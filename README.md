@@ -1,20 +1,38 @@
-# Welcome to your Expo app 👋
+# MATHTATAG - Reimagined 🧮
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A modern React Native Expo application built with cutting-edge technologies for mathematical learning and engagement.
 
-## Get started
+## 🚀 Quick Setup
 
-1. Install dependencies
+Run this single command to set up everything:
 
-   ```bash
-   npm install
-   ```
+```bash
+npm run setup
+```
 
-2. Start the app
+This single command will:
+- ✅ Install all dependencies with proper peer dependency resolution
+- ✅ Create necessary configuration files (babel.config.js, metro.config.js, expo-env.d.ts)
+- ✅ Install missing packages (react-native-worklets)
+- ✅ Fix Expo package versions
+- ✅ Set up the project for immediate development
 
-   ```bash
-   npx expo start
-   ```
+## 📱 Start Development
+
+After running the setup command, start the development server:
+
+```bash
+# Start with cache cleared (recommended)
+npm run start:clear
+
+# Or use the regular start command
+npm start
+
+# Platform-specific commands
+npm run android    # Start on Android
+npm run ios        # Start on iOS  
+npm run web        # Start on web
+```
 
 In the output, you'll find options to open the app in a
 
