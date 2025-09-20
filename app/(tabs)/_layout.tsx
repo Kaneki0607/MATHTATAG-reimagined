@@ -11,11 +11,33 @@ export default function TabLayout() {
 
   return (
     <Tabs
+      initialRouteName="test"
       screenOptions={{
         tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
         headerShown: false,
         tabBarButton: HapticTab,
       }}>
+      <Tabs.Screen
+        name="test"
+        options={{
+          title: 'Test',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="person.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="view"
+        options={{
+          title: 'View',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="list.bullet" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="tts"
+        options={{
+          title: 'TTS',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="speaker.wave.2.fill" color={color} />,
+        }}
+      />
       <Tabs.Screen
         name="index"
         options={{
