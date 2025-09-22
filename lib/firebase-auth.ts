@@ -1,5 +1,4 @@
 // firebase-auth.ts
-
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
@@ -8,81 +7,97 @@ import {
   signInWithEmailAndPassword,
   signOut,
   updateProfile,
-  User,
+  type User,
 } from 'firebase/auth';
-import { auth } from './firebase'; // ✅ not getAuth(app)
+import { Platform } from 'react-native';
+import { app } from './firebase';
 
+// Lazy, platform-safe Auth initializer
+let _auth: import('firebase/auth').Auth | null = null;
+export const getAuthInstance = () => {
+  if (_auth) return _auth;
+  if (Platform.OS === 'web') {
+    // Web
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getAuth } = require('firebase/auth');
+    _auth = getAuth(app);
+    return _auth;
+  }
+  // React Native
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { initializeAuth, getReactNativePersistence } = require('firebase/auth/react-native');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+    _auth = initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) });
+  } catch {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getAuth } = require('firebase/auth');
+    _auth = getAuth(app);
+  }
+  return _auth!;
+};
 
-// 🔹 Sign in existing user
 export const signInUser = async (email: string, password: string) => {
   try {
-    const userCredential = await signInWithEmailAndPassword(auth, email, password);
-    return { user: userCredential.user, error: null };
-  } catch (error: any) {
-    return { user: null, error: error.message };
+    const auth = getAuthInstance();
+    const { user } = await signInWithEmailAndPassword(auth, email, password);
+    return { user, error: null };
+  } catch (e: any) {
+    return { user: null, error: e.message };
   }
 };
 
-// 🔹 Register new user
 export const signUpUser = async (email: string, password: string, displayName?: string) => {
   try {
-    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-    const user = userCredential.user;
-
-    // Update profile with display name
-    if (displayName) {
-      await updateProfile(user, { displayName });
-    }
-
-    // Send email verification
+    const auth = getAuthInstance();
+    const { user } = await createUserWithEmailAndPassword(auth, email, password);
+    if (displayName) await updateProfile(user, { displayName });
     await sendEmailVerification(user);
-
     return { user, error: null };
-  } catch (error: any) {
-    return { user: null, error: error.message };
+  } catch (e: any) {
+    return { user: null, error: e.message };
   }
 };
 
-// 🔹 Sign out current user
 export const signOutUser = async () => {
   try {
+    const auth = getAuthInstance();
     await signOut(auth);
     return { error: null };
-  } catch (error: any) {
-    return { error: error.message };
+  } catch (e: any) {
+    return { error: e.message };
   }
 };
 
-// 🔹 Send password reset email
 export const resetPassword = async (email: string) => {
   try {
+    const auth = getAuthInstance();
     await sendPasswordResetEmail(auth, email);
     return { error: null };
-  } catch (error: any) {
-    return { error: error.message };
+  } catch (e: any) {
+    return { error: e.message };
   }
 };
 
-// 🔹 Re-send verification email
 export const verifyEmail = async () => {
   try {
+    const auth = getAuthInstance();
     const user = auth.currentUser;
-    if (user) {
-      await sendEmailVerification(user);
-      return { error: null };
-    }
-    return { error: 'No user logged in' };
-  } catch (error: any) {
-    return { error: error.message };
+    if (!user) return { error: 'No user logged in' };
+    await sendEmailVerification(user);
+    return { error: null };
+  } catch (e: any) {
+    return { error: e.message };
   }
 };
 
-// 🔹 Get current logged in user
 export const getCurrentUser = () => {
+  const auth = getAuthInstance();
   return auth.currentUser;
 };
 
-// 🔹 Listen for auth state changes
 export const onAuthChange = (callback: (user: User | null) => void) => {
+  const auth = getAuthInstance();
   return onAuthStateChanged(auth, callback);
 };

@@ -81,9 +81,7 @@ export default function ParentLogin() {
       >
         <View style={styles.card}>
           {/* Parent icon */}
-          <View style={styles.iconCircle}>
-            <MaterialCommunityIcons name="account-group" size={38} color="#00aaff" />
-          </View>
+          
           <View style={styles.logoBox}>
             <Image
               source={require('../assets/images/Logo.png')}
@@ -269,6 +267,7 @@ const styles = StyleSheet.create({
   },
   logoBox: {
     alignItems: 'center',
+    marginTop: -50,
     marginBottom: -50,
     zIndex: 2,
   },

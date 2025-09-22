@@ -1,21 +1,27 @@
 const { getDefaultConfig } = require('expo/metro-config');
 
-const config = getDefaultConfig(__dirname);
+module.exports = (() => {
+  const config = getDefaultConfig(__dirname);
 
-// Add custom configurations for optimization
-config.resolver.alias = {
-  '@': './',
-};
+  // Support CommonJS (.cjs) – needed by some Firebase RN internals
+  const { resolver, transformer } = config;
+  resolver.sourceExts = Array.from(new Set([...(resolver.sourceExts || []), 'cjs']));
+  resolver.unstable_enablePackageExports = false; // stabilize Firebase resolution on SDK 53
 
-// Optimize bundle size
-config.transformer.minifierConfig = {
-  keep_fnames: true,
-  mangle: {
+  // Keep useful aliases
+  resolver.alias = {
+    ...(resolver.alias || {}),
+    '@': './',
+  };
+
+  // Reasonable minifier defaults (optional)
+  transformer.minifierConfig = {
     keep_fnames: true,
-  },
-};
+    mangle: { keep_fnames: true },
+  };
 
-// Enable tree shaking
-config.resolver.platforms = ['ios', 'android', 'native', 'web'];
+  // Do NOT override resolver.platforms and do NOT disable package exports.
+  // Expo Router and Firebase rely on default platform resolution/package exports.
 
-module.exports = config;
+  return config;
+})();

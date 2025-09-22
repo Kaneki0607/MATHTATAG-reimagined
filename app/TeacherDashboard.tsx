@@ -14,7 +14,7 @@ import {
   TouchableOpacity,
   View
 } from 'react-native';
-import { getCurrentUser } from '../lib/firebase-auth';
+import { onAuthChange, signOutUser } from '../lib/firebase-auth';
 import { readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
@@ -40,18 +40,20 @@ export default function TeacherDashboard() {
   const [editData, setEditData] = useState<TeacherData | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  // Get current user ID from Firebase Auth
-  const currentUser = getCurrentUser();
-  const currentUserId = currentUser?.uid;
+  // Auth state
+  const [currentUserId, setCurrentUserId] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-    if (currentUserId) {
-      fetchTeacherData(currentUserId);
-    } else {
-      // Redirect to login if no authenticated user
-      router.replace('/TeacherLogin');
-    }
-  }, [currentUserId]);
+    const unsubscribe = onAuthChange((user) => {
+      setCurrentUserId(user?.uid);
+      if (user?.uid) {
+        fetchTeacherData(user.uid);
+      } else {
+        router.replace('/TeacherLogin');
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   const fetchTeacherData = async (userId: string) => {
     try {
@@ -131,6 +133,17 @@ export default function TeacherDashboard() {
     setEditData(teacherData);
   };
 
+  const handleLogout = async () => {
+    try {
+      await signOutUser();
+    } catch (e) {
+      // ignore
+    } finally {
+      setShowProfileModal(false);
+      router.replace('/RoleSelection');
+    }
+  };
+
   const handleInputChange = (field: keyof TeacherData, value: string) => {
     if (editData) {
       setEditData({ ...editData, [field]: value });
@@ -180,9 +193,13 @@ export default function TeacherDashboard() {
     }
   };
 
-  // Don't render if no authenticated user
-  if (!currentUserId) {
-    return null;
+  // Don't render until auth state resolves
+  if (currentUserId === undefined) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Text style={styles.loadingText}>Loading...</Text>
+      </View>
+    );
   }
 
   if (loading) {
@@ -486,10 +503,10 @@ export default function TeacherDashboard() {
                     <Text style={styles.editProfileButtonText}>Edit Profile</Text>
                   </TouchableOpacity>
                   <TouchableOpacity 
-                    style={styles.closeModalButton} 
-                    onPress={() => setShowProfileModal(false)}
+                    style={styles.cancelButton} 
+                    onPress={handleLogout}
                   >
-                    <Text style={styles.closeModalButtonText}>Close</Text>
+                    <Text style={styles.cancelButtonText}>Logout</Text>
                   </TouchableOpacity>
                 </>
               )}

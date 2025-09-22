@@ -1,8 +1,5 @@
 // firebase.ts
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getApps, initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
-import { getReactNativePersistence, initializeAuth } from 'firebase/auth/react-native';
+import { getApp, getApps, initializeApp } from 'firebase/app';
 import { getDatabase } from 'firebase/database';
 import { getStorage } from 'firebase/storage';
 
@@ -18,20 +15,11 @@ const firebaseConfig = {
 };
 
 // Initialize Firebase app
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// ✅ Initialize auth only once
-let auth;
-try {
-  auth = initializeAuth(app, {
-    persistence: getReactNativePersistence(AsyncStorage),
-  });
-} catch (e) {
-  auth = getAuth(app);
-}
-
+// Only initialize non-auth services here (safe during route discovery)
 const database = getDatabase(app);
 const storage = getStorage(app);
 
-export { app, auth, database, storage };
+export { app, database, storage };
 
