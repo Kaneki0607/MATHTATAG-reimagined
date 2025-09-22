@@ -1,8 +1,12 @@
-import { AntDesign, MaterialIcons } from '@expo/vector-icons';
+import { AntDesign } from '@expo/vector-icons';
 import { useFonts } from 'expo-font';
+import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, NativeScrollEvent, NativeSyntheticEvent, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { signInUser, signUpUser } from '../lib/firebase-auth';
+import { writeData } from '../lib/firebase-database';
+import { uploadFile } from '../lib/firebase-storage';
 
 const { width } = Dimensions.get('window'); // Removed unused height variable
 
@@ -11,7 +15,6 @@ export default function TeacherLogin() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fontsLoaded] = useFonts({
     'LeagueSpartan-Bold': require('../assets/fonts/LeagueSpartan-Bold.ttf'),
@@ -31,11 +34,13 @@ export default function TeacherLogin() {
     firstName: '',
     lastName: '',
     email: '',
+    phone: '',
     password: '',
     confirmPassword: '',
     school: '',
-    subject: '',
-    phoneNumber: ''
+    schoolOther: '',
+    agreedToEULA: false,
+    profilePicture: null as string | null
   });
   const [signUpLoading, setSignUpLoading] = useState(false);
 
@@ -45,7 +50,7 @@ export default function TeacherLogin() {
   }, []);
 
 
-  const handleLogin = () => {
+  const handleLogin = async () => {
     if (!email || !password) {
       Alert.alert('Error', 'Please enter both email and password.');
       return;
@@ -53,11 +58,24 @@ export default function TeacherLogin() {
 
     setLoading(true);
     
-    // Simulate login process
-    setTimeout(() => {
+    try {
+      const { user, error } = await signInUser(email, password);
+      
+      if (error) {
+        Alert.alert('Login Error', error);
+        setLoading(false);
+        return;
+      }
+      
+      if (user) {
+        Alert.alert('Success', 'Login successful!');
+        router.replace('/TeacherDashboard');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'An unexpected error occurred during login.');
+    } finally {
       setLoading(false);
-      router.replace('/TeacherDashboard');
-    }, 1000);
+    }
   };
 
   // Handler for opening terms modal
@@ -76,41 +94,168 @@ export default function TeacherLogin() {
   
   const handleSignUpInputChange = (field: string, value: string) => {
     setSignUpData(prev => ({ ...prev, [field]: value }));
+    // Auto-save to AsyncStorage for persistence
+    const updatedData = { ...signUpData, [field]: value };
+    // You can implement AsyncStorage here if needed for persistence
   };
 
-  const handleSignUp = () => {
+  const pickImage = async () => {
+    try {
+      // Request media library permissions
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Media library permission is required to select photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: 'images',
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        setSignUpData(prev => ({ ...prev, profilePicture: result.assets[0].uri }));
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to pick image');
+      console.error('Image picker error:', error);
+    }
+  };
+
+  const takePhoto = async () => {
+    try {
+      // Request camera permissions
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Camera permission is required to take photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        setSignUpData(prev => ({ ...prev, profilePicture: result.assets[0].uri }));
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to take photo');
+      console.error('Camera error:', error);
+    }
+  };
+
+  const handleSignUp = async () => {
     setSignUpLoading(true);
     
     // Simple validation
-    if (!signUpData.firstName || !signUpData.lastName || !signUpData.email || !signUpData.password) {
-      alert('Please fill in all required fields.');
+    if (!signUpData.firstName || !signUpData.lastName || !signUpData.email || !signUpData.phone || !signUpData.password) {
+      Alert.alert('Error', 'Please fill in all required fields.');
+      setSignUpLoading(false);
+      return;
+    }
+    
+    if (!signUpData.school && !signUpData.schoolOther) {
+      Alert.alert('Error', 'Please select a school or enter other school name.');
       setSignUpLoading(false);
       return;
     }
     
     if (signUpData.password !== signUpData.confirmPassword) {
-      alert('Passwords do not match.');
+      Alert.alert('Error', 'Passwords do not match.');
       setSignUpLoading(false);
       return;
     }
     
-    // Simulate sign up process
-    setTimeout(() => {
+    if (!signUpData.agreedToEULA) {
+      Alert.alert('Error', 'Please agree to the Terms and Conditions.');
       setSignUpLoading(false);
-      alert('Account created successfully! You can now login.');
-      setShowSignUpModal(false);
-      // Reset form
-      setSignUpData({
-        firstName: '',
-        lastName: '',
-        email: '',
-        password: '',
-        confirmPassword: '',
-        school: '',
-        subject: '',
-        phoneNumber: ''
-      });
-    }, 2000);
+      return;
+    }
+    
+    try {
+      // Create Firebase Auth account
+      const { user, error } = await signUpUser(
+        signUpData.email, 
+        signUpData.password, 
+        `${signUpData.firstName} ${signUpData.lastName}`
+      );
+      
+      if (error) {
+        Alert.alert('Registration Error', error);
+        setSignUpLoading(false);
+        return;
+      }
+      
+      if (user) {
+        let profilePictureUrl = '';
+        
+        // Upload profile picture to Firebase Storage if provided
+        if (signUpData.profilePicture) {
+          try {
+            const response = await fetch(signUpData.profilePicture);
+            const blob = await response.blob();
+            const timestamp = Date.now();
+            const filename = `teachers/profiles/${user.uid}_${timestamp}.jpg`;
+            
+            const { downloadURL, error: uploadError } = await uploadFile(filename, blob, {
+              contentType: 'image/jpeg',
+            });
+            
+            if (uploadError) {
+              console.error('Photo upload error:', uploadError);
+            } else {
+              profilePictureUrl = downloadURL || '';
+            }
+          } catch (error) {
+            console.error('Photo upload error:', error);
+          }
+        }
+        
+        // Save teacher data to Firebase Realtime Database
+        const teacherData = {
+          firstName: signUpData.firstName,
+          lastName: signUpData.lastName,
+          email: signUpData.email,
+          phone: signUpData.phone,
+          school: signUpData.school === 'Others' ? signUpData.schoolOther : signUpData.school,
+          profilePictureUrl: profilePictureUrl || '',
+          uid: user.uid,
+          createdAt: new Date().toISOString(),
+        };
+        
+        const { success, error: dbError } = await writeData(`/teachers/${user.uid}`, teacherData);
+        
+        if (success) {
+          Alert.alert('Success', 'Account created successfully! You can now login.');
+          setShowSignUpModal(false);
+          // Reset form
+          setSignUpData({
+            firstName: '',
+            lastName: '',
+            email: '',
+            phone: '',
+            password: '',
+            confirmPassword: '',
+            school: '',
+            schoolOther: '',
+            agreedToEULA: false,
+            profilePicture: null
+          });
+        } else {
+          Alert.alert('Error', `Failed to save teacher data: ${dbError}`);
+        }
+      }
+    } catch (error) {
+      Alert.alert('Error', 'An unexpected error occurred during registration.');
+    } finally {
+      setSignUpLoading(false);
+    }
   };
 
   // Handler for scroll to end
@@ -138,9 +283,6 @@ export default function TeacherLogin() {
       >
         <View style={styles.card}>
           {/* Teacher icon */}
-          <View style={styles.iconCircle}>
-            <MaterialIcons name="school" size={38} color="#00aaff" />
-          </View>
           <View style={styles.logoBox}>
             <Image
               source={require('../assets/images/Logo.png')}
@@ -182,21 +324,6 @@ export default function TeacherLogin() {
                 size={20}
                 color="#ffffff"
               />
-            </TouchableOpacity>
-          </View>
-          
-          {/* Remember Me Checkbox */}
-          <View style={styles.rememberMeContainer}>
-            <TouchableOpacity
-              style={styles.checkboxContainer}
-              onPress={() => setRememberMe(!rememberMe)}
-            >
-              <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
-                {rememberMe && (
-                  <AntDesign name="check" size={16} color="#fff" />
-                )}
-              </View>
-              <Text style={styles.rememberMeText}>Remember Me</Text>
             </TouchableOpacity>
           </View>
 
@@ -307,33 +434,82 @@ export default function TeacherLogin() {
                 
                 <TextInput
                   style={styles.signUpInput}
-                  placeholder="Phone Number"
+                  placeholder="Phone Number *"
                   placeholderTextColor="#1e293b"
-                  value={signUpData.phoneNumber}
-                  onChangeText={(value) => handleSignUpInputChange('phoneNumber', value)}
+                  value={signUpData.phone}
+                  onChangeText={(value) => handleSignUpInputChange('phone', value)}
                   keyboardType="phone-pad"
                 />
+                
+                {/* Profile Picture Section */}
+                <View style={styles.photoSection}>
+                  <Text style={styles.photoLabel}>Profile Picture (Optional)</Text>
+                  <View style={styles.photoContainer}>
+                    {signUpData.profilePicture ? (
+                      <View style={styles.photoPreview}>
+                        <Image source={{ uri: signUpData.profilePicture }} style={styles.photoPreviewImage} />
+                        <TouchableOpacity 
+                          style={styles.removePhotoButton}
+                          onPress={() => setSignUpData(prev => ({ ...prev, profilePicture: null }))}
+                        >
+                          <AntDesign name="close" size={16} color="#fff" />
+                        </TouchableOpacity>
+                      </View>
+                    ) : (
+                      <View style={styles.photoPlaceholder}>
+                        <AntDesign name="camera" size={32} color="#64748b" />
+                        <Text style={styles.photoPlaceholderText}>Add Photo</Text>
+                      </View>
+                    )}
+                  </View>
+                  <View style={styles.photoButtons}>
+                    <TouchableOpacity style={styles.photoButton} onPress={takePhoto}>
+                      <AntDesign name="camera" size={20} color="#fff" />
+                      <Text style={styles.photoButtonText}>Take Photo</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.photoButton} onPress={pickImage}>
+                      <AntDesign name="picture" size={20} color="#fff" />
+                      <Text style={styles.photoButtonText}>Upload</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
               </View>
               
               {/* Professional Information */}
               <View style={styles.inputGroup}>
                 <Text style={styles.inputLabel}>Professional Information</Text>
                 
-                <TextInput
-                  style={styles.signUpInput}
-                  placeholder="School/Institution *"
-                  placeholderTextColor="#1e293b"
-                  value={signUpData.school}
-                  onChangeText={(value) => handleSignUpInputChange('school', value)}
-                />
-                
-                <TextInput
-                  style={styles.signUpInput}
-                  placeholder="Subject/Department"
-                  placeholderTextColor="#1e293b"
-                  value={signUpData.subject}
-                  onChangeText={(value) => handleSignUpInputChange('subject', value)}
-                />
+                <View style={styles.dropdownContainer}>
+                  <Text style={styles.dropdownLabel}>School/Institution *</Text>
+                  <View style={styles.dropdown}>
+                    <TouchableOpacity 
+                      style={[styles.dropdownOption, signUpData.school === 'Camohaguin Elementary School' && styles.dropdownOptionSelected]}
+                      onPress={() => handleSignUpInputChange('school', 'Camohaguin Elementary School')}
+                    >
+                      <Text style={[styles.dropdownOptionText, signUpData.school === 'Camohaguin Elementary School' && styles.dropdownOptionTextSelected]}>
+                        Camohaguin Elementary School
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      style={[styles.dropdownOption, signUpData.school === 'Others' && styles.dropdownOptionSelected]}
+                      onPress={() => handleSignUpInputChange('school', 'Others')}
+                    >
+                      <Text style={[styles.dropdownOptionText, signUpData.school === 'Others' && styles.dropdownOptionTextSelected]}>
+                        Others
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  
+                  {signUpData.school === 'Others' && (
+                    <TextInput
+                      style={styles.signUpInput}
+                      placeholder="Enter school name *"
+                      placeholderTextColor="#1e293b"
+                      value={signUpData.schoolOther}
+                      onChangeText={(value) => handleSignUpInputChange('schoolOther', value)}
+                    />
+                  )}
+                </View>
               </View>
               
               {/* Security */}
@@ -357,6 +533,26 @@ export default function TeacherLogin() {
                   onChangeText={(value) => handleSignUpInputChange('confirmPassword', value)}
                   secureTextEntry
                 />
+              </View>
+              
+              {/* EULA Agreement */}
+              <View style={styles.eulaContainer}>
+                <TouchableOpacity
+                  style={styles.eulaCheckbox}
+                  onPress={() => handleSignUpInputChange('agreedToEULA', String(!signUpData.agreedToEULA))}
+                >
+                  <View style={[styles.eulaCheckboxView, signUpData.agreedToEULA && styles.eulaCheckboxChecked]}>
+                    {signUpData.agreedToEULA && (
+                      <AntDesign name="check" size={16} color="#fff" />
+                    )}
+                  </View>
+                  <Text style={styles.eulaText}>
+                    I agree to the{' '}
+                    <Text style={styles.eulaLink} onPress={openTerms}>
+                      Terms and Conditions
+                    </Text>
+                  </Text>
+                </TouchableOpacity>
               </View>
             </ScrollView>
             
@@ -451,6 +647,7 @@ const styles = StyleSheet.create({
   },
   logoBox: {
     alignItems: 'center',
+    marginTop: -50,
     marginBottom: -50,
     zIndex: 2,
   },
@@ -500,36 +697,6 @@ const styles = StyleSheet.create({
   eyeIcon: {
     padding: 12,
     marginRight: 8,
-  },
-  rememberMeContainer: {
-    width: '100%',
-    marginBottom: 16,
-  },
-  checkboxContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-  },
-  checkbox: {
-    width: 20,
-    height: 20,
-    borderRadius: 4,
-    borderWidth: 2,
-    borderColor: '#00aaff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 8,
-  },
-  checkboxChecked: {
-    backgroundColor: '#00aaff',
-  },
-  rememberMeText: {
-    fontSize: 16,
-    color: '#ffffff',
-    fontWeight: '500',
-    textShadowColor: 'rgba(0,0,0,0.3)',
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 2,
   },
   button: {
     width: '100%',
@@ -685,5 +852,150 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  // Dropdown Styles
+  dropdownContainer: {
+    marginBottom: 10,
+  },
+  dropdownLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 8,
+  },
+  dropdown: {
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,170,255,0.3)',
+    borderRadius: 12,
+    marginBottom: 10,
+  },
+  dropdownOption: {
+    paddingHorizontal: 15,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,170,255,0.1)',
+  },
+  dropdownOptionSelected: {
+    backgroundColor: 'rgba(0,170,255,0.1)',
+  },
+  dropdownOptionText: {
+    fontSize: 16,
+    color: '#1e293b',
+  },
+  dropdownOptionTextSelected: {
+    color: 'rgb(40, 127, 214)',
+    fontWeight: '600',
+  },
+  // EULA Styles
+  eulaContainer: {
+    marginTop: 20,
+    marginBottom: 10,
+  },
+  eulaCheckbox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  eulaCheckboxView: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: '#00aaff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+  eulaCheckboxChecked: {
+    backgroundColor: '#00aaff',
+  },
+  eulaText: {
+    fontSize: 14,
+    color: '#1e293b',
+    marginLeft: 8,
+    flex: 1,
+  },
+  eulaLink: {
+    color: 'rgb(40, 127, 214)',
+    textDecorationLine: 'underline',
+    fontWeight: '600',
+  },
+  // Photo Section Styles
+  photoSection: {
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  photoLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 8,
+  },
+  photoContainer: {
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  photoPreview: {
+    position: 'relative',
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    overflow: 'hidden',
+    borderWidth: 3,
+    borderColor: 'rgba(0,170,255,0.3)',
+  },
+  photoPreviewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  removePhotoButton: {
+    position: 'absolute',
+    top: 5,
+    right: 5,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(239, 68, 68, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoPlaceholder: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#f1f5f9',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(0,170,255,0.3)',
+    borderStyle: 'dashed',
+  },
+  photoPlaceholderText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 4,
+    fontWeight: '500',
+  },
+  photoButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
+  photoButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgb(40, 127, 214)',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    marginHorizontal: 5,
+  },
+  photoButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 6,
   },
 }); 

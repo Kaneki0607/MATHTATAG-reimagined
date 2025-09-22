@@ -1,14 +1,14 @@
-import { Audio } from 'expo-av';
+import { useAudioPlayer } from 'expo-audio';
 import React, { useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Alert,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 
 export default function TTSPage() {
@@ -19,6 +19,7 @@ export default function TTSPage() {
   const [language, setLanguage] = useState('fil');
   const [stability, setStability] = useState(0.5);
   const [similarityBoost, setSimilarityBoost] = useState(0.5);
+  const player = useAudioPlayer();
 
   const generateSpeech = async () => {
     if (!text.trim()) {
@@ -67,15 +68,16 @@ export default function TTSPage() {
         // Auto-play the generated speech
         try {
           setIsPlaying(true);
-          const { sound } = await Audio.Sound.createAsync(
-            { uri: base64data },
-            { shouldPlay: true }
-          );
-
-          sound.setOnPlaybackStatusUpdate((status) => {
+          
+          // Load and play the audio
+          player.replace({ uri: base64data });
+          player.play();
+          
+          // Listen for playback completion
+          const unsubscribe = player.addListener('playbackStatusUpdate', (status) => {
             if (status.isLoaded && status.didJustFinish) {
               setIsPlaying(false);
-              sound.unloadAsync();
+              unsubscribe.remove();
             }
           });
         } catch (playError) {
@@ -98,6 +100,7 @@ export default function TTSPage() {
   const clearText = () => {
     setText('');
     setAudioUri(null);
+    player.pause();
   };
 
   return (

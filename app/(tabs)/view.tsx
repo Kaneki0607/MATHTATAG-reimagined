@@ -40,7 +40,7 @@ export default function ViewPage() {
       
       if (data) {
         // Convert object to array and sort by creation date
-        const teachersArray = Object.values(data).sort((a: any, b: any) => 
+        const teachersArray = (Object.values(data) as TeacherData[]).sort((a: any, b: any) => 
           new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
         );
         setTeachers(teachersArray);
@@ -67,7 +67,7 @@ export default function ViewPage() {
     // Set up real-time listener
     const unsubscribe = listenToData('/teachers', (data) => {
       if (data) {
-        const teachersArray = Object.values(data).sort((a: any, b: any) => 
+        const teachersArray = (Object.values(data) as TeacherData[]).sort((a: any, b: any) => 
           new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
         );
         setTeachers(teachersArray);
