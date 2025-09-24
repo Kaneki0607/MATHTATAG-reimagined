@@ -15,7 +15,7 @@ import {
   View
 } from 'react-native';
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
-import { readData, updateData } from '../lib/firebase-database';
+import { pushData, readData, updateData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
 const { width, height } = Dimensions.get('window');
@@ -31,6 +31,24 @@ interface TeacherData {
   createdAt: string;
 }
 
+// Generate two-digit school year options like 22-23, returning { label, value }
+// value will be stored as 2223 in the database
+function generateYearOptions() {
+  const now = new Date();
+  const currentFull = now.getFullYear();
+  const items: { label: string; value: string }[] = [];
+  for (let offset = -5; offset <= 5; offset++) {
+    const startFull = currentFull + offset;
+    const endFull = startFull + 1;
+    const start = ((startFull % 100) + 100) % 100;
+    const end = ((endFull % 100) + 100) % 100;
+    const s = String(start).padStart(2, '0');
+    const e = String(end).padStart(2, '0');
+    items.push({ label: `${s}-${e}`, value: `${s}${e}` });
+  }
+  return items;
+}
+
 export default function TeacherDashboard() {
   const router = useRouter();
   const [teacherData, setTeacherData] = useState<TeacherData | null>(null);
@@ -39,6 +57,22 @@ export default function TeacherDashboard() {
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState<TeacherData | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [showAddClassModal, setShowAddClassModal] = useState(false);
+  const [className, setClassName] = useState('');
+  const [schoolOption, setSchoolOption] = useState<'profile' | 'other'>('profile');
+  const [schoolOther, setSchoolOther] = useState('');
+  const [schoolYear, setSchoolYear] = useState(''); // stores label like "22-23"
+  const [showYearPicker, setShowYearPicker] = useState(false);
+  const [savingClass, setSavingClass] = useState(false);
+
+  // Announcement state
+  const [showAnnModal, setShowAnnModal] = useState(false);
+  const [annTitle, setAnnTitle] = useState('');
+  const [annMessage, setAnnMessage] = useState('');
+  const [annAllClasses, setAnnAllClasses] = useState(true);
+  const [annSelectedClassIds, setAnnSelectedClassIds] = useState<string[]>([]);
+  const [teacherClasses, setTeacherClasses] = useState<{ id: string; name: string; schoolYear?: string }[]>([]);
+  const [sendingAnn, setSendingAnn] = useState(false);
 
   // Auth state
   const [currentUserId, setCurrentUserId] = useState<string | undefined>(undefined);
@@ -250,7 +284,21 @@ export default function TeacherDashboard() {
              <Text style={styles.announcementText}>
                Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nam fermentum vestibulum lectus, eget eleifend...
              </Text>
-             <TouchableOpacity style={styles.editButton}>
+             <TouchableOpacity
+               style={styles.editButton}
+               onPress={async () => {
+                 setShowAnnModal(true);
+                 // Load classes for this teacher
+                 const { data } = await readData('/sections');
+                const list = Object.entries(data || {})
+                  .map(([id, v]: any) => ({ id, ...(v || {}) }))
+                  .filter((s: any) => s.teacherId === currentUserId)
+                  .map((s: any) => ({ id: s.id, name: s.name ?? 'Untitled', schoolYear: s.schoolYear }));
+                 setTeacherClasses(list);
+                 setAnnSelectedClassIds(list.map((c) => c.id));
+                 setAnnAllClasses(true);
+               }}
+             >
                <AntDesign name="edit" size={20} color="#ffffff" />
              </TouchableOpacity>
            </View>
@@ -258,12 +306,12 @@ export default function TeacherDashboard() {
 
          {/* Action Buttons */}
          <View style={styles.actionButtons}>
-           <TouchableOpacity style={styles.actionCard}>
-             <View style={styles.actionGradient1}>
+           <TouchableOpacity style={styles.actionCard} onPress={() => setShowAddClassModal(true)}>
+            <View style={styles.actionGradient1}>
                <View style={styles.actionIcon}>
                  <MaterialCommunityIcons name="book-open-variant" size={28} color="#3182ce" />
                </View>
-               <Text style={styles.actionText}>Add Class</Text>
+              <Text style={styles.actionText}>Add Class</Text>
              </View>
            </TouchableOpacity>
            
@@ -510,6 +558,284 @@ export default function TeacherDashboard() {
                   </TouchableOpacity>
                 </>
               )}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Add Class Modal */}
+      <Modal visible={showAddClassModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.profileModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Add Class / Section</Text>
+              <TouchableOpacity 
+                onPress={() => setShowAddClassModal(false)}
+                style={styles.closeButton}
+              >
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.profileContent}>
+              <View style={styles.infoSection}>
+                {/* Name field */}
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Name</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={className}
+                    onChangeText={setClassName}
+                    placeholder="e.g., Section Masikap"
+                    placeholderTextColor="#6b7280"
+                  />
+                </View>
+
+                {/* School selector */}
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>School</Text>
+                  <View style={styles.segmentWrap}>
+                    <TouchableOpacity
+                      style={[styles.segmentButton, schoolOption === 'profile' && styles.segmentActive]}
+                      onPress={() => setSchoolOption('profile')}
+                    >
+                      <Text style={[styles.segmentText, schoolOption === 'profile' && styles.segmentTextActive]}>Use Profile</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.segmentButton, schoolOption === 'other' && styles.segmentActive]}
+                      onPress={() => setSchoolOption('other')}
+                    >
+                      <Text style={[styles.segmentText, schoolOption === 'other' && styles.segmentTextActive]}>Other</Text>
+                    </TouchableOpacity>
+                  </View>
+                  {schoolOption === 'other' ? (
+                    <TextInput
+                      style={[styles.fieldInput, { marginTop: 10 }]}
+                      value={schoolOther}
+                      onChangeText={setSchoolOther}
+                      placeholder="Enter school name"
+                      placeholderTextColor="#6b7280"
+                    />
+                  ) : (
+                    <View style={styles.readonlyBox}>
+                      <Text style={styles.readonlyText}>{teacherData?.school || '—'}</Text>
+                    </View>
+                  )}
+                </View>
+
+                {/* School year dropdown */}
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>School Year</Text>
+                  <TouchableOpacity style={styles.yearButton} onPress={() => setShowYearPicker((v) => !v)}>
+                    <Text style={styles.yearButtonText}>{schoolYear || 'Select (e.g., 22-23)'}</Text>
+                    <AntDesign name={showYearPicker ? 'up' : 'down'} size={14} color="#1e293b" />
+                  </TouchableOpacity>
+                  {showYearPicker && (
+                    <View style={styles.yearMenu}>
+                      <ScrollView>
+                        {generateYearOptions().map((opt) => (
+                          <TouchableOpacity
+                            key={opt.value}
+                            style={[
+                              styles.yearOption,
+                              schoolYear === opt.label && styles.yearOptionSelected,
+                            ]}
+                            onPress={() => {
+                              setSchoolYear(opt.label);
+                              setShowYearPicker(false);
+                            }}
+                          >
+                            <Text style={styles.yearOptionText}>{opt.label}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    </View>
+                  )}
+                </View>
+              </View>
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <TouchableOpacity 
+                style={styles.cancelButton} 
+                onPress={() => setShowAddClassModal(false)}
+                disabled={savingClass}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.saveButton} 
+                onPress={async () => {
+                  if (!currentUserId) {
+                    Alert.alert('Error', 'Not authenticated.');
+                    return;
+                  }
+                  if (!className.trim()) {
+                    Alert.alert('Error', 'Please enter class/section name.');
+                    return;
+                  }
+                  const resolvedSchool = schoolOption === 'other' ? schoolOther.trim() : (teacherData?.school || '').trim();
+                  if (!resolvedSchool) {
+                    Alert.alert('Error', 'Please select or enter a school name.');
+                    return;
+                  }
+                  if (!schoolYear.trim()) {
+                    Alert.alert('Error', 'Please enter school year (e.g., 2025-2026).');
+                    return;
+                  }
+                  try {
+                    setSavingClass(true);
+                    const syValue = schoolYear.replace('-', ''); // store as 2223
+                    const section = {
+                      name: className.trim(),
+                      schoolName: resolvedSchool,
+                      schoolYear: syValue,
+                      teacherId: currentUserId,
+                      createdAt: new Date().toISOString(),
+                    };
+                    const { key, error } = await pushData('/sections', section);
+                    if (error || !key) {
+                      Alert.alert('Error', error || 'Failed to create section.');
+                    } else {
+                      await updateData(`/sections/${key}`, { id: key });
+                      Alert.alert('Success', 'Class/Section created successfully.');
+                      setShowAddClassModal(false);
+                      setClassName('');
+                      setSchoolOption('profile');
+                      setSchoolOther('');
+                      setSchoolYear('');
+                    }
+                  } catch (e) {
+                    Alert.alert('Error', 'Failed to create section.');
+                  } finally {
+                    setSavingClass(false);
+                  }
+                }}
+                disabled={savingClass}
+              >
+                <Text style={styles.saveButtonText}>{savingClass ? 'Creating...' : 'Create'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Announcement Modal */}
+      <Modal visible={showAnnModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.profileModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>New Announcement</Text>
+              <TouchableOpacity onPress={() => setShowAnnModal(false)} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.profileContent}>
+              <View style={styles.infoSection}>
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Title</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={annTitle}
+                    onChangeText={setAnnTitle}
+                    placeholder="e.g., Exam Schedule"
+                    placeholderTextColor="#6b7280"
+                  />
+                </View>
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Message</Text>
+                  <TextInput
+                    style={[styles.fieldInput, { height: 120, textAlignVertical: 'top' }]}
+                    value={annMessage}
+                    onChangeText={setAnnMessage}
+                    placeholder="Write your announcement..."
+                    placeholderTextColor="#6b7280"
+                    multiline
+                  />
+                </View>
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Send To</Text>
+                  <View style={styles.segmentWrap}>
+                    <TouchableOpacity
+                      style={[styles.segmentButton, annAllClasses && styles.segmentActive]}
+                      onPress={() => {
+                        setAnnAllClasses(true);
+                        setAnnSelectedClassIds(teacherClasses.map((c) => c.id));
+                      }}
+                    >
+                      <Text style={[styles.segmentText, annAllClasses && styles.segmentTextActive]}>All Classes</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.segmentButton, !annAllClasses && styles.segmentActive]}
+                      onPress={() => setAnnAllClasses(false)}
+                    >
+                      <Text style={[styles.segmentText, !annAllClasses && styles.segmentTextActive]}>Specific</Text>
+                    </TouchableOpacity>
+                  </View>
+                  {!annAllClasses && (
+                    <View style={{ marginTop: 10, borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, backgroundColor: '#fff' }}>
+                      {teacherClasses.map((c) => {
+                        const checked = annSelectedClassIds.includes(c.id);
+                        return (
+                          <TouchableOpacity
+                            key={c.id}
+                            style={{ paddingHorizontal: 14, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}
+                            onPress={() => {
+                              setAnnSelectedClassIds((prev) => (
+                                checked ? prev.filter((id) => id !== c.id) : [...prev, c.id]
+                              ));
+                            }}
+                          >
+                            <Text style={{ color: '#111827', fontSize: 16 }}>{c.name}</Text>
+                            <MaterialIcons name={checked ? 'check-box' : 'check-box-outline-blank'} size={18} color={checked ? '#2563eb' : '#9ca3af'} />
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  )}
+                </View>
+              </View>
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.cancelButton} onPress={() => setShowAnnModal(false)} disabled={sendingAnn}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.saveButton}
+                disabled={sendingAnn}
+                onPress={async () => {
+                  if (!currentUserId) { Alert.alert('Error', 'Not authenticated.'); return; }
+                  if (!annTitle.trim() || !annMessage.trim()) { Alert.alert('Error', 'Title and message are required.'); return; }
+                  const targetIds = annAllClasses ? teacherClasses.map((c) => c.id) : annSelectedClassIds;
+                  if (!targetIds.length) { Alert.alert('Error', 'Select at least one class.'); return; }
+                  try {
+                    setSendingAnn(true);
+                    const now = new Date();
+                    const id = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+                    const payload = {
+                      id,
+                      classIds: targetIds,
+                      dateTime: now.toISOString(),
+                      message: annMessage.trim(),
+                      title: annTitle.trim(),
+                      teacherId: currentUserId,
+                    };
+                    const { success, error } = await writeData(`/announcements/${id}`, payload);
+                    if (!success) {
+                      Alert.alert('Error', error || 'Failed to send');
+                    } else {
+                      Alert.alert('Success', 'Announcement sent');
+                      setShowAnnModal(false);
+                      setAnnTitle('');
+                      setAnnMessage('');
+                    }
+                  } catch (e) {
+                    Alert.alert('Error', 'Failed to send');
+                  } finally {
+                    setSendingAnn(false);
+                  }
+                }}
+              >
+                <Text style={styles.saveButtonText}>{sendingAnn ? 'Sending...' : 'Send'}</Text>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -993,6 +1319,105 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     backgroundColor: '#f9fafb',
+  },
+  // Elegant form styles (Add Class modal)
+  field: {
+    marginBottom: 16,
+  },
+  fieldLabel: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '700',
+    marginBottom: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  fieldInput: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: '#111827',
+    fontSize: 16,
+  },
+  segmentWrap: {
+    flexDirection: 'row',
+    backgroundColor: '#f1f5f9',
+    borderRadius: 10,
+    padding: 4,
+    gap: 6,
+  },
+  segmentButton: {
+    flex: 1,
+    borderRadius: 8,
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  segmentActive: {
+    backgroundColor: '#2563eb',
+  },
+  segmentText: {
+    color: '#64748b',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  segmentTextActive: {
+    color: '#ffffff',
+  },
+  readonlyBox: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    alignItems: 'flex-end',
+  },
+  readonlyText: {
+    color: '#111827',
+    fontSize: 16,
+  },
+  yearButton: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  yearButtonText: {
+    color: '#111827',
+    fontSize: 16,
+  },
+  yearMenu: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    maxHeight: 180,
+  },
+  yearOption: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  yearOptionSelected: {
+    backgroundColor: '#eff6ff',
+  },
+  yearOptionText: {
+    fontSize: 16,
+    color: '#111827',
+    textAlign: 'right',
   },
   // Modal Actions
   modalActions: {
