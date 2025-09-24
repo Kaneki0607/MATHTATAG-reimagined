@@ -1,4 +1,5 @@
 import { AntDesign } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts } from 'expo-font';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
@@ -28,6 +29,10 @@ export default function TeacherLogin() {
   const [canCheckAgreement, setCanCheckAgreement] = useState(false);
   const [hasScrolledToEnd, setHasScrolledToEnd] = useState(false);
   
+  // Remember me keys
+  const STORAGE_EMAIL_KEY = 'teacher_email';
+  const STORAGE_PASSWORD_KEY = 'teacher_password';
+  
   // Sign Up Modal States
   const [showSignUpModal, setShowSignUpModal] = useState(false);
   const [signUpData, setSignUpData] = useState({
@@ -47,6 +52,19 @@ export default function TeacherLogin() {
   useEffect(() => {
     // Show terms modal on mount
     setShowTermsModal(true);
+    // Load saved credentials
+    (async () => {
+      try {
+        const [savedEmail, savedPassword] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_EMAIL_KEY),
+          AsyncStorage.getItem(STORAGE_PASSWORD_KEY),
+        ]);
+        if (savedEmail) setEmail(savedEmail);
+        if (savedPassword) setPassword(savedPassword);
+      } catch {
+        // ignore storage errors
+      }
+    })();
   }, []);
 
 
@@ -300,7 +318,10 @@ export default function TeacherLogin() {
               placeholder="Email"
               placeholderTextColor="#ffffff"
               value={email}
-              onChangeText={setEmail}
+              onChangeText={async (v) => {
+                setEmail(v);
+                try { await AsyncStorage.setItem(STORAGE_EMAIL_KEY, v); } catch {}
+              }}
               autoCapitalize="none"
               keyboardType="email-address"
             />
@@ -312,7 +333,10 @@ export default function TeacherLogin() {
               placeholder="Password"
               placeholderTextColor="#ffffff"
               value={password}
-              onChangeText={setPassword}
+              onChangeText={async (v) => {
+                setPassword(v);
+                try { await AsyncStorage.setItem(STORAGE_PASSWORD_KEY, v); } catch {}
+              }}
               secureTextEntry={!showPassword}
             />
             <TouchableOpacity

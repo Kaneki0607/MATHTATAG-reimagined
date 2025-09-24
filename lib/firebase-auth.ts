@@ -14,14 +14,14 @@ import { app } from './firebase';
 
 // Lazy, platform-safe Auth initializer
 let _auth: import('firebase/auth').Auth | null = null;
-export const getAuthInstance = () => {
+export const getAuthInstance = (): import('firebase/auth').Auth => {
   if (_auth) return _auth;
   if (Platform.OS === 'web') {
     // Web
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getAuth } = require('firebase/auth');
     _auth = getAuth(app);
-    return _auth;
+    return _auth!;
   }
   // React Native
   try {

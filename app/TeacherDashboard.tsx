@@ -72,7 +72,23 @@ export default function TeacherDashboard() {
   const [annAllClasses, setAnnAllClasses] = useState(true);
   const [annSelectedClassIds, setAnnSelectedClassIds] = useState<string[]>([]);
   const [teacherClasses, setTeacherClasses] = useState<{ id: string; name: string; schoolYear?: string }[]>([]);
+  const [activeClasses, setActiveClasses] = useState<
+    { id: string; name: string; schoolYear?: string; schoolName?: string; status?: string }[]
+  >([]);
   const [sendingAnn, setSendingAnn] = useState(false);
+  const [closingClassId, setClosingClassId] = useState<string | null>(null);
+  // Add Student state
+  const [showAddStudentModal, setShowAddStudentModal] = useState(false);
+  const [selectedClassForStudent, setSelectedClassForStudent] = useState<{ id: string; name: string } | null>(null);
+  const [studentNickname, setStudentNickname] = useState('');
+  const [studentGender, setStudentGender] = useState<'male' | 'female'>('male');
+  const [savingStudent, setSavingStudent] = useState(false);
+  // List modal state
+  const [showListModal, setShowListModal] = useState(false);
+  const [studentsByClass, setStudentsByClass] = useState<Record<string, any[]>>({});
+  const [parentsById, setParentsById] = useState<Record<string, any>>({});
+  const [assignmentsByClass, setAssignmentsByClass] = useState<Record<string, { total: number; completed: number; pending: number }>>({});
+  const [classAnalytics, setClassAnalytics] = useState<Record<string, { performance?: number; change?: number }>>({});
 
   // Auth state
   const [currentUserId, setCurrentUserId] = useState<string | undefined>(undefined);
@@ -82,12 +98,208 @@ export default function TeacherDashboard() {
       setCurrentUserId(user?.uid);
       if (user?.uid) {
         fetchTeacherData(user.uid);
+        loadTeacherClasses(user.uid);
       } else {
         router.replace('/TeacherLogin');
       }
     });
     return unsubscribe;
   }, []);
+
+  const loadTeacherClasses = async (teacherId: string) => {
+    try {
+      const { data } = await readData('/sections');
+      const list = Object.entries(data || {})
+        .map(([id, v]: any) => ({ id, ...(v || {}) }))
+        .filter((s: any) => s.teacherId === teacherId)
+        .map((s: any) => ({
+          id: s.id,
+          name: s.name ?? 'Untitled',
+          schoolYear: s.schoolYear,
+          schoolName: s.schoolName,
+          status: s.status ?? 'active',
+        }));
+      setTeacherClasses(list);
+      setActiveClasses(list.filter((c) => c.status !== 'inactive'));
+      // After classes load, refresh related data
+      await Promise.all([
+        loadStudentsAndParents(list.map((c) => c.id)),
+        loadAssignments(list.map((c) => c.id)),
+        loadClassAnalytics(list.map((c) => c.id)),
+      ]);
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  const formatSchoolYear = (value?: string) => {
+    if (!value) return '—';
+    const v = String(value);
+    if (v.length === 4) return `${v.slice(0, 2)}-${v.slice(2)}`;
+    return value;
+  };
+
+  const loadStudentsAndParents = async (classIds: string[]) => {
+    try {
+      const [{ data: students }, { data: parents }] = [
+        await readData('/students'),
+        await readData('/parents'),
+      ];
+      const parentsMap: Record<string, any> = Object.entries(parents || {}).reduce((acc: any, [id, v]: any) => {
+        acc[id] = { id, ...(v || {}) };
+        return acc;
+      }, {});
+      const grouped: Record<string, any[]> = {};
+      Object.entries(students || {}).forEach(([id, v]: any) => {
+        const s = { studentId: id, ...(v || {}) };
+        if (!classIds.includes(s.classId)) return;
+        if (!grouped[s.classId]) grouped[s.classId] = [];
+        grouped[s.classId].push(s);
+      });
+      setParentsById(parentsMap);
+      setStudentsByClass(grouped);
+    } catch {
+      // ignore
+    }
+  };
+
+  const loadAssignments = async (classIds: string[]) => {
+    try {
+      const { data } = await readData('/assignments');
+      const stats: Record<string, { total: number; completed: number; pending: number }> = {};
+      Object.entries(data || {}).forEach(([id, v]: any) => {
+        const a = { id, ...(v || {}) };
+        if (!classIds.includes(a.classId)) return;
+        if (!stats[a.classId]) stats[a.classId] = { total: 0, completed: 0, pending: 0 };
+        stats[a.classId].total += 1;
+        if (a.status === 'completed') stats[a.classId].completed += 1;
+        else stats[a.classId].pending += 1;
+      });
+      setAssignmentsByClass(stats);
+    } catch {
+      setAssignmentsByClass({});
+    }
+  };
+
+  const loadClassAnalytics = async (classIds: string[]) => {
+    try {
+      const { data } = await readData('/classAnalytics');
+      const map: Record<string, any> = {};
+      Object.entries(data || {}).forEach(([cid, v]: any) => {
+        if (classIds.includes(cid)) map[cid] = v || {};
+      });
+      setClassAnalytics(map);
+    } catch {
+      setClassAnalytics({});
+    }
+  };
+
+  const handleCloseClass = (cls: { id: string; name: string }) => {
+    Alert.alert(
+      'Close Class',
+      `Are you sure you want to close "${cls.name}"? This will mark the class as inactive and lock all class files from being edited. You can still view it from the Class panel.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Close Class',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setClosingClassId(cls.id);
+              const { error } = await updateData(`/sections/${cls.id}`, {
+                status: 'inactive',
+                closedAt: new Date().toISOString(),
+              });
+              if (error) {
+                Alert.alert('Error', error || 'Failed to close class.');
+                return;
+              }
+              Alert.alert('Class Closed', 'The class has been marked as inactive.');
+              if (currentUserId) {
+                await loadTeacherClasses(currentUserId);
+              }
+            } catch (e) {
+              Alert.alert('Error', 'Failed to close class.');
+            } finally {
+              setClosingClassId(null);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const generateLoginCode = () => String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
+
+  const generateUniqueLoginCode = async (): Promise<string> => {
+    for (let i = 0; i < 10; i++) {
+      const code = generateLoginCode();
+      const { data } = await readData(`/parentLoginCodes/${code}`);
+      if (!data) return code;
+    }
+    // Fallback if collisions keep happening
+    return `${Date.now()}`.slice(-6);
+  };
+
+  const handleOpenAddStudent = (cls: { id: string; name: string }) => {
+    setSelectedClassForStudent(cls);
+    setStudentNickname('');
+    setStudentGender('male');
+    setShowAddStudentModal(true);
+  };
+
+  const handleCreateStudent = async () => {
+    if (!selectedClassForStudent) return;
+    if (!studentNickname.trim()) { Alert.alert('Error', 'Please enter a student nickname.'); return; }
+    try {
+      setSavingStudent(true);
+      const loginCode = await generateUniqueLoginCode();
+      // Create parent placeholder (details will be collected on first login)
+      const parentPayload = {
+        loginCode,
+        infoStatus: 'pending',
+        createdAt: new Date().toISOString(),
+      };
+      const { key: parentId, error: parentErr } = await pushData('/parents', parentPayload);
+      if (parentErr || !parentId) { Alert.alert('Error', parentErr || 'Failed to create parent.'); return; }
+      await writeData(`/parentLoginCodes/${loginCode}`, parentId);
+      // Create student
+      const studentPayload = {
+        classId: selectedClassForStudent.id,
+        parentId,
+        nickname: studentNickname.trim(),
+        gender: studentGender,
+        createdAt: new Date().toISOString(),
+      };
+      const { key: studentId, error: studentErr } = await pushData('/students', studentPayload);
+      if (studentErr || !studentId) { Alert.alert('Error', studentErr || 'Failed to create student.'); return; }
+      await updateData(`/students/${studentId}`, { studentId });
+      await updateData(`/parents/${parentId}`, { parentId });
+      // Refresh lists
+      await loadStudentsAndParents(activeClasses.map((c) => c.id));
+      Alert.alert(
+        'Student Created',
+        `Share this Parent Login Code with the guardian: ${loginCode}`,
+        [
+          {
+            text: 'Create Another',
+            onPress: () => {
+              setStudentNickname('');
+            },
+          },
+          {
+            text: 'Done',
+            style: 'default',
+            onPress: () => setShowAddStudentModal(false),
+          },
+        ]
+      );
+    } catch (e) {
+      Alert.alert('Error', 'Failed to create student.');
+    } finally {
+      setSavingStudent(false);
+    }
+  };
 
   const fetchTeacherData = async (userId: string) => {
     try {
@@ -288,15 +500,11 @@ export default function TeacherDashboard() {
                style={styles.editButton}
                onPress={async () => {
                  setShowAnnModal(true);
-                 // Load classes for this teacher
-                 const { data } = await readData('/sections');
-                const list = Object.entries(data || {})
-                  .map(([id, v]: any) => ({ id, ...(v || {}) }))
-                  .filter((s: any) => s.teacherId === currentUserId)
-                  .map((s: any) => ({ id: s.id, name: s.name ?? 'Untitled', schoolYear: s.schoolYear }));
-                 setTeacherClasses(list);
-                 setAnnSelectedClassIds(list.map((c) => c.id));
-                 setAnnAllClasses(true);
+                 if (currentUserId) {
+                   await loadTeacherClasses(currentUserId);
+                   setAnnSelectedClassIds(teacherClasses.map((c) => c.id));
+                   setAnnAllClasses(true);
+                 }
                }}
              >
                <AntDesign name="edit" size={20} color="#ffffff" />
@@ -308,103 +516,128 @@ export default function TeacherDashboard() {
          <View style={styles.actionButtons}>
            <TouchableOpacity style={styles.actionCard} onPress={() => setShowAddClassModal(true)}>
             <View style={styles.actionGradient1}>
-               <View style={styles.actionIcon}>
-                 <MaterialCommunityIcons name="book-open-variant" size={28} color="#3182ce" />
-               </View>
+              <View style={styles.actionIcon}>
+                <MaterialCommunityIcons name="google-classroom" size={28} color="#3182ce" />
+              </View>
               <Text style={styles.actionText}>Add Class</Text>
              </View>
            </TouchableOpacity>
            
-           <TouchableOpacity style={styles.actionCard}>
-             <View style={styles.actionGradient2}>
-               <View style={styles.actionIcon}>
-                 <MaterialCommunityIcons name="target" size={28} color="#38a169" />
-               </View>
-               <Text style={styles.actionText}>Add Exercise</Text>
-             </View>
-           </TouchableOpacity>
+          <TouchableOpacity style={styles.actionCard} onPress={() => router.push('../CreateExercise')}>
+            <View style={styles.actionGradient2}>
+              <View style={styles.actionIcon}>
+                <MaterialCommunityIcons name="abacus" size={28} color="#38a169" />
+              </View>
+              <Text style={styles.actionText}>Add Exercise</Text>
+            </View>
+          </TouchableOpacity>
          </View>
 
          {/* Classrooms Section */}
          <View style={styles.classroomsSection}>
-           <View style={styles.classroomCard}>
-             <Text style={styles.sectionTitle}>Classrooms</Text>
-             <View style={styles.classroomHeader}>
-               <Text style={styles.classroomTitle}>Section Masikap</Text>
-               <Text style={styles.classroomSubtitle}>Camohaguin Elementary School</Text>
-               <Text style={styles.classroomYear}>SY: 25-26</Text>
-             </View>
-            
-             {/* Analytics Section */}
-             <View style={styles.analyticsContainer}>
-               <View style={styles.analyticsHeader}>
-                 <Text style={styles.analyticsTitle}>Performance Analytics</Text>
-                 <TouchableOpacity style={styles.viewAllButton}>
-                   <Text style={styles.viewAllText}>View All</Text>
-                   <AntDesign name="arrow-right" size={14} color="#3b82f6" />
-                 </TouchableOpacity>
+           <Text style={styles.sectionTitle}>Classrooms</Text>
+           {activeClasses.length === 0 ? (
+             <Text style={styles.classroomSubtitle}>No active classes yet.</Text>
+           ) : (
+             activeClasses.map((cls) => (
+               <View key={cls.id} style={styles.classroomCard}>
+                <View style={styles.classroomHeader}>
+                   <Text style={styles.classroomTitle}>{cls.name}</Text>
+                   <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+                   <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                 </View>
+                 {/* Analytics Section (placeholder/demo) */}
+                 <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                   <TouchableOpacity
+                     style={styles.addStudentBtn}
+                     onPress={() => handleOpenAddStudent({ id: cls.id, name: cls.name })}
+                   >
+                     <Text style={styles.addStudentBtnText}>Add Student</Text>
+                   </TouchableOpacity>
+                   <TouchableOpacity
+                     style={styles.closeClassBtn}
+                     onPress={() => handleCloseClass(cls)}
+                     disabled={closingClassId === cls.id}
+                   >
+                     <Text style={styles.closeClassBtnText}>
+                       {closingClassId === cls.id ? 'Closing...' : 'Close Class'}
+                     </Text>
+                   </TouchableOpacity>
+                 </View>
+                <View style={styles.analyticsContainer}>
+                   <View style={styles.analyticsHeader}>
+                     <Text style={styles.analyticsTitle}>Performance Analytics</Text>
+                     <TouchableOpacity style={styles.viewAllButton}>
+                       <Text style={styles.viewAllText}>View All</Text>
+                       <AntDesign name="arrow-right" size={14} color="#3b82f6" />
+                     </TouchableOpacity>
+                   </View>
+                   <View style={styles.analyticsCards}>
+                     <View style={styles.analyticsCard}>
+                       <View style={styles.analyticsIcon}>
+                         <MaterialCommunityIcons name="chart-line" size={24} color="#10b981" />
+                       </View>
+                       <View style={styles.analyticsContent}>
+                         <Text style={styles.analyticsLabel}>Overall Performance</Text>
+                         <Text style={styles.analyticsValue}>{
+                           classAnalytics[cls.id]?.performance != null ? `${classAnalytics[cls.id].performance}%` : '—'
+                         }</Text>
+                         <Text style={styles.analyticsChange}>{
+                           (() => {
+                             const ca = classAnalytics[cls.id];
+                             if (!ca || ca.change == null) return '—';
+                             return `${ca.change > 0 ? '+' : ''}${ca.change}% from last week`;
+                           })()
+                         }</Text>
+                       </View>
+                     </View>
+                     <View style={styles.analyticsCard}>
+                       <View style={styles.analyticsIcon}>
+                         <MaterialCommunityIcons name="account-group" size={24} color="#3b82f6" />
+                       </View>
+                       <View style={styles.analyticsContent}>
+                         <Text style={styles.analyticsLabel}>Active Students</Text>
+                         <Text style={styles.analyticsValue}>{studentsByClass[cls.id]?.length ?? 0}</Text>
+                         <Text style={styles.analyticsChange}>All students listed</Text>
+                       </View>
+                     </View>
+                   </View>
+                   <View style={styles.quickStats}>
+                     <View style={styles.statItem}>
+                       <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
+                       <Text style={styles.statLabel}>Assignments</Text>
+                     </View>
+                     <View style={styles.statDivider} />
+                     <View style={styles.statItem}>
+                       <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
+                       <Text style={styles.statLabel}>Completed</Text>
+                     </View>
+                     <View style={styles.statDivider} />
+                     <View style={styles.statItem}>
+                       <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
+                       <Text style={styles.statLabel}>Pending</Text>
+                     </View>
+                   </View>
+                 </View>
                </View>
-               
-               {/* Analytics Cards */}
-               <View style={styles.analyticsCards}>
-                 <View style={styles.analyticsCard}>
-                   <View style={styles.analyticsIcon}>
-                     <MaterialCommunityIcons name="chart-line" size={24} color="#10b981" />
-                   </View>
-                   <View style={styles.analyticsContent}>
-                     <Text style={styles.analyticsLabel}>Overall Performance</Text>
-                     <Text style={styles.analyticsValue}>85%</Text>
-                     <Text style={styles.analyticsChange}>+5% from last week</Text>
-                   </View>
-                 </View>
-                 
-                 <View style={styles.analyticsCard}>
-                   <View style={styles.analyticsIcon}>
-                     <MaterialCommunityIcons name="account-group" size={24} color="#3b82f6" />
-                   </View>
-                   <View style={styles.analyticsContent}>
-                     <Text style={styles.analyticsLabel}>Active Students</Text>
-                     <Text style={styles.analyticsValue}>24</Text>
-                     <Text style={styles.analyticsChange}>All students engaged</Text>
-                   </View>
-                 </View>
-               </View>
-               
-               {/* Quick Stats */}
-               <View style={styles.quickStats}>
-                 <View style={styles.statItem}>
-                   <Text style={styles.statValue}>12</Text>
-                   <Text style={styles.statLabel}>Assignments</Text>
-                 </View>
-                 <View style={styles.statDivider} />
-                 <View style={styles.statItem}>
-                   <Text style={styles.statValue}>8</Text>
-                   <Text style={styles.statLabel}>Completed</Text>
-                 </View>
-                 <View style={styles.statDivider} />
-                 <View style={styles.statItem}>
-                   <Text style={styles.statValue}>4</Text>
-                   <Text style={styles.statLabel}>Pending</Text>
-                 </View>
-               </View>
-             </View>
-          </View>
-        </View>
+             ))
+           )}
+         </View>
       </ScrollView>
 
       {/* Bottom Navigation */}
       <View style={styles.bottomNav}>
-        <TouchableOpacity style={[styles.navItem, styles.activeNavItem]}>
+        <TouchableOpacity style={[styles.navItem, styles.activeNavItem]} onPress={() => router.replace('/TeacherDashboard')}>
           <AntDesign name="home" size={24} color="#000000" />
           <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.navItem}>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/list')}>
           <MaterialIcons name="list" size={24} color="#9ca3af" />
           <Text style={styles.navText}>List</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.navItem}>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/class')}>
           <MaterialCommunityIcons name="account-group" size={24} color="#9ca3af" />
           <Text style={styles.navText}>Class</Text>
         </TouchableOpacity>
@@ -585,7 +818,7 @@ export default function TeacherDashboard() {
                     style={styles.fieldInput}
                     value={className}
                     onChangeText={setClassName}
-                    placeholder="e.g., Section Masikap"
+                    placeholder="e.g., Section Mabait"
                     placeholderTextColor="#6b7280"
                   />
                 </View>
@@ -689,6 +922,7 @@ export default function TeacherDashboard() {
                       schoolName: resolvedSchool,
                       schoolYear: syValue,
                       teacherId: currentUserId,
+                      status: 'active',
                       createdAt: new Date().toISOString(),
                     };
                     const { key, error } = await pushData('/sections', section);
@@ -697,6 +931,9 @@ export default function TeacherDashboard() {
                     } else {
                       await updateData(`/sections/${key}`, { id: key });
                       Alert.alert('Success', 'Class/Section created successfully.');
+                      if (currentUserId) {
+                        await loadTeacherClasses(currentUserId);
+                      }
                       setShowAddClassModal(false);
                       setClassName('');
                       setSchoolOption('profile');
@@ -835,6 +1072,101 @@ export default function TeacherDashboard() {
                 }}
               >
                 <Text style={styles.saveButtonText}>{sendingAnn ? 'Sending...' : 'Send'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Add Student Modal */}
+      <Modal visible={showAddStudentModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.profileModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Add Student{selectedClassForStudent ? ` — ${selectedClassForStudent.name}` : ''}</Text>
+              <TouchableOpacity onPress={() => setShowAddStudentModal(false)} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.profileContent}>
+              <View style={styles.infoSection}>
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Student Nickname</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={studentNickname}
+                    onChangeText={setStudentNickname}
+                    placeholder="e.g., Ken"
+                    placeholderTextColor="#6b7280"
+                  />
+                </View>
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Gender</Text>
+                  <View style={styles.segmentWrap}>
+                    <TouchableOpacity
+                      style={[styles.segmentButton, studentGender === 'male' && styles.segmentActive]}
+                      onPress={() => setStudentGender('male')}
+                    >
+                      <Text style={[styles.segmentText, studentGender === 'male' && styles.segmentTextActive]}>Male</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.segmentButton, studentGender === 'female' && styles.segmentActive]}
+                      onPress={() => setStudentGender('female')}
+                    >
+                      <Text style={[styles.segmentText, studentGender === 'female' && styles.segmentTextActive]}>Female</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+                <Text style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
+                  Disclaimer: For student privacy, use only a nickname or a unique identifier. Parent details will be collected securely when they first log in.
+                </Text>
+              </View>
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.cancelButton} onPress={() => setShowAddStudentModal(false)} disabled={savingStudent}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.saveButton} onPress={handleCreateStudent} disabled={savingStudent}>
+                <Text style={styles.saveButtonText}>{savingStudent ? 'Creating...' : 'Create'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Class List Modal */}
+      <Modal visible={showListModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.profileModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Class Lists</Text>
+              <TouchableOpacity onPress={() => setShowListModal(false)} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.profileContent}>
+              {activeClasses.map((cls) => (
+                <View key={cls.id} style={{ marginBottom: 18 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '700', color: '#1e293b', marginBottom: 8 }}>{cls.name}</Text>
+                  {(studentsByClass[cls.id] || []).length === 0 ? (
+                    <Text style={{ color: '#64748b' }}>No students yet.</Text>
+                  ) : (
+                    (studentsByClass[cls.id] || []).map((s) => {
+                      const p = s.parentId ? parentsById[s.parentId] : undefined;
+                      return (
+                        <View key={s.studentId} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}>
+                          <Text style={{ color: '#111827' }}>{s.nickname}</Text>
+                          <Text style={{ color: '#2563eb', fontWeight: '600' }}>{p?.loginCode || '—'}</Text>
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.saveButton} onPress={() => setShowListModal(false)}>
+                <Text style={styles.saveButtonText}>Close</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1069,6 +1401,31 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 20,
+  },
+  addStudentBtn: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  addStudentBtnText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  closeClassBtn: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 8,
+  },
+  closeClassBtnText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   analyticsCard: {
     flex: 1,

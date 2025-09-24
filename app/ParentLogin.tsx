@@ -1,4 +1,5 @@
-import { AntDesign, MaterialCommunityIcons } from '@expo/vector-icons';
+import { AntDesign } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts } from 'expo-font';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
@@ -22,10 +23,22 @@ export default function ParentLogin() {
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [canCheckAgreement, setCanCheckAgreement] = useState(false);
   const [hasScrolledToEnd, setHasScrolledToEnd] = useState(false);
+  
+  // Remember parent key
+  const STORAGE_PARENT_KEY = 'parent_key';
 
   useEffect(() => {
     // Show terms modal on mount
     setShowTermsModal(true);
+    // Load saved parent key
+    (async () => {
+      try {
+        const savedKey = await AsyncStorage.getItem(STORAGE_PARENT_KEY);
+        if (savedKey) setParentKey(savedKey);
+      } catch {
+        // ignore storage errors
+      }
+    })();
   }, []);
 
   // Handler for opening terms modal
@@ -99,7 +112,10 @@ export default function ParentLogin() {
               placeholder="Enter Parent Key"
               placeholderTextColor="#ffffff"
               value={parentKey}
-              onChangeText={setParentKey}
+              onChangeText={async (v) => {
+                setParentKey(v);
+                try { await AsyncStorage.setItem(STORAGE_PARENT_KEY, v); } catch {}
+              }}
               autoCapitalize="characters"
               autoCorrect={false}
             />
