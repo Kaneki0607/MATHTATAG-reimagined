@@ -1,28 +1,12 @@
-import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { readData } from '../lib/firebase-database';
-
-interface Announcement {
-  title: string;
-  body: string;
-  createdAt: string;
-  teacherName?: string;
-  school?: string;
-}
+import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
+import { useEffect, useRef } from 'react';
+import { Animated, Easing, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 export default function ParentDashboard() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ parentId?: string }>();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const translateAnim = useRef(new Animated.Value(16)).current;
-  const [latestAnnouncement, setLatestAnnouncement] = useState<Announcement | null>(null);
-  const [parentProfile, setParentProfile] = useState<any | null>(null);
-  const [studentProfile, setStudentProfile] = useState<any | null>(null);
-  const [classInfo, setClassInfo] = useState<any | null>(null);
-  const [teacherProfile, setTeacherProfile] = useState<any | null>(null);
 
   useEffect(() => {
     Animated.parallel([
@@ -41,60 +25,16 @@ export default function ParentDashboard() {
     ]).start();
   }, [fadeAnim, translateAnim]);
 
-  useEffect(() => {
-    const fetchLatest = async () => {
-      const { data } = await readData('/announcements/global/latest');
-      if (data) setLatestAnnouncement(data as Announcement);
-    };
-    fetchLatest();
-  }, []);
-
-  useEffect(() => {
-    const init = async () => {
-      let pid = params.parentId ? String(params.parentId) : undefined;
-      if (!pid) {
-        try { pid = (await AsyncStorage.getItem('currentParentId')) || undefined; } catch {}
-      }
-      if (!pid) return;
-      const { data: parent } = await readData(`/parents/${pid}`);
-      setParentProfile(parent || null);
-      // Find student linked to this parent
-      const { data: students } = await readData('/students');
-      const student = Object.values<any>(students || {}).find((s) => s.parentId === pid) || null;
-      setStudentProfile(student);
-      if (student?.classId) {
-        const { data: section } = await readData(`/sections/${student.classId}`);
-        setClassInfo(section || null);
-        if (section?.teacherId) {
-          const { data: teacher } = await readData(`/teachers/${section.teacherId}`);
-          setTeacherProfile(teacher || null);
-        } else {
-          setTeacherProfile(null);
-        }
-      } else {
-        setClassInfo(null);
-        setTeacherProfile(null);
-      }
-    };
-    init();
-  }, [params.parentId]);
-
   return (
     <View style={styles.container}>
       <View style={styles.backgroundPattern} />
 
       <Animated.View style={{ flex: 1, opacity: fadeAnim, transform: [{ translateY: translateAnim }] }}>
-      <ScrollView
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
+      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
           <View style={styles.welcomeText}>
-            <Text style={styles.welcomeLabel}>Welcome</Text>
-            <Text style={styles.welcomeTitle}>
-              {(studentProfile?.nickname || 'Student') + "'s Parent"}
-            </Text>
+            <Text style={styles.welcomeLabel}>Welcome,</Text>
+            <Text style={styles.welcomeTitle}>PARENT108756090030</Text>
           </View>
         </View>
 
@@ -112,8 +52,8 @@ export default function ParentDashboard() {
                 <MaterialIcons name="person" size={24} color="#64748b" />
               </View>
               <View style={styles.teacherInfo}>
-                <Text style={styles.teacherName}>{latestAnnouncement?.teacherName || 'Teacher'}</Text>
-                <Text style={styles.teacherRole}>{latestAnnouncement?.school || ''}</Text>
+                <Text style={styles.teacherName}>Mrs. Loteriña</Text>
+                <Text style={styles.teacherRole}>Grade 1 Teacher</Text>
               </View>
               <TouchableOpacity style={styles.flagButton}>
                 <MaterialIcons name="flag" size={20} color="#64748b" />
@@ -123,15 +63,13 @@ export default function ParentDashboard() {
             <View style={styles.announcementContent}>
               <View style={styles.announcementIcon}>
                 <View style={styles.pinkIcon}>
-                  <MaterialCommunityIcons name="bullhorn" size={16} color="#ffffff" />
+                  <AntDesign name="plus" size={16} color="#ffffff" />
                 </View>
-                <Text style={styles.announcementTitleText}>{latestAnnouncement?.title || 'No announcements yet'}</Text>
+                <Text style={styles.announcementTitleText}>Lorem ipsum</Text>
               </View>
-              {!!latestAnnouncement?.body && (
-                <Text style={styles.announcementDescription}>
-                  {latestAnnouncement.body}
-                </Text>
-              )}
+              <Text style={styles.announcementDescription}>
+                Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nam fermentum vestibulum lectus, eget eleifend tellus dignissim non. Praesent ultrices faucibus condimentum.
+              </Text>
             </View>
           </View>
         </View>
@@ -145,8 +83,9 @@ export default function ParentDashboard() {
                 <MaterialIcons name="person" size={28} color="#64748b" />
               </View>
               <View style={styles.studentInfo}>
-                <Text style={styles.studentName}>{studentProfile?.nickname || 'Student'}</Text>
-                <Text style={styles.studentGrade}>{classInfo?.name ? `${classInfo.name}${classInfo.schoolName ? ` — ${classInfo.schoolName}` : ''}` : (studentProfile?.classId ? `Class: ${studentProfile.classId}` : '')}</Text>
+                <Text style={styles.studentName}>Ken Cas</Text>
+                <Text style={styles.studentId}>ID: Jbfwwhqwrh8</Text>
+                <Text style={styles.studentGrade}>Grade 1 Mabait</Text>
               </View>
               <View style={styles.awardIcon}>
                 <MaterialCommunityIcons name="medal" size={24} color="#fbbf24" />
@@ -199,8 +138,6 @@ export default function ParentDashboard() {
               </Text>
             </View>
           </View>
-
-        
         </View>
       </ScrollView>
       </Animated.View>
@@ -242,10 +179,7 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
     paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 16 : 24,
-  },
-  scrollContent: {
-    paddingBottom: 140,
+    paddingTop: 60,
   },
   header: {
     marginBottom: 24,
@@ -483,38 +417,6 @@ const styles = StyleSheet.create({
     color: '#1e293b',
     lineHeight: 20,
   },
-  teacherCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 16,
-    marginTop: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-  },
-  teacherAvatarSmall: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#f1f5f9',
-    marginRight: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  teacherInfoRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 6,
-  },
-  teacherInfoText: {
-    fontSize: 14,
-    color: '#1e293b',
-  },
   bottomNav: {
     position: 'absolute',
     bottom: 0,
@@ -522,7 +424,7 @@ const styles = StyleSheet.create({
     right: 0,
     flexDirection: 'row',
     backgroundColor: '#ffffff',
-    paddingVertical: Platform.OS === 'android' ? 12 : 16,
+    paddingVertical: 16,
     paddingHorizontal: 20,
     borderTopWidth: 1,
     borderTopColor: '#f1f5f9',
@@ -549,3 +451,4 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 });
+
