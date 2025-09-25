@@ -44,6 +44,7 @@ export default function TeacherLogin() {
     confirmPassword: '',
     school: '',
     schoolOther: '',
+    gender: '',
     agreedToEULA: false,
     profilePicture: null as string | null
   });
@@ -172,7 +173,7 @@ export default function TeacherLogin() {
     setSignUpLoading(true);
     
     // Simple validation
-    if (!signUpData.firstName || !signUpData.lastName || !signUpData.email || !signUpData.phone || !signUpData.password) {
+    if (!signUpData.firstName || !signUpData.lastName || !signUpData.email || !signUpData.phone || !signUpData.password || !signUpData.gender) {
       Alert.alert('Error', 'Please fill in all required fields.');
       setSignUpLoading(false);
       return;
@@ -242,6 +243,7 @@ export default function TeacherLogin() {
           email: signUpData.email,
           phone: signUpData.phone,
           school: signUpData.school === 'Others' ? signUpData.schoolOther : signUpData.school,
+          gender: signUpData.gender,
           profilePictureUrl: profilePictureUrl || '',
           uid: user.uid,
           createdAt: new Date().toISOString(),
@@ -262,6 +264,7 @@ export default function TeacherLogin() {
             confirmPassword: '',
             school: '',
             schoolOther: '',
+            gender: '',
             agreedToEULA: false,
             profilePicture: null
           });
@@ -464,6 +467,29 @@ export default function TeacherLogin() {
                   onChangeText={(value) => handleSignUpInputChange('phone', value)}
                   keyboardType="phone-pad"
                 />
+                
+                {/* Gender Selection */}
+                <View style={styles.genderContainer}>
+                  <Text style={styles.genderLabel}>Gender *</Text>
+                  <View style={styles.genderOptions}>
+                    <TouchableOpacity 
+                      style={[styles.genderOption, signUpData.gender === 'Male' && styles.genderOptionSelected]}
+                      onPress={() => handleSignUpInputChange('gender', 'Male')}
+                    >
+                      <Text style={[styles.genderOptionText, signUpData.gender === 'Male' && styles.genderOptionTextSelected]}>
+                        Male
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      style={[styles.genderOption, signUpData.gender === 'Female' && styles.genderOptionSelected]}
+                      onPress={() => handleSignUpInputChange('gender', 'Female')}
+                    >
+                      <Text style={[styles.genderOptionText, signUpData.gender === 'Female' && styles.genderOptionTextSelected]}>
+                        Female
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
                 
                 {/* Profile Picture Section */}
                 <View style={styles.photoSection}>
@@ -1021,5 +1047,43 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     marginLeft: 6,
+  },
+  // Gender Selection Styles
+  genderContainer: {
+    marginBottom: 10,
+  },
+  genderLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 8,
+  },
+  genderOptions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  genderOption: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,170,255,0.3)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 15,
+    marginHorizontal: 5,
+    alignItems: 'center',
+  },
+  genderOptionSelected: {
+    backgroundColor: 'rgba(0,170,255,0.1)',
+    borderColor: 'rgb(40, 127, 214)',
+  },
+  genderOptionText: {
+    fontSize: 16,
+    color: '#1e293b',
+    fontWeight: '500',
+  },
+  genderOptionTextSelected: {
+    color: 'rgb(40, 127, 214)',
+    fontWeight: '600',
   },
 }); 

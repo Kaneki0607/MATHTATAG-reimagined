@@ -1462,14 +1462,14 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
     paddingHorizontal: 20,
-    paddingTop: 20,
+    paddingTop: 60,
   },
   
   // Header Styles
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 32,
+    marginBottom: 24,
     paddingHorizontal: 0,
     paddingVertical: 12,
   },

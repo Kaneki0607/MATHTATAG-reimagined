@@ -1,9 +1,12 @@
 import { AntDesign } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts } from 'expo-font';
+import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, NativeScrollEvent, NativeSyntheticEvent, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, NativeScrollEvent, NativeSyntheticEvent, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { readData, writeData } from '../lib/firebase-database';
+import { uploadFile } from '../lib/firebase-storage';
 
 const { width } = Dimensions.get('window'); // Removed unused height variable
 
@@ -23,6 +26,17 @@ export default function ParentLogin() {
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [canCheckAgreement, setCanCheckAgreement] = useState(false);
   const [hasScrolledToEnd, setHasScrolledToEnd] = useState(false);
+  
+  // Parent Registration Modal States
+  const [showRegistrationModal, setShowRegistrationModal] = useState(false);
+  const [registrationData, setRegistrationData] = useState({
+    firstName: '',
+    lastName: '',
+    email: '',
+    mobile: '',
+    profilePicture: null as string | null
+  });
+  const [registrationLoading, setRegistrationLoading] = useState(false);
   
   // Remember parent key
   const STORAGE_PARENT_KEY = 'parent_key';
@@ -59,22 +73,165 @@ export default function ParentLogin() {
     }
   };
 
-  const handleLogin = () => {
+  // Registration handlers
+  const openRegistration = () => setShowRegistrationModal(true);
+  const closeRegistration = () => setShowRegistrationModal(false);
+  
+  const handleRegistrationInputChange = (field: string, value: string) => {
+    setRegistrationData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const pickImage = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Media library permission is required to select photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: 'images',
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        setRegistrationData(prev => ({ ...prev, profilePicture: result.assets[0].uri }));
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to pick image');
+      console.error('Image picker error:', error);
+    }
+  };
+
+  const takePhoto = async () => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Camera permission is required to take photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        setRegistrationData(prev => ({ ...prev, profilePicture: result.assets[0].uri }));
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to take photo');
+      console.error('Camera error:', error);
+    }
+  };
+
+  const handleRegistration = async () => {
+    setRegistrationLoading(true);
+    
+    // Validation
+    if (!registrationData.firstName || !registrationData.lastName || !registrationData.email || !registrationData.mobile) {
+      Alert.alert('Error', 'Please fill in all required fields.');
+      setRegistrationLoading(false);
+      return;
+    }
+    
+    try {
+      let profilePictureUrl = '';
+      
+      // Upload profile picture if provided
+      if (registrationData.profilePicture) {
+        try {
+          const response = await fetch(registrationData.profilePicture);
+          const blob = await response.blob();
+          const timestamp = Date.now();
+          const filename = `parents/profiles/${parentKey.trim()}_${timestamp}.jpg`;
+          
+          const { downloadURL, error: uploadError } = await uploadFile(filename, blob, {
+            contentType: 'image/jpeg',
+          });
+          
+          if (uploadError) {
+            console.error('Photo upload error:', uploadError);
+          } else {
+            profilePictureUrl = downloadURL || '';
+          }
+        } catch (error) {
+          console.error('Photo upload error:', error);
+        }
+      }
+      
+      // Save parent data to Firebase
+      const parentData = {
+        firstName: registrationData.firstName,
+        lastName: registrationData.lastName,
+        email: registrationData.email,
+        mobile: registrationData.mobile,
+        profilePictureUrl: profilePictureUrl,
+        parentKey: parentKey.trim(),
+        createdAt: new Date().toISOString(),
+      };
+      
+      const { success, error: dbError } = await writeData(`/parents/${parentKey.trim()}`, parentData);
+      
+      if (success) {
+        // Save parent key to storage
+        await AsyncStorage.setItem(STORAGE_PARENT_KEY, parentKey.trim());
+        Alert.alert('Success', 'Registration completed successfully!');
+        setShowRegistrationModal(false);
+        router.replace('/ParentDashboard');
+        
+        // Reset form
+        setRegistrationData({
+          firstName: '',
+          lastName: '',
+          email: '',
+          mobile: '',
+          profilePicture: null
+        });
+      } else {
+        Alert.alert('Error', `Failed to save parent data: ${dbError}`);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'An unexpected error occurred during registration.');
+    } finally {
+      setRegistrationLoading(false);
+    }
+  };
+
+  const handleLogin = async () => {
     setError('');
     setLoading(true);
     
-    // Simple validation for demo purposes
+    // Simple validation
     if (!parentKey.trim()) {
       setError('Please enter a Parent Key.');
       setLoading(false);
       return;
     }
-    
-    // Simulate login process
-    setTimeout(() => {
+
+    try {
+      // Check if parent exists in database
+      const parentData = await readData(`/parents/${parentKey.trim()}`);
+      
+      if (parentData) {
+        // Parent exists, save key and navigate to dashboard
+        await AsyncStorage.setItem(STORAGE_PARENT_KEY, parentKey.trim());
+        setLoading(false);
+        router.replace('/ParentDashboard');
+      } else {
+        // Parent doesn't exist, show registration modal
+        setLoading(false);
+        setShowRegistrationModal(true);
+      }
+    } catch (error) {
       setLoading(false);
-      router.replace('/RoleSelection');
-    }, 1000);
+      setError('Failed to verify parent key. Please try again.');
+    }
   };
 
   if (!fontsLoaded) return null;
@@ -157,6 +314,118 @@ export default function ParentLogin() {
             </TouchableOpacity>
           </View>
         </View>
+      </Modal>
+      
+      {/* Parent Registration Modal */}
+      <Modal visible={showRegistrationModal} animationType="slide" transparent>
+        <KeyboardAvoidingView 
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.registrationModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Complete Your Profile</Text>
+              <TouchableOpacity onPress={closeRegistration} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            
+            <ScrollView style={styles.registrationForm} showsVerticalScrollIndicator={false}>
+              {/* Personal Information */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Personal Information</Text>
+                
+                <View style={styles.inputRow}>
+                  <View style={styles.halfInput}>
+                    <TextInput
+                      style={styles.registrationInput}
+                      placeholder="First Name *"
+                      placeholderTextColor="#1e293b"
+                      value={registrationData.firstName}
+                      onChangeText={(value) => handleRegistrationInputChange('firstName', value)}
+                    />
+                  </View>
+                  <View style={styles.halfInput}>
+                    <TextInput
+                      style={styles.registrationInput}
+                      placeholder="Last Name *"
+                      placeholderTextColor="#1e293b"
+                      value={registrationData.lastName}
+                      onChangeText={(value) => handleRegistrationInputChange('lastName', value)}
+                    />
+                  </View>
+                </View>
+                
+                <TextInput
+                  style={styles.registrationInput}
+                  placeholder="Email Address *"
+                  placeholderTextColor="#1e293b"
+                  value={registrationData.email}
+                  onChangeText={(value) => handleRegistrationInputChange('email', value)}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                />
+                
+                <TextInput
+                  style={styles.registrationInput}
+                  placeholder="Mobile Number *"
+                  placeholderTextColor="#1e293b"
+                  value={registrationData.mobile}
+                  onChangeText={(value) => handleRegistrationInputChange('mobile', value)}
+                  keyboardType="phone-pad"
+                />
+                
+                {/* Profile Picture Section */}
+                <View style={styles.photoSection}>
+                  <Text style={styles.photoLabel}>Profile Picture (Optional)</Text>
+                  <View style={styles.photoContainer}>
+                    {registrationData.profilePicture ? (
+                      <View style={styles.photoPreview}>
+                        <Image source={{ uri: registrationData.profilePicture }} style={styles.photoPreviewImage} />
+                        <TouchableOpacity 
+                          style={styles.removePhotoButton}
+                          onPress={() => setRegistrationData(prev => ({ ...prev, profilePicture: null }))}
+                        >
+                          <AntDesign name="close" size={16} color="#fff" />
+                        </TouchableOpacity>
+                      </View>
+                    ) : (
+                      <View style={styles.photoPlaceholder}>
+                        <AntDesign name="camera" size={32} color="#64748b" />
+                        <Text style={styles.photoPlaceholderText}>Add Photo</Text>
+                      </View>
+                    )}
+                  </View>
+                  <View style={styles.photoButtons}>
+                    <TouchableOpacity style={styles.photoButton} onPress={takePhoto}>
+                      <AntDesign name="camera" size={20} color="#fff" />
+                      <Text style={styles.photoButtonText}>Take Photo</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.photoButton} onPress={pickImage}>
+                      <AntDesign name="picture" size={20} color="#fff" />
+                      <Text style={styles.photoButtonText}>Upload</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
+            
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.cancelButton} onPress={closeRegistration}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={[styles.createButton, registrationLoading && styles.buttonDisabled]} 
+                onPress={handleRegistration}
+                disabled={registrationLoading}
+              >
+                <Text style={styles.createButtonText}>
+                  {registrationLoading ? 'Creating Profile...' : 'Complete Registration'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </ImageBackground>
   );
@@ -302,5 +571,195 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.3)',
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 2,
+  },
+  // Registration Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 20,
+  },
+  registrationModal: {
+    width: '100%',
+    maxWidth: 500,
+    maxHeight: '90%',
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: 'rgba(35, 177, 248, 0.4)',
+    shadowColor: '#00aaff',
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 25,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,170,255,0.2)',
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: 'rgb(40, 127, 214)',
+  },
+  closeButton: {
+    padding: 5,
+  },
+  registrationForm: {
+    maxHeight: 400,
+    paddingHorizontal: 20,
+  },
+  inputGroup: {
+    marginBottom: 20,
+  },
+  inputLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 10,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  halfInput: {
+    width: '48%',
+  },
+  registrationInput: {
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,170,255,0.3)',
+    borderRadius: 12,
+    paddingHorizontal: 15,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: '#1e293b',
+    marginBottom: 10,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,170,255,0.2)',
+  },
+  cancelButton: {
+    flex: 1,
+    backgroundColor: 'rgba(236, 236, 236, 1)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(150,150,150,0.3)',
+  },
+  cancelButtonText: {
+    color: '#1e293b',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  createButton: {
+    flex: 1,
+    backgroundColor: 'rgb(40, 127, 214)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginLeft: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(0,170,255,0.3)',
+  },
+  createButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  buttonDisabled: {
+    backgroundColor: '#ccc',
+  },
+  // Photo Section Styles
+  photoSection: {
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  photoLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 8,
+  },
+  photoContainer: {
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  photoPreview: {
+    position: 'relative',
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    overflow: 'hidden',
+    borderWidth: 3,
+    borderColor: 'rgba(0,170,255,0.3)',
+  },
+  photoPreviewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  removePhotoButton: {
+    position: 'absolute',
+    top: 5,
+    right: 5,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(239, 68, 68, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoPlaceholder: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#f1f5f9',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(0,170,255,0.3)',
+    borderStyle: 'dashed',
+  },
+  photoPlaceholderText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 4,
+    fontWeight: '500',
+  },
+  photoButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
+  photoButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgb(40, 127, 214)',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    marginHorizontal: 5,
+  },
+  photoButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 6,
   },
 }); 
