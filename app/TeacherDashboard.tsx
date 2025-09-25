@@ -1,6 +1,8 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as Print from 'expo-print';
 import { useRouter } from 'expo-router';
+import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
   Alert,
@@ -15,7 +17,7 @@ import {
   View
 } from 'react-native';
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
-import { pushData, readData, updateData, writeData } from '../lib/firebase-database';
+import { deleteData, pushData, readData, updateData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
 const { width, height } = Dimensions.get('window');
@@ -71,7 +73,13 @@ export default function TeacherDashboard() {
   const [annMessage, setAnnMessage] = useState('');
   const [annAllClasses, setAnnAllClasses] = useState(true);
   const [annSelectedClassIds, setAnnSelectedClassIds] = useState<string[]>([]);
-  const [teacherClasses, setTeacherClasses] = useState<{ id: string; name: string; schoolYear?: string }[]>([]);
+  const [teacherClasses, setTeacherClasses] = useState<{
+    id: string;
+    name: string;
+    schoolYear?: string;
+    schoolName?: string;
+    status?: string;
+  }[]>([]);
   const [activeClasses, setActiveClasses] = useState<
     { id: string; name: string; schoolYear?: string; schoolName?: string; status?: string }[]
   >([]);
@@ -92,6 +100,10 @@ export default function TeacherDashboard() {
 
   // Auth state
   const [currentUserId, setCurrentUserId] = useState<string | undefined>(undefined);
+  // Overflow menu state per-class (three dots)
+  const [openMenuClassId, setOpenMenuClassId] = useState<string | null>(null);
+  // Local navigation state to keep bottom nav persistent
+  const [activeTab, setActiveTab] = useState<'home' | 'list' | 'class' | 'reports'>('home');
 
   useEffect(() => {
     const unsubscribe = onAuthChange((user) => {
@@ -192,6 +204,79 @@ export default function TeacherDashboard() {
     } catch {
       setClassAnalytics({});
     }
+  };
+
+  const escapeHtml = (value: string) =>
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+  const exportClassListToPdf = async (cls: { id: string; name: string }) => {
+    try {
+      const students = [...(studentsByClass[cls.id] || [])].sort((a, b) =>
+        String(a.nickname || '').localeCompare(String(b.nickname || ''))
+      );
+      const rows = students
+        .map((s: any, idx: number) => {
+          const loginCode = s.parentId ? (parentsById[s.parentId]?.loginCode || '—') : '—';
+          return `<tr>
+            <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;">${idx + 1}</td>
+            <td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(String(s.nickname || ''))}</td>
+            <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;">${escapeHtml(String(loginCode))}</td>
+          </tr>`;
+        })
+        .join('');
+
+      const html = `<!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <title>${escapeHtml(cls.name)} — Student List</title>
+          </head>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji','Segoe UI Emoji','Segoe UI Symbol','Noto Color Emoji'; color:#111827;">
+            <h1 style="font-size:20px;">${escapeHtml(cls.name)} — Student List</h1>
+            <p style="color:#6b7280;">Generated on ${new Date().toLocaleString()}</p>
+            <table style="border-collapse:collapse;width:100%;font-size:12px;">
+              <thead>
+                <tr>
+                  <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;width:60px;">#</th>
+                  <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;text-align:left;">Student</th>
+                  <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;width:140px;">Parent Code</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows || `<tr><td colspan="3" style="padding:12px;text-align:center;border:1px solid #e5e7eb;">No students yet.</td></tr>`}
+              </tbody>
+            </table>
+          </body>
+        </html>`;
+
+      const file = await Print.printToFileAsync({ html });
+      const sharingAvailable = await Sharing.isAvailableAsync();
+      if (sharingAvailable) {
+        await Sharing.shareAsync(file.uri, { dialogTitle: `Export ${cls.name} Student List` });
+      } else {
+        Alert.alert('Export Complete', `PDF saved to: ${file.uri}`);
+      }
+    } catch (e) {
+      Alert.alert('Export Failed', 'Unable to export PDF.');
+    }
+  };
+
+  const parseSchoolYear = (sy?: string) => {
+    const raw = String(sy || '').replace(/[^0-9]/g, '');
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : -1; // -1 ranks last
+  };
+
+  const compareBySchoolYearDescThenName = (a: { schoolYear?: string; name: string }, b: { schoolYear?: string; name: string }) => {
+    const ay = parseSchoolYear(a.schoolYear);
+    const by = parseSchoolYear(b.schoolYear);
+    if (ay !== by) return by - ay; // desc by year
+    return String(a.name || '').localeCompare(String(b.name || ''));
   };
 
   const handleCloseClass = (cls: { id: string; name: string }) => {
@@ -484,167 +569,351 @@ export default function TeacherDashboard() {
            </View>
          </View>
 
-         {/* Make Announcement Card */}
-         <View style={styles.announcementCard}>
-           <View style={styles.announcementGradient}>
-             <View style={styles.announcementHeader}>
-               <View style={styles.megaphoneIcon}>
-                 <MaterialCommunityIcons name="bullhorn" size={32} color="#e53e3e" />
+         {activeTab === 'home' && (
+           <>
+             {/* Make Announcement Card */}
+             <View style={styles.announcementCard}>
+               <View style={styles.announcementGradient}>
+                 <View style={styles.announcementHeader}>
+                   <View style={styles.megaphoneIcon}>
+                     <MaterialCommunityIcons name="bullhorn" size={32} color="#e53e3e" />
+                   </View>
+                   <Text style={styles.announcementTitle}>Make Announcement</Text>
+                 </View>
+                 <Text style={styles.announcementText}>
+                   Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nam fermentum vestibulum lectus, eget eleifend...
+                 </Text>
+                 <TouchableOpacity
+                   style={styles.editButton}
+                   onPress={async () => {
+                     setShowAnnModal(true);
+                     if (currentUserId) {
+                       await loadTeacherClasses(currentUserId);
+                       setAnnSelectedClassIds(teacherClasses.map((c) => c.id));
+                       setAnnAllClasses(true);
+                     }
+                   }}
+                 >
+                   <AntDesign name="edit" size={20} color="#ffffff" />
+                 </TouchableOpacity>
                </View>
-               <Text style={styles.announcementTitle}>Make Announcement</Text>
              </View>
-             <Text style={styles.announcementText}>
-               Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nam fermentum vestibulum lectus, eget eleifend...
-             </Text>
-             <TouchableOpacity
-               style={styles.editButton}
-               onPress={async () => {
-                 setShowAnnModal(true);
-                 if (currentUserId) {
-                   await loadTeacherClasses(currentUserId);
-                   setAnnSelectedClassIds(teacherClasses.map((c) => c.id));
-                   setAnnAllClasses(true);
-                 }
-               }}
-             >
-               <AntDesign name="edit" size={20} color="#ffffff" />
-             </TouchableOpacity>
-           </View>
-         </View>
 
-         {/* Action Buttons */}
-         <View style={styles.actionButtons}>
-           <TouchableOpacity style={styles.actionCard} onPress={() => setShowAddClassModal(true)}>
-            <View style={styles.actionGradient1}>
-              <View style={styles.actionIcon}>
-                <MaterialCommunityIcons name="google-classroom" size={28} color="#3182ce" />
-              </View>
-              <Text style={styles.actionText}>Add Class</Text>
+             {/* Action Buttons */}
+             <View style={styles.actionButtons}>
+               <TouchableOpacity style={styles.actionCard} onPress={() => setShowAddClassModal(true)}>
+                <View style={styles.actionGradient1}>
+                  <View style={styles.actionIcon}>
+                    <MaterialCommunityIcons name="google-classroom" size={28} color="#3182ce" />
+                  </View>
+                  <Text style={styles.actionText}>Add Class</Text>
+                 </View>
+               </TouchableOpacity>
+               
+              <TouchableOpacity style={styles.actionCard} onPress={() => router.push('../CreateExercise')}>
+                <View style={styles.actionGradient2}>
+                  <View style={styles.actionIcon}>
+                    <MaterialCommunityIcons name="abacus" size={28} color="#38a169" />
+                  </View>
+                  <Text style={styles.actionText}>Add Exercise</Text>
+                </View>
+              </TouchableOpacity>
              </View>
-           </TouchableOpacity>
-           
-          <TouchableOpacity style={styles.actionCard} onPress={() => router.push('../CreateExercise')}>
-            <View style={styles.actionGradient2}>
-              <View style={styles.actionIcon}>
-                <MaterialCommunityIcons name="abacus" size={28} color="#38a169" />
-              </View>
-              <Text style={styles.actionText}>Add Exercise</Text>
-            </View>
-          </TouchableOpacity>
-         </View>
 
-         {/* Classrooms Section */}
-         <View style={styles.classroomsSection}>
-           <Text style={styles.sectionTitle}>Classrooms</Text>
-           {activeClasses.length === 0 ? (
-             <Text style={styles.classroomSubtitle}>No active classes yet.</Text>
-           ) : (
-             activeClasses.map((cls) => (
+             {/* Classrooms Section */}
+             <View style={styles.classroomsSection}>
+               <Text style={styles.sectionTitle}>Classrooms</Text>
+               {activeClasses.length === 0 ? (
+                 <Text style={styles.classroomSubtitle}>No active classes yet.</Text>
+               ) : (
+                activeClasses.map((cls) => (
+                  <View key={cls.id} style={styles.classroomCard}>
+                   <View style={styles.classroomHeader}>
+                      <Text style={styles.classroomTitle}>{cls.name}</Text>
+                      <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+                      <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                      <TouchableOpacity
+                        accessibilityLabel="More actions"
+                        onPress={() => setOpenMenuClassId(openMenuClassId === cls.id ? null : cls.id)}
+                        style={styles.moreButton}
+                      >
+                        <MaterialIcons name="more-vert" size={22} color="#64748b" />
+                      </TouchableOpacity>
+                      {openMenuClassId === cls.id && (
+                        <View style={styles.moreMenu}>
+                          <TouchableOpacity
+                            style={styles.moreMenuItem}
+                            onPress={() => {
+                              setOpenMenuClassId(null);
+                              handleOpenAddStudent({ id: cls.id, name: cls.name });
+                            }}
+                          >
+                            <AntDesign name="plus" size={16} color="#1e293b" />
+                            <Text style={styles.moreMenuText}>Add Student</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.moreMenuItem}
+                            onPress={() => {
+                              setOpenMenuClassId(null);
+                              handleCloseClass(cls);
+                            }}
+                            disabled={closingClassId === cls.id}
+                          >
+                            <MaterialCommunityIcons name="lock" size={16} color="#ef4444" />
+                            <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{closingClassId === cls.id ? 'Closing…' : 'Close Class'}</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+                    {/* Analytics Section (placeholder/demo) */}
+                    <View style={styles.analyticsContainer}>
+                       <View style={styles.analyticsHeader}>
+                         <Text style={styles.analyticsTitle}>Performance Analytics</Text>
+                         <TouchableOpacity style={styles.viewAllButton}>
+                           <Text style={styles.viewAllText}>View All</Text>
+                           <AntDesign name="arrow-right" size={14} color="#3b82f6" />
+                         </TouchableOpacity>
+                       </View>
+                       <View style={styles.analyticsCards}>
+                         <View style={styles.analyticsCard}>
+                           <View style={styles.analyticsIcon}>
+                             <MaterialCommunityIcons name="chart-line" size={24} color="#10b981" />
+                           </View>
+                           <View style={styles.analyticsContent}>
+                             <Text style={styles.analyticsLabel}>Overall Performance</Text>
+                             <Text style={styles.analyticsValue}>{
+                               classAnalytics[cls.id]?.performance != null ? `${classAnalytics[cls.id].performance}%` : '—'
+                             }</Text>
+                             <Text style={styles.analyticsChange}>{
+                               (() => {
+                                 const ca = classAnalytics[cls.id];
+                                 if (!ca || ca.change == null) return '—';
+                                 return `${ca.change > 0 ? '+' : ''}${ca.change}% from last week`;
+                               })()
+                             }</Text>
+                           </View>
+                         </View>
+                         <View style={styles.analyticsCard}>
+                           <View style={styles.analyticsIcon}>
+                             <MaterialCommunityIcons name="account-group" size={24} color="#3b82f6" />
+                           </View>
+                           <View style={styles.analyticsContent}>
+                             <Text style={styles.analyticsLabel}>Active Students</Text>
+                             <Text style={styles.analyticsValue}>{studentsByClass[cls.id]?.length ?? 0}</Text>
+                             <Text style={styles.analyticsChange}>All students listed</Text>
+                           </View>
+                         </View>
+                       </View>
+                       <View style={styles.quickStats}>
+                         <View style={styles.statItem}>
+                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
+                           <Text style={styles.statLabel}>Assignments</Text>
+                         </View>
+                         <View style={styles.statDivider} />
+                         <View style={styles.statItem}>
+                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
+                           <Text style={styles.statLabel}>Completed</Text>
+                         </View>
+                         <View style={styles.statDivider} />
+                         <View style={styles.statItem}>
+                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
+                           <Text style={styles.statLabel}>Pending</Text>
+                         </View>
+                       </View>
+                     </View>
+                   </View>
+                 ))
+               )}
+             </View>
+           </>
+         )}
+
+         {activeTab === 'list' && (
+           <View style={{ paddingBottom: 100 }}>
+             <Text style={styles.sectionTitle}>Student Lists</Text>
+             {activeClasses.map((cls) => (
                <View key={cls.id} style={styles.classroomCard}>
-                <View style={styles.classroomHeader}>
+                 <View style={styles.classroomHeader}>
                    <Text style={styles.classroomTitle}>{cls.name}</Text>
                    <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
                    <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
                  </View>
-                 {/* Analytics Section (placeholder/demo) */}
-                 <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
-                   <TouchableOpacity
-                     style={styles.addStudentBtn}
-                     onPress={() => handleOpenAddStudent({ id: cls.id, name: cls.name })}
-                   >
-                     <Text style={styles.addStudentBtnText}>Add Student</Text>
-                   </TouchableOpacity>
-                   <TouchableOpacity
-                     style={styles.closeClassBtn}
-                     onPress={() => handleCloseClass(cls)}
-                     disabled={closingClassId === cls.id}
-                   >
-                     <Text style={styles.closeClassBtnText}>
-                       {closingClassId === cls.id ? 'Closing...' : 'Close Class'}
-                     </Text>
-                   </TouchableOpacity>
-                 </View>
-                <View style={styles.analyticsContainer}>
-                   <View style={styles.analyticsHeader}>
-                     <Text style={styles.analyticsTitle}>Performance Analytics</Text>
-                     <TouchableOpacity style={styles.viewAllButton}>
-                       <Text style={styles.viewAllText}>View All</Text>
-                       <AntDesign name="arrow-right" size={14} color="#3b82f6" />
+                <View style={styles.classHeader}>
+                  <Text style={{ color: '#64748b', flex: 1 }}>Total Students: {studentsByClass[cls.id]?.length ?? 0}</Text>
+                  <View style={styles.headerActions}>
+                     <TouchableOpacity style={[styles.addStudentBtn, { backgroundColor: '#3b82f6' }]} onPress={() => handleOpenAddStudent({ id: cls.id, name: cls.name })}>
+                       <AntDesign name="plus" size={16} color="#ffffff" />
+                       <Text style={[styles.addStudentBtnText, { marginLeft: 6 }]}>Add Student</Text>
+                     </TouchableOpacity>
+                     <TouchableOpacity style={styles.exportBtn} onPress={() => exportClassListToPdf(cls)}>
+                       <MaterialCommunityIcons name="file-pdf-box" size={18} color="#ffffff" />
+                       <Text style={styles.exportBtnText}>Export PDF</Text>
                      </TouchableOpacity>
                    </View>
-                   <View style={styles.analyticsCards}>
-                     <View style={styles.analyticsCard}>
-                       <View style={styles.analyticsIcon}>
-                         <MaterialCommunityIcons name="chart-line" size={24} color="#10b981" />
-                       </View>
-                       <View style={styles.analyticsContent}>
-                         <Text style={styles.analyticsLabel}>Overall Performance</Text>
-                         <Text style={styles.analyticsValue}>{
-                           classAnalytics[cls.id]?.performance != null ? `${classAnalytics[cls.id].performance}%` : '—'
-                         }</Text>
-                         <Text style={styles.analyticsChange}>{
-                           (() => {
-                             const ca = classAnalytics[cls.id];
-                             if (!ca || ca.change == null) return '—';
-                             return `${ca.change > 0 ? '+' : ''}${ca.change}% from last week`;
-                           })()
-                         }</Text>
-                       </View>
-                     </View>
-                     <View style={styles.analyticsCard}>
-                       <View style={styles.analyticsIcon}>
-                         <MaterialCommunityIcons name="account-group" size={24} color="#3b82f6" />
-                       </View>
-                       <View style={styles.analyticsContent}>
-                         <Text style={styles.analyticsLabel}>Active Students</Text>
-                         <Text style={styles.analyticsValue}>{studentsByClass[cls.id]?.length ?? 0}</Text>
-                         <Text style={styles.analyticsChange}>All students listed</Text>
-                       </View>
-                     </View>
-                   </View>
-                   <View style={styles.quickStats}>
-                     <View style={styles.statItem}>
-                       <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
-                       <Text style={styles.statLabel}>Assignments</Text>
-                     </View>
-                     <View style={styles.statDivider} />
-                     <View style={styles.statItem}>
-                       <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
-                       <Text style={styles.statLabel}>Completed</Text>
-                     </View>
-                     <View style={styles.statDivider} />
-                     <View style={styles.statItem}>
-                       <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
-                       <Text style={styles.statLabel}>Pending</Text>
-                     </View>
-                   </View>
                  </View>
+                 {(studentsByClass[cls.id] || []).length === 0 ? (
+                   <Text style={{ color: '#64748b' }}>No students yet.</Text>
+                ) : (
+                  <>
+                    <View style={styles.studentHeaderRow}>
+                      <Text style={[styles.studentIndex, { width: 28 }]}>#</Text>
+                      <Text style={[styles.studentName, { fontWeight: '700', color: '#374151' }]}>Student Name</Text>
+                      <Text style={[styles.studentCode, { color: '#374151' }]}>Parent Access Code</Text>
+                    </View>
+                    {(studentsByClass[cls.id] || []).map((s: any, idx: number) => {
+                      const p = s.parentId ? parentsById[s.parentId] : undefined;
+                      return (
+                        <View key={s.studentId} style={styles.studentRow}>
+                          <Text style={styles.studentIndex}>{idx + 1}.</Text>
+                          <Text style={styles.studentName}>{s.nickname}</Text>
+                          <View style={styles.studentActionsWrap}>
+                            <TouchableOpacity
+                              accessibilityLabel="Edit student"
+                              onPress={() => {
+                                setSelectedClassForStudent({ id: cls.id, name: cls.name });
+                                setStudentNickname(String(s.nickname || ''));
+                                setStudentGender(String(s.gender || 'male') === 'female' ? 'female' : 'male');
+                                setShowAddStudentModal(true);
+                              }}
+                              style={styles.iconBtn}
+                            >
+                              <MaterialIcons name="edit" size={18} color="#64748b" />
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              accessibilityLabel="Delete student"
+                              onPress={() => {
+                                Alert.alert(
+                                  'Delete Student',
+                                  `Remove "${s.nickname}" from ${cls.name}? This cannot be undone.`,
+                                  [
+                                    { text: 'Cancel', style: 'cancel' },
+                                    {
+                                      text: 'Delete',
+                                      style: 'destructive',
+                                      onPress: async () => {
+                                        try {
+                                          await deleteData(`/students/${s.studentId}`);
+                                          if (s.parentId) {
+                                            // Optional: orphan parent cleanup can be handled server-side; keep code simple here
+                                          }
+                                          await loadStudentsAndParents([cls.id]);
+                                          Alert.alert('Removed', 'Student deleted.');
+                                        } catch (e) {
+                                          Alert.alert('Error', 'Failed to delete student.');
+                                        }
+                                      },
+                                    },
+                                  ]
+                                );
+                              }}
+                              style={styles.iconBtn}
+                            >
+                              <MaterialIcons name="delete" size={18} color="#ef4444" />
+                            </TouchableOpacity>
+                            <Text style={styles.studentCode}>{p?.loginCode || '—'}</Text>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </>
+                )}
                </View>
-             ))
-           )}
-         </View>
+             ))}
+           </View>
+         )}
+
+        {activeTab === 'class' && (
+          <View style={{ paddingBottom: 100 }}>
+            <Text style={styles.sectionTitle}>Classroom</Text>
+            {teacherClasses.length === 0 ? (
+              <Text style={styles.classroomSubtitle}>No classes yet.</Text>
+            ) : (
+              <>
+                {activeClasses.length > 0 && (
+                  <>
+                    <Text style={[styles.classroomSubtitle, { marginBottom: 8 }]}>Active</Text>
+                    {[...activeClasses].sort(compareBySchoolYearDescThenName).map((cls) => (
+                      <View key={cls.id} style={[styles.classroomCard, { marginBottom: 12 }]}>
+                        <View style={styles.classroomHeader}>
+                          <Text style={styles.classroomTitle}>{cls.name}</Text>
+                          <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+                          <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                        </View>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                          <View style={styles.statusPillActive}>
+                            <Text style={styles.statusText}>Active</Text>
+                          </View>
+                          <Text style={{ color: '#64748b' }}>Students: {studentsByClass[cls.id]?.length ?? 0}</Text>
+                        </View>
+                        <View style={styles.quickStats}>
+                          <View style={styles.statItem}>
+                            <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
+                            <Text style={styles.statLabel}>Assignments</Text>
+                          </View>
+                          <View style={styles.statDivider} />
+                          <View style={styles.statItem}>
+                            <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
+                            <Text style={styles.statLabel}>Completed</Text>
+                          </View>
+                          <View style={styles.statDivider} />
+                          <View style={styles.statItem}>
+                            <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
+                            <Text style={styles.statLabel}>Pending</Text>
+                          </View>
+                        </View>
+                      </View>
+                    ))}
+                  </>
+                )}
+                {teacherClasses.filter((c) => c.status === 'inactive').length > 0 && (
+                  <>
+                    <Text style={[styles.classroomSubtitle, { marginVertical: 8 }]}>Inactive</Text>
+                    {teacherClasses
+                      .filter((c) => c.status === 'inactive')
+                      .sort(compareBySchoolYearDescThenName)
+                      .map((cls) => (
+                      <View key={cls.id} style={[styles.classroomCard, { marginBottom: 12 }]}>
+                        <View style={styles.classroomHeader}>
+                          <Text style={styles.classroomTitle}>{cls.name}</Text>
+                          <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+                          <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                        </View>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <View style={styles.statusPillInactive}>
+                            <Text style={styles.statusText}>Inactive</Text>
+                          </View>
+                          <Text style={{ color: '#64748b' }}>Students: {studentsByClass[cls.id]?.length ?? 0}</Text>
+                        </View>
+                      </View>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
+          </View>
+        )}
       </ScrollView>
 
       {/* Bottom Navigation */}
       <View style={styles.bottomNav}>
-        <TouchableOpacity style={[styles.navItem, styles.activeNavItem]} onPress={() => router.replace('/TeacherDashboard')}>
-          <AntDesign name="home" size={24} color="#000000" />
-          <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
+        <TouchableOpacity style={[styles.navItem, activeTab === 'home' && styles.activeNavItem]} onPress={() => setActiveTab('home')}>
+          <AntDesign name="home" size={24} color={activeTab === 'home' ? '#000000' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'home' && styles.activeNavText]}>Home</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/list')}>
-          <MaterialIcons name="list" size={24} color="#9ca3af" />
-          <Text style={styles.navText}>List</Text>
+        <TouchableOpacity style={[styles.navItem, activeTab === 'list' && styles.activeNavItem]} onPress={() => setActiveTab('list')}>
+          <MaterialIcons name="list" size={24} color={activeTab === 'list' ? '#000000' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'list' && styles.activeNavText]}>List</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/class')}>
-          <MaterialCommunityIcons name="account-group" size={24} color="#9ca3af" />
-          <Text style={styles.navText}>Class</Text>
+        <TouchableOpacity style={[styles.navItem, activeTab === 'class' && styles.activeNavItem]} onPress={() => setActiveTab('class')}>
+          <MaterialCommunityIcons name="account-group" size={24} color={activeTab === 'class' ? '#000000' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'class' && styles.activeNavText]}>Class</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.navItem}>
-          <MaterialCommunityIcons name="chart-bar" size={24} color="#9ca3af" />
-          <Text style={styles.navText}>Reports</Text>
+        <TouchableOpacity style={[styles.navItem, activeTab === 'reports' && styles.activeNavItem]} onPress={() => setActiveTab('reports')}>
+          <MaterialCommunityIcons name="chart-bar" size={24} color={activeTab === 'reports' ? '#000000' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'reports' && styles.activeNavText]}>Reports</Text>
         </TouchableOpacity>
       </View>
 
@@ -1329,6 +1598,21 @@ const styles = StyleSheet.create({
   classroomsSection: {
     marginBottom: 100, // Space for bottom nav
   },
+  classHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  headerActions: {
+    flexShrink: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
+    maxWidth: '60%',
+    flexWrap: 'wrap',
+  },
   sectionTitle: {
     fontSize: 22,
     fontWeight: '700',
@@ -1367,6 +1651,42 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontWeight: '500',
   },
+  moreButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    padding: 6,
+    borderRadius: 12,
+  },
+  moreMenu: {
+    position: 'absolute',
+    top: 28,
+    right: 0,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 6,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    zIndex: 10,
+  },
+  moreMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    gap: 8,
+  },
+  moreMenuText: {
+    color: '#1e293b',
+    fontSize: 14,
+    fontWeight: '600',
+  },
   
   // Analytics Styles
   analyticsContainer: {
@@ -1403,11 +1723,13 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   addStudentBtn: {
-    alignSelf: 'flex-start',
+    alignSelf: 'auto',
     backgroundColor: '#3b82f6',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   addStudentBtnText: {
     color: '#ffffff',
@@ -1538,6 +1860,77 @@ const styles = StyleSheet.create({
   },
   activeNavText: {
     color: '#1e293b',
+    fontWeight: '700',
+  },
+  studentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  studentHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  studentIndex: {
+    width: 28,
+    color: '#64748b',
+    fontWeight: '700',
+    textAlign: 'left',
+  },
+  studentName: {
+    flex: 1,
+    color: '#111827',
+    marginLeft: 6,
+  },
+  studentCode: {
+    color: '#2563eb',
+    fontWeight: '600',
+  },
+  studentActionsWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  iconBtn: {
+    padding: 6,
+    borderRadius: 8,
+  },
+  statusPillActive: {
+    backgroundColor: '#dcfce7',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  statusPillInactive: {
+    backgroundColor: '#fee2e2',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  statusText: {
+    color: '#111827',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  exportBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  exportBtnText: {
+    color: '#ffffff',
+    fontSize: 12,
     fontWeight: '700',
   },
   // Loading Styles
