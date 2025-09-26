@@ -67,6 +67,10 @@ export default function ParentDashboard() {
     profilePicture: null as string | null
   });
   const [profileEditLoading, setProfileEditLoading] = useState(false);
+  
+  // Announcement modal state
+  const [showAnnouncementModal, setShowAnnouncementModal] = useState(false);
+  const [selectedAnnouncement, setSelectedAnnouncement] = useState<Announcement | null>(null);
 
   // Load parent data on component mount
   useEffect(() => {
@@ -221,6 +225,18 @@ export default function ParentDashboard() {
     } catch (error) {
       console.error('Failed to mark announcement as read:', error);
     }
+  };
+
+  const openAnnouncementModal = (announcement: Announcement) => {
+    setSelectedAnnouncement(announcement);
+    setShowAnnouncementModal(true);
+    // Mark as read when opened
+    markAnnouncementAsRead(announcement.id);
+  };
+
+  const closeAnnouncementModal = () => {
+    setShowAnnouncementModal(false);
+    setSelectedAnnouncement(null);
   };
 
   // Registration form handlers
@@ -583,7 +599,7 @@ export default function ParentDashboard() {
                           styles.announcementCardHorizontal,
                           !isRead && styles.unreadAnnouncementCard
                         ]}
-                        onPress={() => markAnnouncementAsRead(announcement.id)}
+                        onPress={() => openAnnouncementModal(announcement)}
                       >
                         
 
@@ -1071,6 +1087,87 @@ export default function ParentDashboard() {
                 <Text style={styles.updateButtonText}>
                   {profileEditLoading ? 'Updating...' : 'Update Profile'}
                 </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+      
+      {/* Announcement Detail Modal */}
+      <Modal visible={showAnnouncementModal} animationType="slide" transparent>
+        <KeyboardAvoidingView 
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.announcementModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Announcement Details</Text>
+              <TouchableOpacity onPress={closeAnnouncementModal} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            
+            {selectedAnnouncement && (
+              <View style={styles.announcementModalContent}>
+                <ScrollView showsVerticalScrollIndicator={false} style={styles.announcementScrollView}>
+                  <View style={styles.announcementModalCard}>
+                    <View style={styles.announcementModalHeader}>
+                      <View style={styles.announcementModalIcon}>
+                        <View style={styles.announcementIconContainer}>
+                          <MaterialIcons name="campaign" size={20} color="#ffffff" />
+                        </View>
+                        <Text style={styles.announcementModalTitle}>{selectedAnnouncement.title}</Text>
+                      </View>
+                    </View>
+                    
+                    <View style={styles.announcementModalBody}>
+                      <Text style={styles.announcementModalMessage}>{selectedAnnouncement.message}</Text>
+                    </View>
+                    
+                    <View style={styles.announcementModalFooter}>
+                      <View style={styles.announcementModalMeta}>
+                        <View style={styles.announcementModalMetaRow}>
+                          <Text style={styles.announcementModalMetaLabel}>Posted on:</Text>
+                          <Text style={styles.announcementModalMetaValue}>
+                            {selectedAnnouncement.dateTime ? new Date(selectedAnnouncement.dateTime).toLocaleString('en-US', {
+                              weekday: 'short',
+                              year: 'numeric',
+                              month: 'long',
+                              day: 'numeric',
+                              hour: 'numeric',
+                              minute: '2-digit',
+                              hour12: true
+                            }) : 'No date'}
+                          </Text>
+                        </View>
+                        <View style={styles.announcementModalMetaRow}>
+                          <View style={styles.teacherProfileRow}>
+                            <View style={styles.teacherAvatarSmall}>
+                              {selectedAnnouncement.teacherProfilePictureUrl ? (
+                                <Image 
+                                  source={{ uri: selectedAnnouncement.teacherProfilePictureUrl }} 
+                                  style={styles.teacherProfileImageSmall}
+                                />
+                              ) : (
+                                <MaterialIcons name="person" size={16} color="#64748b" />
+                              )}
+                            </View>
+                            <Text style={styles.announcementModalMetaLabel}>Posted by: </Text>
+                            <Text style={styles.announcementModalMetaValue}>
+                              {selectedAnnouncement.teacherGender === 'Male' ? 'Sir' : selectedAnnouncement.teacherGender === 'Female' ? 'Ma\'am' : ''} {selectedAnnouncement.teacherName || 'Teacher'}
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                    </View>
+                  </View>
+                </ScrollView>
+              </View>
+            )}
+            
+            <View style={styles.announcementModalActions}>
+              <TouchableOpacity style={styles.closeAnnouncementButton} onPress={closeAnnouncementModal}>
+                <Text style={styles.closeAnnouncementButtonText}>Close</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1963,6 +2060,109 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(0,170,255,0.3)',
   },
   updateButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  // Announcement Modal Styles
+  announcementModal: {
+    width: '100%',
+    maxWidth: 500,
+    maxHeight: '85%',
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: 'rgba(35, 177, 248, 0.4)',
+    shadowColor: '#00aaff',
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 25,
+  },
+  announcementModalContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  announcementScrollView: {
+    flex: 1,
+  },
+  announcementModalCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  announcementModalHeader: {
+    marginBottom: 16,
+  },
+  announcementModalIcon: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  announcementModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: 12,
+  },
+  announcementModalBody: {
+    marginBottom: 20,
+  },
+  announcementModalMessage: {
+    fontSize: 16,
+    color: '#1e293b',
+    lineHeight: 24,
+  },
+  announcementModalFooter: {
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    paddingTop: 16,
+  },
+  announcementModalMeta: {
+    marginBottom: 8,
+  },
+  announcementModalMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  announcementModalMetaLabel: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+    marginRight: 4,
+  },
+  announcementModalMetaValue: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '600',
+  },
+  announcementModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,170,255,0.2)',
+    backgroundColor: 'rgba(255,255,255,0.95)',
+  },
+  closeAnnouncementButton: {
+    backgroundColor: 'rgb(40, 127, 214)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(0,170,255,0.3)',
+  },
+  closeAnnouncementButtonText: {
     color: '#ffffff',
     fontSize: 16,
     fontWeight: 'bold',
