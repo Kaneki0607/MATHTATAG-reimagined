@@ -52,6 +52,18 @@ export default function CreateExercise() {
   const [uploading, setUploading] = useState(false);
   const [showFillSettings, setShowFillSettings] = useState(false);
   const [fillSettingsDraft, setFillSettingsDraft] = useState<NonNullable<Question['fillSettings']> | null>(null);
+  
+  // Stock image selection state
+  const [showStockImageModal, setShowStockImageModal] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [stockImageContext, setStockImageContext] = useState<{
+    questionId: string;
+    optionIndex?: number;
+    pairIndex?: number;
+    side?: 'left' | 'right';
+    type: 'question' | 'option' | 'pair';
+  } | null>(null);
+  
 
   const questionTypes = [
     {
@@ -89,6 +101,67 @@ export default function CreateExercise() {
       icon: 'book-open-variant',
       color: '#8b5cf6',
     },
+  ];
+
+  // Stock image categories with actual image sources
+  const stockImageCategories = [
+    {
+      id: 'animals',
+      name: 'Animals',
+      icon: 'paw',
+      color: '#f59e0b',
+      images: [
+        { name: 'Bee', source: require('../assets/images/Animals/Bee.png') },
+        { name: 'Black Cat', source: require('../assets/images/Animals/Black Cat.png') },
+        { name: 'Bug', source: require('../assets/images/Animals/Bug.png') },
+        { name: 'Butterfly', source: require('../assets/images/Animals/Butterfly.png') },
+        { name: 'Cat', source: require('../assets/images/Animals/Cat.png') },
+        { name: 'Cheetah', source: require('../assets/images/Animals/Cheetah.png') },
+        { name: 'Chicken', source: require('../assets/images/Animals/Chicken.png') },
+        { name: 'Cow', source: require('../assets/images/Animals/Cow.png') },
+        { name: 'Deer', source: require('../assets/images/Animals/Deer.png') },
+        { name: 'Dog', source: require('../assets/images/Animals/Dog.png') },
+        { name: 'Elephant', source: require('../assets/images/Animals/Elephant.png') },
+        { name: 'Fox', source: require('../assets/images/Animals/Fox.png') },
+        { name: 'Frog', source: require('../assets/images/Animals/Frog.png') },
+        { name: 'Giraffe', source: require('../assets/images/Animals/Giraffe.png') },
+        { name: 'Hipo', source: require('../assets/images/Animals/Hipo.png') },
+        { name: 'Horse', source: require('../assets/images/Animals/Horse.png') },
+        { name: 'Koala', source: require('../assets/images/Animals/Koala.png') },
+        { name: 'Lion', source: require('../assets/images/Animals/Lion.png') },
+        { name: 'Monkey', source: require('../assets/images/Animals/Monkey.png') },
+        { name: 'Owl', source: require('../assets/images/Animals/Owl.png') },
+        { name: 'Panda', source: require('../assets/images/Animals/Panda.png') },
+        { name: 'Parrot', source: require('../assets/images/Animals/Parrot.png') },
+        { name: 'Penguin', source: require('../assets/images/Animals/Penguin.png') },
+        { name: 'Pig', source: require('../assets/images/Animals/Pig.png') },
+        { name: 'Rabbit', source: require('../assets/images/Animals/Rabbit.png') },
+        { name: 'Red Panda', source: require('../assets/images/Animals/Red Panda.png') },
+        { name: 'Snail', source: require('../assets/images/Animals/Snail.png') },
+        { name: 'Snake', source: require('../assets/images/Animals/Snake.png') },
+        { name: 'Tiger', source: require('../assets/images/Animals/Tiger.png') },
+        { name: 'Turkey', source: require('../assets/images/Animals/Turkey.png') },
+        { name: 'Wolf', source: require('../assets/images/Animals/Wolf.png') },
+        { name: 'Zebra', source: require('../assets/images/Animals/Zebra.png') }
+      ]
+    },
+    {
+      id: 'numbers',
+      name: 'Numbers',
+      icon: 'numeric',
+      color: '#3b82f6',
+      images: [
+        { name: '1', source: require('../assets/images/Numbers/1.png') },
+        { name: '2', source: require('../assets/images/Numbers/2.png') },
+        { name: '3', source: require('../assets/images/Numbers/3.png') },
+        { name: '4', source: require('../assets/images/Numbers/4.png') },
+        { name: '5', source: require('../assets/images/Numbers/5.png') },
+        { name: '6', source: require('../assets/images/Numbers/6.png') },
+        { name: '7', source: require('../assets/images/Numbers/7.png') },
+        { name: '8', source: require('../assets/images/Numbers/8.png') },
+        { name: '9', source: require('../assets/images/Numbers/9.png') }
+      ]
+    }
   ];
 
   const addQuestion = (type: string) => {
@@ -262,24 +335,70 @@ export default function CreateExercise() {
     }
   };
 
-  const pickOptionImage = async (questionId: string, optionIndex: number) => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Media library access is required to pick images.');
-      return;
+  const openStockImageModal = (context: {
+    questionId: string;
+    optionIndex?: number;
+    pairIndex?: number;
+    side?: 'left' | 'right';
+    type: 'question' | 'option' | 'pair';
+  }) => {
+    setStockImageContext(context);
+    setShowStockImageModal(true);
+    setSelectedCategory('');
+  };
+
+  const selectStockImage = (imageSource: any) => {
+    if (!stockImageContext) return;
+    
+    const { questionId, optionIndex, pairIndex, side, type } = stockImageContext;
+    
+    if (type === 'question') {
+      updateQuestion(questionId, { questionImage: imageSource });
+    } else if (type === 'option' && optionIndex !== undefined) {
+      const q = questions.find((q) => q.id === questionId);
+      if (!q) return;
+      const next = [...(q.optionImages || [])];
+      next[optionIndex] = imageSource;
+      updateQuestion(questionId, { optionImages: next });
+    } else if (type === 'pair' && pairIndex !== undefined && side) {
+      const q = questions.find((q) => q.id === questionId);
+      if (!q || !q.pairs) return;
+      const nextPairs = [...q.pairs];
+      const target = { ...nextPairs[pairIndex] };
+      if (side === 'left') target.leftImage = imageSource;
+      else target.rightImage = imageSource;
+      nextPairs[pairIndex] = target;
+      updateQuestion(questionId, { pairs: nextPairs });
     }
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.8,
-    });
-    if (res.canceled) return;
-    const uri = res.assets?.[0]?.uri;
-    if (!uri) return;
-    const q = questions.find(q => q.id === questionId);
-    if (!q) return;
-    const next = [...(q.optionImages || [])];
-    next[optionIndex] = uri;
-    updateQuestion(questionId, { optionImages: next });
+    
+    setShowStockImageModal(false);
+    setStockImageContext(null);
+  };
+
+  const pickOptionImage = async (questionId: string, optionIndex: number) => {
+    Alert.alert('Image Selection', 'Choose image source:', [
+      { text: 'Stock Images', onPress: () => openStockImageModal({ questionId, optionIndex, type: 'option' }) },
+      { text: 'Upload Custom', onPress: async () => {
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Permission needed', 'Media library access is required to pick images.');
+          return;
+        }
+        const res = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.8,
+        });
+        if (res.canceled) return;
+        const uri = res.assets?.[0]?.uri;
+        if (!uri) return;
+        const q = questions.find((q) => q.id === questionId);
+        if (!q) return;
+        const next = [...(q.optionImages || [])];
+        next[optionIndex] = uri;
+        updateQuestion(questionId, { optionImages: next });
+      }},
+      { text: 'Cancel', style: 'cancel' }
+    ]);
   };
 
   const pickPairImage = async (
@@ -287,25 +406,32 @@ export default function CreateExercise() {
     pairIndex: number,
     side: 'left' | 'right'
   ) => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Media library access is required to pick images.');
-      return;
-    }
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.8,
-    });
-    if (res.canceled) return;
-    const uri = res.assets?.[0]?.uri;
-    if (!uri) return;
-    const q = questions.find(q => q.id === questionId);
-    if (!q || !q.pairs) return;
-    const nextPairs = [...q.pairs];
-    const target = { ...(nextPairs[pairIndex] || { left: '', right: '' }) } as NonNullable<Question['pairs']>[number];
-    if (side === 'left') target.leftImage = uri; else target.rightImage = uri;
-    nextPairs[pairIndex] = target;
-    updateQuestion(questionId, { pairs: nextPairs });
+    Alert.alert('Image Selection', 'Choose image source:', [
+      { text: 'Stock Images', onPress: () => openStockImageModal({ questionId, pairIndex, side, type: 'pair' }) },
+      { text: 'Upload Custom', onPress: async () => {
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Permission needed', 'Media library access is required to pick images.');
+          return;
+        }
+        const res = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.8,
+        });
+        if (res.canceled) return;
+        const uri = res.assets?.[0]?.uri;
+        if (!uri) return;
+        const q = questions.find((q) => q.id === questionId);
+        if (!q || !q.pairs) return;
+        const nextPairs = [...q.pairs];
+        const target = { ...nextPairs[pairIndex] };
+        if (side === 'left') target.leftImage = uri;
+        else target.rightImage = uri;
+        nextPairs[pairIndex] = target;
+        updateQuestion(questionId, { pairs: nextPairs });
+      }},
+      { text: 'Cancel', style: 'cancel' }
+    ]);
   };
 
   const clearPairImage = (
@@ -323,19 +449,25 @@ export default function CreateExercise() {
   };
 
   const pickQuestionImage = async (questionId: string) => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Media library access is required to pick images.');
-      return;
-    }
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.9,
-    });
-    if (res.canceled) return;
-    const uri = res.assets?.[0]?.uri;
-    if (!uri) return;
-    updateQuestion(questionId, { questionImage: uri });
+    Alert.alert('Image Selection', 'Choose image source:', [
+      { text: 'Stock Images', onPress: () => openStockImageModal({ questionId, type: 'question' }) },
+      { text: 'Upload Custom', onPress: async () => {
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Permission needed', 'Media library access is required to pick images.');
+          return;
+        }
+        const res = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.9,
+        });
+        if (res.canceled) return;
+        const uri = res.assets?.[0]?.uri;
+        if (!uri) return;
+        updateQuestion(questionId, { questionImage: uri });
+      }},
+      { text: 'Cancel', style: 'cancel' }
+    ]);
   };
 
   const renderQuestionTypeModal = () => (
@@ -1314,6 +1446,7 @@ export default function CreateExercise() {
     );
   };
 
+
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
@@ -1429,6 +1562,180 @@ export default function CreateExercise() {
 
       {renderQuestionTypeModal()}
       {renderQuestionEditor()}
+      
+      {/* Stock Image Modal */}
+      <Modal
+        visible={showStockImageModal}
+        transparent={false}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setShowStockImageModal(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: '#f8fafc' }}>
+          {/* Header */}
+          <View style={{ 
+            flexDirection: 'row', 
+            justifyContent: 'space-between', 
+            alignItems: 'center',
+            paddingHorizontal: 20,
+            paddingVertical: 15,
+            backgroundColor: '#ffffff',
+            borderBottomWidth: 1,
+            borderBottomColor: '#e2e8f0'
+          }}>
+            <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#1e293b' }}>Select Stock Image</Text>
+            <TouchableOpacity 
+              onPress={() => setShowStockImageModal(false)}
+              style={{ padding: 5 }}
+            >
+              <AntDesign name="close" size={24} color="#1e293b" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Content */}
+          <ScrollView style={{ flex: 1, paddingHorizontal: 20 }}>
+            {!selectedCategory ? (
+              // Category Selection
+              <View style={{ paddingVertical: 20 }}>
+                <Text style={{ fontSize: 18, fontWeight: '700', color: '#1e293b', marginBottom: 16 }}>Choose Category</Text>
+                
+                {stockImageCategories.map((category) => (
+                  <TouchableOpacity
+                    key={category.id}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      backgroundColor: '#f8fafc',
+                      borderRadius: 12,
+                      padding: 16,
+                      marginBottom: 12,
+                      borderWidth: 1,
+                      borderColor: '#e2e8f0',
+                    }}
+                    onPress={() => setSelectedCategory(category.id)}
+                  >
+                    <View style={{
+                      width: 48,
+                      height: 48,
+                      borderRadius: 24,
+                      backgroundColor: category.color,
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      marginRight: 16,
+                    }}>
+                      <MaterialCommunityIcons name={category.icon as any} size={24} color="#ffffff" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 16, fontWeight: '600', color: '#1e293b', marginBottom: 4 }}>
+                        {category.name}
+                      </Text>
+                      <Text style={{ fontSize: 14, color: '#64748b' }}>
+                        {category.images.length} images
+                      </Text>
+                    </View>
+                    <AntDesign name="right" size={16} color="#64748b" />
+                  </TouchableOpacity>
+                ))}
+                
+                <TouchableOpacity
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: '#eff6ff',
+                    borderRadius: 12,
+                    padding: 16,
+                    marginTop: 8,
+                    borderWidth: 2,
+                    borderColor: '#3b82f6',
+                    borderStyle: 'dashed',
+                  }}
+                  onPress={async () => {
+                    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+                    if (status !== 'granted') {
+                      Alert.alert('Permission needed', 'Media library access is required to pick images.');
+                      return;
+                    }
+                    const res = await ImagePicker.launchImageLibraryAsync({
+                      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                      quality: 0.8,
+                    });
+                    if (res.canceled) return;
+                    const uri = res.assets?.[0]?.uri;
+                    if (!uri || !stockImageContext) return;
+                    
+                    const { questionId, optionIndex, pairIndex, side, type } = stockImageContext;
+                    
+                    if (type === 'question') {
+                      updateQuestion(questionId, { questionImage: uri });
+                    } else if (type === 'option' && optionIndex !== undefined) {
+                      const q = questions.find((q) => q.id === questionId);
+                      if (!q) return;
+                      const next = [...(q.optionImages || [])];
+                      next[optionIndex] = uri;
+                      updateQuestion(questionId, { optionImages: next });
+                    } else if (type === 'pair' && pairIndex !== undefined && side) {
+                      const q = questions.find((q) => q.id === questionId);
+                      if (!q || !q.pairs) return;
+                      const nextPairs = [...q.pairs];
+                      const target = { ...nextPairs[pairIndex] };
+                      if (side === 'left') target.leftImage = uri;
+                      else target.rightImage = uri;
+                      nextPairs[pairIndex] = target;
+                      updateQuestion(questionId, { pairs: nextPairs });
+                    }
+                    
+                    setShowStockImageModal(false);
+                    setStockImageContext(null);
+                  }}
+                >
+                  <MaterialCommunityIcons name="upload" size={24} color="#3b82f6" />
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#3b82f6', marginLeft: 12 }}>
+                    Upload Custom Image
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              // Image Selection
+              <View style={{ paddingVertical: 20 }}>
+                <TouchableOpacity 
+                  onPress={() => setSelectedCategory('')}
+                  style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}
+                >
+                  <AntDesign name="left" size={16} color="#3b82f6" />
+                  <Text style={{ fontSize: 16, color: '#3b82f6', fontWeight: '600', marginLeft: 8 }}>
+                    Back to Categories
+                  </Text>
+                </TouchableOpacity>
+                
+                <Text style={{ fontSize: 18, fontWeight: '700', color: '#1e293b', marginBottom: 16 }}>
+                  {stockImageCategories.find(c => c.id === selectedCategory)?.name} Images
+                </Text>
+                
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }}>
+                  {stockImageCategories
+                    .find(c => c.id === selectedCategory)
+                    ?.images.map((image) => (
+                      <TouchableOpacity
+                        key={image.name}
+                        style={{ width: '30%', marginBottom: 16, alignItems: 'center' }}
+                        onPress={() => selectStockImage(image.source)}
+                      >
+                        <Image
+                          source={image.source}
+                          style={{ width: 80, height: 80, borderRadius: 12, backgroundColor: '#f1f5f9' }}
+                          resizeMode="cover"
+                        />
+                        <Text style={{ fontSize: 12, color: '#64748b', marginTop: 8, textAlign: 'center', fontWeight: '500' }} numberOfLines={1}>
+                          {image.name}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                </View>
+              </View>
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2109,5 +2416,143 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginLeft: 8,
+  },
+  // Stock Image Modal Styles
+  stockImageModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  stockImageModal: {
+    width: '100%',
+    maxWidth: 500,
+    maxHeight: '90%',
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 25,
+  },
+  stockImageModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  stockImageModalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#1e293b',
+  },
+  stockImageModalClose: {
+    padding: 5,
+  },
+  stockImageModalContent: {
+    maxHeight: 400,
+    paddingHorizontal: 20,
+  },
+  stockImageCategories: {
+    paddingVertical: 10,
+  },
+  stockImageSectionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 16,
+  },
+  stockImageCategoryCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  stockImageCategoryIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 16,
+  },
+  stockImageCategoryInfo: {
+    flex: 1,
+  },
+  stockImageCategoryName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  stockImageCategoryCount: {
+    fontSize: 14,
+    color: '#64748b',
+  },
+  stockImageCustomUpload: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    borderRadius: 12,
+    padding: 16,
+    marginTop: 8,
+    borderWidth: 2,
+    borderColor: '#3b82f6',
+    borderStyle: 'dashed',
+  },
+  stockImageCustomUploadText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#3b82f6',
+    marginLeft: 12,
+  },
+  stockImageGrid: {
+    paddingVertical: 10,
+  },
+  stockImageGridHeader: {
+    marginBottom: 16,
+  },
+  stockImageBackButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  stockImageBackText: {
+    fontSize: 16,
+    color: '#3b82f6',
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  stockImageGridContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  stockImageItem: {
+    width: '30%',
+    marginBottom: 16,
+    alignItems: 'center',
+  },
+  stockImageThumbnail: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    backgroundColor: '#f1f5f9',
+  },
+  stockImageName: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 8,
+    textAlign: 'center',
+    fontWeight: '500',
   },
 });

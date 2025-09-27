@@ -1,6 +1,9 @@
 // firebase-auth.ts
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   createUserWithEmailAndPassword,
+  getAuth,
+  initializeAuth,
   onAuthStateChanged,
   sendEmailVerification,
   sendPasswordResetEmail,
@@ -12,27 +15,25 @@ import {
 import { Platform } from 'react-native';
 import { app } from './firebase';
 
-// Lazy, platform-safe Auth initializer
 let _auth: import('firebase/auth').Auth | null = null;
 export const getAuthInstance = (): import('firebase/auth').Auth => {
   if (_auth) return _auth;
+  
   if (Platform.OS === 'web') {
-    // Web
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { getAuth } = require('firebase/auth');
+    // Web - use standard getAuth
     _auth = getAuth(app);
     return _auth!;
   }
-  // React Native
+  
+  // React Native - use initializeAuth with AsyncStorage persistence
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { initializeAuth, getReactNativePersistence } = require('firebase/auth/react-native');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
-    _auth = initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) });
-  } catch {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { getAuth } = require('firebase/auth');
+    // Use the exact syntax suggested by the Firebase warning
+    const { getReactNativePersistence } = require('firebase/auth');
+    _auth = initializeAuth(app, {
+      persistence: getReactNativePersistence(AsyncStorage)
+    });
+  } catch (error) {
+    // If initializeAuth fails (e.g., already initialized), fall back to getAuth
     _auth = getAuth(app);
   }
   return _auth!;

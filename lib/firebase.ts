@@ -18,6 +18,7 @@ const firebaseConfig = {
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
 // Only initialize non-auth services here (safe during route discovery)
+// Auth is initialized separately in firebase-auth.ts to avoid the AsyncStorage warning
 const database = getDatabase(app);
 const storage = getStorage(app);
 
