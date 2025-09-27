@@ -87,7 +87,6 @@ export default function TeacherLogin() {
       }
       
       if (user) {
-        Alert.alert('Success', 'Login successful!');
         router.replace('/TeacherDashboard');
       }
     } catch (error) {

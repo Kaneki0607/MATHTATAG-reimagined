@@ -16,6 +16,60 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { pushData } from '../lib/firebase-database';
+import { uploadFile } from '../lib/firebase-storage';
+
+// Stock image library data
+const stockImages = {
+  Animals: [
+    { name: 'Bee', uri: require('../assets/images/Animals/Bee.png') },
+    { name: 'Black Cat', uri: require('../assets/images/Animals/Black Cat.png') },
+    { name: 'Bug', uri: require('../assets/images/Animals/Bug.png') },
+    { name: 'Butterfly', uri: require('../assets/images/Animals/Butterfly.png') },
+    { name: 'Cat', uri: require('../assets/images/Animals/Cat.png') },
+    { name: 'Cheetah', uri: require('../assets/images/Animals/Cheetah.png') },
+    { name: 'Chicken', uri: require('../assets/images/Animals/Chicken.png') },
+    { name: 'Cow', uri: require('../assets/images/Animals/Cow.png') },
+    { name: 'Deer', uri: require('../assets/images/Animals/Deer.png') },
+    { name: 'Dog', uri: require('../assets/images/Animals/Dog.png') },
+    { name: 'Elephant', uri: require('../assets/images/Animals/Elephant.png') },
+    { name: 'Fox', uri: require('../assets/images/Animals/Fox.png') },
+    { name: 'Frog', uri: require('../assets/images/Animals/Frog.png') },
+    { name: 'Giraffe', uri: require('../assets/images/Animals/Giraffe.png') },
+    { name: 'Hipo', uri: require('../assets/images/Animals/Hipo.png') },
+    { name: 'Horse', uri: require('../assets/images/Animals/Horse.png') },
+    { name: 'Koala', uri: require('../assets/images/Animals/Koala.png') },
+    { name: 'Lion', uri: require('../assets/images/Animals/Lion.png') },
+    { name: 'Monkey', uri: require('../assets/images/Animals/Monkey.png') },
+    { name: 'Owl', uri: require('../assets/images/Animals/Owl.png') },
+    { name: 'Panda', uri: require('../assets/images/Animals/Panda.png') },
+    { name: 'Parrot', uri: require('../assets/images/Animals/Parrot.png') },
+    { name: 'Penguin', uri: require('../assets/images/Animals/Penguin.png') },
+    { name: 'Pig', uri: require('../assets/images/Animals/Pig.png') },
+    { name: 'Rabbit', uri: require('../assets/images/Animals/Rabbit.png') },
+    { name: 'Red Panda', uri: require('../assets/images/Animals/Red Panda.png') },
+    { name: 'Snail', uri: require('../assets/images/Animals/Snail.png') },
+    { name: 'Snake', uri: require('../assets/images/Animals/Snake.png') },
+    { name: 'Tiger', uri: require('../assets/images/Animals/Tiger.png') },
+    { name: 'Turkey', uri: require('../assets/images/Animals/Turkey.png') },
+    { name: 'Wolf', uri: require('../assets/images/Animals/Wolf.png') },
+    { name: 'Zebra', uri: require('../assets/images/Animals/Zebra.png') },
+  ],
+  Numbers: [
+    { name: '1', uri: require('../assets/images/Numbers/1.png') },
+    { name: '2', uri: require('../assets/images/Numbers/2.png') },
+    { name: '3', uri: require('../assets/images/Numbers/3.png') },
+    { name: '4', uri: require('../assets/images/Numbers/4.png') },
+    { name: '5', uri: require('../assets/images/Numbers/5.png') },
+    { name: '6', uri: require('../assets/images/Numbers/6.png') },
+    { name: '7', uri: require('../assets/images/Numbers/7.png') },
+    { name: '8', uri: require('../assets/images/Numbers/8.png') },
+    { name: '9', uri: require('../assets/images/Numbers/9.png') },
+  ],
+  Schools: [],
+  Fruits: [],
+  Letters: [],
+};
 
 interface Question {
   id: string;
@@ -45,6 +99,8 @@ export default function CreateExercise() {
   const router = useRouter();
   const [exerciseTitle, setExerciseTitle] = useState('');
   const [exerciseDescription, setExerciseDescription] = useState('');
+  const [isPublic, setIsPublic] = useState(false);
+  const [exerciseCode, setExerciseCode] = useState('');
   const [questions, setQuestions] = useState<Question[]>([]);
   const [showQuestionTypeModal, setShowQuestionTypeModal] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
@@ -64,6 +120,146 @@ export default function CreateExercise() {
     type: 'question' | 'option' | 'pair';
   } | null>(null);
   
+  // Inline image library state
+  const [showImageLibrary, setShowImageLibrary] = useState(false);
+  const [imageLibraryContext, setImageLibraryContext] = useState<{
+    questionId: string;
+    optionIndex?: number;
+    pairIndex?: number;
+    side?: 'left' | 'right';
+    type: 'question' | 'option' | 'pair';
+  } | null>(null);
+  const [customCategories, setCustomCategories] = useState<Record<string, string[]>>({});
+  const [showAddCategory, setShowAddCategory] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [modalStack, setModalStack] = useState<string[]>([]);
+  
+  // Generate 6-digit code for exercise
+  const generateExerciseCode = () => {
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    setExerciseCode(code);
+    return code;
+  };
+
+  // Check if an image URI is local (from require())
+  const isLocalImage = (uri: string): boolean => {
+    return uri.includes('assets/') || uri.includes('file://') || uri.includes('content://');
+  };
+
+  // Upload local images to Firebase Storage and return remote URLs
+  const uploadLocalImages = async (questions: Question[], exerciseCode: string): Promise<Question[]> => {
+    const uploadPromises: Promise<any>[] = [];
+    const updatedQuestions = [...questions];
+
+    for (let qIndex = 0; qIndex < updatedQuestions.length; qIndex++) {
+      const question = updatedQuestions[qIndex];
+      
+      // Handle question image
+      if (question.questionImage && isLocalImage(question.questionImage)) {
+        uploadPromises.push(
+          uploadLocalImageToStorage(question.questionImage, `exercises/${exerciseCode}/question-${qIndex}`)
+            .then(remoteUrl => {
+              updatedQuestions[qIndex].questionImage = remoteUrl;
+            })
+        );
+      }
+
+      // Handle option images
+      if (question.optionImages) {
+        question.optionImages.forEach((imageUri, optionIndex) => {
+          if (imageUri && isLocalImage(imageUri)) {
+            uploadPromises.push(
+              uploadLocalImageToStorage(imageUri, `exercises/${exerciseCode}/question-${qIndex}/option-${optionIndex}`)
+                .then(remoteUrl => {
+                  if (!updatedQuestions[qIndex].optionImages) {
+                    updatedQuestions[qIndex].optionImages = [];
+                  }
+                  updatedQuestions[qIndex].optionImages![optionIndex] = remoteUrl;
+                })
+            );
+          }
+        });
+      }
+
+      // Handle pair images
+      if (question.pairs) {
+        question.pairs.forEach((pair, pairIndex) => {
+          if (pair.leftImage && isLocalImage(pair.leftImage)) {
+            uploadPromises.push(
+              uploadLocalImageToStorage(pair.leftImage, `exercises/${exerciseCode}/question-${qIndex}/pair-${pairIndex}-left`)
+                .then(remoteUrl => {
+                  updatedQuestions[qIndex].pairs![pairIndex].leftImage = remoteUrl;
+                })
+            );
+          }
+          if (pair.rightImage && isLocalImage(pair.rightImage)) {
+            uploadPromises.push(
+              uploadLocalImageToStorage(pair.rightImage, `exercises/${exerciseCode}/question-${qIndex}/pair-${pairIndex}-right`)
+                .then(remoteUrl => {
+                  updatedQuestions[qIndex].pairs![pairIndex].rightImage = remoteUrl;
+                })
+            );
+          }
+        });
+      }
+    }
+
+    // Wait for all uploads to complete
+    await Promise.all(uploadPromises);
+    return updatedQuestions;
+  };
+
+  // Upload a single local image to Firebase Storage
+  const uploadLocalImageToStorage = async (localUri: string, storagePath: string): Promise<string> => {
+    try {
+      // For local images from require(), we need to get the actual file
+      const response = await fetch(localUri);
+      const blob = await response.blob();
+      
+      const { downloadURL, error } = await uploadFile(`${storagePath}.png`, blob, {
+        contentType: 'image/png',
+      });
+      
+      if (error) {
+        console.error('Failed to upload local image:', error);
+        return localUri; // Return original URI if upload fails
+      }
+      
+      return downloadURL || localUri;
+    } catch (error) {
+      console.error('Error uploading local image:', error);
+      return localUri; // Return original URI if upload fails
+    }
+  };
+  
+  // Modal management functions
+  const openModal = (modalName: string) => {
+    setModalStack(prev => {
+      // Prevent duplicate modals in the stack
+      if (prev.includes(modalName)) return prev;
+      return [...prev, modalName];
+    });
+  };
+  
+  const closeModal = () => {
+    setModalStack(prev => {
+      if (prev.length === 0) return prev;
+      return prev.slice(0, -1);
+    });
+  };
+  
+  const closeAllModals = () => {
+    setModalStack([]);
+  };
+  
+  const getCurrentModal = () => {
+    return modalStack[modalStack.length - 1];
+  };
+  
+  const isModalOpen = (modalName: string) => {
+    return modalStack.includes(modalName);
+  };
 
   const questionTypes = [
     {
@@ -103,65 +299,40 @@ export default function CreateExercise() {
     },
   ];
 
-  // Stock image categories with actual image sources
+  // Dynamic stock image categories - easily extensible for new folders
   const stockImageCategories = [
     {
       id: 'animals',
       name: 'Animals',
       icon: 'paw',
       color: '#f59e0b',
-      images: [
-        { name: 'Bee', source: require('../assets/images/Animals/Bee.png') },
-        { name: 'Black Cat', source: require('../assets/images/Animals/Black Cat.png') },
-        { name: 'Bug', source: require('../assets/images/Animals/Bug.png') },
-        { name: 'Butterfly', source: require('../assets/images/Animals/Butterfly.png') },
-        { name: 'Cat', source: require('../assets/images/Animals/Cat.png') },
-        { name: 'Cheetah', source: require('../assets/images/Animals/Cheetah.png') },
-        { name: 'Chicken', source: require('../assets/images/Animals/Chicken.png') },
-        { name: 'Cow', source: require('../assets/images/Animals/Cow.png') },
-        { name: 'Deer', source: require('../assets/images/Animals/Deer.png') },
-        { name: 'Dog', source: require('../assets/images/Animals/Dog.png') },
-        { name: 'Elephant', source: require('../assets/images/Animals/Elephant.png') },
-        { name: 'Fox', source: require('../assets/images/Animals/Fox.png') },
-        { name: 'Frog', source: require('../assets/images/Animals/Frog.png') },
-        { name: 'Giraffe', source: require('../assets/images/Animals/Giraffe.png') },
-        { name: 'Hipo', source: require('../assets/images/Animals/Hipo.png') },
-        { name: 'Horse', source: require('../assets/images/Animals/Horse.png') },
-        { name: 'Koala', source: require('../assets/images/Animals/Koala.png') },
-        { name: 'Lion', source: require('../assets/images/Animals/Lion.png') },
-        { name: 'Monkey', source: require('../assets/images/Animals/Monkey.png') },
-        { name: 'Owl', source: require('../assets/images/Animals/Owl.png') },
-        { name: 'Panda', source: require('../assets/images/Animals/Panda.png') },
-        { name: 'Parrot', source: require('../assets/images/Animals/Parrot.png') },
-        { name: 'Penguin', source: require('../assets/images/Animals/Penguin.png') },
-        { name: 'Pig', source: require('../assets/images/Animals/Pig.png') },
-        { name: 'Rabbit', source: require('../assets/images/Animals/Rabbit.png') },
-        { name: 'Red Panda', source: require('../assets/images/Animals/Red Panda.png') },
-        { name: 'Snail', source: require('../assets/images/Animals/Snail.png') },
-        { name: 'Snake', source: require('../assets/images/Animals/Snake.png') },
-        { name: 'Tiger', source: require('../assets/images/Animals/Tiger.png') },
-        { name: 'Turkey', source: require('../assets/images/Animals/Turkey.png') },
-        { name: 'Wolf', source: require('../assets/images/Animals/Wolf.png') },
-        { name: 'Zebra', source: require('../assets/images/Animals/Zebra.png') }
-      ]
+      images: stockImages.Animals.map(animal => ({
+        name: animal.name,
+        source: animal.uri
+      }))
     },
     {
       id: 'numbers',
       name: 'Numbers',
       icon: 'numeric',
       color: '#3b82f6',
-      images: [
-        { name: '1', source: require('../assets/images/Numbers/1.png') },
-        { name: '2', source: require('../assets/images/Numbers/2.png') },
-        { name: '3', source: require('../assets/images/Numbers/3.png') },
-        { name: '4', source: require('../assets/images/Numbers/4.png') },
-        { name: '5', source: require('../assets/images/Numbers/5.png') },
-        { name: '6', source: require('../assets/images/Numbers/6.png') },
-        { name: '7', source: require('../assets/images/Numbers/7.png') },
-        { name: '8', source: require('../assets/images/Numbers/8.png') },
-        { name: '9', source: require('../assets/images/Numbers/9.png') }
-      ]
-    }
+      images: stockImages.Numbers.map(number => ({
+        name: number.name,
+        source: number.uri
+      }))
+    },
+    // Add more categories here as you add more folders
+    // Example for future categories:
+    // {
+    //   id: 'fruits',
+    //   name: 'Fruits',
+    //   icon: 'food-apple',
+    //   color: '#10b981',
+    //   images: stockImages.Fruits.map(fruit => ({
+    //     name: fruit.name,
+    //     source: fruit.uri
+    //   }))
+    // }
   ];
 
   const addQuestion = (type: string) => {
@@ -184,6 +355,8 @@ export default function CreateExercise() {
     setQuestions([...questions, newQuestion]);
     setEditingQuestion(newQuestion);
     setShowQuestionTypeModal(false);
+    closeModal();
+    openModal('questionEditor');
   };
 
   const updateQuestion = (questionId: string, updates: Partial<Question>) => {
@@ -233,7 +406,17 @@ export default function CreateExercise() {
   // Validate multiple choice questions have options and correct answer(s)
   const invalidMultipleChoice = questions.filter(q => {
     if (q.type !== 'multiple-choice') return false;
-    if (!q.options || q.options.some(opt => !opt.trim())) return true;
+    if (!q.options) return true;
+    
+    // Check if each option has either text or image
+    const hasValidOptions = q.options.every((opt, index) => {
+      const hasText = opt.trim().length > 0;
+      const hasImage = q.optionImages?.[index] && q.optionImages[index] !== null;
+      return hasText || hasImage;
+    });
+    
+    if (!hasValidOptions) return true;
+    
     const ans = q.answer;
     if (Array.isArray(ans)) return ans.length === 0;
     return !ans;
@@ -283,18 +466,138 @@ export default function CreateExercise() {
     // Upload file if selected
     const uploadedUrl = await uploadResourceFile();
 
-    // Here you would save to your database, including uploaded file URL if any
+    // Generate exercise code if not already set
+    const finalExerciseCode = exerciseCode || generateExerciseCode();
+
+    // Save to Firebase Realtime Database
     const exercisePayload = {
       title: exerciseTitle.trim(),
       description: exerciseDescription.trim(),
       resourceUrl: uploadedUrl || null,
       questions,
+      isPublic,
+      exerciseCode: finalExerciseCode,
       createdAt: new Date().toISOString(),
     };
-    // TODO: write to Firebase Realtime DB or Firestore
-    Alert.alert('Success', 'Exercise created successfully!', [
-      { text: 'OK', onPress: () => router.push('/TeacherDashboard') }
-    ]);
+
+    try {
+      console.log('Attempting to save exercise...');
+      
+      // Show loading indicator for image uploads
+      setUploading(true);
+      
+      // Upload local images to Firebase Storage first
+      console.log('Uploading local images to Firebase Storage...');
+      const questionsWithRemoteImages = await uploadLocalImages(questions, finalExerciseCode);
+      console.log('Local images uploaded successfully');
+      
+      // Clean the payload to ensure it's serializable
+      const cleanPayload = {
+        title: exerciseTitle.trim(),
+        description: exerciseDescription.trim(),
+        resourceUrl: uploadedUrl || null,
+        questions: questionsWithRemoteImages.map(q => {
+          // Create a clean question object, removing all undefined values
+          const cleanQuestion: any = {
+            id: q.id,
+            type: q.type,
+            question: q.question?.trim() || '',
+            answer: typeof q.answer === 'string' ? q.answer.trim() : q.answer,
+          };
+
+          // Only add fields that have values (not undefined)
+          if (q.options && q.options.length > 0) {
+            cleanQuestion.options = q.options.map(opt => opt?.trim() || '');
+          }
+          
+          if (q.optionImages && q.optionImages.length > 0) {
+            cleanQuestion.optionImages = q.optionImages;
+          }
+          
+          if (q.pairs && q.pairs.length > 0) {
+            cleanQuestion.pairs = q.pairs;
+          }
+          
+          if (q.order && q.order.length > 0) {
+            cleanQuestion.order = q.order;
+          }
+          
+          if (q.subQuestions && q.subQuestions.length > 0) {
+            cleanQuestion.subQuestions = q.subQuestions;
+          }
+          
+          if (q.questionImage) {
+            cleanQuestion.questionImage = q.questionImage;
+          }
+          
+          if (q.passage) {
+            cleanQuestion.passage = q.passage;
+          }
+          
+          if (q.multiAnswer !== undefined) {
+            cleanQuestion.multiAnswer = q.multiAnswer;
+          }
+          
+          if (q.reorderDirection) {
+            cleanQuestion.reorderDirection = q.reorderDirection;
+          }
+          
+          if (q.fillSettings) {
+            cleanQuestion.fillSettings = q.fillSettings;
+          }
+
+          return cleanQuestion;
+        }),
+        isPublic: Boolean(isPublic),
+        exerciseCode: finalExerciseCode,
+        createdAt: new Date().toISOString(),
+      };
+      
+      console.log('Saving exercise with payload:', cleanPayload);
+      const { key, error } = await pushData('/exercises', cleanPayload);
+      
+      if (error) {
+        console.error('Firebase pushData error:', error);
+        
+        // Try to provide more specific error messages
+        let errorMessage = 'Failed to save exercise. ';
+        if (error.includes('permission')) {
+          errorMessage += 'Permission denied. Please check your Firebase rules.';
+        } else if (error.includes('network')) {
+          errorMessage += 'Network error. Please check your internet connection.';
+        } else if (error.includes('quota')) {
+          errorMessage += 'Database quota exceeded. Please try again later.';
+        } else {
+          errorMessage += `Error: ${error}`;
+        }
+        
+        Alert.alert('Error', errorMessage);
+        return;
+      }
+      
+      console.log('Exercise saved successfully with key:', key);
+      Alert.alert('Success', `Exercise created successfully!\nExercise Code: ${finalExerciseCode}`, [
+        { text: 'OK', onPress: () => router.push('/TeacherDashboard') }
+      ]);
+    } catch (error: any) {
+      console.error('Error saving exercise:', error);
+      
+      // Provide more specific error messages
+      let errorMessage = 'Failed to save exercise. ';
+      if (error?.message?.includes('permission')) {
+        errorMessage += 'Permission denied. Please check your Firebase rules.';
+      } else if (error?.message?.includes('network')) {
+        errorMessage += 'Network error. Please check your internet connection.';
+      } else if (error?.message?.includes('quota')) {
+        errorMessage += 'Database quota exceeded. Please try again later.';
+      } else {
+        errorMessage += `Error: ${error?.message || 'Unknown error'}`;
+      }
+      
+      Alert.alert('Error', errorMessage);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const pickResourceFile = async () => {
@@ -352,53 +655,186 @@ export default function CreateExercise() {
     
     const { questionId, optionIndex, pairIndex, side, type } = stockImageContext;
     
+    // Convert require() object to URI string
+    const imageUri = Image.resolveAssetSource(imageSource).uri;
+    
     if (type === 'question') {
-      updateQuestion(questionId, { questionImage: imageSource });
+      updateQuestion(questionId, { questionImage: imageUri });
     } else if (type === 'option' && optionIndex !== undefined) {
       const q = questions.find((q) => q.id === questionId);
       if (!q) return;
       const next = [...(q.optionImages || [])];
-      next[optionIndex] = imageSource;
+      next[optionIndex] = imageUri;
       updateQuestion(questionId, { optionImages: next });
     } else if (type === 'pair' && pairIndex !== undefined && side) {
       const q = questions.find((q) => q.id === questionId);
       if (!q || !q.pairs) return;
       const nextPairs = [...q.pairs];
       const target = { ...nextPairs[pairIndex] };
-      if (side === 'left') target.leftImage = imageSource;
-      else target.rightImage = imageSource;
+      if (side === 'left') target.leftImage = imageUri;
+      else target.rightImage = imageUri;
       nextPairs[pairIndex] = target;
       updateQuestion(questionId, { pairs: nextPairs });
     }
     
+    // Close stock image modal and return to question editor
     setShowStockImageModal(false);
     setStockImageContext(null);
+    closeModal(); // Close stock image modal
+    
+    // Ensure question editor remains open
+    setTimeout(() => {
+      if (!isModalOpen('questionEditor')) {
+        openModal('questionEditor');
+      }
+    }, 100);
   };
 
   const pickOptionImage = async (questionId: string, optionIndex: number) => {
-    Alert.alert('Image Selection', 'Choose image source:', [
-      { text: 'Stock Images', onPress: () => openStockImageModal({ questionId, optionIndex, type: 'option' }) },
-      { text: 'Upload Custom', onPress: async () => {
-        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (status !== 'granted') {
-          Alert.alert('Permission needed', 'Media library access is required to pick images.');
+    setImageLibraryContext({ questionId, optionIndex, type: 'option' });
+    setShowImageLibrary(true);
+    openModal('imageLibrary');
+  };
+
+  const handleImageSelect = (imageUri: string) => {
+    if (!imageLibraryContext) return;
+    
+    const { questionId, optionIndex, pairIndex, side, type } = imageLibraryContext;
+    
+    // Update the question with the selected image
+    if (type === 'option' && optionIndex !== undefined) {
+      const q = questions.find((q) => q.id === questionId);
+      if (!q) return;
+      const next = [...(q.optionImages || [])];
+      next[optionIndex] = imageUri;
+      updateQuestion(questionId, { optionImages: next });
+    } else if (type === 'pair' && pairIndex !== undefined && side) {
+      const q = questions.find((q) => q.id === questionId);
+      if (!q || !q.pairs) return;
+      const nextPairs = [...q.pairs];
+      if (side === 'left') {
+        nextPairs[pairIndex] = { ...nextPairs[pairIndex], leftImage: imageUri };
+      } else {
+        nextPairs[pairIndex] = { ...nextPairs[pairIndex], rightImage: imageUri };
+      }
+      updateQuestion(questionId, { pairs: nextPairs });
+    } else if (type === 'question') {
+      updateQuestion(questionId, { questionImage: imageUri });
+    }
+    
+    // Close image library and return to question editor
+    setShowImageLibrary(false);
+    setImageLibraryContext(null);
+    closeModal(); // Close image library modal
+    
+    // Ensure question editor remains open
+    setTimeout(() => {
+      if (!isModalOpen('questionEditor')) {
+        openModal('questionEditor');
+      }
+    }, 100);
+  };
+
+  const handleImageUpload = async (categoryName?: string) => {
+    try {
+      setUploadingImage(true);
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        return;
+      }
+      
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: 'images',
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        const asset = result.assets[0];
+        
+        // Check file size (10MB limit)
+        if (asset.fileSize && asset.fileSize > 10 * 1024 * 1024) {
+          Alert.alert('File Too Large', 'Image must be smaller than 10MB');
           return;
         }
-        const res = await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ImagePicker.MediaTypeOptions.Images,
-          quality: 0.8,
+        
+        // Upload to Firebase Storage
+        const response = await fetch(asset.uri);
+        const blob = await response.blob();
+        const timestamp = Date.now();
+        const filename = `custom-images/${categoryName || 'Custom Uploads'}/${timestamp}.jpg`;
+        
+        const { downloadURL, error: uploadError } = await uploadFile(filename, blob, {
+          contentType: 'image/jpeg',
         });
-        if (res.canceled) return;
-        const uri = res.assets?.[0]?.uri;
-        if (!uri) return;
-        const q = questions.find((q) => q.id === questionId);
-        if (!q) return;
-        const next = [...(q.optionImages || [])];
-        next[optionIndex] = uri;
-        updateQuestion(questionId, { optionImages: next });
-      }},
-      { text: 'Cancel', style: 'cancel' }
-    ]);
+        
+        if (uploadError) {
+          Alert.alert('Upload Failed', 'Failed to upload image to database');
+          return;
+        }
+        
+        // Store in database - always use "Custom Uploads" category
+        const finalCategoryName = 'Custom Uploads';
+        const categoryData = {
+          name: finalCategoryName,
+          imageUrl: downloadURL,
+          uploadedAt: new Date().toISOString(),
+        };
+        
+        const { key, error } = await pushData('/customImageCategories', categoryData);
+        if (error) {
+          console.error('Database error:', error);
+        }
+        
+        // Update local state - always add to Custom Uploads
+        if (downloadURL) {
+          setCustomCategories(prev => ({
+            ...prev,
+            [finalCategoryName]: [...(prev[finalCategoryName] || []), downloadURL]
+          }));
+        }
+        
+        handleImageSelect(downloadURL || asset.uri);
+      }
+    } catch (error) {
+      console.error('Image upload error:', error);
+      Alert.alert('Upload Failed', 'Failed to upload image');
+    } finally {
+      setUploadingImage(false);
+    }
+  };
+
+  const handleCreateCategory = async () => {
+    if (!newCategoryName.trim()) {
+      Alert.alert('Error', 'Please enter a category name');
+      return;
+    }
+    
+    try {
+      const categoryData = {
+        name: newCategoryName.trim(),
+        createdAt: new Date().toISOString(),
+        images: [],
+      };
+      
+      const { key, error } = await pushData('/imageCategories', categoryData);
+      if (error) {
+        Alert.alert('Error', 'Failed to create category');
+        return;
+      }
+      
+      setCustomCategories(prev => ({
+        ...prev,
+        [newCategoryName.trim()]: []
+      }));
+      
+      setNewCategoryName('');
+      setShowAddCategory(false);
+      Alert.alert('Success', 'Category created successfully!');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to create category');
+    }
   };
 
   const pickPairImage = async (
@@ -449,39 +885,30 @@ export default function CreateExercise() {
   };
 
   const pickQuestionImage = async (questionId: string) => {
-    Alert.alert('Image Selection', 'Choose image source:', [
-      { text: 'Stock Images', onPress: () => openStockImageModal({ questionId, type: 'question' }) },
-      { text: 'Upload Custom', onPress: async () => {
-        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (status !== 'granted') {
-          Alert.alert('Permission needed', 'Media library access is required to pick images.');
-          return;
-        }
-        const res = await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ImagePicker.MediaTypeOptions.Images,
-          quality: 0.9,
-        });
-        if (res.canceled) return;
-        const uri = res.assets?.[0]?.uri;
-        if (!uri) return;
-        updateQuestion(questionId, { questionImage: uri });
-      }},
-      { text: 'Cancel', style: 'cancel' }
-    ]);
+    // Directly open the Image Library for question image selection
+    setImageLibraryContext({ questionId, type: 'question' });
+    setShowImageLibrary(true);
+    openModal('imageLibrary');
   };
 
   const renderQuestionTypeModal = () => (
       <Modal
-        visible={showQuestionTypeModal}
+        visible={showQuestionTypeModal && getCurrentModal() === 'questionType'}
         transparent
-        animationType="slide"
-        onRequestClose={() => setShowQuestionTypeModal(false)}
+        animationType="none"
+        onRequestClose={() => {
+          setShowQuestionTypeModal(false);
+          closeModal();
+        }}
       >
       <View style={styles.questionTypeModalOverlay}>
         <View style={styles.questionTypeModalContent}>
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Select Question Type</Text>
-            <TouchableOpacity onPress={() => setShowQuestionTypeModal(false)}>
+            <TouchableOpacity onPress={() => {
+              setShowQuestionTypeModal(false);
+              closeModal();
+            }}>
               <AntDesign name="close" size={24} color="#64748b" />
             </TouchableOpacity>
           </View>
@@ -514,44 +941,56 @@ export default function CreateExercise() {
 
     return (
       <Modal
-        visible={!!editingQuestion}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setEditingQuestion(null)}
+        visible={!!editingQuestion && getCurrentModal() === 'questionEditor'}
+        transparent={false}
+        animationType="none"
+        presentationStyle="fullScreen"
+        onRequestClose={() => {
+          setEditingQuestion(null);
+          closeAllModals();
+        }}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>
-                Edit {questionTypes.find(t => t.id === editingQuestion.type)?.title} Question
-              </Text>
-              <TouchableOpacity onPress={() => setEditingQuestion(null)}>
-                <AntDesign name="close" size={24} color="#64748b" />
-              </TouchableOpacity>
-            </View>
+        <View style={styles.fullScreenModal}>
+          <View style={styles.fullScreenHeader}>
+            <TouchableOpacity onPress={() => {
+              setEditingQuestion(null);
+              closeModal();
+            }} style={styles.backButton}>
+              <AntDesign name="arrow-left" size={24} color="#1e293b" />
+            </TouchableOpacity>
+            <Text style={styles.fullScreenTitle}>
+              Edit {questionTypes.find(t => t.id === editingQuestion.type)?.title} Question
+            </Text>
+            <View style={styles.placeholder} />
+          </View>
             
-            <ScrollView style={styles.questionEditor}>
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Question</Text>
-                <TextInput
-                  style={styles.textInput}
-                  value={editingQuestion.question}
-                  onChangeText={(text) => updateQuestion(editingQuestion.id, { question: text })}
-                  placeholder="Enter your question..."
-                  placeholderTextColor="#64748b"
-                  multiline
-                  textAlignVertical="top"
-                  autoFocus={true}
-                />
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
-                  <TouchableOpacity onPress={() => pickQuestionImage(editingQuestion.id)} style={styles.pickFileButton}>
-                    <MaterialCommunityIcons name="image-plus" size={16} color="#ffffff" />
-                    <Text style={styles.pickFileButtonText}>{editingQuestion.questionImage ? 'Change image' : 'Add image'}</Text>
-                  </TouchableOpacity>
-                </View>
+          <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Question</Text>
+              <TextInput
+                style={styles.textInput}
+                value={editingQuestion.question}
+                onChangeText={(text) => updateQuestion(editingQuestion.id, { question: text })}
+                placeholder="Enter your question..."
+                placeholderTextColor="#64748b"
+                multiline
+                textAlignVertical="top"
+                autoFocus={true}
+              />
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
+                <TouchableOpacity onPress={() => pickQuestionImage(editingQuestion.id)} style={styles.pickFileButton}>
+                  <MaterialCommunityIcons name="image-plus" size={16} color="#ffffff" />
+                  <Text style={styles.pickFileButtonText}>{editingQuestion.questionImage ? 'Change image' : 'Add image'}</Text>
+                </TouchableOpacity>
+              </View>
                 {editingQuestion.questionImage && (
                   <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center' }}>
-                    <Image source={{ uri: editingQuestion.questionImage }} style={{ width: 140, height: 140, borderRadius: 12, marginRight: 8 }} />
+                    <Image 
+                      source={{ uri: editingQuestion.questionImage }} 
+                      style={{ width: 140, height: 140, borderRadius: 12, marginRight: 8 }} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
                     <TouchableOpacity onPress={() => updateQuestion(editingQuestion.id, { questionImage: null })}>
                       <MaterialCommunityIcons name="trash-can" size={22} color="#ef4444" />
                     </TouchableOpacity>
@@ -713,7 +1152,7 @@ export default function CreateExercise() {
                             newOptions[index] = text;
                             updateQuestion(editingQuestion.id, { options: newOptions });
                           }}
-                          placeholder={`Type answer option here`}
+                          placeholder={editingQuestion.optionImages?.[index] ? "Text (optional)" : "Type answer option here"}
                           placeholderTextColor="rgba(255,255,255,0.7)"
                         />
                         <TouchableOpacity onPress={() => pickOptionImage(editingQuestion.id, index)} style={{ marginLeft: 8 }}>
@@ -722,7 +1161,12 @@ export default function CreateExercise() {
                       </View>
                       {(editingQuestion.optionImages?.[index]) && (
                         <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center' }}>
-                          <Image source={{ uri: editingQuestion.optionImages[index] as string }} style={{ width: 72, height: 72, borderRadius: 8, marginRight: 8 }} />
+                          <Image 
+                            source={{ uri: editingQuestion.optionImages[index] as string }} 
+                            style={{ width: 72, height: 72, borderRadius: 8, marginRight: 8 }} 
+                            resizeMode="cover"
+                            loadingIndicatorSource={require('../assets/images/icon.png')}
+                          />
                           <TouchableOpacity onPress={() => {
                             const imgs = [...(editingQuestion.optionImages || [])];
                             imgs[index] = null;
@@ -1425,22 +1869,15 @@ export default function CreateExercise() {
                 </View>
               )}
 
-              <View style={styles.modalActions}>
-                <TouchableOpacity
-                  style={styles.cancelButton}
-                  onPress={() => setEditingQuestion(null)}
-                >
-                  <Text style={styles.cancelButtonText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.saveButton}
-                  onPress={() => setEditingQuestion(null)}
-                >
-                  <Text style={styles.saveButtonText}>Save Question</Text>
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-          </View>
+            <View style={styles.fullScreenActions}>
+              <TouchableOpacity
+                style={styles.saveButton}
+                onPress={() => setEditingQuestion(null)}
+              >
+                <Text style={styles.saveButtonText}>Save Question</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
         </View>
       </Modal>
     );
@@ -1486,6 +1923,42 @@ export default function CreateExercise() {
               numberOfLines={3}
             />
           </View>
+          
+          {/* Public/Private Toggle */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Visibility</Text>
+            <View style={styles.toggleContainer}>
+              <TouchableOpacity
+                style={[styles.toggleOption, !isPublic && styles.toggleOptionActive]}
+                onPress={() => setIsPublic(false)}
+              >
+                <MaterialCommunityIcons name="lock" size={20} color={!isPublic ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.toggleText, !isPublic && styles.toggleTextActive]}>Private</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.toggleOption, isPublic && styles.toggleOptionActive]}
+                onPress={() => setIsPublic(true)}
+              >
+                <MaterialCommunityIcons name="earth" size={20} color={isPublic ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.toggleText, isPublic && styles.toggleTextActive]}>Public</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.visibilityHint}>
+              {isPublic 
+                ? "Public exercises can be shared with co-teachers and accessed by anyone with the exercise code"
+                : "Private exercises are only visible to you"
+              }
+            </Text>
+          </View>
+          
+          {/* Exercise Code Info */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Exercise Code</Text>
+            <View style={styles.codeInfoContainer}>
+              <MaterialCommunityIcons name="information" size={20} color="#3b82f6" />
+              <Text style={styles.codeInfoText}>A 6-digit code will be automatically generated when you save the exercise</Text>
+            </View>
+          </View>
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Attach Resource (optional)</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -1506,7 +1979,10 @@ export default function CreateExercise() {
             <Text style={styles.sectionTitle}>Questions ({questions.length})</Text>
             <TouchableOpacity
               style={styles.addQuestionButton}
-              onPress={() => setShowQuestionTypeModal(true)}
+              onPress={() => {
+                setShowQuestionTypeModal(true);
+                openModal('questionType');
+              }}
             >
               <AntDesign name="plus" size={16} color="#ffffff" />
               <Text style={styles.addQuestionButtonText}>Add Question</Text>
@@ -1524,7 +2000,10 @@ export default function CreateExercise() {
                 </View>
                 <View style={styles.questionActions}>
                   <TouchableOpacity
-                    onPress={() => setEditingQuestion(question)}
+                    onPress={() => {
+                      setEditingQuestion(question);
+                      openModal('questionEditor');
+                    }}
                     style={styles.actionButton}
                   >
                     <AntDesign name="edit" size={16} color="#3b82f6" />
@@ -1565,11 +2044,14 @@ export default function CreateExercise() {
       
       {/* Stock Image Modal */}
       <Modal
-        visible={showStockImageModal}
+        visible={showStockImageModal && getCurrentModal() === 'stockImage'}
         transparent={false}
-        animationType="slide"
+        animationType="none"
         presentationStyle="fullScreen"
-        onRequestClose={() => setShowStockImageModal(false)}
+        onRequestClose={() => {
+          setShowStockImageModal(false);
+          closeModal();
+        }}
       >
         <View style={{ flex: 1, backgroundColor: '#f8fafc' }}>
           {/* Header */}
@@ -1585,7 +2067,10 @@ export default function CreateExercise() {
           }}>
             <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#1e293b' }}>Select Stock Image</Text>
             <TouchableOpacity 
-              onPress={() => setShowStockImageModal(false)}
+              onPress={() => {
+                setShowStockImageModal(false);
+                closeModal();
+              }}
               style={{ padding: 5 }}
             >
               <AntDesign name="close" size={24} color="#1e293b" />
@@ -1734,6 +2219,253 @@ export default function CreateExercise() {
               </View>
             )}
           </ScrollView>
+        </View>
+      </Modal>
+
+      {/* Inline Image Library */}
+      <Modal
+        visible={showImageLibrary && getCurrentModal() === 'imageLibrary'}
+        transparent={false}
+        animationType="none"
+        presentationStyle="fullScreen"
+        onRequestClose={() => {
+          setShowImageLibrary(false);
+          setImageLibraryContext(null);
+          closeModal();
+        }}
+      >
+        <View style={styles.fullScreenModal}>
+            <View style={styles.fullScreenHeader}>
+              <TouchableOpacity 
+                onPress={() => {
+                  setShowImageLibrary(false);
+                  setImageLibraryContext(null);
+                  closeModal();
+                }}
+                style={styles.backButton}
+              >
+                <AntDesign name="arrow-left" size={24} color="#1e293b" />
+              </TouchableOpacity>
+              <Text style={styles.fullScreenTitle}>Choose Image</Text>
+              <View style={styles.placeholder} />
+            </View>
+            
+            <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
+            {/* Animals Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Animals</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                {/* Add button as first item */}
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Animals')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages.Animals.slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`animal-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Numbers Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Numbers</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                {/* Add button as first item */}
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Numbers')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages.Numbers.map((image, index) => (
+                  <TouchableOpacity
+                    key={`number-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Custom Categories */}
+            {Object.keys(customCategories).map((categoryName) => (
+              <View key={categoryName} style={styles.imageCategory}>
+                <Text style={styles.categoryTitle}>{categoryName}</Text>
+                <ScrollView 
+                  horizontal 
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.horizontalImageScroll}
+                  contentContainerStyle={styles.horizontalImageContainer}
+                >
+                  {/* Add button as first item */}
+                  <TouchableOpacity
+                    style={styles.addImageButton}
+                    onPress={() => handleImageUpload(categoryName)}
+                  >
+                    <AntDesign name="plus" size={24} color="#3b82f6" />
+                  </TouchableOpacity>
+                  
+                  {customCategories[categoryName].map((imageUrl, index) => (
+                    <TouchableOpacity
+                      key={`custom-${categoryName}-${index}`}
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(imageUrl)}
+                    >
+                      <Image 
+                        source={{ uri: imageUrl }} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            ))}
+
+            {/* Custom Uploads Category - Always show this */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Custom Uploads</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                {/* Add button as first item */}
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Custom Uploads')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(customCategories['Custom Uploads'] || []).map((imageUrl, index) => (
+                  <TouchableOpacity
+                    key={`custom-uploads-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(imageUrl)}
+                  >
+                    <Image source={{ uri: imageUrl }} style={styles.horizontalImageThumbnail} />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Create Another Category Button */}
+            <TouchableOpacity
+              style={styles.createCategoryButton}
+              onPress={() => {
+                setShowAddCategory(true);
+                openModal('addCategory');
+              }}
+            >
+              <AntDesign name="plus" size={16} color="#10b981" />
+              <Text style={styles.createCategoryButtonText}>Create another Category</Text>
+            </TouchableOpacity>
+
+            {/* Upload Button */}
+            <TouchableOpacity
+              style={styles.uploadButton}
+              onPress={() => handleImageUpload()}
+              disabled={uploadingImage}
+            >
+              <AntDesign name="plus" size={16} color="#3b82f6" />
+              <Text style={styles.uploadButtonText}>
+                {uploadingImage ? 'Uploading...' : 'Upload Custom Image'}
+              </Text>
+            </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </Modal>
+
+      {/* Create Category Modal */}
+      <Modal
+        visible={showAddCategory && getCurrentModal() === 'addCategory'}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setShowAddCategory(false);
+          closeModal();
+        }}
+      >
+        <View style={styles.categoryModalOverlay}>
+          <View style={styles.categoryModal}>
+            <View style={styles.categoryModalHeader}>
+              <Text style={styles.categoryModalTitle}>Create New Category</Text>
+              <TouchableOpacity 
+                onPress={() => {
+                  setShowAddCategory(false);
+                  closeModal();
+                }}
+                style={styles.categoryModalClose}
+              >
+                <AntDesign name="close" size={20} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+            
+            <View style={styles.categoryModalContent}>
+              <Text style={styles.categoryModalLabel}>Category Name</Text>
+              <TextInput
+                style={styles.categoryModalInput}
+                value={newCategoryName}
+                onChangeText={setNewCategoryName}
+                placeholder="Enter category name (e.g., Fruits, Shapes)"
+                placeholderTextColor="#9ca3af"
+              />
+              
+              <View style={styles.categoryModalActions}>
+                <TouchableOpacity 
+                  style={styles.categoryModalCancel}
+                  onPress={() => {
+                    setShowAddCategory(false);
+                    setNewCategoryName('');
+                  }}
+                >
+                  <Text style={styles.categoryModalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity 
+                  style={styles.categoryModalCreate}
+                  onPress={handleCreateCategory}
+                >
+                  <Text style={styles.categoryModalCreateText}>Create Category</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
         </View>
       </Modal>
     </View>
@@ -1955,6 +2687,81 @@ const styles = StyleSheet.create({
     maxHeight: '85%',
     width: '100%',
     maxWidth: 500,
+  },
+  
+  // Full Screen Modal Styles
+  fullScreenModal: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+  },
+  fullScreenHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 20,
+    paddingHorizontal: 20,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  fullScreenTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    flex: 1,
+    textAlign: 'center',
+    marginHorizontal: 20,
+  },
+  fullScreenContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+  },
+  fullScreenActions: {
+    paddingHorizontal: 20,
+    paddingVertical: 20,
+    backgroundColor: '#ffffff',
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  
+  
+  // Horizontal Image Layout Styles
+  horizontalImageScroll: {
+    marginTop: 8,
+  },
+  horizontalImageContainer: {
+    paddingHorizontal: 4,
+    alignItems: 'center',
+  },
+  horizontalImageItem: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    marginRight: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  horizontalImageThumbnail: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  addImageButton: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    backgroundColor: '#f0f9ff',
+    borderWidth: 2,
+    borderColor: '#3b82f6',
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
   },
   // Question Type Modal (Bottom Sheet Style)
   questionTypeModalOverlay: {
@@ -2554,5 +3361,254 @@ const styles = StyleSheet.create({
     marginTop: 8,
     textAlign: 'center',
     fontWeight: '500',
+  },
+  
+  // Inline Image Library Styles
+  inlineImageLibrary: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10000,
+  },
+  libraryHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  libraryTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  libraryCloseButton: {
+    padding: 4,
+  },
+  libraryContent: {
+    backgroundColor: '#ffffff',
+    maxHeight: '70%',
+    borderBottomLeftRadius: 20,
+    borderBottomRightRadius: 20,
+  },
+  imageCategory: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  categoryTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 12,
+  },
+  imageGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  imageItem: {
+    width: 60,
+    height: 60,
+    borderRadius: 8,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    padding: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imageThumbnail: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'contain',
+  },
+  uploadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f0f9ff',
+    borderWidth: 1,
+    borderColor: '#3b82f6',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    margin: 20,
+  },
+  uploadButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#3b82f6',
+    marginLeft: 8,
+  },
+  createCategoryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f0fdf4',
+    borderWidth: 1,
+    borderColor: '#10b981',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    margin: 20,
+  },
+  createCategoryButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#10b981',
+    marginLeft: 8,
+  },
+  
+  // Create Category Modal Styles
+  categoryModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  categoryModal: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 12,
+  },
+  categoryModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  categoryModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  categoryModalClose: {
+    padding: 4,
+  },
+  categoryModalContent: {
+    padding: 20,
+  },
+  categoryModalLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  categoryModalInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#111827',
+    backgroundColor: '#f9fafb',
+    marginBottom: 20,
+  },
+  categoryModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  categoryModalCancel: {
+    flex: 1,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  categoryModalCancelText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  categoryModalCreate: {
+    flex: 1,
+    backgroundColor: '#10b981',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  categoryModalCreateText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  
+  // Toggle styles
+  toggleContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#f1f5f9',
+    borderRadius: 8,
+    padding: 4,
+  },
+  toggleOption: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+  },
+  toggleOptionActive: {
+    backgroundColor: '#3b82f6',
+  },
+  toggleText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748b',
+    marginLeft: 8,
+  },
+  toggleTextActive: {
+    color: '#ffffff',
+  },
+  
+  
+  // Code info styles
+  codeInfoContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  codeInfoText: {
+    fontSize: 14,
+    color: '#3b82f6',
+    marginLeft: 8,
+    flex: 1,
+  },
+  
+  // Visibility hint styles
+  visibilityHint: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 8,
+    fontStyle: 'italic',
+    lineHeight: 16,
   },
 });

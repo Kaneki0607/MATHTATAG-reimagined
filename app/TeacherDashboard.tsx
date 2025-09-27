@@ -5,22 +5,74 @@ import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
-  Alert,
-  Dimensions,
-  Image,
-  Modal,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    Alert,
+    Dimensions,
+    Image,
+    Modal,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
 import { deleteData, pushData, readData, updateData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
 const { width, height } = Dimensions.get('window');
+
+// Stock image library data
+const stockImages = {
+  Animals: [
+    { name: 'Bee', uri: require('../assets/images/Animals/Bee.png') },
+    { name: 'Black Cat', uri: require('../assets/images/Animals/Black Cat.png') },
+    { name: 'Bug', uri: require('../assets/images/Animals/Bug.png') },
+    { name: 'Butterfly', uri: require('../assets/images/Animals/Butterfly.png') },
+    { name: 'Cat', uri: require('../assets/images/Animals/Cat.png') },
+    { name: 'Cheetah', uri: require('../assets/images/Animals/Cheetah.png') },
+    { name: 'Chicken', uri: require('../assets/images/Animals/Chicken.png') },
+    { name: 'Cow', uri: require('../assets/images/Animals/Cow.png') },
+    { name: 'Deer', uri: require('../assets/images/Animals/Deer.png') },
+    { name: 'Dog', uri: require('../assets/images/Animals/Dog.png') },
+    { name: 'Elephant', uri: require('../assets/images/Animals/Elephant.png') },
+    { name: 'Fox', uri: require('../assets/images/Animals/Fox.png') },
+    { name: 'Frog', uri: require('../assets/images/Animals/Frog.png') },
+    { name: 'Giraffe', uri: require('../assets/images/Animals/Giraffe.png') },
+    { name: 'Hipo', uri: require('../assets/images/Animals/Hipo.png') },
+    { name: 'Horse', uri: require('../assets/images/Animals/Horse.png') },
+    { name: 'Koala', uri: require('../assets/images/Animals/Koala.png') },
+    { name: 'Lion', uri: require('../assets/images/Animals/Lion.png') },
+    { name: 'Monkey', uri: require('../assets/images/Animals/Monkey.png') },
+    { name: 'Owl', uri: require('../assets/images/Animals/Owl.png') },
+    { name: 'Panda', uri: require('../assets/images/Animals/Panda.png') },
+    { name: 'Parrot', uri: require('../assets/images/Animals/Parrot.png') },
+    { name: 'Penguin', uri: require('../assets/images/Animals/Penguin.png') },
+    { name: 'Pig', uri: require('../assets/images/Animals/Pig.png') },
+    { name: 'Rabbit', uri: require('../assets/images/Animals/Rabbit.png') },
+    { name: 'Red Panda', uri: require('../assets/images/Animals/Red Panda.png') },
+    { name: 'Snail', uri: require('../assets/images/Animals/Snail.png') },
+    { name: 'Snake', uri: require('../assets/images/Animals/Snake.png') },
+    { name: 'Tiger', uri: require('../assets/images/Animals/Tiger.png') },
+    { name: 'Turkey', uri: require('../assets/images/Animals/Turkey.png') },
+    { name: 'Wolf', uri: require('../assets/images/Animals/Wolf.png') },
+    { name: 'Zebra', uri: require('../assets/images/Animals/Zebra.png') },
+  ],
+  Numbers: [
+    { name: '1', uri: require('../assets/images/Numbers/1.png') },
+    { name: '2', uri: require('../assets/images/Numbers/2.png') },
+    { name: '3', uri: require('../assets/images/Numbers/3.png') },
+    { name: '4', uri: require('../assets/images/Numbers/4.png') },
+    { name: '5', uri: require('../assets/images/Numbers/5.png') },
+    { name: '6', uri: require('../assets/images/Numbers/6.png') },
+    { name: '7', uri: require('../assets/images/Numbers/7.png') },
+    { name: '8', uri: require('../assets/images/Numbers/8.png') },
+    { name: '9', uri: require('../assets/images/Numbers/9.png') },
+  ],
+  Schools: [],
+  Fruits: [],
+  Letters: [],
+};
 
 interface TeacherData {
   firstName: string;
@@ -104,6 +156,7 @@ export default function TeacherDashboard() {
   const [openMenuClassId, setOpenMenuClassId] = useState<string | null>(null);
   // Local navigation state to keep bottom nav persistent
   const [activeTab, setActiveTab] = useState<'home' | 'list' | 'class' | 'reports'>('home');
+  
 
   useEffect(() => {
     const unsubscribe = onAuthChange((user) => {
@@ -524,6 +577,7 @@ export default function TeacherDashboard() {
     }
   };
 
+
   // Don't render until auth state resolves
   if (currentUserId === undefined) {
     return (
@@ -619,6 +673,7 @@ export default function TeacherDashboard() {
                 </View>
               </TouchableOpacity>
              </View>
+
 
              {/* Classrooms Section */}
              <View style={styles.classroomsSection}>
@@ -1441,6 +1496,7 @@ export default function TeacherDashboard() {
           </View>
         </View>
       </Modal>
+
     </View>
   );
 }
@@ -1593,6 +1649,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1e293b',
   },
+  
   
   // Classrooms Section Styles
   classroomsSection: {
@@ -2230,4 +2287,5 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
+  
 });
