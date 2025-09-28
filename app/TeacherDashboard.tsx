@@ -17,7 +17,7 @@ import {
   View
 } from 'react-native';
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
-import { useExercises } from '../hooks/useExercises';
+import { AssignedExercise, useExercises } from '../hooks/useExercises';
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
 import { deleteData, pushData, readData, updateData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -311,6 +311,61 @@ export default function TeacherDashboard() {
   const [exercisesTab, setExercisesTab] = useState<'my' | 'public' | 'assigned'>('my');
   const [showAssignForm, setShowAssignForm] = useState(false);
   const [selectedExerciseForAssign, setSelectedExerciseForAssign] = useState<any>(null);
+  const [selectedCategory, setSelectedCategory] = useState<string>('All');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  // Assignment edit/delete modals
+  const [showEditAssignmentModal, setShowEditAssignmentModal] = useState(false);
+  const [showDeleteAssignmentModal, setShowDeleteAssignmentModal] = useState(false);
+  const [editingAssignment, setEditingAssignment] = useState<AssignedExercise | null>(null);
+  const [deletingAssignment, setDeletingAssignment] = useState<AssignedExercise | null>(null);
+  const [editAssignmentLoading, setEditAssignmentLoading] = useState(false);
+  const [deleteAssignmentLoading, setDeleteAssignmentLoading] = useState(false);
+  
+  // Category options
+  const categoryOptions = [
+    'All',
+    'Addition',
+    'Subtraction', 
+    'Multiplication',
+    'Division',
+    'Word Problems',
+    'Geometry',
+    'Fractions',
+    'Measurement',
+    'Time & Money'
+  ];
+  
+  // Filter and group exercises by category
+  const getFilteredAndGroupedExercises = (exercises: any[]) => {
+    let filtered = exercises;
+    
+    // Filter by category
+    if (selectedCategory !== 'All') {
+      filtered = filtered.filter(exercise => exercise.category === selectedCategory);
+    }
+    
+    // Filter by search query
+    if (searchQuery.trim()) {
+      filtered = filtered.filter(exercise => 
+        exercise.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        exercise.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (exercise.category && exercise.category.toLowerCase().includes(searchQuery.toLowerCase()))
+      );
+    }
+    
+    // Group by category
+    const grouped = filtered.reduce((acc, exercise) => {
+      const category = exercise.category || 'Uncategorized';
+      if (!acc[category]) {
+        acc[category] = [];
+      }
+      acc[category].push(exercise);
+      return acc;
+    }, {} as Record<string, any[]>);
+    
+    return grouped;
+  };
   
   // Use the exercises hook
   const {
@@ -484,26 +539,52 @@ export default function TeacherDashboard() {
     }
   };
 
-  const handleDeleteAssignment = async (assignmentId: string) => {
-    Alert.alert(
-      'Delete Assignment',
-      'Are you sure you want to delete this assignment?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await deleteAssignment(assignmentId);
-              Alert.alert('Success', 'Assignment deleted successfully');
-            } catch (error) {
-              Alert.alert('Error', 'Failed to delete assignment');
-            }
-          },
-        },
-      ]
-    );
+  const handleEditAssignment = (assignment: AssignedExercise) => {
+    setEditingAssignment(assignment);
+    setShowEditAssignmentModal(true);
+  };
+
+  const handleDeleteAssignment = (assignment: AssignedExercise) => {
+    setDeletingAssignment(assignment);
+    setShowDeleteAssignmentModal(true);
+  };
+
+  const confirmDeleteAssignment = async () => {
+    if (!deletingAssignment) return;
+    
+    setDeleteAssignmentLoading(true);
+    try {
+      await deleteAssignment(deletingAssignment.id);
+      setShowDeleteAssignmentModal(false);
+      setDeletingAssignment(null);
+      // The useExercises hook will automatically refresh the list
+    } catch (error) {
+      Alert.alert('Error', 'Failed to delete assignment');
+    } finally {
+      setDeleteAssignmentLoading(false);
+    }
+  };
+
+  const saveEditAssignment = async (updatedAssignment: Partial<AssignedExercise>) => {
+    if (!editingAssignment) return;
+    
+    setEditAssignmentLoading(true);
+    try {
+      // Update the assignment in the database
+      const { success, error } = await updateData(`/assignments/${editingAssignment.id}`, updatedAssignment);
+      
+      if (success) {
+        setShowEditAssignmentModal(false);
+        setEditingAssignment(null);
+        // The useExercises hook will automatically refresh the list
+      } else {
+        Alert.alert('Error', `Failed to update assignment: ${error}`);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to update assignment');
+    } finally {
+      setEditAssignmentLoading(false);
+    }
   };
 
   const escapeHtml = (value: string) =>
@@ -1111,7 +1192,14 @@ export default function TeacherDashboard() {
                            </View>
                          </View>
                          <View style={styles.exerciseContent}>
-                           <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
+                           <View style={styles.exerciseTitleRow}>
+                             <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
+                             {exercise.category && (
+                               <View style={styles.categoryBadge}>
+                                 <Text style={styles.categoryBadgeText}>{exercise.category}</Text>
+                               </View>
+                             )}
+                           </View>
                            <Text style={styles.exerciseDescription}>{exercise.description || 'No description available'}</Text>
                            <View style={styles.exerciseStats}>
                              <Text style={styles.exerciseStat}>{exercise.questionCount || 0} Questions</Text>
@@ -1161,57 +1249,117 @@ export default function TeacherDashboard() {
                  </>
                ) : exercisesTab === 'public' ? (
                  <>
+                   {/* Search and Filter Bar */}
+                   <View style={styles.filterContainer}>
+                     <View style={styles.searchContainer}>
+                       <MaterialCommunityIcons name="magnify" size={20} color="#64748b" />
+                       <TextInput
+                         style={styles.searchInput}
+                         placeholder="Search exercises..."
+                         placeholderTextColor="#64748b"
+                         value={searchQuery}
+                         onChangeText={setSearchQuery}
+                       />
+                     </View>
+                     <View style={styles.categoryFilterContainer}>
+                       <ScrollView 
+                         horizontal 
+                         showsHorizontalScrollIndicator={false}
+                         contentContainerStyle={styles.categoryScrollContent}
+                         style={styles.categoryScrollView}
+                         bounces={false}
+                         decelerationRate="fast"
+                         scrollEventThrottle={16}
+                       >
+                         {categoryOptions.map((category) => (
+                           <TouchableOpacity
+                             key={category}
+                             style={[
+                               styles.categoryFilterButton,
+                               selectedCategory === category && styles.categoryFilterButtonActive
+                             ]}
+                             onPress={() => setSelectedCategory(category)}
+                           >
+                             <Text style={[
+                               styles.categoryFilterText,
+                               selectedCategory === category && styles.categoryFilterTextActive
+                             ]}>
+                               {category}
+                             </Text>
+                           </TouchableOpacity>
+                         ))}
+                       </ScrollView>
+                     </View>
+                   </View>
+
                    {exercisesLoading ? (
                      <View style={styles.loadingContainer}>
                        <Text style={styles.loadingText}>Loading public exercises...</Text>
                      </View>
-                   ) : publicExercises.length === 0 ? (
-                     <View style={styles.emptyState}>
-                       <MaterialCommunityIcons name="book-open-variant" size={48} color="#9ca3af" />
-                       <Text style={styles.emptyStateText}>No public exercises available</Text>
-                       <Text style={styles.emptyStateSubtext}>Check back later for new exercises shared by other teachers</Text>
-                     </View>
-                   ) : (
-                     publicExercises.map((exercise) => (
-                       <View key={exercise.id} style={styles.exerciseCard}>
-                         <View style={styles.exerciseIcon}>
-                           <View style={styles.exerciseIconBackground}>
-                             <MaterialCommunityIcons name="book-open-variant" size={24} color="#8b5cf6" />
-                           </View>
+                   ) : (() => {
+                     const groupedExercises = getFilteredAndGroupedExercises(publicExercises);
+                     const categories = Object.keys(groupedExercises).sort();
+                     
+                     if (categories.length === 0) {
+                       return (
+                         <View style={styles.emptyState}>
+                           <MaterialCommunityIcons name="book-open-variant" size={48} color="#9ca3af" />
+                           <Text style={styles.emptyStateText}>No exercises found</Text>
+                           <Text style={styles.emptyStateSubtext}>
+                             {searchQuery || selectedCategory !== 'All' 
+                               ? 'Try adjusting your search or filter criteria'
+                               : 'Check back later for new exercises shared by other teachers'
+                             }
+                           </Text>
                          </View>
-                         <View style={styles.exerciseContent}>
-                           <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
-                           <Text style={styles.exerciseDescription}>{exercise.description || 'No description available'}</Text>
-                           <View style={styles.exerciseStats}>
-                             <Text style={styles.exerciseStat}>{exercise.questionCount || 0} Questions</Text>
-                             <Text style={styles.exerciseStatSeparator}>•</Text>
-                             <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
+                       );
+                     }
+                     
+                     return categories.map((category) => (
+                       <View key={category} style={styles.categorySection}>
+                         <Text style={styles.categoryHeader}>{category}</Text>
+                         {groupedExercises[category].map((exercise: any) => (
+                           <View key={exercise.id} style={styles.exerciseCard}>
+                             <View style={styles.exerciseIcon}>
+                               <View style={styles.exerciseIconBackground}>
+                                 <MaterialCommunityIcons name="book-open-variant" size={24} color="#8b5cf6" />
+                               </View>
+                             </View>
+                             <View style={styles.exerciseContent}>
+                               <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
+                               <Text style={styles.exerciseDescription}>{exercise.description || 'No description available'}</Text>
+                               <View style={styles.exerciseStats}>
+                                 <Text style={styles.exerciseStat}>{exercise.questionCount || 0} Questions</Text>
+                                 <Text style={styles.exerciseStatSeparator}>•</Text>
+                                 <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
+                               </View>
+                               <View style={styles.exerciseMeta}>
+                                 <Text style={styles.exerciseCreator}>By {exercise.teacherName || 'Unknown Teacher'}</Text>
+                                 <Text style={styles.exerciseDate}>
+                                   {exercise.createdAt ? new Date(exercise.createdAt).toLocaleDateString() : 'Unknown date'}
+                                 </Text>
+                               </View>
+                             </View>
+                             <TouchableOpacity 
+                               style={styles.exerciseOptions}
+                               onPress={() => {
+                                 Alert.alert(
+                                   'Exercise Options',
+                                   'What would you like to do with this exercise?',
+                                   [
+                                     { text: 'Make a Copy', onPress: () => handleCopyExercise(exercise) },
+                                     { text: 'Cancel', style: 'cancel' }
+                                   ]
+                                 );
+                               }}
+                             >
+                               <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                             </TouchableOpacity>
                            </View>
-                           <View style={styles.exerciseMeta}>
-                             <Text style={styles.exerciseCreator}>By {exercise.teacherName || 'Unknown Teacher'}</Text>
-                             <Text style={styles.exerciseDate}>
-                               {exercise.createdAt ? new Date(exercise.createdAt).toLocaleDateString() : 'Unknown date'}
-                             </Text>
-                           </View>
-                         </View>
-                         <TouchableOpacity 
-                           style={styles.exerciseOptions}
-                           onPress={() => {
-                             Alert.alert(
-                               'Exercise Options',
-                               'What would you like to do with this exercise?',
-                               [
-                                 { text: 'Make a Copy', onPress: () => handleCopyExercise(exercise) },
-                                 { text: 'Cancel', style: 'cancel' }
-                               ]
-                             );
-                           }}
-                         >
-                           <MaterialIcons name="more-vert" size={20} color="#64748b" />
-                         </TouchableOpacity>
+                         ))}
                        </View>
-                     ))
-                   )}
+                     ));
+                   })()}
                  </>
                ) : (
                  // Assigned Exercises Tab
@@ -1238,22 +1386,20 @@ export default function TeacherDashboard() {
                                {assignment.className || 'Unknown Class'}
                              </Text>
                            </View>
-                           <TouchableOpacity 
-                             style={styles.assignmentOptions}
-                             onPress={() => {
-                               Alert.alert(
-                                 'Assignment Options',
-                                 'What would you like to do with this assignment?',
-                                 [
-                                   { text: 'Edit', onPress: () => {/* TODO: Implement edit assignment */} },
-                                   { text: 'Delete', style: 'destructive', onPress: () => handleDeleteAssignment(assignment.id) },
-                                   { text: 'Cancel', style: 'cancel' }
-                                 ]
-                               );
-                             }}
-                           >
-                             <MaterialIcons name="more-vert" size={20} color="#64748b" />
-                           </TouchableOpacity>
+                           <View style={styles.assignmentOptions}>
+                             <TouchableOpacity 
+                               style={styles.assignmentActionButton}
+                               onPress={() => handleEditAssignment(assignment)}
+                             >
+                               <MaterialIcons name="edit" size={20} color="#3b82f6" />
+                             </TouchableOpacity>
+                             <TouchableOpacity 
+                               style={styles.assignmentActionButton}
+                               onPress={() => handleDeleteAssignment(assignment)}
+                             >
+                               <MaterialIcons name="delete" size={20} color="#ef4444" />
+                             </TouchableOpacity>
+                           </View>
                          </View>
                          <View style={styles.assignmentDetails}>
                            <View style={styles.assignmentDetail}>
@@ -2011,6 +2157,162 @@ export default function TeacherDashboard() {
         exerciseTitle={selectedExerciseForAssign?.title || ''}
         currentUserId={currentUserId}
       />
+
+      {/* Edit Assignment Modal */}
+      <Modal
+        visible={showEditAssignmentModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowEditAssignmentModal(false)}
+      >
+        <View style={styles.assignmentModalContainer}>
+          <View style={styles.assignmentModalHeader}>
+            <TouchableOpacity
+              onPress={() => setShowEditAssignmentModal(false)}
+              style={styles.assignmentModalCloseButton}
+            >
+              <MaterialIcons name="close" size={24} color="#1e293b" />
+            </TouchableOpacity>
+            <Text style={styles.assignmentModalTitle}>Edit Assignment</Text>
+            <View style={styles.assignmentModalPlaceholder} />
+          </View>
+
+          {editingAssignment && (
+            <ScrollView style={styles.assignmentModalContent} showsVerticalScrollIndicator={false}>
+              <View style={styles.editAssignmentForm}>
+                <Text style={styles.editAssignmentTitle}>
+                  {editingAssignment.exercise?.title || 'Unknown Exercise'}
+                </Text>
+                
+                <View style={styles.editInputGroup}>
+                  <Text style={styles.editInputLabel}>Assigned Class</Text>
+                  <Text style={styles.classDisplay}>
+                    {editingAssignment.className || 'Unknown Class'}
+                  </Text>
+                  <Text style={styles.inputNote}>Class cannot be changed after assignment</Text>
+                </View>
+
+                <View style={styles.editInputGroup}>
+                  <Text style={styles.editInputLabel}>Deadline</Text>
+                  <TouchableOpacity style={styles.dateTimeButton}>
+                    <MaterialCommunityIcons name="calendar-clock" size={20} color="#3b82f6" />
+                    <Text style={styles.dateTimeText}>
+                      {editingAssignment.deadline ? 
+                        new Date(editingAssignment.deadline).toLocaleString('en-US', {
+                          weekday: 'short',
+                          year: 'numeric',
+                          month: 'long',
+                          day: 'numeric',
+                          hour: 'numeric',
+                          minute: '2-digit',
+                          hour12: true
+                        }) : 'No deadline set'
+                      }
+                    </Text>
+                    <MaterialIcons name="arrow-drop-down" size={20} color="#64748b" />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.editAssignmentInfo}>
+                  <Text style={styles.editInfoLabel}>Assignment Details</Text>
+                  <View style={styles.editInfoRow}>
+                    <Text style={styles.editInfoLabel}>Created:</Text>
+                    <Text style={styles.editInfoValue}>
+                      {new Date(editingAssignment.createdAt).toLocaleDateString()}
+                    </Text>
+                  </View>
+                  <View style={styles.editInfoRow}>
+                    <Text style={styles.editInfoLabel}>Questions:</Text>
+                    <Text style={styles.editInfoValue}>
+                      {editingAssignment.exercise?.questionCount || 0} questions
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
+          )}
+
+          <View style={styles.assignmentModalActions}>
+            <TouchableOpacity
+              style={styles.editCancelButton}
+              onPress={() => setShowEditAssignmentModal(false)}
+            >
+              <Text style={styles.editCancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.editSaveButton, editAssignmentLoading && styles.buttonDisabled]}
+              onPress={() => {
+                // For now, just close the modal - date picker implementation would go here
+                setShowEditAssignmentModal(false);
+              }}
+              disabled={editAssignmentLoading}
+            >
+              <Text style={styles.editSaveButtonText}>
+                {editAssignmentLoading ? 'Saving...' : 'Save Changes'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Delete Assignment Modal */}
+      <Modal
+        visible={showDeleteAssignmentModal}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowDeleteAssignmentModal(false)}
+      >
+        <View style={styles.deleteModalOverlay}>
+          <View style={styles.deleteModal}>
+            <View style={styles.deleteModalHeader}>
+              <MaterialIcons name="warning" size={24} color="#ef4444" />
+              <Text style={styles.deleteModalTitle}>Delete Assignment</Text>
+            </View>
+            
+            {deletingAssignment && (
+              <View style={styles.deleteModalContent}>
+                <Text style={styles.deleteModalText}>
+                  Are you sure you want to delete this assignment?
+                </Text>
+                <View style={styles.deleteAssignmentInfo}>
+                  <Text style={styles.deleteAssignmentTitle}>
+                    {deletingAssignment.exercise?.title || 'Unknown Exercise'}
+                  </Text>
+                  <Text style={styles.deleteAssignmentClass}>
+                    {deletingAssignment.className || 'Unknown Class'}
+                  </Text>
+                  <Text style={styles.deleteAssignmentDeadline}>
+                    Due: {deletingAssignment.deadline ? 
+                      new Date(deletingAssignment.deadline).toLocaleDateString() : 'No deadline'
+                    }
+                  </Text>
+                </View>
+                <Text style={styles.deleteWarningText}>
+                  This action cannot be undone. Students will no longer have access to this assignment.
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.deleteModalActions}>
+              <TouchableOpacity
+                style={styles.deleteCancelButton}
+                onPress={() => setShowDeleteAssignmentModal(false)}
+              >
+                <Text style={styles.deleteCancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.deleteConfirmButton, deleteAssignmentLoading && styles.buttonDisabled]}
+                onPress={confirmDeleteAssignment}
+                disabled={deleteAssignmentLoading}
+              >
+                <Text style={styles.deleteConfirmButtonText}>
+                  {deleteAssignmentLoading ? 'Deleting...' : 'Delete Assignment'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
     </View>
   );
@@ -2944,6 +3246,93 @@ const styles = StyleSheet.create({
     color: '#1e293b',
   },
   
+  // Filter and Search Styles
+  filterContainer: {
+    marginBottom: 20,
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 16,
+    color: '#1e293b',
+    marginLeft: 8,
+  },
+  categoryFilterContainer: {
+    marginBottom: 8,
+  },
+  categoryScrollView: {
+    maxHeight: 50,
+  },
+  categoryScrollContent: {
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  categoryFilterButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#f1f5f9',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    minWidth: 80,
+    alignItems: 'center',
+  },
+  categoryFilterButtonActive: {
+    backgroundColor: '#7c3aed',
+    borderColor: '#7c3aed',
+  },
+  categoryFilterText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#64748b',
+  },
+  categoryFilterTextActive: {
+    color: '#ffffff',
+  },
+  
+  // Category Section Styles
+  categorySection: {
+    marginBottom: 24,
+  },
+  categoryHeader: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+    paddingHorizontal: 4,
+  },
+  
+  // Exercise Title Row Styles
+  exerciseTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  categoryBadge: {
+    backgroundColor: '#7c3aed',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  categoryBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  
   // Empty State Styles
   emptyState: {
     alignItems: 'center',
@@ -3053,8 +3442,15 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   assignmentOptions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  assignmentActionButton: {
     padding: 8,
     borderRadius: 8,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   assignmentDetails: {
     flexDirection: 'row',
@@ -3070,6 +3466,255 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#64748b',
     marginLeft: 6,
+  },
+
+  // Assignment Modal Styles
+  assignmentModalContainer: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+  },
+  assignmentModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  assignmentModalCloseButton: {
+    padding: 4,
+  },
+  assignmentModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  assignmentModalPlaceholder: {
+    width: 32,
+  },
+  assignmentModalContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  assignmentModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    backgroundColor: '#ffffff',
+  },
+
+  // Edit Assignment Modal Styles
+  editAssignmentForm: {
+    paddingVertical: 20,
+  },
+  editAssignmentTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 24,
+  },
+  editInputGroup: {
+    marginBottom: 20,
+  },
+  editInputLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 8,
+  },
+  classDisplay: {
+    fontSize: 16,
+    color: '#64748b',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  inputNote: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  dateTimeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  dateTimeText: {
+    flex: 1,
+    fontSize: 16,
+    color: '#1e293b',
+    marginLeft: 12,
+  },
+  editAssignmentInfo: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    marginTop: 8,
+  },
+  editInfoLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 8,
+  },
+  editInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  editInfoValue: {
+    fontSize: 14,
+    color: '#64748b',
+  },
+
+  // Delete Assignment Modal Styles
+  deleteModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  deleteModal: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 25,
+  },
+  deleteModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  deleteModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: 12,
+  },
+  deleteModalContent: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+  },
+  deleteModalText: {
+    fontSize: 16,
+    color: '#1e293b',
+    marginBottom: 16,
+    lineHeight: 24,
+  },
+  deleteAssignmentInfo: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  deleteAssignmentTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  deleteAssignmentClass: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  deleteAssignmentDeadline: {
+    fontSize: 14,
+    color: '#64748b',
+  },
+  deleteWarningText: {
+    fontSize: 14,
+    color: '#ef4444',
+    fontStyle: 'italic',
+  },
+  deleteModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  deleteCancelButton: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  deleteCancelButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  deleteConfirmButton: {
+    flex: 1,
+    backgroundColor: '#ef4444',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  deleteConfirmButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  editCancelButton: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  editCancelButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  editSaveButton: {
+    flex: 1,
+    backgroundColor: '#3b82f6',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  editSaveButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  buttonDisabled: {
+    backgroundColor: '#9ca3af',
   },
   
 });

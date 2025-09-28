@@ -1094,75 +1094,74 @@ export default function ParentDashboard() {
       </Modal>
       
       {/* Announcement Detail Modal */}
-      <Modal visible={showAnnouncementModal} animationType="slide" transparent>
-        <KeyboardAvoidingView 
-          style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
+      <Modal visible={showAnnouncementModal} animationType="fade" transparent>
+        <View style={styles.announcementModalOverlay}>
           <View style={styles.announcementModal}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Announcement Details</Text>
-              <TouchableOpacity onPress={closeAnnouncementModal} style={styles.closeButton}>
+            <View style={styles.announcementModalHeader}>
+              <Text style={styles.announcementModalTitle}>Announcement Details</Text>
+              <TouchableOpacity onPress={closeAnnouncementModal} style={styles.announcementModalCloseButton}>
                 <AntDesign name="close" size={24} color="#1e293b" />
               </TouchableOpacity>
             </View>
             
             {selectedAnnouncement && (
-              <View style={styles.announcementModalContent}>
-                <ScrollView showsVerticalScrollIndicator={false} style={styles.announcementScrollView}>
-                  <View style={styles.announcementModalCard}>
-                    <View style={styles.announcementModalHeader}>
-                      <View style={styles.announcementModalIcon}>
-                        <View style={styles.announcementIconContainer}>
-                          <MaterialIcons name="campaign" size={20} color="#ffffff" />
-                        </View>
-                        <Text style={styles.announcementModalTitle}>{selectedAnnouncement.title}</Text>
+              <ScrollView 
+                style={styles.announcementModalScrollView}
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={styles.announcementModalContent}
+              >
+                <View style={styles.announcementModalCard}>
+                  <View style={styles.announcementModalCardHeader}>
+                    <View style={styles.announcementModalIcon}>
+                      <View style={styles.announcementIconContainer}>
+                        <MaterialIcons name="campaign" size={20} color="#ffffff" />
                       </View>
+                      <Text style={styles.announcementModalCardTitle}>{selectedAnnouncement.title}</Text>
                     </View>
-                    
-                    <View style={styles.announcementModalBody}>
-                      <Text style={styles.announcementModalMessage}>{selectedAnnouncement.message}</Text>
-                    </View>
-                    
-                    <View style={styles.announcementModalFooter}>
-                      <View style={styles.announcementModalMeta}>
-                        <View style={styles.announcementModalMetaRow}>
-                          <Text style={styles.announcementModalMetaLabel}>Posted on:</Text>
-                          <Text style={styles.announcementModalMetaValue}>
-                            {selectedAnnouncement.dateTime ? new Date(selectedAnnouncement.dateTime).toLocaleString('en-US', {
-                              weekday: 'short',
-                              year: 'numeric',
-                              month: 'long',
-                              day: 'numeric',
-                              hour: 'numeric',
-                              minute: '2-digit',
-                              hour12: true
-                            }) : 'No date'}
-                          </Text>
-                        </View>
-                        <View style={styles.announcementModalMetaRow}>
-                          <View style={styles.teacherProfileRow}>
-                            <View style={styles.teacherAvatarSmall}>
-                              {selectedAnnouncement.teacherProfilePictureUrl ? (
-                                <Image 
-                                  source={{ uri: selectedAnnouncement.teacherProfilePictureUrl }} 
-                                  style={styles.teacherProfileImageSmall}
-                                />
-                              ) : (
-                                <MaterialIcons name="person" size={16} color="#64748b" />
-                              )}
-                            </View>
-                            <Text style={styles.announcementModalMetaLabel}>Posted by: </Text>
-                            <Text style={styles.announcementModalMetaValue}>
-                              {selectedAnnouncement.teacherGender === 'Male' ? 'Sir' : selectedAnnouncement.teacherGender === 'Female' ? 'Ma\'am' : ''} {selectedAnnouncement.teacherName || 'Teacher'}
-                            </Text>
+                  </View>
+                  
+                  <View style={styles.announcementModalCardBody}>
+                    <Text style={styles.announcementModalMessage}>{selectedAnnouncement.message}</Text>
+                  </View>
+                  
+                  <View style={styles.announcementModalCardFooter}>
+                    <View style={styles.announcementModalMeta}>
+                      <View style={styles.announcementModalMetaRow}>
+                        <Text style={styles.announcementModalMetaLabel}>Posted on:</Text>
+                        <Text style={styles.announcementModalMetaValue}>
+                          {selectedAnnouncement.dateTime ? new Date(selectedAnnouncement.dateTime).toLocaleString('en-US', {
+                            weekday: 'short',
+                            year: 'numeric',
+                            month: 'long',
+                            day: 'numeric',
+                            hour: 'numeric',
+                            minute: '2-digit',
+                            hour12: true
+                          }) : 'No date'}
+                        </Text>
+                      </View>
+                      <View style={styles.announcementModalMetaRow}>
+                        <View style={styles.teacherProfileRow}>
+                          <View style={styles.teacherAvatarSmall}>
+                            {selectedAnnouncement.teacherProfilePictureUrl ? (
+                              <Image 
+                                source={{ uri: selectedAnnouncement.teacherProfilePictureUrl }} 
+                                style={styles.teacherProfileImageSmall}
+                              />
+                            ) : (
+                              <MaterialIcons name="person" size={16} color="#64748b" />
+                            )}
                           </View>
+                          <Text style={styles.announcementModalMetaLabel}>Posted by: </Text>
+                          <Text style={styles.announcementModalMetaValue}>
+                            {selectedAnnouncement.teacherGender === 'Male' ? 'Sir' : selectedAnnouncement.teacherGender === 'Female' ? 'Ma\'am' : ''} {selectedAnnouncement.teacherName || 'Teacher'}
+                          </Text>
                         </View>
                       </View>
                     </View>
                   </View>
-                </ScrollView>
-              </View>
+                </View>
+              </ScrollView>
             )}
             
             <View style={styles.announcementModalActions}>
@@ -1171,7 +1170,7 @@ export default function ParentDashboard() {
               </TouchableOpacity>
             </View>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
       
     </View>
@@ -2065,40 +2064,58 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   // Announcement Modal Styles
+  announcementModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 40,
+  },
   announcementModal: {
     width: '100%',
     maxWidth: 500,
-    maxHeight: '85%',
-    backgroundColor: 'rgba(255,255,255,0.95)',
+    maxHeight: '90%',
+    backgroundColor: '#ffffff',
     borderRadius: 20,
-    borderWidth: 2,
-    borderColor: 'rgba(35, 177, 248, 0.4)',
-    shadowColor: '#00aaff',
-    shadowOpacity: 0.5,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 10 },
     elevation: 25,
   },
-  announcementModalContent: {
-    flex: 1,
+  announcementModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
   },
-  announcementScrollView: {
+  announcementModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  announcementModalCloseButton: {
+    padding: 4,
+  },
+  announcementModalScrollView: {
     flex: 1,
+  },
+  announcementModalContent: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
   },
   announcementModalCard: {
-    backgroundColor: '#ffffff',
+    backgroundColor: '#f8fafc',
     borderRadius: 16,
     padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
-  announcementModalHeader: {
+  announcementModalCardHeader: {
     marginBottom: 16,
   },
   announcementModalIcon: {
@@ -2106,13 +2123,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  announcementModalTitle: {
+  announcementModalCardTitle: {
     fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
     marginLeft: 12,
+    flex: 1,
   },
-  announcementModalBody: {
+  announcementModalCardBody: {
     marginBottom: 20,
   },
   announcementModalMessage: {
@@ -2120,9 +2138,9 @@ const styles = StyleSheet.create({
     color: '#1e293b',
     lineHeight: 24,
   },
-  announcementModalFooter: {
+  announcementModalCardFooter: {
     borderTopWidth: 1,
-    borderTopColor: '#f1f5f9',
+    borderTopColor: '#e2e8f0',
     paddingTop: 16,
   },
   announcementModalMeta: {
@@ -2143,29 +2161,28 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#1e293b',
     fontWeight: '600',
+    flex: 1,
   },
   announcementModalActions: {
     flexDirection: 'row',
     justifyContent: 'center',
     paddingHorizontal: 20,
-    paddingVertical: 15,
+    paddingVertical: 16,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(0,170,255,0.2)',
-    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderTopColor: '#f1f5f9',
+    backgroundColor: '#ffffff',
   },
   closeAnnouncementButton: {
-    backgroundColor: 'rgb(40, 127, 214)',
+    backgroundColor: '#3b82f6',
     borderRadius: 12,
     paddingVertical: 12,
-    paddingHorizontal: 24,
+    paddingHorizontal: 32,
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(0,170,255,0.3)',
   },
   closeAnnouncementButtonText: {
     color: '#ffffff',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontWeight: '600',
   },
 });
 

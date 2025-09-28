@@ -15,6 +15,7 @@ export interface Exercise {
   coAuthors?: string[];
   originalAuthor?: string;
   originalExerciseId?: string;
+  category?: string;
 }
 
 export interface AssignedExercise {

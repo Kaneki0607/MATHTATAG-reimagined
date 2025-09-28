@@ -251,7 +251,25 @@ export default function CreateExercise() {
   const [exerciseDescription, setExerciseDescription] = useState('');
   const [isPublic, setIsPublic] = useState(false);
   const [exerciseCode, setExerciseCode] = useState('');
+  const [exerciseCategory, setExerciseCategory] = useState('');
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
+  const [showCustomCategoryModal, setShowCustomCategoryModal] = useState(false);
+  const [customCategoryInput, setCustomCategoryInput] = useState('');
+  
+  // Category options
+  const categoryOptions = [
+    'Addition',
+    'Subtraction', 
+    'Multiplication',
+    'Division',
+    'Word Problems',
+    'Geometry',
+    'Fractions',
+    'Measurement',
+    'Time & Money',
+    'Custom'
+  ];
   const [showQuestionTypeModal, setShowQuestionTypeModal] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
   const [resourceFile, setResourceFile] = useState<{ name: string; uri: string } | null>(null);
@@ -341,6 +359,7 @@ export default function CreateExercise() {
         setExerciseDescription(data.description || '');
         setIsPublic(data.isPublic || false);
         setExerciseCode(data.exerciseCode || '');
+        setExerciseCategory(data.category || '');
         setQuestions(data.questions || []);
         if (data.resourceUrl) {
           setResourceFile({ name: 'Resource File', uri: data.resourceUrl });
@@ -675,6 +694,10 @@ export default function CreateExercise() {
       Alert.alert('Error', 'Please enter an exercise title');
       return;
     }
+    if (!exerciseCategory.trim()) {
+      Alert.alert('Error', 'Please select a category');
+      return;
+    }
     if (questions.length === 0) {
       Alert.alert('Error', 'Please add at least one question');
       return;
@@ -761,6 +784,7 @@ export default function CreateExercise() {
       questions,
       isPublic,
       exerciseCode: finalExerciseCode,
+      category: exerciseCategory,
       createdAt: new Date().toISOString(),
     };
 
@@ -838,6 +862,7 @@ export default function CreateExercise() {
         }),
         isPublic: Boolean(isPublic),
         exerciseCode: finalExerciseCode,
+        category: exerciseCategory,
         createdAt: new Date().toISOString(),
       };
       
@@ -900,7 +925,7 @@ export default function CreateExercise() {
         }
       }
       
-      Alert.alert('Success', `Exercise ${isEditing ? 'updated' : 'created'} successfully!\nExercise Code: ${finalExerciseCode}`, [
+      Alert.alert('Success', `Exercise ${isEditing ? 'updated' : 'created'} successfully!`, [
         { text: 'OK', onPress: () => router.push('/TeacherDashboard') }
       ]);
     } catch (error: any) {
@@ -1166,32 +1191,9 @@ export default function CreateExercise() {
     pairIndex: number,
     side: 'left' | 'right'
   ) => {
-    Alert.alert('Image Selection', 'Choose image source:', [
-      { text: 'Stock Images', onPress: () => openStockImageModal({ questionId, pairIndex, side, type: 'pair' }) },
-      { text: 'Upload Custom', onPress: async () => {
-        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (status !== 'granted') {
-          Alert.alert('Permission needed', 'Media library access is required to pick images.');
-          return;
-        }
-        const res = await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ImagePicker.MediaTypeOptions.Images,
-          quality: 0.8,
-        });
-        if (res.canceled) return;
-        const uri = res.assets?.[0]?.uri;
-        if (!uri) return;
-        const q = questions.find((q) => q.id === questionId);
-        if (!q || !q.pairs) return;
-        const nextPairs = [...q.pairs];
-        const target = { ...nextPairs[pairIndex] };
-        if (side === 'left') target.leftImage = uri;
-        else target.rightImage = uri;
-        nextPairs[pairIndex] = target;
-        updateQuestion(questionId, { pairs: nextPairs });
-      }},
-      { text: 'Cancel', style: 'cancel' }
-    ]);
+    setImageLibraryContext({ questionId, pairIndex, side, type: 'pair' });
+    setShowImageLibrary(true);
+    openModal('imageLibrary');
   };
 
   const clearPairImage = (
@@ -1529,12 +1531,19 @@ export default function CreateExercise() {
                   {/* Preview Section */}
                   {(editingQuestion.pairs || []).length > 0 && (
                     <View style={styles.previewSection}>
-                      <Text style={styles.previewLabel}>Preview</Text>
-                      <ScrollView
-                        style={styles.pairsPreviewVScroll}
-                        showsVerticalScrollIndicator={true}
-                        contentContainerStyle={styles.pairsPreviewVContainer}
-                      >
+                      <View style={styles.previewHeader}>
+                        <Text style={styles.previewLabel}>Preview</Text>
+                        {(editingQuestion.pairs || []).length > 3 && (
+                          <Text style={styles.scrollHint}>Scroll to see all pairs</Text>
+                        )}
+                      </View>
+                      <View style={styles.scrollContainer}>
+                        <ScrollView
+                          style={styles.pairsPreviewVScroll}
+                          showsVerticalScrollIndicator={true}
+                          contentContainerStyle={styles.pairsPreviewVContainer}
+                          nestedScrollEnabled={true}
+                        >
                         {(editingQuestion.pairs || []).map((pair, idx) => (
                           <View key={`pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                             <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
@@ -1556,7 +1565,8 @@ export default function CreateExercise() {
                             </View>
                           </View>
                         ))}
-                      </ScrollView>
+                        </ScrollView>
+                      </View>
                     </View>
                   )}
 
@@ -1879,12 +1889,19 @@ export default function CreateExercise() {
                             {/* Preview Section for Sub-questions */}
                             {(sub.pairs || []).length > 0 && (
                               <View style={styles.previewSection}>
-                                <Text style={styles.previewLabel}>Preview</Text>
-                                <ScrollView
-                                  style={styles.pairsPreviewVScroll}
-                                  showsVerticalScrollIndicator={true}
-                                  contentContainerStyle={styles.pairsPreviewVContainer}
-                                >
+                                <View style={styles.previewHeader}>
+                                  <Text style={styles.previewLabel}>Preview</Text>
+                                  {(sub.pairs || []).length > 3 && (
+                                    <Text style={styles.scrollHint}>Scroll to see all pairs</Text>
+                                  )}
+                                </View>
+                                <View style={styles.scrollContainer}>
+                                  <ScrollView
+                                    style={styles.pairsPreviewVScroll}
+                                    showsVerticalScrollIndicator={true}
+                                    contentContainerStyle={styles.pairsPreviewVContainer}
+                                    nestedScrollEnabled={true}
+                                  >
                                   {(sub.pairs || []).map((pair, idx) => (
                                     <View key={`sub-pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                                       <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
@@ -1906,7 +1923,8 @@ export default function CreateExercise() {
                                       </View>
                                     </View>
                                   ))}
-                                </ScrollView>
+                                  </ScrollView>
+                                </View>
                               </View>
                             )}
 
@@ -2255,6 +2273,64 @@ export default function CreateExercise() {
             />
           </View>
           
+          {/* Category Dropdown */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Category *</Text>
+            <View style={styles.dropdownContainer}>
+              <TouchableOpacity
+                style={styles.dropdownButton}
+                onPress={() => setShowCategoryDropdown(!showCategoryDropdown)}
+              >
+                <Text style={[styles.dropdownButtonText, !exerciseCategory && styles.placeholderText]}>
+                  {exerciseCategory || 'Select a category...'}
+                </Text>
+                <MaterialCommunityIcons 
+                  name={showCategoryDropdown ? "chevron-up" : "chevron-down"} 
+                  size={20} 
+                  color="#64748b" 
+                />
+              </TouchableOpacity>
+              
+              {showCategoryDropdown && (
+                <>
+                  <TouchableOpacity
+                    style={styles.dropdownOverlay}
+                    onPress={() => setShowCategoryDropdown(false)}
+                    activeOpacity={1}
+                  />
+                  <View style={styles.dropdownList}>
+                    <ScrollView 
+                      style={styles.dropdownScrollView}
+                      showsVerticalScrollIndicator={true}
+                      nestedScrollEnabled={true}
+                    >
+                      {categoryOptions.map((category) => (
+                        <TouchableOpacity
+                          key={category}
+                          style={styles.dropdownItem}
+                          onPress={() => {
+                            if (category === 'Custom') {
+                              setShowCategoryDropdown(false);
+                              setShowCustomCategoryModal(true);
+                            } else {
+                              setExerciseCategory(category);
+                              setShowCategoryDropdown(false);
+                            }
+                          }}
+                        >
+                          <Text style={styles.dropdownItemText}>{category}</Text>
+                          {exerciseCategory === category && (
+                            <MaterialCommunityIcons name="check" size={20} color="#3b82f6" />
+                          )}
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  </View>
+                </>
+              )}
+            </View>
+          </View>
+          
           {/* Public/Private Toggle */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Visibility</Text>
@@ -2282,14 +2358,6 @@ export default function CreateExercise() {
             </Text>
           </View>
           
-          {/* Exercise Code Info */}
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Exercise Code</Text>
-            <View style={styles.codeInfoContainer}>
-              <MaterialCommunityIcons name="information" size={20} color="#3b82f6" />
-              <Text style={styles.codeInfoText}>A 6-digit code will be automatically generated when you save the exercise</Text>
-            </View>
-          </View>
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Attach Resource (optional)</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -3061,6 +3129,78 @@ export default function CreateExercise() {
           </View>
         </View>
       </Modal>
+
+      {/* Custom Category Modal */}
+      <Modal
+        visible={showCustomCategoryModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setShowCustomCategoryModal(false);
+          setCustomCategoryInput('');
+        }}
+      >
+        <View style={styles.customCategoryModalOverlay}>
+          <View style={styles.customCategoryModal}>
+            <View style={styles.customCategoryModalHeader}>
+              <Text style={styles.customCategoryModalTitle}>Custom Category</Text>
+              <TouchableOpacity 
+                onPress={() => {
+                  setShowCustomCategoryModal(false);
+                  setCustomCategoryInput('');
+                }}
+                style={styles.customCategoryModalClose}
+              >
+                <AntDesign name="close" size={20} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+            
+            <View style={styles.customCategoryModalContent}>
+              <Text style={styles.customCategoryModalLabel}>Enter custom category name</Text>
+              <TextInput
+                style={styles.customCategoryModalInput}
+                value={customCategoryInput}
+                onChangeText={setCustomCategoryInput}
+                placeholder="e.g., Science, History, Art..."
+                placeholderTextColor="#9ca3af"
+                autoFocus
+              />
+              
+              <View style={styles.customCategoryModalActions}>
+                <TouchableOpacity 
+                  style={styles.customCategoryModalCancel}
+                  onPress={() => {
+                    setShowCustomCategoryModal(false);
+                    setCustomCategoryInput('');
+                  }}
+                >
+                  <Text style={styles.customCategoryModalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity 
+                  style={[
+                    styles.customCategoryModalSave,
+                    !customCategoryInput.trim() && styles.customCategoryModalSaveDisabled
+                  ]}
+                  onPress={() => {
+                    if (customCategoryInput.trim()) {
+                      setExerciseCategory(customCategoryInput.trim());
+                      setShowCustomCategoryModal(false);
+                      setCustomCategoryInput('');
+                    }
+                  }}
+                  disabled={!customCategoryInput.trim()}
+                >
+                  <Text style={[
+                    styles.customCategoryModalSaveText,
+                    !customCategoryInput.trim() && styles.customCategoryModalSaveTextDisabled
+                  ]}>Save</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -3146,6 +3286,81 @@ const styles = StyleSheet.create({
     height: 100,
     textAlignVertical: 'top',
     fontSize: 16,
+  },
+  
+  // Dropdown Styles
+  dropdownContainer: {
+    position: 'relative',
+    zIndex: 1000,
+  },
+  dropdownOverlay: {
+    position: 'absolute',
+    top: -1000,
+    left: -1000,
+    right: -1000,
+    bottom: -1000,
+    zIndex: 999,
+  },
+  dropdownButton: {
+    borderWidth: 2,
+    borderColor: '#7c3aed',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#ffffff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 48,
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  dropdownButtonText: {
+    fontSize: 16,
+    color: '#1e293b',
+    flex: 1,
+  },
+  placeholderText: {
+    color: '#64748b',
+  },
+  dropdownList: {
+    position: 'absolute',
+    top: 52,
+    left: 0,
+    right: 0,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#7c3aed',
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 10,
+    zIndex: 1001,
+    maxHeight: 200,
+    marginTop: 4,
+    overflow: 'hidden',
+  },
+  dropdownScrollView: {
+    maxHeight: 200,
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  dropdownItemText: {
+    fontSize: 16,
+    color: '#1e293b',
+    flex: 1,
   },
   
   // Add Question Button
@@ -3500,6 +3715,20 @@ const styles = StyleSheet.create({
     color: '#111827',
     fontWeight: '600',
   },
+  previewHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  scrollHint: {
+    fontSize: 12,
+    color: '#64748b',
+    fontStyle: 'italic',
+  },
+  scrollContainer: {
+    position: 'relative',
+  },
   optionLabel: {
     fontSize: 16,
     fontWeight: '600',
@@ -3642,10 +3871,12 @@ const styles = StyleSheet.create({
     borderColor: '#e2e8f0',
   },
   pairsPreviewVScroll: {
-    maxHeight: 180,
+    maxHeight: 300,
+    marginVertical: 8,
   },
   pairsPreviewVContainer: {
-    paddingBottom: 6,
+    paddingBottom: 12,
+    paddingHorizontal: 4,
   },
   pairsPreviewContainer: {
     flexDirection: 'row',
@@ -3660,13 +3891,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderRadius: 12,
     padding: 12,
+    marginBottom: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
     minWidth: 280,
-    marginBottom: 12,
   },
   pairSide: {
     flex: 1,
@@ -3776,8 +4007,8 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   pairImageThumbnail: {
-    width: 60,
-    height: 60,
+    width: 72,
+    height: 72,
     borderRadius: 8,
   },
   pairImageRemove: {
@@ -4146,6 +4377,97 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#ffffff',
+  },
+  
+  // Custom Category Modal Styles
+  customCategoryModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  customCategoryModal: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 12,
+  },
+  customCategoryModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  customCategoryModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  customCategoryModalClose: {
+    padding: 4,
+  },
+  customCategoryModalContent: {
+    padding: 20,
+  },
+  customCategoryModalLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  customCategoryModalInput: {
+    borderWidth: 2,
+    borderColor: '#7c3aed',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: '#1e293b',
+    backgroundColor: '#ffffff',
+    marginBottom: 20,
+  },
+  customCategoryModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+  },
+  customCategoryModalCancel: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+  },
+  customCategoryModalCancelText: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#6b7280',
+  },
+  customCategoryModalSave: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#7c3aed',
+  },
+  customCategoryModalSaveDisabled: {
+    backgroundColor: '#d1d5db',
+  },
+  customCategoryModalSaveText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  customCategoryModalSaveTextDisabled: {
+    color: '#9ca3af',
   },
   
   // Toggle styles
