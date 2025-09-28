@@ -2,8 +2,8 @@ import { AntDesign, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
-import { Stack, useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import React, { useEffect, useState } from 'react';
 import {
   Alert,
   Image,
@@ -16,46 +16,117 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { pushData } from '../lib/firebase-database';
+import { onAuthChange } from '../lib/firebase-auth';
+import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
 // Stock image library data
-const stockImages = {
-  Animals: [
-    { name: 'Bee', uri: require('../assets/images/Animals/Bee.png') },
-    { name: 'Black Cat', uri: require('../assets/images/Animals/Black Cat.png') },
-    { name: 'Bug', uri: require('../assets/images/Animals/Bug.png') },
-    { name: 'Butterfly', uri: require('../assets/images/Animals/Butterfly.png') },
-    { name: 'Cat', uri: require('../assets/images/Animals/Cat.png') },
-    { name: 'Cheetah', uri: require('../assets/images/Animals/Cheetah.png') },
-    { name: 'Chicken', uri: require('../assets/images/Animals/Chicken.png') },
-    { name: 'Cow', uri: require('../assets/images/Animals/Cow.png') },
-    { name: 'Deer', uri: require('../assets/images/Animals/Deer.png') },
-    { name: 'Dog', uri: require('../assets/images/Animals/Dog.png') },
-    { name: 'Elephant', uri: require('../assets/images/Animals/Elephant.png') },
-    { name: 'Fox', uri: require('../assets/images/Animals/Fox.png') },
-    { name: 'Frog', uri: require('../assets/images/Animals/Frog.png') },
-    { name: 'Giraffe', uri: require('../assets/images/Animals/Giraffe.png') },
-    { name: 'Hipo', uri: require('../assets/images/Animals/Hipo.png') },
-    { name: 'Horse', uri: require('../assets/images/Animals/Horse.png') },
-    { name: 'Koala', uri: require('../assets/images/Animals/Koala.png') },
-    { name: 'Lion', uri: require('../assets/images/Animals/Lion.png') },
-    { name: 'Monkey', uri: require('../assets/images/Animals/Monkey.png') },
-    { name: 'Owl', uri: require('../assets/images/Animals/Owl.png') },
-    { name: 'Panda', uri: require('../assets/images/Animals/Panda.png') },
-    { name: 'Parrot', uri: require('../assets/images/Animals/Parrot.png') },
-    { name: 'Penguin', uri: require('../assets/images/Animals/Penguin.png') },
-    { name: 'Pig', uri: require('../assets/images/Animals/Pig.png') },
-    { name: 'Rabbit', uri: require('../assets/images/Animals/Rabbit.png') },
-    { name: 'Red Panda', uri: require('../assets/images/Animals/Red Panda.png') },
-    { name: 'Snail', uri: require('../assets/images/Animals/Snail.png') },
-    { name: 'Snake', uri: require('../assets/images/Animals/Snake.png') },
-    { name: 'Tiger', uri: require('../assets/images/Animals/Tiger.png') },
-    { name: 'Turkey', uri: require('../assets/images/Animals/Turkey.png') },
-    { name: 'Wolf', uri: require('../assets/images/Animals/Wolf.png') },
-    { name: 'Zebra', uri: require('../assets/images/Animals/Zebra.png') },
+const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
+  'Water Animals': [
+    { name: 'Water Animal 1', uri: require('../assets/images/Water Animals/1.png') },
+    { name: 'Water Animal 2', uri: require('../assets/images/Water Animals/2.png') },
+    { name: 'Water Animal 3', uri: require('../assets/images/Water Animals/3.png') },
+    { name: 'Water Animal 4', uri: require('../assets/images/Water Animals/4.png') },
+    { name: 'Water Animal 5', uri: require('../assets/images/Water Animals/5.png') },
+    { name: 'Water Animal 6', uri: require('../assets/images/Water Animals/6.png') },
+    { name: 'Water Animal 7', uri: require('../assets/images/Water Animals/7.png') },
+    { name: 'Water Animal 8', uri: require('../assets/images/Water Animals/8.png') },
+    { name: 'Water Animal 9', uri: require('../assets/images/Water Animals/9.png') },
+    { name: 'Water Animal 10', uri: require('../assets/images/Water Animals/10.png') },
+    { name: 'Water Animal 11', uri: require('../assets/images/Water Animals/11.png') },
+    { name: 'Water Animal 12', uri: require('../assets/images/Water Animals/12.png') },
+    { name: 'Water Animal 13', uri: require('../assets/images/Water Animals/13.png') },
+    { name: 'Water Animal 14', uri: require('../assets/images/Water Animals/14.png') },
+    { name: 'Water Animal 15', uri: require('../assets/images/Water Animals/15.png') },
   ],
-  Numbers: [
+  'Alphabet': [
+    { name: 'A', uri: require('../assets/images/Alphabet/a.png') },
+    { name: 'B', uri: require('../assets/images/Alphabet/b.png') },
+    { name: 'C', uri: require('../assets/images/Alphabet/c.png') },
+    { name: 'D', uri: require('../assets/images/Alphabet/d.png') },
+    { name: 'E', uri: require('../assets/images/Alphabet/e.png') },
+    { name: 'F', uri: require('../assets/images/Alphabet/f.png') },
+    { name: 'G', uri: require('../assets/images/Alphabet/g.png') },
+    { name: 'H', uri: require('../assets/images/Alphabet/h.png') },
+    { name: 'I', uri: require('../assets/images/Alphabet/i.png') },
+    { name: 'J', uri: require('../assets/images/Alphabet/j.png') },
+    { name: 'K', uri: require('../assets/images/Alphabet/k.png') },
+    { name: 'M', uri: require('../assets/images/Alphabet/m.png') },
+    { name: 'N', uri: require('../assets/images/Alphabet/n.png') },
+    { name: 'O', uri: require('../assets/images/Alphabet/o.png') },
+    { name: 'P', uri: require('../assets/images/Alphabet/p.png') },
+    { name: 'Q', uri: require('../assets/images/Alphabet/q.png') },
+    { name: 'R', uri: require('../assets/images/Alphabet/r.png') },
+    { name: 'S', uri: require('../assets/images/Alphabet/s.png') },
+    { name: 'T', uri: require('../assets/images/Alphabet/t.png') },
+    { name: 'U', uri: require('../assets/images/Alphabet/u.png') },
+    { name: 'V', uri: require('../assets/images/Alphabet/v.png') },
+    { name: 'W', uri: require('../assets/images/Alphabet/w.png') },
+    { name: 'X', uri: require('../assets/images/Alphabet/x.png') },
+    { name: 'Y', uri: require('../assets/images/Alphabet/y.png') },
+    { name: 'Z', uri: require('../assets/images/Alphabet/z.png') },
+  ],
+  'Fruits': [
+    { name: 'Apple', uri: require('../assets/images/Fruits/apple.png') },
+    { name: 'Avocado', uri: require('../assets/images/Fruits/avocado.png') },
+    { name: 'Banana', uri: require('../assets/images/Fruits/banana.png') },
+    { name: 'Blueberry', uri: require('../assets/images/Fruits/blueberry.png') },
+    { name: 'Coco', uri: require('../assets/images/Fruits/coco.png') },
+    { name: 'Corn', uri: require('../assets/images/Fruits/corn.png') },
+    { name: 'Durian', uri: require('../assets/images/Fruits/durian.png') },
+    { name: 'Grapes', uri: require('../assets/images/Fruits/grapes.png') },
+    { name: 'Lemon', uri: require('../assets/images/Fruits/lemon.png') },
+    { name: 'Mango', uri: require('../assets/images/Fruits/mango.png') },
+    { name: 'Orange', uri: require('../assets/images/Fruits/orange.png') },
+    { name: 'Pineapple', uri: require('../assets/images/Fruits/pineapple.png') },
+    { name: 'Rambutan', uri: require('../assets/images/Fruits/rambutan.png') },
+    { name: 'Strawberry', uri: require('../assets/images/Fruits/strawberry.png') },
+    { name: 'Tomato', uri: require('../assets/images/Fruits/tomato.png') },
+    { name: 'Watermelon', uri: require('../assets/images/Fruits/watermelon.png') },
+  ],
+  'Land Animals': [
+    { name: 'Bee', uri: require('../assets/images/Land Animals/bee.png') },
+    { name: 'Bird', uri: require('../assets/images/Land Animals/bird.png') },
+    { name: 'Black Cat', uri: require('../assets/images/Land Animals/black cat.png') },
+    { name: 'Bug', uri: require('../assets/images/Land Animals/bug.png') },
+    { name: 'Bunny', uri: require('../assets/images/Land Animals/bunny.png') },
+    { name: 'Butterfly', uri: require('../assets/images/Land Animals/butterfly.png') },
+    { name: 'Cat', uri: require('../assets/images/Land Animals/cat.png') },
+    { name: 'Cheetah', uri: require('../assets/images/Land Animals/cheetah.png') },
+    { name: 'Chicken', uri: require('../assets/images/Land Animals/chicken.png') },
+    { name: 'Cow', uri: require('../assets/images/Land Animals/cow.png') },
+    { name: 'Deer', uri: require('../assets/images/Land Animals/deer.png') },
+    { name: 'Dog', uri: require('../assets/images/Land Animals/dog.png') },
+    { name: 'Elephant', uri: require('../assets/images/Land Animals/elephant.png') },
+    { name: 'Fox', uri: require('../assets/images/Land Animals/fox.png') },
+    { name: 'Frog', uri: require('../assets/images/Land Animals/frog.png') },
+    { name: 'Giraffe', uri: require('../assets/images/Land Animals/guraffe.png') },
+    { name: 'Hipo', uri: require('../assets/images/Land Animals/hipo.png') },
+    { name: 'Horse', uri: require('../assets/images/Land Animals/horse.png') },
+    { name: 'Koala', uri: require('../assets/images/Land Animals/koala.png') },
+    { name: 'Lion', uri: require('../assets/images/Land Animals/lion.png') },
+    { name: 'Monkey', uri: require('../assets/images/Land Animals/monkey.png') },
+    { name: 'Owl', uri: require('../assets/images/Land Animals/owl.png') },
+    { name: 'Panda', uri: require('../assets/images/Land Animals/panda.png') },
+    { name: 'Penguin', uri: require('../assets/images/Land Animals/penguin.png') },
+    { name: 'Pig', uri: require('../assets/images/Land Animals/pig.png') },
+    { name: 'Red Panda', uri: require('../assets/images/Land Animals/red panda.png') },
+    { name: 'Snail', uri: require('../assets/images/Land Animals/snail.png') },
+    { name: 'Snake', uri: require('../assets/images/Land Animals/snake.png') },
+    { name: 'Tiger', uri: require('../assets/images/Land Animals/tiger.png') },
+    { name: 'Turkey', uri: require('../assets/images/Land Animals/turkey.png') },
+    { name: 'Wolf', uri: require('../assets/images/Land Animals/wolf.png') },
+    { name: 'Zebra', uri: require('../assets/images/Land Animals/zebra.png') },
+  ],
+  'Math Symbols': [
+    { name: 'Equal', uri: require('../assets/images/Math Symbols/equal.png') },
+    { name: 'Greater Than', uri: require('../assets/images/Math Symbols/greater than.png') },
+    { name: 'Less Than', uri: require('../assets/images/Math Symbols/less than.png') },
+    { name: 'Minus', uri: require('../assets/images/Math Symbols/minus.png') },
+    { name: 'Not Equal To', uri: require('../assets/images/Math Symbols/not equal to.png') },
+    { name: 'Plus', uri: require('../assets/images/Math Symbols/plus.png') },
+  ],
+  'Numbers': [
     { name: '1', uri: require('../assets/images/Numbers/1.png') },
     { name: '2', uri: require('../assets/images/Numbers/2.png') },
     { name: '3', uri: require('../assets/images/Numbers/3.png') },
@@ -66,9 +137,87 @@ const stockImages = {
     { name: '8', uri: require('../assets/images/Numbers/8.png') },
     { name: '9', uri: require('../assets/images/Numbers/9.png') },
   ],
-  Schools: [],
-  Fruits: [],
-  Letters: [],
+  'Pattern': [
+    { name: 'Pattern 1', uri: require('../assets/images/Pattern/1.png') },
+    { name: 'Pattern 2', uri: require('../assets/images/Pattern/2.png') },
+    { name: 'Pattern 3', uri: require('../assets/images/Pattern/3.png') },
+    { name: 'Pattern 4', uri: require('../assets/images/Pattern/4.png') },
+    { name: 'Pattern 5', uri: require('../assets/images/Pattern/5.png') },
+    { name: 'Pattern 6', uri: require('../assets/images/Pattern/6.png') },
+    { name: 'Pattern 7', uri: require('../assets/images/Pattern/7.png') },
+    { name: 'Pattern 8', uri: require('../assets/images/Pattern/8.png') },
+    { name: 'Pattern 9', uri: require('../assets/images/Pattern/9.png') },
+    { name: 'Pattern 10', uri: require('../assets/images/Pattern/10.png') },
+    { name: 'Pattern 11', uri: require('../assets/images/Pattern/11.png') },
+  ],
+  'School Supplies': [
+    { name: 'Abacus', uri: require('../assets/images/School Supplies/abacus.png') },
+    { name: 'Bag', uri: require('../assets/images/School Supplies/bag.png') },
+    { name: 'Blue Scissors', uri: require('../assets/images/School Supplies/blue scissors.png') },
+    { name: 'Board', uri: require('../assets/images/School Supplies/board.png') },
+    { name: 'Brushes', uri: require('../assets/images/School Supplies/brushes.png') },
+    { name: 'Clip', uri: require('../assets/images/School Supplies/clip.png') },
+    { name: 'Crayon', uri: require('../assets/images/School Supplies/crayon.png') },
+    { name: 'Crayons', uri: require('../assets/images/School Supplies/crayons.png') },
+    { name: 'Eraser', uri: require('../assets/images/School Supplies/eraser.png') },
+    { name: 'Globe', uri: require('../assets/images/School Supplies/globe.png') },
+    { name: 'Glue', uri: require('../assets/images/School Supplies/glue.png') },
+    { name: 'Mid Thick Book', uri: require('../assets/images/School Supplies/mid thick book.png') },
+    { name: 'Notebook 1', uri: require('../assets/images/School Supplies/notebook 1.png') },
+    { name: 'Notebook 2', uri: require('../assets/images/School Supplies/notebook 2.png') },
+    { name: 'Paint Brush', uri: require('../assets/images/School Supplies/paint brush.png') },
+    { name: 'Paper', uri: require('../assets/images/School Supplies/paper.png') },
+    { name: 'Pencil Case', uri: require('../assets/images/School Supplies/pencil case.png') },
+    { name: 'Pencil', uri: require('../assets/images/School Supplies/pencil.png') },
+    { name: 'Red Scissors', uri: require('../assets/images/School Supplies/red scissors.png') },
+    { name: 'Ruler 1', uri: require('../assets/images/School Supplies/ruler 1.png') },
+    { name: 'Ruler 2', uri: require('../assets/images/School Supplies/ruler 2.png') },
+    { name: 'Sharpener', uri: require('../assets/images/School Supplies/sharpener.png') },
+    { name: 'Stack Books', uri: require('../assets/images/School Supplies/stack books.png') },
+    { name: 'Stapler', uri: require('../assets/images/School Supplies/stapler.png') },
+    { name: 'Thickest Book', uri: require('../assets/images/School Supplies/thickest book.png') },
+    { name: 'Thin Book', uri: require('../assets/images/School Supplies/thin book.png') },
+  ],
+  'Shapes': [
+    { name: 'Circle', uri: require('../assets/images/Shapes/circle.png') },
+    { name: 'Decagon', uri: require('../assets/images/Shapes/decagon.png') },
+    { name: 'Heptagon', uri: require('../assets/images/Shapes/heptagon.png') },
+    { name: 'Hexagon', uri: require('../assets/images/Shapes/hexagon.png') },
+    { name: 'Nonagon', uri: require('../assets/images/Shapes/nonagon.png') },
+    { name: 'Octagon', uri: require('../assets/images/Shapes/octagon.png') },
+    { name: 'Oval', uri: require('../assets/images/Shapes/oval.png') },
+    { name: 'Pentagon', uri: require('../assets/images/Shapes/pentagon.png') },
+    { name: 'Rectangle', uri: require('../assets/images/Shapes/rectangle.png') },
+    { name: 'Square', uri: require('../assets/images/Shapes/square.png') },
+    { name: 'Triangle', uri: require('../assets/images/Shapes/triangle.png') },
+  ],
+  'Toys': [
+    { name: 'Airplane', uri: require('../assets/images/Toys/airplane.png') },
+    { name: 'Ball', uri: require('../assets/images/Toys/ball.png') },
+    { name: 'Beach Ball', uri: require('../assets/images/Toys/beach ball.png') },
+    { name: 'Bear', uri: require('../assets/images/Toys/bear.png') },
+    { name: 'Bike', uri: require('../assets/images/Toys/bike.png') },
+    { name: 'Boat', uri: require('../assets/images/Toys/boat.png') },
+    { name: 'Car', uri: require('../assets/images/Toys/car.png') },
+    { name: 'Dice', uri: require('../assets/images/Toys/dice.png') },
+    { name: 'Dino', uri: require('../assets/images/Toys/dino.png') },
+    { name: 'Drums', uri: require('../assets/images/Toys/drums.png') },
+    { name: 'Excavator', uri: require('../assets/images/Toys/excavator.png') },
+    { name: 'House', uri: require('../assets/images/Toys/house.png') },
+    { name: 'Joystick', uri: require('../assets/images/Toys/joystick.png') },
+    { name: 'Kite', uri: require('../assets/images/Toys/kite.png') },
+    { name: 'Lego', uri: require('../assets/images/Toys/lego.png') },
+    { name: 'Magnet', uri: require('../assets/images/Toys/magnet.png') },
+    { name: 'Paper Boat', uri: require('../assets/images/Toys/paper boat.png') },
+    { name: 'Puzzle', uri: require('../assets/images/Toys/puzzle.png') },
+    { name: 'Racket', uri: require('../assets/images/Toys/racket.png') },
+    { name: 'Robot', uri: require('../assets/images/Toys/robot.png') },
+    { name: 'Rubik', uri: require('../assets/images/Toys/rubik.png') },
+    { name: 'Stack Ring', uri: require('../assets/images/Toys/stack ring.png') },
+    { name: 'Train', uri: require('../assets/images/Toys/train.png') },
+    { name: 'Xylophone', uri: require('../assets/images/Toys/xylophone.png') },
+    { name: 'Yoyo', uri: require('../assets/images/Toys/yoyo.png') },
+  ],
 };
 
 interface Question {
@@ -97,6 +246,7 @@ interface Question {
 
 export default function CreateExercise() {
   const router = useRouter();
+  const { edit } = useLocalSearchParams();
   const [exerciseTitle, setExerciseTitle] = useState('');
   const [exerciseDescription, setExerciseDescription] = useState('');
   const [isPublic, setIsPublic] = useState(false);
@@ -106,6 +256,13 @@ export default function CreateExercise() {
   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
   const [resourceFile, setResourceFile] = useState<{ name: string; uri: string } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [exerciseId, setExerciseId] = useState<string | null>(null);
+  
+  // User state
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [teacherData, setTeacherData] = useState<any>(null);
   const [showFillSettings, setShowFillSettings] = useState(false);
   const [fillSettingsDraft, setFillSettingsDraft] = useState<NonNullable<Question['fillSettings']> | null>(null);
   
@@ -140,6 +297,65 @@ export default function CreateExercise() {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     setExerciseCode(code);
     return code;
+  };
+
+  // Handle authentication and fetch teacher data
+  useEffect(() => {
+    const unsubscribe = onAuthChange((user) => {
+      if (user?.uid) {
+        setCurrentUserId(user.uid);
+        fetchTeacherData(user.uid);
+      } else {
+        router.replace('/TeacherLogin');
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  // Load exercise data when editing
+  useEffect(() => {
+    if (edit && currentUserId) {
+      loadExerciseForEdit(edit as string);
+    }
+  }, [edit, currentUserId]);
+
+  const fetchTeacherData = async (userId: string) => {
+    try {
+      const { data } = await readData(`/teachers/${userId}`);
+      if (data) {
+        setTeacherData(data);
+      }
+    } catch (error) {
+      console.error('Error fetching teacher data:', error);
+    }
+  };
+
+  const loadExerciseForEdit = async (exerciseId: string) => {
+    try {
+      setLoading(true);
+      const { data } = await readData(`/exercises/${exerciseId}`);
+      if (data) {
+        setExerciseId(exerciseId);
+        setIsEditing(true);
+        setExerciseTitle(data.title || '');
+        setExerciseDescription(data.description || '');
+        setIsPublic(data.isPublic || false);
+        setExerciseCode(data.exerciseCode || '');
+        setQuestions(data.questions || []);
+        if (data.resourceUrl) {
+          setResourceFile({ name: 'Resource File', uri: data.resourceUrl });
+        }
+      } else {
+        Alert.alert('Error', 'Exercise not found');
+        router.back();
+      }
+    } catch (error) {
+      console.error('Error loading exercise for edit:', error);
+      Alert.alert('Error', 'Failed to load exercise');
+      router.back();
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Check if an image URI is local (from require())
@@ -302,13 +518,53 @@ export default function CreateExercise() {
   // Dynamic stock image categories - easily extensible for new folders
   const stockImageCategories = [
     {
-      id: 'animals',
-      name: 'Animals',
-      icon: 'paw',
-      color: '#f59e0b',
-      images: stockImages.Animals.map(animal => ({
+      id: 'water-animals',
+      name: 'Water Animals',
+      icon: 'fish',
+      color: '#0ea5e9',
+      images: stockImages['Water Animals'].map(animal => ({
         name: animal.name,
         source: animal.uri
+      }))
+    },
+    {
+      id: 'alphabet',
+      name: 'Alphabet',
+      icon: 'alphabetical',
+      color: '#8b5cf6',
+      images: stockImages['Alphabet'].map(letter => ({
+        name: letter.name,
+        source: letter.uri
+      }))
+    },
+    {
+      id: 'fruits',
+      name: 'Fruits',
+      icon: 'food-apple',
+      color: '#10b981',
+      images: stockImages['Fruits'].map(fruit => ({
+        name: fruit.name,
+        source: fruit.uri
+      }))
+    },
+    {
+      id: 'land-animals',
+      name: 'Land Animals',
+      icon: 'paw',
+      color: '#f59e0b',
+      images: stockImages['Land Animals'].map(animal => ({
+        name: animal.name,
+        source: animal.uri
+      }))
+    },
+    {
+      id: 'math-symbols',
+      name: 'Math Symbols',
+      icon: 'calculator',
+      color: '#ef4444',
+      images: stockImages['Math Symbols'].map(symbol => ({
+        name: symbol.name,
+        source: symbol.uri
       }))
     },
     {
@@ -316,23 +572,51 @@ export default function CreateExercise() {
       name: 'Numbers',
       icon: 'numeric',
       color: '#3b82f6',
-      images: stockImages.Numbers.map(number => ({
+      images: stockImages['Numbers'].map(number => ({
         name: number.name,
         source: number.uri
       }))
     },
-    // Add more categories here as you add more folders
-    // Example for future categories:
-    // {
-    //   id: 'fruits',
-    //   name: 'Fruits',
-    //   icon: 'food-apple',
-    //   color: '#10b981',
-    //   images: stockImages.Fruits.map(fruit => ({
-    //     name: fruit.name,
-    //     source: fruit.uri
-    //   }))
-    // }
+    {
+      id: 'pattern',
+      name: 'Pattern',
+      icon: 'pattern',
+      color: '#f97316',
+      images: stockImages['Pattern'].map(pattern => ({
+        name: pattern.name,
+        source: pattern.uri
+      }))
+    },
+    {
+      id: 'school-supplies',
+      name: 'School Supplies',
+      icon: 'school',
+      color: '#06b6d4',
+      images: stockImages['School Supplies'].map(supply => ({
+        name: supply.name,
+        source: supply.uri
+      }))
+    },
+    {
+      id: 'shapes',
+      name: 'Shapes',
+      icon: 'shape',
+      color: '#84cc16',
+      images: stockImages['Shapes'].map(shape => ({
+        name: shape.name,
+        source: shape.uri
+      }))
+    },
+    {
+      id: 'toys',
+      name: 'Toys',
+      icon: 'toy-brick',
+      color: '#ec4899',
+      images: stockImages['Toys'].map(toy => ({
+        name: toy.name,
+        source: toy.uri
+      }))
+    }
   ];
 
   const addQuestion = (type: string) => {
@@ -496,6 +780,10 @@ export default function CreateExercise() {
         title: exerciseTitle.trim(),
         description: exerciseDescription.trim(),
         resourceUrl: uploadedUrl || null,
+        teacherId: currentUserId,
+        teacherName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
+        questionCount: questionsWithRemoteImages.length,
+        timesUsed: 0,
         questions: questionsWithRemoteImages.map(q => {
           // Create a clean question object, removing all undefined values
           const cleanQuestion: any = {
@@ -554,29 +842,65 @@ export default function CreateExercise() {
       };
       
       console.log('Saving exercise with payload:', cleanPayload);
-      const { key, error } = await pushData('/exercises', cleanPayload);
       
-      if (error) {
-        console.error('Firebase pushData error:', error);
+      let key: string | null = null;
+      let error: string | null = null;
+      
+      if (isEditing && exerciseId) {
+        // Update existing exercise
+        const { success, error: updateError } = await updateData(`/exercises/${exerciseId}`, cleanPayload);
+        if (success) {
+          key = exerciseId;
+        } else {
+          error = updateError || 'Failed to update exercise';
+        }
+      } else {
+        // Create new exercise
+        const result = await pushData('/exercises', cleanPayload);
+        key = result.key;
+        error = result.error;
+      }
+      
+      if (error || !key) {
+        console.error('Firebase error:', error);
         
         // Try to provide more specific error messages
-        let errorMessage = 'Failed to save exercise. ';
-        if (error.includes('permission')) {
+        let errorMessage = `Failed to ${isEditing ? 'update' : 'save'} exercise. `;
+        if (error?.includes('permission')) {
           errorMessage += 'Permission denied. Please check your Firebase rules.';
-        } else if (error.includes('network')) {
+        } else if (error?.includes('network')) {
           errorMessage += 'Network error. Please check your internet connection.';
-        } else if (error.includes('quota')) {
+        } else if (error?.includes('quota')) {
           errorMessage += 'Database quota exceeded. Please try again later.';
         } else {
-          errorMessage += `Error: ${error}`;
+          errorMessage += `Error: ${error || 'Unknown error'}`;
         }
         
         Alert.alert('Error', errorMessage);
         return;
       }
       
-      console.log('Exercise saved successfully with key:', key);
-      Alert.alert('Success', `Exercise created successfully!\nExercise Code: ${finalExerciseCode}`, [
+      console.log(`Exercise ${isEditing ? 'updated' : 'saved'} successfully with key:`, key);
+      
+      // If exercise is public, also save to public exercises collection
+      if (isPublic) {
+        try {
+          const publicExercisePayload = {
+            ...cleanPayload,
+            id: key, // Use the same ID as the main exercise
+            creatorName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
+            creatorId: currentUserId,
+          };
+          
+          await pushData('/publicExercises', publicExercisePayload);
+          console.log('Exercise also saved to public exercises');
+        } catch (publicError) {
+          console.error('Error saving to public exercises:', publicError);
+          // Don't fail the whole operation if public save fails
+        }
+      }
+      
+      Alert.alert('Success', `Exercise ${isEditing ? 'updated' : 'created'} successfully!\nExercise Code: ${finalExerciseCode}`, [
         { text: 'OK', onPress: () => router.push('/TeacherDashboard') }
       ]);
     } catch (error: any) {
@@ -1883,6 +2207,13 @@ export default function CreateExercise() {
     );
   };
 
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Text style={styles.loadingText}>{isEditing ? 'Loading exercise...' : 'Loading...'}</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -1894,7 +2225,7 @@ export default function CreateExercise() {
           <TouchableOpacity onPress={() => router.push('/TeacherDashboard')} style={styles.backButton}>
             <AntDesign name="arrow-left" size={24} color="#1e293b" />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Create Exercise</Text>
+          <Text style={styles.headerTitle}>{isEditing ? 'Edit Exercise' : 'Create Exercise'}</Text>
           <View style={styles.placeholder} />
         </View>
 
@@ -2034,7 +2365,7 @@ export default function CreateExercise() {
         {/* Save Button */}
         <View style={styles.saveSection}>
           <TouchableOpacity style={styles.saveExerciseButton} onPress={saveExercise}>
-            <Text style={styles.saveExerciseButtonText}>{uploading ? 'Uploading...' : 'Create Exercise'}</Text>
+            <Text style={styles.saveExerciseButtonText}>{uploading ? 'Uploading...' : (isEditing ? 'Update Exercise' : 'Create Exercise')}</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -2251,26 +2582,157 @@ export default function CreateExercise() {
             </View>
             
             <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
-            {/* Animals Section */}
+            {/* Water Animals Section */}
             <View style={styles.imageCategory}>
-              <Text style={styles.categoryTitle}>Animals</Text>
+              <Text style={styles.categoryTitle}>Water Animals</Text>
               <ScrollView 
                 horizontal 
                 showsHorizontalScrollIndicator={false}
                 style={styles.horizontalImageScroll}
                 contentContainerStyle={styles.horizontalImageContainer}
               >
-                {/* Add button as first item */}
                 <TouchableOpacity
                   style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Animals')}
+                  onPress={() => handleImageUpload('Water Animals')}
                 >
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages.Animals.slice(0, 8).map((image, index) => (
+                {stockImages['Water Animals'].slice(0, 8).map((image, index) => (
                   <TouchableOpacity
-                    key={`animal-${index}`}
+                    key={`water-animal-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Alphabet Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Alphabet</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Alphabet')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages['Alphabet'].slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`alphabet-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Fruits Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Fruits</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Fruits')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages['Fruits'].slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`fruit-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Land Animals Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Land Animals</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Land Animals')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages['Land Animals'].slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`land-animal-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Math Symbols Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Math Symbols</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Math Symbols')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages['Math Symbols'].slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`math-symbol-${index}`}
                     style={styles.horizontalImageItem}
                     onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
                   >
@@ -2294,7 +2756,6 @@ export default function CreateExercise() {
                 style={styles.horizontalImageScroll}
                 contentContainerStyle={styles.horizontalImageContainer}
               >
-                {/* Add button as first item */}
                 <TouchableOpacity
                   style={styles.addImageButton}
                   onPress={() => handleImageUpload('Numbers')}
@@ -2302,9 +2763,141 @@ export default function CreateExercise() {
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages.Numbers.map((image, index) => (
+                {stockImages['Numbers'].map((image, index) => (
                   <TouchableOpacity
                     key={`number-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Pattern Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Pattern</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Pattern')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages['Pattern'].slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`pattern-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* School Supplies Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>School Supplies</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('School Supplies')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages['School Supplies'].slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`school-supply-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Shapes Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Shapes</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Shapes')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages['Shapes'].slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`shape-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Toys Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Toys</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Toys')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {stockImages['Toys'].slice(0, 8).map((image, index) => (
+                  <TouchableOpacity
+                    key={`toy-${index}`}
                     style={styles.horizontalImageItem}
                     onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
                   >
@@ -3610,5 +4203,18 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontStyle: 'italic',
     lineHeight: 16,
+  },
+  
+  // Loading styles
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+  },
+  loadingText: {
+    fontSize: 16,
+    color: '#64748b',
+    fontWeight: '500',
   },
 });

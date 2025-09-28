@@ -5,17 +5,19 @@ import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
-    Alert,
-    Dimensions,
-    Image,
-    Modal,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  Alert,
+  Dimensions,
+  Image,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
+import { AssignExerciseForm } from '../components/AssignExerciseForm';
+import { useExercises } from '../hooks/useExercises';
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
 import { deleteData, pushData, readData, updateData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -23,42 +25,112 @@ import { uploadFile } from '../lib/firebase-storage';
 const { width, height } = Dimensions.get('window');
 
 // Stock image library data
-const stockImages = {
-  Animals: [
-    { name: 'Bee', uri: require('../assets/images/Animals/Bee.png') },
-    { name: 'Black Cat', uri: require('../assets/images/Animals/Black Cat.png') },
-    { name: 'Bug', uri: require('../assets/images/Animals/Bug.png') },
-    { name: 'Butterfly', uri: require('../assets/images/Animals/Butterfly.png') },
-    { name: 'Cat', uri: require('../assets/images/Animals/Cat.png') },
-    { name: 'Cheetah', uri: require('../assets/images/Animals/Cheetah.png') },
-    { name: 'Chicken', uri: require('../assets/images/Animals/Chicken.png') },
-    { name: 'Cow', uri: require('../assets/images/Animals/Cow.png') },
-    { name: 'Deer', uri: require('../assets/images/Animals/Deer.png') },
-    { name: 'Dog', uri: require('../assets/images/Animals/Dog.png') },
-    { name: 'Elephant', uri: require('../assets/images/Animals/Elephant.png') },
-    { name: 'Fox', uri: require('../assets/images/Animals/Fox.png') },
-    { name: 'Frog', uri: require('../assets/images/Animals/Frog.png') },
-    { name: 'Giraffe', uri: require('../assets/images/Animals/Giraffe.png') },
-    { name: 'Hipo', uri: require('../assets/images/Animals/Hipo.png') },
-    { name: 'Horse', uri: require('../assets/images/Animals/Horse.png') },
-    { name: 'Koala', uri: require('../assets/images/Animals/Koala.png') },
-    { name: 'Lion', uri: require('../assets/images/Animals/Lion.png') },
-    { name: 'Monkey', uri: require('../assets/images/Animals/Monkey.png') },
-    { name: 'Owl', uri: require('../assets/images/Animals/Owl.png') },
-    { name: 'Panda', uri: require('../assets/images/Animals/Panda.png') },
-    { name: 'Parrot', uri: require('../assets/images/Animals/Parrot.png') },
-    { name: 'Penguin', uri: require('../assets/images/Animals/Penguin.png') },
-    { name: 'Pig', uri: require('../assets/images/Animals/Pig.png') },
-    { name: 'Rabbit', uri: require('../assets/images/Animals/Rabbit.png') },
-    { name: 'Red Panda', uri: require('../assets/images/Animals/Red Panda.png') },
-    { name: 'Snail', uri: require('../assets/images/Animals/Snail.png') },
-    { name: 'Snake', uri: require('../assets/images/Animals/Snake.png') },
-    { name: 'Tiger', uri: require('../assets/images/Animals/Tiger.png') },
-    { name: 'Turkey', uri: require('../assets/images/Animals/Turkey.png') },
-    { name: 'Wolf', uri: require('../assets/images/Animals/Wolf.png') },
-    { name: 'Zebra', uri: require('../assets/images/Animals/Zebra.png') },
+const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
+  'Water Animals': [
+    { name: 'Water Animal 1', uri: require('../assets/images/Water Animals/1.png') },
+    { name: 'Water Animal 2', uri: require('../assets/images/Water Animals/2.png') },
+    { name: 'Water Animal 3', uri: require('../assets/images/Water Animals/3.png') },
+    { name: 'Water Animal 4', uri: require('../assets/images/Water Animals/4.png') },
+    { name: 'Water Animal 5', uri: require('../assets/images/Water Animals/5.png') },
+    { name: 'Water Animal 6', uri: require('../assets/images/Water Animals/6.png') },
+    { name: 'Water Animal 7', uri: require('../assets/images/Water Animals/7.png') },
+    { name: 'Water Animal 8', uri: require('../assets/images/Water Animals/8.png') },
+    { name: 'Water Animal 9', uri: require('../assets/images/Water Animals/9.png') },
+    { name: 'Water Animal 10', uri: require('../assets/images/Water Animals/10.png') },
+    { name: 'Water Animal 11', uri: require('../assets/images/Water Animals/11.png') },
+    { name: 'Water Animal 12', uri: require('../assets/images/Water Animals/12.png') },
+    { name: 'Water Animal 13', uri: require('../assets/images/Water Animals/13.png') },
+    { name: 'Water Animal 14', uri: require('../assets/images/Water Animals/14.png') },
+    { name: 'Water Animal 15', uri: require('../assets/images/Water Animals/15.png') },
   ],
-  Numbers: [
+  'Alphabet': [
+    { name: 'A', uri: require('../assets/images/Alphabet/a.png') },
+    { name: 'B', uri: require('../assets/images/Alphabet/b.png') },
+    { name: 'C', uri: require('../assets/images/Alphabet/c.png') },
+    { name: 'D', uri: require('../assets/images/Alphabet/d.png') },
+    { name: 'E', uri: require('../assets/images/Alphabet/e.png') },
+    { name: 'F', uri: require('../assets/images/Alphabet/f.png') },
+    { name: 'G', uri: require('../assets/images/Alphabet/g.png') },
+    { name: 'H', uri: require('../assets/images/Alphabet/h.png') },
+    { name: 'I', uri: require('../assets/images/Alphabet/i.png') },
+    { name: 'J', uri: require('../assets/images/Alphabet/j.png') },
+    { name: 'K', uri: require('../assets/images/Alphabet/k.png') },
+    { name: 'M', uri: require('../assets/images/Alphabet/m.png') },
+    { name: 'N', uri: require('../assets/images/Alphabet/n.png') },
+    { name: 'O', uri: require('../assets/images/Alphabet/o.png') },
+    { name: 'P', uri: require('../assets/images/Alphabet/p.png') },
+    { name: 'Q', uri: require('../assets/images/Alphabet/q.png') },
+    { name: 'R', uri: require('../assets/images/Alphabet/r.png') },
+    { name: 'S', uri: require('../assets/images/Alphabet/s.png') },
+    { name: 'T', uri: require('../assets/images/Alphabet/t.png') },
+    { name: 'U', uri: require('../assets/images/Alphabet/u.png') },
+    { name: 'V', uri: require('../assets/images/Alphabet/v.png') },
+    { name: 'W', uri: require('../assets/images/Alphabet/w.png') },
+    { name: 'X', uri: require('../assets/images/Alphabet/x.png') },
+    { name: 'Y', uri: require('../assets/images/Alphabet/y.png') },
+    { name: 'Z', uri: require('../assets/images/Alphabet/z.png') },
+  ],
+  'Fruits': [
+    { name: 'Apple', uri: require('../assets/images/Fruits/apple.png') },
+    { name: 'Avocado', uri: require('../assets/images/Fruits/avocado.png') },
+    { name: 'Banana', uri: require('../assets/images/Fruits/banana.png') },
+    { name: 'Blueberry', uri: require('../assets/images/Fruits/blueberry.png') },
+    { name: 'Coco', uri: require('../assets/images/Fruits/coco.png') },
+    { name: 'Corn', uri: require('../assets/images/Fruits/corn.png') },
+    { name: 'Durian', uri: require('../assets/images/Fruits/durian.png') },
+    { name: 'Grapes', uri: require('../assets/images/Fruits/grapes.png') },
+    { name: 'Lemon', uri: require('../assets/images/Fruits/lemon.png') },
+    { name: 'Mango', uri: require('../assets/images/Fruits/mango.png') },
+    { name: 'Orange', uri: require('../assets/images/Fruits/orange.png') },
+    { name: 'Pineapple', uri: require('../assets/images/Fruits/pineapple.png') },
+    { name: 'Rambutan', uri: require('../assets/images/Fruits/rambutan.png') },
+    { name: 'Strawberry', uri: require('../assets/images/Fruits/strawberry.png') },
+    { name: 'Tomato', uri: require('../assets/images/Fruits/tomato.png') },
+    { name: 'Watermelon', uri: require('../assets/images/Fruits/watermelon.png') },
+  ],
+  'Land Animals': [
+    { name: 'Bee', uri: require('../assets/images/Land Animals/bee.png') },
+    { name: 'Bird', uri: require('../assets/images/Land Animals/bird.png') },
+    { name: 'Black Cat', uri: require('../assets/images/Land Animals/black cat.png') },
+    { name: 'Bug', uri: require('../assets/images/Land Animals/bug.png') },
+    { name: 'Bunny', uri: require('../assets/images/Land Animals/bunny.png') },
+    { name: 'Butterfly', uri: require('../assets/images/Land Animals/butterfly.png') },
+    { name: 'Cat', uri: require('../assets/images/Land Animals/cat.png') },
+    { name: 'Cheetah', uri: require('../assets/images/Land Animals/cheetah.png') },
+    { name: 'Chicken', uri: require('../assets/images/Land Animals/chicken.png') },
+    { name: 'Cow', uri: require('../assets/images/Land Animals/cow.png') },
+    { name: 'Deer', uri: require('../assets/images/Land Animals/deer.png') },
+    { name: 'Dog', uri: require('../assets/images/Land Animals/dog.png') },
+    { name: 'Elephant', uri: require('../assets/images/Land Animals/elephant.png') },
+    { name: 'Fox', uri: require('../assets/images/Land Animals/fox.png') },
+    { name: 'Frog', uri: require('../assets/images/Land Animals/frog.png') },
+    { name: 'Giraffe', uri: require('../assets/images/Land Animals/guraffe.png') },
+    { name: 'Hipo', uri: require('../assets/images/Land Animals/hipo.png') },
+    { name: 'Horse', uri: require('../assets/images/Land Animals/horse.png') },
+    { name: 'Koala', uri: require('../assets/images/Land Animals/koala.png') },
+    { name: 'Lion', uri: require('../assets/images/Land Animals/lion.png') },
+    { name: 'Monkey', uri: require('../assets/images/Land Animals/monkey.png') },
+    { name: 'Owl', uri: require('../assets/images/Land Animals/owl.png') },
+    { name: 'Panda', uri: require('../assets/images/Land Animals/panda.png') },
+    { name: 'Penguin', uri: require('../assets/images/Land Animals/penguin.png') },
+    { name: 'Pig', uri: require('../assets/images/Land Animals/pig.png') },
+    { name: 'Red Panda', uri: require('../assets/images/Land Animals/red panda.png') },
+    { name: 'Snail', uri: require('../assets/images/Land Animals/snail.png') },
+    { name: 'Snake', uri: require('../assets/images/Land Animals/snake.png') },
+    { name: 'Tiger', uri: require('../assets/images/Land Animals/tiger.png') },
+    { name: 'Turkey', uri: require('../assets/images/Land Animals/turkey.png') },
+    { name: 'Wolf', uri: require('../assets/images/Land Animals/wolf.png') },
+    { name: 'Zebra', uri: require('../assets/images/Land Animals/zebra.png') },
+  ],
+  'Math Symbols': [
+    { name: 'Equal', uri: require('../assets/images/Math Symbols/equal.png') },
+    { name: 'Greater Than', uri: require('../assets/images/Math Symbols/greater than.png') },
+    { name: 'Less Than', uri: require('../assets/images/Math Symbols/less than.png') },
+    { name: 'Minus', uri: require('../assets/images/Math Symbols/minus.png') },
+    { name: 'Not Equal To', uri: require('../assets/images/Math Symbols/not equal to.png') },
+    { name: 'Plus', uri: require('../assets/images/Math Symbols/plus.png') },
+  ],
+  'Numbers': [
     { name: '1', uri: require('../assets/images/Numbers/1.png') },
     { name: '2', uri: require('../assets/images/Numbers/2.png') },
     { name: '3', uri: require('../assets/images/Numbers/3.png') },
@@ -69,9 +141,87 @@ const stockImages = {
     { name: '8', uri: require('../assets/images/Numbers/8.png') },
     { name: '9', uri: require('../assets/images/Numbers/9.png') },
   ],
-  Schools: [],
-  Fruits: [],
-  Letters: [],
+  'Pattern': [
+    { name: 'Pattern 1', uri: require('../assets/images/Pattern/1.png') },
+    { name: 'Pattern 2', uri: require('../assets/images/Pattern/2.png') },
+    { name: 'Pattern 3', uri: require('../assets/images/Pattern/3.png') },
+    { name: 'Pattern 4', uri: require('../assets/images/Pattern/4.png') },
+    { name: 'Pattern 5', uri: require('../assets/images/Pattern/5.png') },
+    { name: 'Pattern 6', uri: require('../assets/images/Pattern/6.png') },
+    { name: 'Pattern 7', uri: require('../assets/images/Pattern/7.png') },
+    { name: 'Pattern 8', uri: require('../assets/images/Pattern/8.png') },
+    { name: 'Pattern 9', uri: require('../assets/images/Pattern/9.png') },
+    { name: 'Pattern 10', uri: require('../assets/images/Pattern/10.png') },
+    { name: 'Pattern 11', uri: require('../assets/images/Pattern/11.png') },
+  ],
+  'School Supplies': [
+    { name: 'Abacus', uri: require('../assets/images/School Supplies/abacus.png') },
+    { name: 'Bag', uri: require('../assets/images/School Supplies/bag.png') },
+    { name: 'Blue Scissors', uri: require('../assets/images/School Supplies/blue scissors.png') },
+    { name: 'Board', uri: require('../assets/images/School Supplies/board.png') },
+    { name: 'Brushes', uri: require('../assets/images/School Supplies/brushes.png') },
+    { name: 'Clip', uri: require('../assets/images/School Supplies/clip.png') },
+    { name: 'Crayon', uri: require('../assets/images/School Supplies/crayon.png') },
+    { name: 'Crayons', uri: require('../assets/images/School Supplies/crayons.png') },
+    { name: 'Eraser', uri: require('../assets/images/School Supplies/eraser.png') },
+    { name: 'Globe', uri: require('../assets/images/School Supplies/globe.png') },
+    { name: 'Glue', uri: require('../assets/images/School Supplies/glue.png') },
+    { name: 'Mid Thick Book', uri: require('../assets/images/School Supplies/mid thick book.png') },
+    { name: 'Notebook 1', uri: require('../assets/images/School Supplies/notebook 1.png') },
+    { name: 'Notebook 2', uri: require('../assets/images/School Supplies/notebook 2.png') },
+    { name: 'Paint Brush', uri: require('../assets/images/School Supplies/paint brush.png') },
+    { name: 'Paper', uri: require('../assets/images/School Supplies/paper.png') },
+    { name: 'Pencil Case', uri: require('../assets/images/School Supplies/pencil case.png') },
+    { name: 'Pencil', uri: require('../assets/images/School Supplies/pencil.png') },
+    { name: 'Red Scissors', uri: require('../assets/images/School Supplies/red scissors.png') },
+    { name: 'Ruler 1', uri: require('../assets/images/School Supplies/ruler 1.png') },
+    { name: 'Ruler 2', uri: require('../assets/images/School Supplies/ruler 2.png') },
+    { name: 'Sharpener', uri: require('../assets/images/School Supplies/sharpener.png') },
+    { name: 'Stack Books', uri: require('../assets/images/School Supplies/stack books.png') },
+    { name: 'Stapler', uri: require('../assets/images/School Supplies/stapler.png') },
+    { name: 'Thickest Book', uri: require('../assets/images/School Supplies/thickest book.png') },
+    { name: 'Thin Book', uri: require('../assets/images/School Supplies/thin book.png') },
+  ],
+  'Shapes': [
+    { name: 'Circle', uri: require('../assets/images/Shapes/circle.png') },
+    { name: 'Decagon', uri: require('../assets/images/Shapes/decagon.png') },
+    { name: 'Heptagon', uri: require('../assets/images/Shapes/heptagon.png') },
+    { name: 'Hexagon', uri: require('../assets/images/Shapes/hexagon.png') },
+    { name: 'Nonagon', uri: require('../assets/images/Shapes/nonagon.png') },
+    { name: 'Octagon', uri: require('../assets/images/Shapes/octagon.png') },
+    { name: 'Oval', uri: require('../assets/images/Shapes/oval.png') },
+    { name: 'Pentagon', uri: require('../assets/images/Shapes/pentagon.png') },
+    { name: 'Rectangle', uri: require('../assets/images/Shapes/rectangle.png') },
+    { name: 'Square', uri: require('../assets/images/Shapes/square.png') },
+    { name: 'Triangle', uri: require('../assets/images/Shapes/triangle.png') },
+  ],
+  'Toys': [
+    { name: 'Airplane', uri: require('../assets/images/Toys/airplane.png') },
+    { name: 'Ball', uri: require('../assets/images/Toys/ball.png') },
+    { name: 'Beach Ball', uri: require('../assets/images/Toys/beach ball.png') },
+    { name: 'Bear', uri: require('../assets/images/Toys/bear.png') },
+    { name: 'Bike', uri: require('../assets/images/Toys/bike.png') },
+    { name: 'Boat', uri: require('../assets/images/Toys/boat.png') },
+    { name: 'Car', uri: require('../assets/images/Toys/car.png') },
+    { name: 'Dice', uri: require('../assets/images/Toys/dice.png') },
+    { name: 'Dino', uri: require('../assets/images/Toys/dino.png') },
+    { name: 'Drums', uri: require('../assets/images/Toys/drums.png') },
+    { name: 'Excavator', uri: require('../assets/images/Toys/excavator.png') },
+    { name: 'House', uri: require('../assets/images/Toys/house.png') },
+    { name: 'Joystick', uri: require('../assets/images/Toys/joystick.png') },
+    { name: 'Kite', uri: require('../assets/images/Toys/kite.png') },
+    { name: 'Lego', uri: require('../assets/images/Toys/lego.png') },
+    { name: 'Magnet', uri: require('../assets/images/Toys/magnet.png') },
+    { name: 'Paper Boat', uri: require('../assets/images/Toys/paper boat.png') },
+    { name: 'Puzzle', uri: require('../assets/images/Toys/puzzle.png') },
+    { name: 'Racket', uri: require('../assets/images/Toys/racket.png') },
+    { name: 'Robot', uri: require('../assets/images/Toys/robot.png') },
+    { name: 'Rubik', uri: require('../assets/images/Toys/rubik.png') },
+    { name: 'Stack Ring', uri: require('../assets/images/Toys/stack ring.png') },
+    { name: 'Train', uri: require('../assets/images/Toys/train.png') },
+    { name: 'Xylophone', uri: require('../assets/images/Toys/xylophone.png') },
+    { name: 'Yoyo', uri: require('../assets/images/Toys/yoyo.png') },
+  ],
 };
 
 interface TeacherData {
@@ -155,7 +305,28 @@ export default function TeacherDashboard() {
   // Overflow menu state per-class (three dots)
   const [openMenuClassId, setOpenMenuClassId] = useState<string | null>(null);
   // Local navigation state to keep bottom nav persistent
-  const [activeTab, setActiveTab] = useState<'home' | 'list' | 'class' | 'reports'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'list' | 'class' | 'exercises'>('home');
+  
+  // Exercises Library state
+  const [exercisesTab, setExercisesTab] = useState<'my' | 'public' | 'assigned'>('my');
+  const [showAssignForm, setShowAssignForm] = useState(false);
+  const [selectedExerciseForAssign, setSelectedExerciseForAssign] = useState<any>(null);
+  
+  // Use the exercises hook
+  const {
+    myExercises,
+    publicExercises,
+    assignedExercises,
+    loading: exercisesLoading,
+    error: exercisesError,
+    loadMyExercises,
+    loadPublicExercises,
+    loadAssignedExercises,
+    copyExercise,
+    deleteExercise,
+    assignExercise,
+    deleteAssignment,
+  } = useExercises(currentUserId || null);
   
 
   useEffect(() => {
@@ -170,6 +341,19 @@ export default function TeacherDashboard() {
     });
     return unsubscribe;
   }, []);
+
+  // Load exercises when exercises tab becomes active
+  useEffect(() => {
+    if (activeTab === 'exercises' && currentUserId) {
+      if (exercisesTab === 'my') {
+        loadMyExercises();
+      } else if (exercisesTab === 'public') {
+        loadPublicExercises();
+      } else if (exercisesTab === 'assigned') {
+        loadAssignedExercises();
+      }
+    }
+  }, [activeTab, exercisesTab, currentUserId]);
 
   const loadTeacherClasses = async (teacherId: string) => {
     try {
@@ -257,6 +441,69 @@ export default function TeacherDashboard() {
     } catch {
       setClassAnalytics({});
     }
+  };
+
+  const handleDeleteExercise = async (exerciseId: string) => {
+    Alert.alert(
+      'Delete Exercise',
+      'Are you sure you want to delete this exercise? This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteExercise(exerciseId);
+              Alert.alert('Success', 'Exercise deleted successfully');
+            } catch (error) {
+              Alert.alert('Error', 'Failed to delete exercise');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleCopyExercise = async (exercise: any) => {
+    try {
+      const teacherName = teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher';
+      await copyExercise(exercise, currentUserId!, teacherName);
+      Alert.alert('Success', 'Exercise copied to My Exercises');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to copy exercise');
+    }
+  };
+
+  const handleAssignExercise = async (classIds: string[], deadline: string) => {
+    try {
+      await assignExercise(selectedExerciseForAssign.id, classIds, deadline, currentUserId!);
+      Alert.alert('Success', 'Exercise assigned successfully');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to assign exercise');
+    }
+  };
+
+  const handleDeleteAssignment = async (assignmentId: string) => {
+    Alert.alert(
+      'Delete Assignment',
+      'Are you sure you want to delete this assignment?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteAssignment(assignmentId);
+              Alert.alert('Success', 'Assignment deleted successfully');
+            } catch (error) {
+              Alert.alert('Error', 'Failed to delete assignment');
+            }
+          },
+        },
+      ]
+    );
   };
 
   const escapeHtml = (value: string) =>
@@ -664,12 +911,12 @@ export default function TeacherDashboard() {
                  </View>
                </TouchableOpacity>
                
-              <TouchableOpacity style={styles.actionCard} onPress={() => router.push('../CreateExercise')}>
+              <TouchableOpacity style={styles.actionCard} onPress={() => setActiveTab('exercises')}>
                 <View style={styles.actionGradient2}>
                   <View style={styles.actionIcon}>
                     <MaterialCommunityIcons name="abacus" size={28} color="#38a169" />
                   </View>
-                  <Text style={styles.actionText}>Add Exercise</Text>
+                  <Text style={styles.actionText}>Exercises</Text>
                 </View>
               </TouchableOpacity>
              </View>
@@ -762,7 +1009,7 @@ export default function TeacherDashboard() {
                        <View style={styles.quickStats}>
                          <View style={styles.statItem}>
                            <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
-                           <Text style={styles.statLabel}>Assignments</Text>
+                           <Text style={styles.statLabel}>Exercises</Text>
                          </View>
                          <View style={styles.statDivider} />
                          <View style={styles.statItem}>
@@ -781,6 +1028,262 @@ export default function TeacherDashboard() {
                )}
              </View>
            </>
+         )}
+
+         {activeTab === 'exercises' && (
+           <View style={styles.exercisesSection}>
+             {/* Exercises Library Header */}
+             <View style={styles.exercisesHeader}>
+               <Text style={styles.exercisesTitle}>Exercises Library</Text>
+               <View style={styles.exercisesActions}>
+                 <TouchableOpacity 
+                   style={styles.refreshButton}
+                   onPress={() => {
+                     if (exercisesTab === 'my') {
+                       loadMyExercises();
+                     } else {
+                       loadPublicExercises();
+                     }
+                   }}
+                 >
+                   <MaterialCommunityIcons name="refresh" size={20} color="#64748b" />
+                 </TouchableOpacity>
+                 <TouchableOpacity style={styles.searchButton}>
+                   <AntDesign name="search" size={20} color="#64748b" />
+                 </TouchableOpacity>
+                 <TouchableOpacity style={styles.moreOptionsButton}>
+                   <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                 </TouchableOpacity>
+               </View>
+             </View>
+
+             {/* Exercises Tabs */}
+             <View style={styles.exercisesTabs}>
+               <TouchableOpacity 
+                 style={[styles.exercisesTab, exercisesTab === 'my' && styles.exercisesTabActive]}
+                 onPress={() => {
+                   setExercisesTab('my');
+                   loadMyExercises();
+                 }}
+               >
+                 <Text style={[styles.exercisesTabText, exercisesTab === 'my' && styles.exercisesTabTextActive]}>My Exercises</Text>
+               </TouchableOpacity>
+               <TouchableOpacity 
+                 style={[styles.exercisesTab, exercisesTab === 'public' && styles.exercisesTabActive]}
+                 onPress={() => {
+                   setExercisesTab('public');
+                   loadPublicExercises();
+                 }}
+               >
+                 <Text style={[styles.exercisesTabText, exercisesTab === 'public' && styles.exercisesTabTextActive]}>Public</Text>
+               </TouchableOpacity>
+               <TouchableOpacity 
+                 style={[styles.exercisesTab, exercisesTab === 'assigned' && styles.exercisesTabActive]}
+                 onPress={() => {
+                   setExercisesTab('assigned');
+                   loadAssignedExercises();
+                 }}
+               >
+                 <Text style={[styles.exercisesTabText, exercisesTab === 'assigned' && styles.exercisesTabTextActive]}>Assigned</Text>
+               </TouchableOpacity>
+             </View>
+
+             {/* Exercise Cards */}
+             <View style={styles.exerciseCardsContainer}>
+               {exercisesTab === 'my' ? (
+                 <>
+                   {exercisesLoading ? (
+                     <View style={styles.loadingContainer}>
+                       <Text style={styles.loadingText}>Loading your exercises...</Text>
+                     </View>
+                   ) : myExercises.length === 0 ? (
+                     <View style={styles.emptyState}>
+                       <MaterialCommunityIcons name="book-open-variant" size={48} color="#9ca3af" />
+                       <Text style={styles.emptyStateText}>No exercises created yet</Text>
+                       <Text style={styles.emptyStateSubtext}>Create your first exercise to get started</Text>
+                     </View>
+                   ) : (
+                     myExercises.map((exercise) => (
+                       <View key={exercise.id} style={styles.exerciseCard}>
+                         <View style={styles.exerciseIcon}>
+                           <View style={styles.exerciseIconBackground}>
+                             <MaterialCommunityIcons name="book-open-variant" size={24} color="#8b5cf6" />
+                           </View>
+                         </View>
+                         <View style={styles.exerciseContent}>
+                           <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
+                           <Text style={styles.exerciseDescription}>{exercise.description || 'No description available'}</Text>
+                           <View style={styles.exerciseStats}>
+                             <Text style={styles.exerciseStat}>{exercise.questionCount || 0} Questions</Text>
+                             <Text style={styles.exerciseStatSeparator}>•</Text>
+                             <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
+                           </View>
+                           <View style={styles.exerciseMeta}>
+                             <Text style={styles.exerciseCreator}>
+                               {exercise.isPublic ? 'Public' : 'Private'}
+                             </Text>
+                             <Text style={styles.exerciseDate}>
+                               {exercise.createdAt ? new Date(exercise.createdAt).toLocaleDateString() : 'Unknown date'}
+                             </Text>
+                           </View>
+                         </View>
+                         <View style={styles.exerciseActions}>
+                           <TouchableOpacity 
+                             style={styles.assignButton}
+                             onPress={() => {
+                               setSelectedExerciseForAssign(exercise);
+                               setShowAssignForm(true);
+                             }}
+                           >
+                             <MaterialCommunityIcons name="send" size={16} color="#ffffff" />
+                             <Text style={styles.assignButtonText}>Assign</Text>
+                           </TouchableOpacity>
+                           <TouchableOpacity 
+                             style={styles.exerciseOptions}
+                             onPress={() => {
+                               Alert.alert(
+                                 'Exercise Options',
+                                 'What would you like to do with this exercise?',
+                                 [
+                                 { text: 'Edit', onPress: () => router.push(`/CreateExercise?edit=${exercise.id}`) },
+                                 { text: 'Delete', style: 'destructive', onPress: () => handleDeleteExercise(exercise.id) },
+                                   { text: 'Cancel', style: 'cancel' }
+                                 ]
+                               );
+                             }}
+                           >
+                             <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                           </TouchableOpacity>
+                         </View>
+                       </View>
+                     ))
+                   )}
+                 </>
+               ) : exercisesTab === 'public' ? (
+                 <>
+                   {exercisesLoading ? (
+                     <View style={styles.loadingContainer}>
+                       <Text style={styles.loadingText}>Loading public exercises...</Text>
+                     </View>
+                   ) : publicExercises.length === 0 ? (
+                     <View style={styles.emptyState}>
+                       <MaterialCommunityIcons name="book-open-variant" size={48} color="#9ca3af" />
+                       <Text style={styles.emptyStateText}>No public exercises available</Text>
+                       <Text style={styles.emptyStateSubtext}>Check back later for new exercises shared by other teachers</Text>
+                     </View>
+                   ) : (
+                     publicExercises.map((exercise) => (
+                       <View key={exercise.id} style={styles.exerciseCard}>
+                         <View style={styles.exerciseIcon}>
+                           <View style={styles.exerciseIconBackground}>
+                             <MaterialCommunityIcons name="book-open-variant" size={24} color="#8b5cf6" />
+                           </View>
+                         </View>
+                         <View style={styles.exerciseContent}>
+                           <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
+                           <Text style={styles.exerciseDescription}>{exercise.description || 'No description available'}</Text>
+                           <View style={styles.exerciseStats}>
+                             <Text style={styles.exerciseStat}>{exercise.questionCount || 0} Questions</Text>
+                             <Text style={styles.exerciseStatSeparator}>•</Text>
+                             <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
+                           </View>
+                           <View style={styles.exerciseMeta}>
+                             <Text style={styles.exerciseCreator}>By {exercise.teacherName || 'Unknown Teacher'}</Text>
+                             <Text style={styles.exerciseDate}>
+                               {exercise.createdAt ? new Date(exercise.createdAt).toLocaleDateString() : 'Unknown date'}
+                             </Text>
+                           </View>
+                         </View>
+                         <TouchableOpacity 
+                           style={styles.exerciseOptions}
+                           onPress={() => {
+                             Alert.alert(
+                               'Exercise Options',
+                               'What would you like to do with this exercise?',
+                               [
+                                 { text: 'Make a Copy', onPress: () => handleCopyExercise(exercise) },
+                                 { text: 'Cancel', style: 'cancel' }
+                               ]
+                             );
+                           }}
+                         >
+                           <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                         </TouchableOpacity>
+                       </View>
+                     ))
+                   )}
+                 </>
+               ) : (
+                 // Assigned Exercises Tab
+                 <>
+                   {exercisesLoading ? (
+                     <View style={styles.loadingContainer}>
+                       <Text style={styles.loadingText}>Loading assigned exercises...</Text>
+                     </View>
+                   ) : assignedExercises.length === 0 ? (
+                     <View style={styles.emptyState}>
+                       <MaterialCommunityIcons name="clipboard-text" size={48} color="#9ca3af" />
+                       <Text style={styles.emptyStateText}>No exercises assigned yet</Text>
+                       <Text style={styles.emptyStateSubtext}>Assign exercises to your classes to see them here</Text>
+                     </View>
+                   ) : (
+                     assignedExercises.map((assignment) => (
+                       <View key={assignment.id} style={styles.assignmentCard}>
+                         <View style={styles.assignmentHeader}>
+                           <View style={styles.assignmentInfo}>
+                             <Text style={styles.assignmentTitle}>
+                               {assignment.exercise?.title || 'Unknown Exercise'}
+                             </Text>
+                             <Text style={styles.assignmentClass}>
+                               {assignment.className || 'Unknown Class'}
+                             </Text>
+                           </View>
+                           <TouchableOpacity 
+                             style={styles.assignmentOptions}
+                             onPress={() => {
+                               Alert.alert(
+                                 'Assignment Options',
+                                 'What would you like to do with this assignment?',
+                                 [
+                                   { text: 'Edit', onPress: () => {/* TODO: Implement edit assignment */} },
+                                   { text: 'Delete', style: 'destructive', onPress: () => handleDeleteAssignment(assignment.id) },
+                                   { text: 'Cancel', style: 'cancel' }
+                                 ]
+                               );
+                             }}
+                           >
+                             <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                           </TouchableOpacity>
+                         </View>
+                         <View style={styles.assignmentDetails}>
+                           <View style={styles.assignmentDetail}>
+                             <MaterialCommunityIcons name="calendar-clock" size={16} color="#64748b" />
+                             <Text style={styles.assignmentDetailText}>
+                               Due: {new Date(assignment.deadline).toLocaleDateString()}
+                             </Text>
+                           </View>
+                           <View style={styles.assignmentDetail}>
+                             <MaterialCommunityIcons name="account" size={16} color="#64748b" />
+                             <Text style={styles.assignmentDetailText}>
+                               Assigned: {new Date(assignment.createdAt).toLocaleDateString()}
+                             </Text>
+                           </View>
+                         </View>
+                       </View>
+                     ))
+                   )}
+                 </>
+               )}
+             </View>
+
+             {/* Add Exercise Button */}
+             <TouchableOpacity style={styles.addExerciseButton} onPress={() => router.push('../CreateExercise')}>
+               <View style={styles.addExerciseIcon}>
+                 <AntDesign name="plus" size={20} color="#ffffff" />
+               </View>
+               <Text style={styles.addExerciseText}>Add Exercise</Text>
+             </TouchableOpacity>
+           </View>
          )}
 
          {activeTab === 'list' && (
@@ -966,9 +1469,9 @@ export default function TeacherDashboard() {
           <Text style={[styles.navText, activeTab === 'class' && styles.activeNavText]}>Class</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={[styles.navItem, activeTab === 'reports' && styles.activeNavItem]} onPress={() => setActiveTab('reports')}>
-          <MaterialCommunityIcons name="chart-bar" size={24} color={activeTab === 'reports' ? '#000000' : '#9ca3af'} />
-          <Text style={[styles.navText, activeTab === 'reports' && styles.activeNavText]}>Reports</Text>
+        <TouchableOpacity style={[styles.navItem, activeTab === 'exercises' && styles.activeNavItem]} onPress={() => setActiveTab('exercises')}>
+          <MaterialCommunityIcons name="abacus" size={24} color={activeTab === 'exercises' ? '#000000' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'exercises' && styles.activeNavText]}>Exercises</Text>
         </TouchableOpacity>
       </View>
 
@@ -1496,6 +1999,18 @@ export default function TeacherDashboard() {
           </View>
         </View>
       </Modal>
+
+      {/* Assign Exercise Form */}
+      <AssignExerciseForm
+        visible={showAssignForm}
+        onClose={() => {
+          setShowAssignForm(false);
+          setSelectedExerciseForAssign(null);
+        }}
+        onAssign={handleAssignExercise}
+        exerciseTitle={selectedExerciseForAssign?.title || ''}
+        currentUserId={currentUserId}
+      />
 
     </View>
   );
@@ -2286,6 +2801,275 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  
+  // Exercises Library Styles
+  exercisesSection: {
+    paddingBottom: 100,
+  },
+  exercisesHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  exercisesTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  exercisesActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  refreshButton: {
+    padding: 8,
+    borderRadius: 8,
+  },
+  searchButton: {
+    padding: 8,
+    borderRadius: 8,
+  },
+  moreOptionsButton: {
+    padding: 8,
+    borderRadius: 8,
+  },
+  exercisesTabs: {
+    flexDirection: 'row',
+    marginBottom: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  exercisesTab: {
+    paddingBottom: 12,
+    marginRight: 24,
+  },
+  exercisesTabActive: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#1e293b',
+  },
+  exercisesTabText: {
+    fontSize: 16,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  exercisesTabTextActive: {
+    color: '#1e293b',
+    fontWeight: '700',
+  },
+  exerciseCardsContainer: {
+    marginBottom: 24,
+  },
+  exerciseCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+  },
+  exerciseIcon: {
+    marginRight: 16,
+  },
+  exerciseIconBackground: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: '#fef3c7',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  exerciseContent: {
+    flex: 1,
+  },
+  exerciseTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  exerciseDescription: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 8,
+  },
+  exerciseStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  exerciseStat: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  exerciseStatSeparator: {
+    fontSize: 12,
+    color: '#64748b',
+    marginHorizontal: 8,
+  },
+  exerciseOptions: {
+    padding: 8,
+    borderRadius: 8,
+  },
+  addExerciseButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f1f5f9',
+    borderRadius: 16,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    marginTop: 20,
+  },
+  addExerciseIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#3b82f6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  addExerciseText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  
+  // Empty State Styles
+  emptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+  emptyStateText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  emptyStateSubtext: {
+    fontSize: 14,
+    color: '#6b7280',
+    marginTop: 4,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  
+  // Exercise Meta Styles
+  exerciseMeta: {
+    marginTop: 8,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  exerciseCreator: {
+    fontSize: 12,
+    color: '#6b7280',
+    fontWeight: '500',
+  },
+  exerciseDate: {
+    fontSize: 12,
+    color: '#9ca3af',
+  },
+  
+  // Exercise Actions Styles
+  exerciseActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  assignButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#10b981',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  assignButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  copyButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  copyButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  
+  // Assignment Card Styles
+  assignmentCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  assignmentHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  assignmentInfo: {
+    flex: 1,
+  },
+  assignmentTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  assignmentClass: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  assignmentOptions: {
+    padding: 8,
+    borderRadius: 8,
+  },
+  assignmentDetails: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  assignmentDetail: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  assignmentDetailText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginLeft: 6,
   },
   
 });
