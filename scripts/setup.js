@@ -72,8 +72,10 @@ log(`${colors.yellow}Setting up your React Native Expo project...${colors.reset}
 // 1. Clean install dependencies
 executeCommand('npm ci --legacy-peer-deps || npm install --legacy-peer-deps', 'Installing dependencies with peer dependency resolution');
 
-// 2. Create babel.config.js
-const babelConfig = `module.exports = function (api) {
+// 2. Create babel.config.js (only if it doesn't exist)
+const babelConfigPath = path.resolve('babel.config.js');
+if (!fs.existsSync(babelConfigPath)) {
+  const babelConfig = `module.exports = function (api) {
   api.cache(true);
   return {
     presets: ['babel-preset-expo'],
@@ -84,10 +86,15 @@ const babelConfig = `module.exports = function (api) {
   };
 };
 `;
-createFile('babel.config.js', babelConfig, 'Created babel.config.js');
+  createFile('babel.config.js', babelConfig, 'Created babel.config.js');
+} else {
+  log(`${colors.yellow}⚠️  babel.config.js already exists, skipping creation${colors.reset}`);
+}
 
-// 3. Create metro.config.js
-const metroConfig = `const { getDefaultConfig } = require('expo/metro-config');
+// 3. Create metro.config.js (only if it doesn't exist)
+const metroConfigPath = path.resolve('metro.config.js');
+if (!fs.existsSync(metroConfigPath)) {
+  const metroConfig = `const { getDefaultConfig } = require('expo/metro-config');
 
 const config = getDefaultConfig(__dirname);
 
@@ -98,7 +105,10 @@ config.resolver.alias = {
 
 module.exports = config;
 `;
-createFile('metro.config.js', metroConfig, 'Created metro.config.js');
+  createFile('metro.config.js', metroConfig, 'Created metro.config.js');
+} else {
+  log(`${colors.yellow}⚠️  metro.config.js already exists, skipping creation${colors.reset}`);
+}
 
 // 4. Create expo-env.d.ts
 const expoEnvTypes = `/// <reference types="expo-router/types" />
