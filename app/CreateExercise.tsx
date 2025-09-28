@@ -16,6 +16,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
 import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -220,6 +221,13 @@ const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
   ],
 };
 
+interface ReorderItem {
+  id: string;
+  type: 'text' | 'image';
+  content: string; // text content or image URL
+  imageUrl?: string; // for image items
+}
+
 interface Question {
   id: string;
   type: 'identification' | 'multiple-choice' | 'matching' | 're-order' | 'reading-passage';
@@ -228,7 +236,8 @@ interface Question {
   options?: string[];
   optionImages?: (string | null)[];
   pairs?: { left: string; right: string; leftImage?: string | null; rightImage?: string | null }[];
-  order?: string[];
+  order?: string[]; // legacy - will be replaced by reorderItems
+  reorderItems?: ReorderItem[]; // new structure for reorder questions
   passage?: string;
   subQuestions?: Omit<Question, 'subQuestions'>[];
   multiAnswer?: boolean;
@@ -302,7 +311,8 @@ export default function CreateExercise() {
     optionIndex?: number;
     pairIndex?: number;
     side?: 'left' | 'right';
-    type: 'question' | 'option' | 'pair';
+    reorderItemIndex?: number;
+    type: 'question' | 'option' | 'pair' | 'reorder';
   } | null>(null);
   const [customCategories, setCustomCategories] = useState<Record<string, string[]>>({});
   const [showAddCategory, setShowAddCategory] = useState(false);
@@ -360,7 +370,21 @@ export default function CreateExercise() {
         setIsPublic(data.isPublic || false);
         setExerciseCode(data.exerciseCode || '');
         setExerciseCategory(data.category || '');
-        setQuestions(data.questions || []);
+        // Migrate old order arrays to reorderItems structure
+        const migratedQuestions = (data.questions || []).map((q: any) => {
+          if (q.type === 're-order' && q.order && !q.reorderItems) {
+            return {
+              ...q,
+              reorderItems: q.order.map((item: string, index: number) => ({
+                id: `migrated-${Date.now()}-${index}`,
+                type: 'text' as const,
+                content: item,
+              })),
+            };
+          }
+          return q;
+        });
+        setQuestions(migratedQuestions);
         if (data.resourceUrl) {
           setResourceFile({ name: 'Resource File', uri: data.resourceUrl });
         }
@@ -433,6 +457,21 @@ export default function CreateExercise() {
               uploadLocalImageToStorage(pair.rightImage, `exercises/${exerciseCode}/question-${qIndex}/pair-${pairIndex}-right`)
                 .then(remoteUrl => {
                   updatedQuestions[qIndex].pairs![pairIndex].rightImage = remoteUrl;
+                })
+            );
+          }
+        });
+      }
+
+      // Handle reorder item images
+      if (question.reorderItems) {
+        question.reorderItems.forEach((item, itemIndex) => {
+          if (item.type === 'image' && item.imageUrl && isLocalImage(item.imageUrl)) {
+            uploadPromises.push(
+              uploadLocalImageToStorage(item.imageUrl, `exercises/${exerciseCode}/question-${qIndex}/reorder-${itemIndex}`)
+                .then(remoteUrl => {
+                  updatedQuestions[qIndex].reorderItems![itemIndex].imageUrl = remoteUrl;
+                  updatedQuestions[qIndex].reorderItems![itemIndex].content = remoteUrl;
                 })
             );
           }
@@ -639,22 +678,40 @@ export default function CreateExercise() {
   ];
 
   const addQuestion = (type: string) => {
-    const newQuestion: Question = {
+    const newQuestion: any = {
       id: Date.now().toString(),
       type: type as Question['type'],
       question: '',
       answer: type === 'multiple-choice' ? '' : type === 'matching' ? [] : type === 're-order' ? [] : '',
-      options: type === 'multiple-choice' ? ['', '', '', ''] : undefined,
-      optionImages: type === 'multiple-choice' ? [null, null, null, null] : undefined,
-      pairs: type === 'matching' ? [{ left: '', right: '', leftImage: null, rightImage: null }] : undefined,
-      order: type === 're-order' ? [''] : undefined,
-      passage: type === 'reading-passage' ? '' : undefined,
-      subQuestions: type === 'reading-passage' ? [] : undefined,
-      multiAnswer: type === 'multiple-choice' ? false : undefined,
-      reorderDirection: type === 're-order' ? 'asc' : undefined,
-      questionImage: null,
-      fillSettings: type === 'identification' ? { caseSensitive: false, showBoxes: true } : undefined,
     };
+
+    // Only add fields that are not undefined
+    if (type === 'multiple-choice') {
+      newQuestion.options = ['', '', '', ''];
+      newQuestion.optionImages = [null, null, null, null];
+      newQuestion.multiAnswer = false;
+    }
+    
+    if (type === 'matching') {
+      newQuestion.pairs = [{ left: '', right: '', leftImage: null, rightImage: null }];
+    }
+    
+    if (type === 're-order') {
+      newQuestion.order = [''];
+      newQuestion.reorderItems = [{ id: Date.now().toString(), type: 'text', content: '' }];
+      newQuestion.reorderDirection = 'asc';
+    }
+    
+    if (type === 'reading-passage') {
+      newQuestion.passage = '';
+      newQuestion.subQuestions = [];
+    }
+    
+    if (type === 'identification') {
+      newQuestion.fillSettings = { caseSensitive: false, showBoxes: true };
+    }
+    
+    newQuestion.questionImage = null;
     setQuestions([...questions, newQuestion]);
     setEditingQuestion(newQuestion);
     setShowQuestionTypeModal(false);
@@ -814,7 +871,7 @@ export default function CreateExercise() {
             id: q.id,
             type: q.type,
             question: q.question?.trim() || '',
-            answer: typeof q.answer === 'string' ? q.answer.trim() : q.answer,
+            answer: q.answer !== undefined ? (typeof q.answer === 'string' ? q.answer.trim() : q.answer) : null,
           };
 
           // Only add fields that have values (not undefined)
@@ -832,6 +889,10 @@ export default function CreateExercise() {
           
           if (q.order && q.order.length > 0) {
             cleanQuestion.order = q.order;
+          }
+          
+          if (q.reorderItems && q.reorderItems.length > 0) {
+            cleanQuestion.reorderItems = q.reorderItems;
           }
           
           if (q.subQuestions && q.subQuestions.length > 0) {
@@ -866,14 +927,37 @@ export default function CreateExercise() {
         createdAt: new Date().toISOString(),
       };
       
-      console.log('Saving exercise with payload:', cleanPayload);
+      // Clean all undefined values from the payload
+      const finalCleanPayload = cleanUndefinedValues(cleanPayload);
+      
+      // Additional check for answer fields specifically
+      if (finalCleanPayload.questions) {
+        finalCleanPayload.questions = finalCleanPayload.questions.map((q: any) => {
+          if (q.answer === undefined) {
+            console.warn('Found undefined answer in question:', q.id, 'type:', q.type);
+            q.answer = null;
+          }
+          return q;
+        });
+      }
+      
+      // Validate no undefined values remain
+      validateNoUndefined(finalCleanPayload, 'payload');
+      
+      console.log('Saving exercise with payload:', finalCleanPayload);
+      console.log('Questions in payload:', finalCleanPayload.questions?.map((q: any) => ({
+        id: q.id,
+        type: q.type,
+        answer: q.answer,
+        hasAnswer: 'answer' in q
+      })));
       
       let key: string | null = null;
       let error: string | null = null;
       
       if (isEditing && exerciseId) {
         // Update existing exercise
-        const { success, error: updateError } = await updateData(`/exercises/${exerciseId}`, cleanPayload);
+        const { success, error: updateError } = await updateData(`/exercises/${exerciseId}`, finalCleanPayload);
         if (success) {
           key = exerciseId;
         } else {
@@ -881,7 +965,7 @@ export default function CreateExercise() {
         }
       } else {
         // Create new exercise
-        const result = await pushData('/exercises', cleanPayload);
+        const result = await pushData('/exercises', finalCleanPayload);
         key = result.key;
         error = result.error;
       }
@@ -911,7 +995,7 @@ export default function CreateExercise() {
       if (isPublic) {
         try {
           const publicExercisePayload = {
-            ...cleanPayload,
+            ...finalCleanPayload,
             id: key, // Use the same ID as the main exercise
             creatorName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
             creatorId: currentUserId,
@@ -1048,7 +1132,7 @@ export default function CreateExercise() {
   const handleImageSelect = (imageUri: string) => {
     if (!imageLibraryContext) return;
     
-    const { questionId, optionIndex, pairIndex, side, type } = imageLibraryContext;
+    const { questionId, optionIndex, pairIndex, side, reorderItemIndex, type } = imageLibraryContext;
     
     // Update the question with the selected image
     if (type === 'option' && optionIndex !== undefined) {
@@ -1069,6 +1153,12 @@ export default function CreateExercise() {
       updateQuestion(questionId, { pairs: nextPairs });
     } else if (type === 'question') {
       updateQuestion(questionId, { questionImage: imageUri });
+    } else if (type === 'reorder' && reorderItemIndex !== undefined) {
+      updateReorderItem(questionId, reorderItemIndex, { 
+        type: 'image', 
+        content: imageUri, 
+        imageUrl: imageUri 
+      });
     }
     
     // Close image library and return to question editor
@@ -1215,6 +1305,180 @@ export default function CreateExercise() {
     setImageLibraryContext({ questionId, type: 'question' });
     setShowImageLibrary(true);
     openModal('imageLibrary');
+  };
+
+  // Helper function to clean undefined values from objects
+  const cleanUndefinedValues = (obj: any): any => {
+    if (obj === null || obj === undefined) {
+      return null;
+    }
+    
+    if (Array.isArray(obj)) {
+      return obj.map(item => cleanUndefinedValues(item)).filter(item => item !== undefined);
+    }
+    
+    if (typeof obj === 'object') {
+      const cleaned: any = {};
+      for (const [key, value] of Object.entries(obj)) {
+        const cleanedValue = cleanUndefinedValues(value);
+        if (cleanedValue !== undefined) {
+          cleaned[key] = cleanedValue;
+        }
+      }
+      return cleaned;
+    }
+    
+    return obj;
+  };
+
+  // Helper function to validate no undefined values remain
+  const validateNoUndefined = (obj: any, path: string = ''): void => {
+    if (obj === undefined) {
+      console.error(`Found undefined value at path: ${path}`);
+      return;
+    }
+    
+    if (Array.isArray(obj)) {
+      obj.forEach((item, index) => {
+        validateNoUndefined(item, `${path}[${index}]`);
+      });
+    } else if (obj && typeof obj === 'object') {
+      for (const [key, value] of Object.entries(obj)) {
+        validateNoUndefined(value, `${path}.${key}`);
+      }
+    }
+  };
+
+  // Reorder item functions
+  const addReorderItem = (questionId: string, type: 'text' | 'image' = 'text') => {
+    const newItem: ReorderItem = {
+      id: Date.now().toString(),
+      type,
+      content: type === 'text' ? '' : '',
+      imageUrl: type === 'image' ? '' : undefined
+    };
+    
+    const question = questions.find(q => q.id === questionId);
+    if (question) {
+      const currentItems = question.reorderItems || [];
+      updateQuestion(questionId, { reorderItems: [...currentItems, newItem] });
+      
+      // If it's an image item, automatically open the image picker
+      if (type === 'image') {
+        const newItemIndex = currentItems.length; // Index of the newly added item
+        pickReorderItemImage(questionId, newItemIndex);
+      }
+    }
+  };
+
+  const updateReorderItem = (questionId: string, itemIndex: number, updates: Partial<ReorderItem>) => {
+    const question = questions.find(q => q.id === questionId);
+    if (question && question.reorderItems) {
+      const newItems = [...question.reorderItems];
+      newItems[itemIndex] = { ...newItems[itemIndex], ...updates };
+      updateQuestion(questionId, { reorderItems: newItems });
+    }
+  };
+
+  const removeReorderItem = (questionId: string, itemIndex: number) => {
+    const question = questions.find(q => q.id === questionId);
+    if (question && question.reorderItems && question.reorderItems.length > 1) {
+      const newItems = question.reorderItems.filter((_, index) => index !== itemIndex);
+      updateQuestion(questionId, { reorderItems: newItems });
+    }
+  };
+
+  const pickReorderItemImage = async (questionId: string, itemIndex: number) => {
+    setImageLibraryContext({ questionId, reorderItemIndex: itemIndex, type: 'reorder' });
+    setShowImageLibrary(true);
+    openModal('imageLibrary');
+  };
+
+  const reorderItems = (questionId: string, newItems: ReorderItem[]) => {
+    updateQuestion(questionId, { reorderItems: newItems });
+  };
+
+  // Render function for draggable reorder items
+  const renderReorderItem = ({ item, drag, isActive, getIndex }: RenderItemParams<ReorderItem>) => {
+    const index = getIndex?.() ?? 0;
+    const question = questions.find(q => q.id === editingQuestion?.id);
+    if (!question || !question.reorderItems) return null;
+
+    return (
+      <TouchableOpacity
+        style={[
+          styles.reorderItemContainer,
+          isActive && styles.reorderItemActive
+        ]}
+        onLongPress={drag}
+        disabled={isActive}
+      >
+        <View style={styles.reorderItemContent}>
+          <View style={styles.reorderItemNumber}>
+            <Text style={styles.reorderItemNumberText}>{index + 1}</Text>
+          </View>
+          
+          {item.type === 'text' ? (
+            <TextInput
+              style={styles.reorderTextInput}
+              value={item.content}
+              onChangeText={(text) => updateReorderItem(editingQuestion!.id, index, { content: text })}
+              placeholder={`Item ${index + 1}`}
+              placeholderTextColor="#9ca3af"
+            />
+          ) : (
+            <View style={styles.reorderImageContainer}>
+              {item.imageUrl && item.imageUrl.trim() !== '' ? (
+                <Image source={{ uri: item.imageUrl }} style={styles.reorderImageThumbnail} />
+              ) : (
+                <View style={styles.reorderImagePlaceholder}>
+                  <MaterialCommunityIcons name="image" size={24} color="#9ca3af" />
+                </View>
+              )}
+            </View>
+          )}
+          
+          <View style={styles.reorderItemActions}>
+            {item.type === 'text' ? (
+              <TouchableOpacity
+                style={styles.reorderActionButton}
+                onPress={() => pickReorderItemImage(editingQuestion!.id, index)}
+              >
+                <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.reorderItemActionGroup}>
+                <TouchableOpacity
+                  style={styles.reorderActionButton}
+                  onPress={() => pickReorderItemImage(editingQuestion!.id, index)}
+                >
+                  <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.reorderActionButton}
+                  onPress={() => updateReorderItem(editingQuestion!.id, index, { type: 'text', content: '', imageUrl: undefined })}
+                >
+                  <MaterialCommunityIcons name="text" size={20} color="#3b82f6" />
+                </TouchableOpacity>
+              </View>
+            )}
+            
+            {question.reorderItems.length > 1 && (
+              <TouchableOpacity
+                style={styles.reorderActionButton}
+                onPress={() => removeReorderItem(editingQuestion!.id, index)}
+              >
+                <AntDesign name="close" size={16} color="#ef4444" />
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+        
+        <View style={styles.reorderDragHandle}>
+          <MaterialCommunityIcons name="drag" size={20} color="#9ca3af" />
+        </View>
+      </TouchableOpacity>
+    );
   };
 
   const renderQuestionTypeModal = () => (
@@ -1547,7 +1811,7 @@ export default function CreateExercise() {
                         {(editingQuestion.pairs || []).map((pair, idx) => (
                           <View key={`pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                             <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
-                              {pair.leftImage ? (
+                              {pair.leftImage && pair.leftImage.trim() !== '' ? (
                                 <Image source={{ uri: pair.leftImage }} style={styles.pairImage} />
                               ) : (
                                 <Text style={styles.pairText}>{pair.left || 'Left item'}</Text>
@@ -1557,7 +1821,7 @@ export default function CreateExercise() {
                               <MaterialCommunityIcons name="arrow-right" size={20} color="#64748b" />
                             </View>
                             <View style={[styles.pairSide, styles.pairRight, { backgroundColor: ['#1e40af','#059669','#d97706','#dc2626','#7c3aed'][idx % 5] }]}>
-                              {pair.rightImage ? (
+                              {pair.rightImage && pair.rightImage.trim() !== '' ? (
                                 <Image source={{ uri: pair.rightImage }} style={styles.pairImage} />
                               ) : (
                                 <Text style={styles.pairText}>{pair.right || 'Right item'}</Text>
@@ -1612,7 +1876,7 @@ export default function CreateExercise() {
                               <MaterialCommunityIcons name="image-plus" size={18} color="#3b82f6" />
                             </TouchableOpacity>
                           </View>
-                          {pair.leftImage && (
+                          {pair.leftImage && pair.leftImage.trim() !== '' && (
                             <View style={styles.pairImagePreview}>
                               <Image source={{ uri: pair.leftImage }} style={styles.pairImageThumbnail} />
                               <TouchableOpacity 
@@ -1652,7 +1916,7 @@ export default function CreateExercise() {
                               <MaterialCommunityIcons name="image-plus" size={18} color="#3b82f6" />
                             </TouchableOpacity>
                           </View>
-                          {pair.rightImage && (
+                          {pair.rightImage && pair.rightImage.trim() !== '' && (
                             <View style={styles.pairImagePreview}>
                               <Image source={{ uri: pair.rightImage }} style={styles.pairImageThumbnail} />
                               <TouchableOpacity 
@@ -1698,52 +1962,58 @@ export default function CreateExercise() {
                       <Text style={[styles.choiceModeText, editingQuestion.reorderDirection === 'desc' && styles.choiceModeTextActive]}>Descending order</Text>
                     </TouchableOpacity>
                   </View>
-                  {(editingQuestion.order || []).map((item, index) => (
-                    <View key={index} style={styles.orderRow}>
-                      <Text style={styles.orderNumber}>{index + 1}.</Text>
-                      <TextInput
-                        style={styles.orderInput}
-                        value={item}
-                        onChangeText={(text) => {
-                          const newOrder = [...(editingQuestion.order || [])];
-                          newOrder[index] = text;
-                          updateQuestion(editingQuestion.id, { order: newOrder });
-                        }}
-                        placeholder={`Item ${index + 1}`}
-                      />
-                      {(editingQuestion.order || []).length > 1 && (
-                        <TouchableOpacity
-                          style={styles.removeButton}
-                          onPress={() => {
-                            const newOrder = (editingQuestion.order || []).filter((_, i) => i !== index);
-                            updateQuestion(editingQuestion.id, { order: newOrder });
-                          }}
-                        >
-                          <AntDesign name="close" size={16} color="#ef4444" />
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  ))}
-                  <TouchableOpacity
-                    style={styles.addButton}
-                    onPress={() => {
-                      const newOrder = [...(editingQuestion.order || []), ''];
-                      updateQuestion(editingQuestion.id, { order: newOrder });
-                    }}
-                  >
-                    <AntDesign name="plus" size={16} color="#3b82f6" />
-                    <Text style={styles.addButtonText}>Add Item</Text>
-                  </TouchableOpacity>
-                  {(editingQuestion.order || []).length > 0 && (
-                    <View style={{ marginTop: 10, flexDirection: 'row', flexWrap: 'wrap' }}>
-                      {(editingQuestion.order || []).map((it, i) => (
-                        <View key={`prev-${i}`} style={{ backgroundColor: ['#1e3a8a','#0f766e','#92400e','#7f1d1d','#5b21b6'][i % 5], paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12, marginRight: 8, marginBottom: 8, minWidth: 64, alignItems: 'center' }}>
-                          <Text style={{ color: '#fff', fontWeight: '700' }}>{it || `Item ${i+1}`}</Text>
-                          <View style={{ marginTop: 6, backgroundColor: 'rgba(255,255,255,0.12)', paddingVertical: 4, paddingHorizontal: 10, borderRadius: 8 }}>
-                            <Text style={{ color: '#fff', fontSize: 12 }}>{i + 1}</Text>
+                  
+                  {/* Draggable Reorder Items */}
+                  <View style={styles.reorderContainer}>
+                    <DraggableFlatList
+                      data={editingQuestion.reorderItems || []}
+                      renderItem={renderReorderItem}
+                      keyExtractor={(item) => item.id}
+                      onDragEnd={({ data }) => reorderItems(editingQuestion.id, data)}
+                      scrollEnabled={false}
+                    />
+                  </View>
+                  
+                  {/* Add Item Buttons */}
+                  <View style={styles.reorderAddButtons}>
+                    <TouchableOpacity
+                      style={styles.addReorderButton}
+                      onPress={() => addReorderItem(editingQuestion.id, 'text')}
+                    >
+                      <MaterialCommunityIcons name="text" size={16} color="#3b82f6" />
+                      <Text style={styles.addReorderButtonText}>Add Text Item</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.addReorderButton}
+                      onPress={() => addReorderItem(editingQuestion.id, 'image')}
+                    >
+                      <MaterialCommunityIcons name="image-plus" size={16} color="#3b82f6" />
+                      <Text style={styles.addReorderButtonText}>Add Image Item</Text>
+                    </TouchableOpacity>
+                  </View>
+                  
+                  {/* Preview */}
+                  {(editingQuestion.reorderItems || []).length > 0 && (
+                    <View style={styles.reorderPreview}>
+                      <Text style={styles.reorderPreviewLabel}>Preview:</Text>
+                      <View style={styles.reorderPreviewContainer}>
+                        {(editingQuestion.reorderItems || []).map((item, i) => (
+                          <View key={`prev-${i}`} style={[styles.reorderPreviewItem, { backgroundColor: ['#1e3a8a','#0f766e','#92400e','#7f1d1d','#5b21b6'][i % 5] }]}>
+                            {item.type === 'text' ? (
+                              <Text style={styles.reorderPreviewText}>{item.content || `Item ${i+1}`}</Text>
+                            ) : item.imageUrl && item.imageUrl.trim() !== '' ? (
+                              <Image source={{ uri: item.imageUrl }} style={styles.reorderPreviewImage} />
+                            ) : (
+                              <View style={styles.reorderPreviewPlaceholder}>
+                                <MaterialCommunityIcons name="image" size={20} color="#ffffff" />
+                              </View>
+                            )}
+                            <View style={styles.reorderPreviewNumber}>
+                              <Text style={styles.reorderPreviewNumberText}>{i + 1}</Text>
+                            </View>
                           </View>
-                        </View>
-                      ))}
+                        ))}
+                      </View>
                     </View>
                   )}
                 </View>
@@ -1905,7 +2175,7 @@ export default function CreateExercise() {
                                   {(sub.pairs || []).map((pair, idx) => (
                                     <View key={`sub-pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                                       <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
-                                        {(pair as any).leftImage ? (
+                                        {(pair as any).leftImage && (pair as any).leftImage.trim() !== '' ? (
                                           <Image source={{ uri: (pair as any).leftImage }} style={styles.pairImage} />
                                         ) : (
                                           <Text style={styles.pairText}>{pair.left || 'Left item'}</Text>
@@ -1915,7 +2185,7 @@ export default function CreateExercise() {
                                         <MaterialCommunityIcons name="arrow-right" size={20} color="#64748b" />
                                       </View>
                                       <View style={[styles.pairSide, styles.pairRight, { backgroundColor: ['#1e40af','#059669','#d97706','#dc2626','#7c3aed'][idx % 5] }]}>
-                                        {(pair as any).rightImage ? (
+                                        {(pair as any).rightImage && (pair as any).rightImage.trim() !== '' ? (
                                           <Image source={{ uri: (pair as any).rightImage }} style={styles.pairImage} />
                                         ) : (
                                           <Text style={styles.pairText}>{pair.right || 'Right item'}</Text>
@@ -1991,7 +2261,7 @@ export default function CreateExercise() {
                                         <MaterialCommunityIcons name="image-plus" size={18} color="#3b82f6" />
                                       </TouchableOpacity>
                                     </View>
-                                    {(pair as any).leftImage && (
+                                    {(pair as any).leftImage && (pair as any).leftImage.trim() !== '' && (
                                       <View style={styles.pairImagePreview}>
                                         <Image source={{ uri: (pair as any).leftImage }} style={styles.pairImageThumbnail} />
                                         <TouchableOpacity 
@@ -2063,7 +2333,7 @@ export default function CreateExercise() {
                                         <MaterialCommunityIcons name="image-plus" size={18} color="#3b82f6" />
                                       </TouchableOpacity>
                                     </View>
-                                    {(pair as any).rightImage && (
+                                    {(pair as any).rightImage && (pair as any).rightImage.trim() !== '' && (
                                       <View style={styles.pairImagePreview}>
                                         <Image source={{ uri: (pair as any).rightImage }} style={styles.pairImageThumbnail} />
                                         <TouchableOpacity 
@@ -4538,5 +4808,179 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#64748b',
     fontWeight: '500',
+  },
+
+  // Reorder Items Styles
+  reorderContainer: {
+    marginBottom: 16,
+  },
+  reorderItemContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  reorderItemActive: {
+    backgroundColor: '#f0f9ff',
+    borderColor: '#3b82f6',
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  reorderItemContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  reorderItemNumber: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  reorderItemNumberText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  reorderTextInput: {
+    flex: 1,
+    fontSize: 16,
+    color: '#1e293b',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reorderImageContainer: {
+    flex: 1,
+    height: 60,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reorderImageThumbnail: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  reorderImagePlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#f1f5f9',
+  },
+  reorderItemActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  reorderItemActionGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  reorderActionButton: {
+    padding: 8,
+    borderRadius: 6,
+    backgroundColor: '#f8fafc',
+    marginLeft: 4,
+  },
+  reorderDragHandle: {
+    padding: 8,
+    marginLeft: 8,
+  },
+  reorderAddButtons: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 16,
+  },
+  addReorderButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  addReorderButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#3b82f6',
+    marginLeft: 6,
+  },
+  reorderPreview: {
+    marginTop: 16,
+  },
+  reorderPreviewLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 8,
+  },
+  reorderPreviewContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  reorderPreviewItem: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    marginRight: 8,
+    marginBottom: 8,
+    minWidth: 64,
+    alignItems: 'center',
+    position: 'relative',
+  },
+  reorderPreviewText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  reorderPreviewImage: {
+    width: 40,
+    height: 40,
+    borderRadius: 6,
+    resizeMode: 'cover',
+  },
+  reorderPreviewPlaceholder: {
+    width: 40,
+    height: 40,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  reorderPreviewNumber: {
+    marginTop: 6,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+  },
+  reorderPreviewNumberText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

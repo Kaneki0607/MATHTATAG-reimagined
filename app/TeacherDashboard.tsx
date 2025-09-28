@@ -321,6 +321,16 @@ export default function TeacherDashboard() {
   const [deletingAssignment, setDeletingAssignment] = useState<AssignedExercise | null>(null);
   const [editAssignmentLoading, setEditAssignmentLoading] = useState(false);
   const [deleteAssignmentLoading, setDeleteAssignmentLoading] = useState(false);
+
+  // Student completion status modal
+  const [showStudentStatusModal, setShowStudentStatusModal] = useState(false);
+  const [selectedAssignmentForStatus, setSelectedAssignmentForStatus] = useState<AssignedExercise | null>(null);
+  const [completedStudents, setCompletedStudents] = useState<Record<string, string[]>>({}); // assignmentId -> studentIds[]
+
+  // Date/Time picker state
+  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [selectedTime, setSelectedTime] = useState(new Date());
+  const [newDeadline, setNewDeadline] = useState<string>('');
   
   // Category options
   const categoryOptions = [
@@ -335,6 +345,99 @@ export default function TeacherDashboard() {
     'Measurement',
     'Time & Money'
   ];
+
+  // Helper function to calculate time remaining until deadline
+  const getTimeRemaining = (deadline: string) => {
+    const now = new Date();
+    const dueDate = new Date(deadline);
+    const diffMs = dueDate.getTime() - now.getTime();
+    
+    if (diffMs <= 0) {
+      return { text: 'Overdue', color: '#ef4444', urgent: true };
+    }
+    
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    const diffWeeks = Math.floor(diffDays / 7);
+    
+    if (diffWeeks > 0) {
+      return { 
+        text: `${diffWeeks} week${diffWeeks > 1 ? 's' : ''} left`, 
+        color: diffWeeks <= 1 ? '#f59e0b' : '#10b981',
+        urgent: diffWeeks <= 1
+      };
+    } else if (diffDays > 0) {
+      return { 
+        text: `${diffDays} day${diffDays > 1 ? 's' : ''} left`, 
+        color: diffDays <= 1 ? '#ef4444' : diffDays <= 3 ? '#f59e0b' : '#10b981',
+        urgent: diffDays <= 1
+      };
+    } else {
+      return { 
+        text: `${diffHours} hour${diffHours > 1 ? 's' : ''} left`, 
+        color: '#ef4444',
+        urgent: true
+      };
+    }
+  };
+
+  // Helper function to get student completion stats
+  const getStudentCompletionStats = (assignment: AssignedExercise) => {
+    const classStudents = studentsByClass[assignment.classId] || [];
+    const totalStudents = classStudents.length;
+    
+    // Get completed students for this assignment
+    const assignmentCompletedStudents = completedStudents[assignment.id] || [];
+    const completedCount = assignmentCompletedStudents.length;
+    
+    // TODO: Implement real completion tracking
+    // This would query a submissions/completions collection in Firebase:
+    // const submissions = await readData(`/submissions/${assignment.id}`);
+    // const completedStudents = Object.keys(submissions || {}).length;
+    
+    return {
+      completed: completedCount,
+      total: totalStudents,
+      percentage: totalStudents > 0 ? Math.round((completedCount / totalStudents) * 100) : 0
+    };
+  };
+
+  // Helper function to get individual student status
+  const getStudentStatus = (studentId: string, assignment: AssignedExercise) => {
+    // Check if student has completed the assignment
+    const assignmentCompletedStudents = completedStudents[assignment.id] || [];
+    const isCompleted = assignmentCompletedStudents.includes(studentId);
+    
+    // TODO: Implement real completion tracking
+    // This would check if student has submitted the assignment:
+    // const submission = await readData(`/submissions/${assignment.id}/${studentId}`);
+    // return submission ? 'completed' : 'pending';
+    
+    // For now, check if student ID is in the completed list
+    return isCompleted ? 'completed' : 'pending';
+  };
+
+  // Function to open student status modal
+  const handleShowStudentStatus = (assignment: AssignedExercise) => {
+    setSelectedAssignmentForStatus(assignment);
+    setShowStudentStatusModal(true);
+  };
+
+  // Function to mark a student as completed (for testing purposes)
+  const markStudentCompleted = (studentId: string, assignmentId: string) => {
+    setCompletedStudents(prev => ({
+      ...prev,
+      [assignmentId]: [...(prev[assignmentId] || []), studentId]
+    }));
+  };
+
+  // Function to mark a student as pending (for testing purposes)
+  const markStudentPending = (studentId: string, assignmentId: string) => {
+    setCompletedStudents(prev => ({
+      ...prev,
+      [assignmentId]: (prev[assignmentId] || []).filter(id => id !== studentId)
+    }));
+  };
   
   // Filter and group exercises by category
   const getFilteredAndGroupedExercises = (exercises: any[]) => {
@@ -541,6 +644,19 @@ export default function TeacherDashboard() {
 
   const handleEditAssignment = (assignment: AssignedExercise) => {
     setEditingAssignment(assignment);
+    setNewDeadline(assignment.deadline || '');
+    
+    // Initialize date/time pickers with current deadline or current date/time
+    if (assignment.deadline) {
+      const deadlineDate = new Date(assignment.deadline);
+      setSelectedDate(deadlineDate);
+      setSelectedTime(deadlineDate);
+    } else {
+      const now = new Date();
+      setSelectedDate(now);
+      setSelectedTime(now);
+    }
+    
     setShowEditAssignmentModal(true);
   };
 
@@ -565,18 +681,29 @@ export default function TeacherDashboard() {
     }
   };
 
-  const saveEditAssignment = async (updatedAssignment: Partial<AssignedExercise>) => {
+  const updateDeadline = (date: Date, time: Date) => {
+    const combinedDateTime = new Date(date);
+    combinedDateTime.setHours(time.getHours());
+    combinedDateTime.setMinutes(time.getMinutes());
+    setNewDeadline(combinedDateTime.toISOString());
+  };
+
+  const saveEditAssignment = async () => {
     if (!editingAssignment) return;
     
     setEditAssignmentLoading(true);
     try {
       // Update the assignment in the database
-      const { success, error } = await updateData(`/assignments/${editingAssignment.id}`, updatedAssignment);
+      const { success, error } = await updateData(`/assignments/${editingAssignment.id}`, {
+        deadline: newDeadline
+      });
       
       if (success) {
         setShowEditAssignmentModal(false);
         setEditingAssignment(null);
+        setNewDeadline('');
         // The useExercises hook will automatically refresh the list
+        Alert.alert('Success', 'Assignment deadline updated successfully');
       } else {
         Alert.alert('Error', `Failed to update assignment: ${error}`);
       }
@@ -1375,48 +1502,97 @@ export default function TeacherDashboard() {
                        <Text style={styles.emptyStateSubtext}>Assign exercises to your classes to see them here</Text>
                      </View>
                    ) : (
-                     assignedExercises.map((assignment) => (
-                       <View key={assignment.id} style={styles.assignmentCard}>
-                         <View style={styles.assignmentHeader}>
-                           <View style={styles.assignmentInfo}>
-                             <Text style={styles.assignmentTitle}>
-                               {assignment.exercise?.title || 'Unknown Exercise'}
-                             </Text>
-                             <Text style={styles.assignmentClass}>
-                               {assignment.className || 'Unknown Class'}
-                             </Text>
+                     assignedExercises.map((assignment) => {
+                       const timeRemaining = getTimeRemaining(assignment.deadline);
+                       const completionStats = getStudentCompletionStats(assignment);
+                       
+                       return (
+                         <View key={assignment.id} style={styles.assignmentCard}>
+                           <View style={styles.assignmentHeader}>
+                             <View style={styles.assignmentInfo}>
+                               <Text style={styles.assignmentTitle}>
+                                 {assignment.exercise?.title || 'Unknown Exercise'}
+                               </Text>
+                               <Text style={styles.assignmentClass}>
+                                 {assignment.className || 'Unknown Class'}
+                               </Text>
+                             </View>
+                             <View style={styles.assignmentOptions}>
+                               <TouchableOpacity 
+                                 style={styles.assignmentActionButton}
+                                 onPress={() => handleEditAssignment(assignment)}
+                               >
+                                 <MaterialIcons name="edit" size={20} color="#3b82f6" />
+                               </TouchableOpacity>
+                               <TouchableOpacity 
+                                 style={styles.assignmentActionButton}
+                                 onPress={() => handleDeleteAssignment(assignment)}
+                               >
+                                 <MaterialIcons name="delete" size={20} color="#ef4444" />
+                               </TouchableOpacity>
+                             </View>
                            </View>
-                           <View style={styles.assignmentOptions}>
+                           
+                           {/* Student Completion Stats */}
+                           <View style={styles.assignmentStats}>
                              <TouchableOpacity 
-                               style={styles.assignmentActionButton}
-                               onPress={() => handleEditAssignment(assignment)}
+                               style={styles.completionStats}
+                               onPress={() => handleShowStudentStatus(assignment)}
+                               activeOpacity={0.7}
                              >
-                               <MaterialIcons name="edit" size={20} color="#3b82f6" />
+                               <View style={styles.completionIcon}>
+                                 <MaterialCommunityIcons name="account-group" size={16} color="#3b82f6" />
+                               </View>
+                               <Text style={styles.completionText}>
+                                 {completionStats.completed}/{completionStats.total} students completed
+                               </Text>
+                               <View style={[styles.completionBadge, { 
+                                 backgroundColor: completionStats.percentage === 100 ? '#10b981' : 
+                                                completionStats.percentage >= 50 ? '#f59e0b' : '#ef4444'
+                               }]}>
+                                 <Text style={styles.completionPercentage}>{completionStats.percentage}%</Text>
+                               </View>
+                               <MaterialCommunityIcons name="chevron-right" size={16} color="#64748b" />
                              </TouchableOpacity>
-                             <TouchableOpacity 
-                               style={styles.assignmentActionButton}
-                               onPress={() => handleDeleteAssignment(assignment)}
-                             >
-                               <MaterialIcons name="delete" size={20} color="#ef4444" />
-                             </TouchableOpacity>
+                             
+                             {/* Progress Bar */}
+                             <View style={styles.progressBarContainer}>
+                               <View style={styles.progressBar}>
+                                 <View 
+                                   style={[
+                                     styles.progressBarFill, 
+                                     { 
+                                       width: `${completionStats.percentage}%`,
+                                       backgroundColor: completionStats.percentage === 100 ? '#10b981' : 
+                                                      completionStats.percentage >= 50 ? '#f59e0b' : '#ef4444'
+                                     }
+                                   ]} 
+                                 />
+                               </View>
+                             </View>
+                           </View>
+                           
+                           <View style={styles.assignmentDetails}>
+                             <View style={styles.assignmentDetail}>
+                               <MaterialCommunityIcons name="calendar-clock" size={16} color="#64748b" />
+                               <Text style={styles.assignmentDetailText}>
+                                 Due: {new Date(assignment.deadline).toLocaleDateString()}
+                               </Text>
+                             </View>
+                             <View style={[styles.assignmentDetail, styles.timeRemainingDetail]}>
+                               <MaterialCommunityIcons 
+                                 name={timeRemaining.urgent ? "clock-alert" : "clock"} 
+                                 size={16} 
+                                 color={timeRemaining.color} 
+                               />
+                               <Text style={[styles.assignmentDetailText, { color: timeRemaining.color }]}>
+                                 {timeRemaining.text}
+                               </Text>
+                             </View>
                            </View>
                          </View>
-                         <View style={styles.assignmentDetails}>
-                           <View style={styles.assignmentDetail}>
-                             <MaterialCommunityIcons name="calendar-clock" size={16} color="#64748b" />
-                             <Text style={styles.assignmentDetailText}>
-                               Due: {new Date(assignment.deadline).toLocaleDateString()}
-                             </Text>
-                           </View>
-                           <View style={styles.assignmentDetail}>
-                             <MaterialCommunityIcons name="account" size={16} color="#64748b" />
-                             <Text style={styles.assignmentDetailText}>
-                               Assigned: {new Date(assignment.createdAt).toLocaleDateString()}
-                             </Text>
-                           </View>
-                         </View>
-                       </View>
-                     ))
+                       );
+                     })
                    )}
                  </>
                )}
@@ -1552,7 +1728,7 @@ export default function TeacherDashboard() {
                         <View style={styles.quickStats}>
                           <View style={styles.statItem}>
                             <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
-                            <Text style={styles.statLabel}>Assignments</Text>
+                            <Text style={styles.statLabel}>Exercises</Text>
                           </View>
                           <View style={styles.statDivider} />
                           <View style={styles.statItem}>
@@ -2194,11 +2370,69 @@ export default function TeacherDashboard() {
 
                 <View style={styles.editInputGroup}>
                   <Text style={styles.editInputLabel}>Deadline</Text>
-                  <TouchableOpacity style={styles.dateTimeButton}>
-                    <MaterialCommunityIcons name="calendar-clock" size={20} color="#3b82f6" />
-                    <Text style={styles.dateTimeText}>
-                      {editingAssignment.deadline ? 
-                        new Date(editingAssignment.deadline).toLocaleString('en-US', {
+                  
+                  {/* Simple Date/Time Input */}
+                  <View style={styles.simpleDateTimeContainer}>
+                    <Text style={styles.simpleDateTimeLabel}>Select New Deadline:</Text>
+                    
+                    <View style={styles.simpleDateTimeRow}>
+                      <Text style={styles.simpleDateTimeText}>Date:</Text>
+                      <TextInput
+                        style={styles.simpleDateTimeInput}
+                        placeholder="MM/DD/YYYY"
+                        value={selectedDate.toLocaleDateString('en-US')}
+                        onChangeText={(text) => {
+                          // Simple date parsing
+                          const parts = text.split('/');
+                          if (parts.length === 3) {
+                            const month = parseInt(parts[0]) - 1;
+                            const day = parseInt(parts[1]);
+                            const year = parseInt(parts[2]);
+                            if (!isNaN(month) && !isNaN(day) && !isNaN(year)) {
+                              const newDate = new Date(year, month, day);
+                              if (!isNaN(newDate.getTime())) {
+                                setSelectedDate(newDate);
+                                updateDeadline(newDate, selectedTime);
+                              }
+                            }
+                          }
+                        }}
+                      />
+                    </View>
+
+                    <View style={styles.simpleDateTimeRow}>
+                      <Text style={styles.simpleDateTimeText}>Time:</Text>
+                      <TextInput
+                        style={styles.simpleDateTimeInput}
+                        placeholder="HH:MM AM/PM"
+                        value={selectedTime.toLocaleTimeString('en-US', { hour12: true })}
+                        onChangeText={(text) => {
+                          // Simple time parsing
+                          const timeMatch = text.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+                          if (timeMatch) {
+                            let hours = parseInt(timeMatch[1]);
+                            const minutes = parseInt(timeMatch[2]);
+                            const ampm = timeMatch[3].toUpperCase();
+                            
+                            if (ampm === 'PM' && hours !== 12) hours += 12;
+                            if (ampm === 'AM' && hours === 12) hours = 0;
+                            
+                            const newTime = new Date();
+                            newTime.setHours(hours, minutes, 0, 0);
+                            setSelectedTime(newTime);
+                            updateDeadline(selectedDate, newTime);
+                          }
+                        }}
+                      />
+                    </View>
+                  </View>
+
+                  {/* Current Deadline Display */}
+                  {newDeadline && (
+                    <View style={styles.currentDeadlineDisplay}>
+                      <Text style={styles.currentDeadlineLabel}>New Deadline:</Text>
+                      <Text style={styles.currentDeadlineText}>
+                        {new Date(newDeadline).toLocaleString('en-US', {
                           weekday: 'short',
                           year: 'numeric',
                           month: 'long',
@@ -2206,11 +2440,10 @@ export default function TeacherDashboard() {
                           hour: 'numeric',
                           minute: '2-digit',
                           hour12: true
-                        }) : 'No deadline set'
-                      }
-                    </Text>
-                    <MaterialIcons name="arrow-drop-down" size={20} color="#64748b" />
-                  </TouchableOpacity>
+                        })}
+                      </Text>
+                    </View>
+                  )}
                 </View>
 
                 <View style={styles.editAssignmentInfo}>
@@ -2241,10 +2474,7 @@ export default function TeacherDashboard() {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.editSaveButton, editAssignmentLoading && styles.buttonDisabled]}
-              onPress={() => {
-                // For now, just close the modal - date picker implementation would go here
-                setShowEditAssignmentModal(false);
-              }}
+              onPress={saveEditAssignment}
               disabled={editAssignmentLoading}
             >
               <Text style={styles.editSaveButtonText}>
@@ -2313,6 +2543,109 @@ export default function TeacherDashboard() {
           </View>
         </View>
       </Modal>
+
+      {/* Student Status Modal */}
+      <Modal
+        visible={showStudentStatusModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowStudentStatusModal(false)}
+      >
+        <View style={styles.studentStatusModalContainer}>
+          <View style={styles.studentStatusModalHeader}>
+            <TouchableOpacity
+              onPress={() => setShowStudentStatusModal(false)}
+              style={styles.studentStatusModalCloseButton}
+            >
+              <MaterialIcons name="close" size={24} color="#1e293b" />
+            </TouchableOpacity>
+            <Text style={styles.studentStatusModalTitle}>Student Progress</Text>
+            <View style={styles.studentStatusModalPlaceholder} />
+          </View>
+
+          {selectedAssignmentForStatus && (
+            <ScrollView style={styles.studentStatusModalContent} showsVerticalScrollIndicator={false}>
+              <View style={styles.studentStatusHeader}>
+                <Text style={styles.studentStatusAssignmentTitle}>
+                  {selectedAssignmentForStatus.exercise?.title || 'Unknown Exercise'}
+                </Text>
+                <Text style={styles.studentStatusClass}>
+                  {selectedAssignmentForStatus.className || 'Unknown Class'}
+                </Text>
+                <Text style={styles.studentStatusDeadline}>
+                  Due: {new Date(selectedAssignmentForStatus.deadline).toLocaleString('en-US', {
+                    weekday: 'short',
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                    hour: 'numeric',
+                    minute: '2-digit',
+                    hour12: true
+                  })}
+                </Text>
+              </View>
+
+              <View style={styles.studentListContainer}>
+                <Text style={styles.studentListTitle}>Students ({studentsByClass[selectedAssignmentForStatus.classId]?.length || 0})</Text>
+                <Text style={styles.studentListSubtitle}>Tap status badges to toggle completion</Text>
+                
+                {(studentsByClass[selectedAssignmentForStatus.classId] || []).map((student: any, index: number) => {
+                  const status = getStudentStatus(student.studentId, selectedAssignmentForStatus);
+                  return (
+                    <View key={student.studentId} style={styles.studentStatusItem}>
+                      <View style={styles.studentInfo}>
+                        <View style={styles.studentAvatar}>
+                          <Text style={styles.studentAvatarText}>
+                            {student.nickname?.charAt(0)?.toUpperCase() || 'S'}
+                          </Text>
+                        </View>
+                        <View style={styles.studentDetails}>
+                          <Text style={styles.studentStatusName}>{student.nickname || 'Unknown Student'}</Text>
+                          <Text style={styles.studentId}>ID: {student.studentId}</Text>
+                        </View>
+                      </View>
+                      
+                      <TouchableOpacity 
+                        style={[styles.statusBadge, {
+                          backgroundColor: status === 'completed' ? '#10b981' : '#ef4444'
+                        }]}
+                        onPress={() => {
+                          if (status === 'completed') {
+                            markStudentPending(student.studentId, selectedAssignmentForStatus.id);
+                          } else {
+                            markStudentCompleted(student.studentId, selectedAssignmentForStatus.id);
+                          }
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <MaterialCommunityIcons 
+                          name={status === 'completed' ? 'check-circle' : 'alert-circle'} 
+                          size={16} 
+                          color="#ffffff" 
+                        />
+                        <Text style={styles.studentStatusText}>
+                          {status === 'completed' ? 'Completed' : 'Pending'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
+              </View>
+            </ScrollView>
+          )}
+
+          <View style={styles.studentStatusModalActions}>
+            <TouchableOpacity
+              style={styles.studentStatusCloseButton}
+              onPress={() => setShowStudentStatusModal(false)}
+            >
+              <Text style={styles.studentStatusCloseButtonText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+
 
     </View>
   );
@@ -3468,6 +3801,61 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
 
+  // Assignment Stats Styles
+  assignmentStats: {
+    marginVertical: 12,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#f1f5f9',
+  },
+  completionStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderRadius: 8,
+    backgroundColor: '#f8fafc',
+  },
+  completionIcon: {
+    marginRight: 8,
+  },
+  completionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+    flex: 1,
+  },
+  completionBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    minWidth: 40,
+    alignItems: 'center',
+  },
+  completionPercentage: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  progressBarContainer: {
+    marginTop: 4,
+  },
+  progressBar: {
+    height: 6,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  timeRemainingDetail: {
+    marginTop: 4,
+  },
+
   // Assignment Modal Styles
   assignmentModalContainer: {
     flex: 1,
@@ -3578,6 +3966,204 @@ const styles = StyleSheet.create({
   editInfoValue: {
     fontSize: 14,
     color: '#64748b',
+  },
+  currentDeadlineDisplay: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+  },
+  currentDeadlineLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1e40af',
+    marginBottom: 4,
+  },
+  currentDeadlineText: {
+    fontSize: 14,
+    color: '#1e40af',
+    fontWeight: '500',
+  },
+
+  // Simple Date/Time Input Styles
+  simpleDateTimeContainer: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  simpleDateTimeLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+  simpleDateTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  simpleDateTimeText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#64748b',
+    width: 60,
+  },
+  simpleDateTimeInput: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#1e293b',
+  },
+
+  // Custom Date/Time Picker Modal Styles
+  customDateTimeModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 40,
+  },
+  customDateTimeModal: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 25,
+  },
+  customDateTimeModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  customDateTimeModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  customDateTimeModalCloseButton: {
+    padding: 4,
+  },
+  customDateTimeModalContent: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+  },
+  customDateTimeSection: {
+    marginBottom: 24,
+  },
+  customDateTimeLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+  customDateTimeInputs: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  customDateTimeInputGroup: {
+    flex: 1,
+    marginHorizontal: 4,
+  },
+  customDateTimeInputLabel: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#64748b',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  customDateTimeInput: {
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#1e293b',
+    textAlign: 'center',
+    fontWeight: '600',
+  },
+  customDateTimeToggle: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  customDateTimeToggleText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  customDateTimePreview: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 8,
+    padding: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+  },
+  customDateTimePreviewLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1e40af',
+    marginBottom: 4,
+  },
+  customDateTimePreviewText: {
+    fontSize: 14,
+    color: '#1e40af',
+    fontWeight: '500',
+  },
+  customDateTimeModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  customDateTimeCancelButton: {
+    flex: 1,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginRight: 8,
+  },
+  customDateTimeCancelButtonText: {
+    color: '#64748b',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  customDateTimeConfirmButton: {
+    flex: 1,
+    backgroundColor: '#3b82f6',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  customDateTimeConfirmButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '600',
   },
 
   // Delete Assignment Modal Styles
@@ -3715,6 +4301,156 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: {
     backgroundColor: '#9ca3af',
+  },
+
+  // Student Status Modal Styles
+  studentStatusModalContainer: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+  },
+  studentStatusModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  studentStatusModalCloseButton: {
+    padding: 4,
+  },
+  studentStatusModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  studentStatusModalPlaceholder: {
+    width: 32,
+  },
+  studentStatusModalContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  studentStatusModalActions: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    backgroundColor: '#ffffff',
+  },
+  studentStatusCloseButton: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  studentStatusCloseButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  // Student Status Content Styles
+  studentStatusHeader: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    marginVertical: 16,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+  },
+  studentStatusAssignmentTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  studentStatusClass: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  studentStatusDeadline: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  studentListContainer: {
+    marginBottom: 20,
+  },
+  studentListTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  studentListSubtitle: {
+    fontSize: 12,
+    color: '#64748b',
+    marginBottom: 12,
+    fontStyle: 'italic',
+  },
+  studentStatusItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  studentInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  studentAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#3b82f6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  studentAvatarText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  studentDetails: {
+    flex: 1,
+  },
+  studentStatusName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+  studentId: {
+    fontSize: 12,
+    color: '#64748b',
+  },
+  statusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  studentStatusText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#ffffff',
+    marginLeft: 4,
   },
   
 });

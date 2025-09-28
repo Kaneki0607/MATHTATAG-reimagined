@@ -40,7 +40,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
   const [classes, setClasses] = useState<Class[]>([]);
   const [selectedClasses, setSelectedClasses] = useState<string[]>([]);
   const [deadline, setDeadline] = useState(new Date());
-  const [deadlineText, setDeadlineText] = useState('');
+  const [deadlineDate, setDeadlineDate] = useState('');
+  const [deadlineTime, setDeadlineTime] = useState('');
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -52,7 +53,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       setDeadline(tomorrow);
-      setDeadlineText(tomorrow.toISOString().slice(0, 16)); // Format: YYYY-MM-DDTHH:MM
+      setDeadlineDate(tomorrow.toLocaleDateString('en-US')); // Format: MM/DD/YYYY
+      setDeadlineTime(tomorrow.toLocaleTimeString('en-US', { hour12: true })); // Format: HH:MM AM/PM
     }
   }, [visible, currentUserId]);
 
@@ -84,11 +86,41 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
     );
   };
 
-  const handleDateTextChange = (text: string) => {
-    setDeadlineText(text);
-    const date = new Date(text);
-    if (!isNaN(date.getTime())) {
-      setDeadline(date);
+  const handleDateChange = (text: string) => {
+    setDeadlineDate(text);
+    updateDeadlineFromInputs(text, deadlineTime);
+  };
+
+  const handleTimeChange = (text: string) => {
+    setDeadlineTime(text);
+    updateDeadlineFromInputs(deadlineDate, text);
+  };
+
+  const updateDeadlineFromInputs = (dateText: string, timeText: string) => {
+    // Parse date (MM/DD/YYYY format)
+    const dateParts = dateText.split('/');
+    if (dateParts.length === 3) {
+      const month = parseInt(dateParts[0]) - 1;
+      const day = parseInt(dateParts[1]);
+      const year = parseInt(dateParts[2]);
+      
+      if (!isNaN(month) && !isNaN(day) && !isNaN(year)) {
+        // Parse time (HH:MM AM/PM format)
+        const timeMatch = timeText.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+        if (timeMatch) {
+          let hours = parseInt(timeMatch[1]);
+          const minutes = parseInt(timeMatch[2]);
+          const ampm = timeMatch[3].toUpperCase();
+          
+          if (ampm === 'PM' && hours !== 12) hours += 12;
+          if (ampm === 'AM' && hours === 12) hours = 0;
+          
+          const newDeadline = new Date(year, month, day, hours, minutes);
+          if (!isNaN(newDeadline.getTime())) {
+            setDeadline(newDeadline);
+          }
+        }
+      }
     }
   };
 
@@ -182,19 +214,38 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Set Deadline</Text>
               <View style={styles.deadlineContainer}>
-                <View style={styles.dateInputContainer}>
-                  <MaterialCommunityIcons name="calendar-clock" size={20} color="#3b82f6" />
+                {/* Date Selection */}
+                <View style={styles.dateTimeButton}>
+                  <MaterialCommunityIcons name="calendar" size={20} color="#3b82f6" />
                   <TextInput
-                    style={styles.dateInput}
-                    value={deadlineText}
-                    onChangeText={handleDateTextChange}
-                    placeholder="2024-12-25 14:30"
-                    placeholderTextColor="#9ca3af"
+                    style={styles.dateTimeText}
+                    placeholder="MM/DD/YYYY"
+                    value={deadlineDate}
+                    onChangeText={handleDateChange}
                   />
                 </View>
-                <Text style={styles.dateHint}>
-                  Format: YYYY-MM-DD HH:MM (e.g., 2024-12-25 14:30)
-                </Text>
+
+                {/* Time Selection */}
+                <View style={[styles.dateTimeButton, { marginTop: 8 }]}>
+                  <MaterialCommunityIcons name="clock" size={20} color="#3b82f6" />
+                  <TextInput
+                    style={styles.dateTimeText}
+                    placeholder="HH:MM AM/PM"
+                    value={deadlineTime}
+                    onChangeText={handleTimeChange}
+                  />
+                </View>
+
+                {/* Current Deadline Display */}
+                {deadline && (
+                  <View style={styles.currentDeadlineDisplay}>
+                    <Text style={styles.currentDeadlineLabel}>Deadline Preview:</Text>
+                    <Text style={styles.currentDeadlineText}>
+                      {formatDate(deadline)}
+                    </Text>
+                  </View>
+                )}
+
                 <View style={styles.quickDateOptions}>
                   <TouchableOpacity 
                     style={styles.quickDateButton}
@@ -202,7 +253,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       const tomorrow = new Date();
                       tomorrow.setDate(tomorrow.getDate() + 1);
                       setDeadline(tomorrow);
-                      setDeadlineText(tomorrow.toISOString().slice(0, 16));
+                      setDeadlineDate(tomorrow.toLocaleDateString('en-US'));
+                      setDeadlineTime(tomorrow.toLocaleTimeString('en-US', { hour12: true }));
                     }}
                   >
                     <Text style={styles.quickDateText}>Tomorrow</Text>
@@ -213,7 +265,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       const nextWeek = new Date();
                       nextWeek.setDate(nextWeek.getDate() + 7);
                       setDeadline(nextWeek);
-                      setDeadlineText(nextWeek.toISOString().slice(0, 16));
+                      setDeadlineDate(nextWeek.toLocaleDateString('en-US'));
+                      setDeadlineTime(nextWeek.toLocaleTimeString('en-US', { hour12: true }));
                     }}
                   >
                     <Text style={styles.quickDateText}>Next Week</Text>
@@ -433,6 +486,42 @@ const styles = StyleSheet.create({
     color: '#64748b',
     marginTop: 4,
     fontStyle: 'italic',
+  },
+  // Date/Time Button Styles (matching edit assignment modal)
+  dateTimeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  dateTimeText: {
+    flex: 1,
+    fontSize: 16,
+    color: '#1e293b',
+    marginLeft: 12,
+  },
+  currentDeadlineDisplay: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+  },
+  currentDeadlineLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1e40af',
+    marginBottom: 4,
+  },
+  currentDeadlineText: {
+    fontSize: 14,
+    color: '#1e40af',
+    fontWeight: '500',
   },
   footer: {
     flexDirection: 'row',
