@@ -143,19 +143,6 @@ const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
     { name: '8', uri: require('../assets/images/Numbers/8.png') },
     { name: '9', uri: require('../assets/images/Numbers/9.png') },
   ],
-  'Pattern': [
-    { name: 'Pattern 1', uri: require('../assets/images/Pattern/1.png') },
-    { name: 'Pattern 2', uri: require('../assets/images/Pattern/2.png') },
-    { name: 'Pattern 3', uri: require('../assets/images/Pattern/3.png') },
-    { name: 'Pattern 4', uri: require('../assets/images/Pattern/4.png') },
-    { name: 'Pattern 5', uri: require('../assets/images/Pattern/5.png') },
-    { name: 'Pattern 6', uri: require('../assets/images/Pattern/6.png') },
-    { name: 'Pattern 7', uri: require('../assets/images/Pattern/7.png') },
-    { name: 'Pattern 8', uri: require('../assets/images/Pattern/8.png') },
-    { name: 'Pattern 9', uri: require('../assets/images/Pattern/9.png') },
-    { name: 'Pattern 10', uri: require('../assets/images/Pattern/10.png') },
-    { name: 'Pattern 11', uri: require('../assets/images/Pattern/11.png') },
-  ],
   'School Supplies': [
     { name: 'Abacus', uri: require('../assets/images/School Supplies/abacus.png') },
     { name: 'Bag', uri: require('../assets/images/School Supplies/bag.png') },
@@ -248,6 +235,7 @@ interface Question {
   multiAnswer?: boolean;
   reorderDirection?: 'asc' | 'desc';
   questionImage?: string | null;
+  questionImages?: string[]; // Support for multiple images in pattern questions
   fillSettings?: {
     caseSensitive: boolean;
     showBoxes: boolean;
@@ -337,7 +325,7 @@ export default function CreateExercise() {
     optionIndex?: number;
     pairIndex?: number;
     side?: 'left' | 'right';
-    type: 'question' | 'option' | 'pair';
+    type: 'question' | 'option' | 'pair' | 'multiple-question';
   } | null>(null);
   
   // Inline image library state
@@ -348,7 +336,7 @@ export default function CreateExercise() {
     pairIndex?: number;
     side?: 'left' | 'right';
     reorderItemIndex?: number;
-    type: 'question' | 'option' | 'pair' | 'reorder';
+    type: 'question' | 'option' | 'pair' | 'reorder' | 'multiple-question';
   } | null>(null);
   const [customCategories, setCustomCategories] = useState<Record<string, string[]>>({});
   const [showAddCategory, setShowAddCategory] = useState(false);
@@ -537,6 +525,26 @@ export default function CreateExercise() {
               updatedQuestions[qIndex].questionImage = remoteUrl;
             })
         );
+      }
+
+      // Handle multiple question images
+      if (question.questionImages && Array.isArray(question.questionImages)) {
+        question.questionImages.forEach((imageUri, imgIndex) => {
+          if (isLocalImage(imageUri)) {
+            uploadPromises.push(
+              uploadLocalImageToStorage(imageUri, `exercises/${exerciseCode}/question-${qIndex}-image-${imgIndex}`)
+                .then(remoteUrl => {
+                  if (!updatedQuestions[qIndex].questionImages) {
+                    updatedQuestions[qIndex].questionImages = [...(question.questionImages || [])];
+                  }
+                  const questionImages = updatedQuestions[qIndex].questionImages;
+                  if (questionImages && Array.isArray(questionImages) && questionImages.length > imgIndex) {
+                    questionImages[imgIndex] = remoteUrl;
+                  }
+                })
+            );
+          }
+        });
       }
 
       // Handle option images
@@ -751,16 +759,6 @@ export default function CreateExercise() {
       }))
     },
     {
-      id: 'pattern',
-      name: 'Pattern',
-      icon: 'pattern',
-      color: '#f97316',
-      images: stockImages['Pattern'].map(pattern => ({
-        name: pattern.name,
-        source: pattern.uri
-      }))
-    },
-    {
       id: 'school-supplies',
       name: 'School Supplies',
       icon: 'school',
@@ -823,7 +821,7 @@ export default function CreateExercise() {
     }
     
     if (type === 'identification') {
-      newQuestion.fillSettings = { caseSensitive: false, showBoxes: true };
+      newQuestion.fillSettings = { caseSensitive: false, showBoxes: false };
     }
     
     newQuestion.questionImage = null;
@@ -1008,6 +1006,40 @@ export default function CreateExercise() {
     return updatedQuestions;
   };
 
+  // Function to clean question text and remove any answers
+  const cleanQuestionText = (questionText: string, answer: string): string => {
+    let cleaned = questionText;
+    
+    // Remove parenthetical hints that include the answer
+    cleaned = cleaned.replace(/\([^)]*show[^)]*image[^)]*\)/gi, '');
+    cleaned = cleaned.replace(/\([^)]*ipakita[^)]*image[^)]*\)/gi, '');
+    cleaned = cleaned.replace(/\([^)]*show[^)]*\)/gi, '');
+    cleaned = cleaned.replace(/\([^)]*ipakita[^)]*\)/gi, '');
+    
+    // Remove direct mentions of the answer in the question
+    const answerVariations = [
+      answer,
+      answer.toLowerCase(),
+      answer.toUpperCase(),
+      answer.charAt(0).toUpperCase() + answer.slice(1).toLowerCase()
+    ];
+    
+    answerVariations.forEach(variation => {
+      // Remove patterns like "Tingnan ang 'Answer'" or "Look at the 'Answer'"
+      cleaned = cleaned.replace(new RegExp(`(Tingnan ang|Look at the|See the)\\s*['"]?${variation}['"]?`, 'gi'), '');
+      // Remove patterns like "Ito ay isang Answer" or "This is a Answer"
+      cleaned = cleaned.replace(new RegExp(`(Ito ay isang|This is a|This is an)\\s+${variation}`, 'gi'), '');
+      // Remove patterns like "Answer na nasa picture" or "Answer in the picture"
+      cleaned = cleaned.replace(new RegExp(`${variation}\\s+(na nasa picture|in the picture|sa picture)`, 'gi'), '');
+    });
+    
+    // Clean up extra spaces and punctuation
+    cleaned = cleaned.replace(/\s+/g, ' ').trim();
+    cleaned = cleaned.replace(/\s*\.\s*$/, '.');
+    
+    return cleaned;
+  };
+
   // AI Questions Generator function
   const generateAIQuestions = async () => {
     if (!exerciseTitle.trim() || !exerciseDescription.trim() || !exerciseCategory.trim()) {
@@ -1042,22 +1074,68 @@ EXERCISE DETAILS:
 
 QUESTION TYPE: ${selectedQuestionType}
 
-AVAILABLE STOCK IMAGES (use these in your questions when relevant):
+AVAILABLE STOCK IMAGES (use these in your questions when relevant but its not necessary):
 ${availableImages}
 
 REQUIREMENTS FOR FILIPINO GRADE 1 STUDENTS:
-1. Use simple Filipino language (Tagalog) mixed with English when necessary
+1. Use simple Filipino language (Tagalog) mixed with ONLY WHEN English is necessary
 2. Questions should be age-appropriate for 6-7 year old Filipino children
 3. Use familiar Filipino words and concepts (e.g., "bahay", "pamilya", "pagkain", "kulay")
 4. Make questions engaging with Filipino cultural context
 5. Use simple sentence structures
 6. Include visual concepts that Filipino children can relate to
-7. For multiple choice: Provide 4 simple options with only 1 correct answer
-8. For identification: Ask for specific Filipino words, objects, or concepts
-9. For matching: Create pairs that Filipino children can easily understand
-10. For re-order: Create simple sequences (numbers, letters, daily activities)
-11. MAXIMIZE USE OF STOCK IMAGES: Reference specific images from the available list in questions and options
-12. When using images, mention the exact image name from the stock images list
+7. MAXIMIZE USE OF STOCK IMAGES: Reference specific images from the available list in questions and options
+8. When using images, mention the exact image name from the stock images list
+9. CRITICAL: NEVER include the answer in the question text - questions should only ask, not provide answers
+
+QUESTION TYPE SPECIFIC RULES:
+
+FOR MULTIPLE CHOICE:
+- Provide 4 simple options with only 1 correct answer
+- The "answer" field should contain the EXACT text that appears in the options array
+- The correct answer must be placed in a RANDOM position in the options array (not always first)
+- All options should be plausible but only one should be correct
+- Use simple, clear language for all options
+- Include image references in options when relevant (e.g., "Apple", "Cat", "Circle")
+
+FOR IDENTIFICATION:
+- Ask for specific Filipino words, objects, or concepts
+- The "answer" field should contain the correct answer text
+- Do NOT include options array
+- Do NOT include Emoji in the answer
+- Focus on single-word or short phrase answers
+- Use questionImage to show what students need to identify
+- ALWAYS include alternative answers for Filipino variations
+- Include common Filipino terms, English equivalents, and regional variations
+- Example: If asking for "bahay", include alternatives like "house", "tahanan", "bahay-kubo"
+- CRITICAL: NEVER mention the answer in the question text
+- Use phrases like "Ano ang hugis nito?" (What shape is this?) instead of "Ano ang hugis nito? Tingnan ang 'Triangle'"
+- Use "Ano ito?" (What is this?) instead of "Ano ito? Ito ay isang aso" (What is this? This is a dog)
+- The question should only ask, not provide hints or answers
+
+FOR MATCHING:
+- Create pairs that Filipino children can easily understand
+- The "answer" field should be an array of correct pair indices
+- Include "pairs" array with left and right items
+- Each pair should have clear, simple concepts
+- Use images in pairs when relevant
+
+FOR RE-ORDER:
+- Create simple sequences (numbers, letters, daily activities, patterns)
+- The "answer" field should be an array of items in correct order
+- Include "reorderItems" array with text and/or image items
+- Items should be logically connected and age-appropriate
+- For pattern questions, use multiple images to show the sequence
+
+FOR RE-ORDER PATTERN QUESTIONS:
+- When creating pattern questions (number sequences, shape patterns, color progressions), use multiple images
+- Include "questionImages" array with multiple image references to show the pattern sequence
+- Create logical patterns that children can follow (e.g., 1-2-3-?, circle-square-circle-?, red-blue-red-?)
+- Use numbers, shapes, colors, or objects in sequence
+- The answer should be the next item in the pattern
+- ALWAYS use questionImages array for pattern questions, NOT questionImage
+- Include 3-4 images in the pattern sequence
+- Make sure the pattern is clear and logical for Grade 1 students
 
 CRITICAL IMAGE RELEVANCE RULES:
 - questionImage MUST be factually relevant to the main subject of the question
@@ -1067,30 +1145,115 @@ CRITICAL IMAGE RELEVANCE RULES:
 - NEVER use irrelevant images (e.g., pig image for milk question, cat image for dog question)
 - questionImage should help students understand what the question is asking about
 - If no relevant image exists in stock images, do NOT include questionImage
+- For pattern questions, use questionImages array with multiple relevant images
 
-CRITICAL RULES FOR MULTIPLE CHOICE:
-- The "answer" field should contain the EXACT text that appears in the options array
-- The correct answer must be placed in a RANDOM position in the options array (not always first)
-- All options should be plausible but only one should be correct
-- Use simple, clear language for all options
-- Include image references in options when relevant (e.g., "Apple", "Cat", "Circle")
+YOU CAN ALSO USE EMOJIS INSTEAD OF USING ONLY PICTURES
 
 IMPORTANT: Respond ONLY with valid JSON array. No additional text before or after.
 
-JSON Format:
+JSON Format for Multiple Choice:
 [
   {
-    "question": "Simple question in Filipino/English mix (mention specific images when relevant)",
+    "question": "Simple question in Filipino/English mix",
     "answer": "Exact text that appears in options array",
     "options": ["Option A", "Correct Answer", "Option C", "Option D"],
-    "imageReferences": ["Image Name 1", "Image Name 2"] // Optional: specific images to use
+    "imageReferences": ["Image Name 1", "Image Name 2"]
   }
-]`;
+]
+
+JSON Format for Identification:
+[
+  {
+    "question": "Ano ang hugis nito?",
+    "answer": "Triangle",
+    "imageReferences": ["Triangle"],
+    "alternativeAnswers": ["tatsulok", "triangle", "shape with three sides"]
+  }
+]
+
+JSON Format for Matching:
+[
+  {
+    "question": "Match the items",
+    "answer": [0, 1, 2],
+    "pairs": [
+      {"left": "Item 1", "right": "Match 1"},
+      {"left": "Item 2", "right": "Match 2"},
+      {"left": "Item 3", "right": "Match 3"}
+    ],
+    "imageReferences": ["Image Name 1", "Image Name 2"]
+  }
+]
+
+JSON Format for Re-order (regular sequence):
+[
+  {
+    "question": "Put these in the correct order",
+    "answer": ["First", "Second", "Third"],
+    "reorderItems": [
+      {"type": "text", "content": "First item"},
+      {"type": "text", "content": "Second item"},
+      {"type": "text", "content": "Third item"}
+    ],
+    "imageReferences": ["Image Name 1", "Image Name 2"]
+  }
+]
+
+JSON Format for Re-order (pattern with multiple images):
+[
+  {
+    "question": "What comes next in this pattern?",
+    "answer": "Next item in pattern",
+    "questionImages": ["Number 1", "Number 2", "Number 3"],
+    "imageReferences": ["Number 1", "Number 2", "Number 3", "Number 4"]
+  }
+]
+
+IMPORTANT FOR PATTERN QUESTIONS:
+- Always use "questionImages" array (not "questionImage") for pattern questions
+- Include 3-4 images in the pattern sequence
+- Use specific image names from the available stock images
+- Make the pattern logical and easy to follow
+- The question should ask "What comes next?" or "What is the next item?"
+
+IMPORTANT FOR IDENTIFICATION ALTERNATIVE ANSWERS:
+- ALWAYS include alternative answers for identification questions
+- Include Filipino variations, English equivalents, and regional terms
+- Examples of good alternative answers:
+  * For "bahay": ["house", "tahanan", "bahay-kubo", "home"]
+  * For "aso": ["dog", "aso", "canine"]
+  * For "tubig": ["water", "tubig", "liquid"]
+  * For "araw": ["sun", "araw", "sunshine", "sikat ng araw"]
+  * For "bulaklak": ["flower", "bulaklak", "bloom"]
+- Include 2-4 alternative answers per question
+- Use simple, common terms that Grade 1 students would know
+
+CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
+- NEVER mention the answer in the question text
+- WRONG: "Ano ang hugis nito? Tingnan ang 'Triangle'"
+- WRONG: "Ano ito? Ito ay isang aso"
+- WRONG: "What is this? This is a house"
+- WRONG: "Ano ang shape na nasa picture? (ipakita ang image ng Square)"
+- WRONG: "What shape is this? (show the image of a Square)"
+- CORRECT: "Ano ang hugis nito?" (What shape is this?)
+- CORRECT: "Ano ito?" (What is this?)
+- CORRECT: "What is this?"
+- CORRECT: "Ano ang shape na nasa picture?" (What shape is in the picture?)
+- The question should ONLY ask, never provide hints or answers
+- Do NOT include parenthetical hints like "(show the image of X)" or "(ipakita ang image ng X)"
+- Do NOT include the answer in any form within the question text`;
 
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
       console.log('API URL:', apiUrl);
       
-      const response = await fetch(apiUrl, {
+      // Retry logic for 503 errors
+      let response;
+      let attempts = 0;
+      const maxAttempts = 10;
+      
+      while (attempts < maxAttempts) {
+        try {
+          response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1114,10 +1277,40 @@ JSON Format:
         })
       });
 
-      if (!response.ok) {
+          if (response.ok) {
+            break; // Success, exit retry loop
+          } else if (response.status === 503) {
+            attempts++;
+            console.warn(`API returned 503 (Service Unavailable). Attempt ${attempts}/${maxAttempts}. Retrying in 1 second...`);
+            if (attempts < maxAttempts) {
+              await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+              continue; // Retry
+            } else {
+              const errorText = await response.text();
+              console.error('API Error after max attempts:', response.status, errorText);
+              throw new Error(`API Error: ${response.status} - Service unavailable after ${maxAttempts} attempts`);
+            }
+          } else {
+            // Other error, don't retry
         const errorText = await response.text();
         console.error('API Error:', response.status, errorText);
         throw new Error(`API Error: ${response.status}`);
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          if (errorMessage.includes('503') && attempts < maxAttempts) {
+            attempts++;
+            console.warn(`Network error during API call. Attempt ${attempts}/${maxAttempts}. Retrying in 1 second...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            continue;
+          } else {
+            throw error; // Re-throw if not a 503 error or max attempts reached
+          }
+        }
+      }
+
+      if (!response) {
+        throw new Error('Failed to get response from API after all retry attempts');
       }
 
       const data = await response.json();
@@ -1181,29 +1374,37 @@ JSON Format:
           throw new Error(`Question ${index + 1} is missing required fields`);
         }
 
-        // Process options and assign images
-        let processedOptions = undefined;
-        let optionImages = undefined;
-        
-        if (q.options && Array.isArray(q.options)) {
-          processedOptions = q.options.map((opt: any) => String(opt).trim());
-          optionImages = q.options.map((opt: any) => {
-            const imageName = String(opt).trim();
-            return findStockImageByName(imageName);
-          });
+        // Process based on question type
+        let processedQuestion: Question = {
+          id: `ai_${Date.now()}_${index}_${Math.random().toString(36).substr(2, 9)}`,
+          type: selectedQuestionType as any,
+          question: q.question.trim(),
+          answer: '',
+          fillSettings: {
+            caseSensitive: false,
+            showBoxes: false,
+            allowShowWork: false
+          }
+        };
+
+
+        // Apply question text cleaning for identification questions
+        if (selectedQuestionType === 'identification') {
+          processedQuestion.question = cleanQuestionText(q.question.trim(), q.answer.trim());
         }
 
-        // Find question image if imageReferences are provided
-        let questionImage = null;
-        if (q.imageReferences && Array.isArray(q.imageReferences) && q.imageReferences.length > 0) {
-          questionImage = findStockImageByName(q.imageReferences[0]);
-        }
-
-        // If no specific image references, try to find images from question text
-        // BUT avoid using images that are already used in answer options
-        if (!questionImage) {
-          const questionText = q.question.toLowerCase();
-          const usedOptionImages = new Set(optionImages.filter((img: any) => img).map((img: any) => img.toLowerCase()));
+        // Helper function to find stock image by name
+        const findStockImageByName = (imageName: string): string | null => {
+          for (const category of Object.keys(stockImages)) {
+            const found = stockImages[category].find(img => 
+              img.name.toLowerCase() === imageName.toLowerCase()
+            );
+            if (found) {
+              return Image.resolveAssetSource(found.uri).uri;
+            }
+          }
+          return null;
+        };
           
           // Helper function to check if image is relevant to question
           const isImageRelevant = (imgName: string, questionText: string) => {
@@ -1213,7 +1414,7 @@ JSON Format:
             // Check for direct mentions
             if (questionLower.includes(imgLower)) return true;
             
-            // Check for conceptual relevance (e.g., "milk" question should use cow/goat, not pig)
+          // Check for conceptual relevance
             if (questionLower.includes('gatas') || questionLower.includes('milk')) {
               return imgLower.includes('cow') || imgLower.includes('goat') || imgLower.includes('milk');
             }
@@ -1228,44 +1429,49 @@ JSON Format:
             if (questionLower.includes('numero') || questionLower.includes('number')) {
               return imgLower.match(/\d/) || imgLower.includes('number');
             }
+          if (questionLower.includes('pattern') || questionLower.includes('sunod') || 
+              questionLower.includes('next') || questionLower.includes('susunod') ||
+              questionLower.includes('sequence') || questionLower.includes('order')) {
+            return imgLower.includes('number') || imgLower.includes('circle') || 
+                   imgLower.includes('square') || imgLower.includes('triangle') || 
+                   imgLower.includes('rectangle') || imgLower.includes('oval') ||
+                   imgLower.includes('red') || imgLower.includes('blue') || 
+                   imgLower.includes('green') || imgLower.includes('yellow');
+          }
             
             return false;
           };
           
-          for (const category of Object.keys(stockImages)) {
-            for (const img of stockImages[category]) {
-              const imgName = img.name.toLowerCase();
-              // Only use image if it's relevant to question AND not used in options
-              if (isImageRelevant(imgName, questionText) && !usedOptionImages.has(imgName)) {
-                questionImage = Image.resolveAssetSource(img.uri).uri;
-                console.log(`✅ Selected relevant question image: ${imgName} for question: ${q.question.substring(0, 50)}...`);
-                break;
-              }
-            }
-            if (questionImage) break;
-          }
-          
-          // If no relevant image found, log it and leave questionImage as null
-          if (!questionImage) {
-            console.log(`⚠️ No relevant image found for question: ${q.question.substring(0, 50)}...`);
-          }
+        // Process based on question type
+        switch (selectedQuestionType) {
+          case 'multiple-choice':
+            // Process options and assign images
+            let processedOptions = undefined;
+            let optionImages = undefined;
+            
+            if (q.options && Array.isArray(q.options)) {
+              processedOptions = q.options.map((opt: any) => String(opt).trim());
+              optionImages = q.options.map((opt: any) => {
+                const imageName = String(opt).trim();
+                return findStockImageByName(imageName);
+              });
         }
 
         // Find the correct answer letter by matching the answer text with options
         let correctAnswerLetter = '';
         const correctAnswerText = q.answer.trim();
-        const correctIndex = processedOptions.findIndex((option: string) => 
+            const correctIndex = processedOptions?.findIndex((option: string) => 
           option.toLowerCase() === correctAnswerText.toLowerCase()
-        );
+            ) ?? -1;
         
         if (correctIndex !== -1) {
           correctAnswerLetter = String.fromCharCode(65 + correctIndex); // A, B, C, D
         } else {
           // Fallback: if no exact match, try partial match
-          const partialIndex = processedOptions.findIndex((option: string) => 
+              const partialIndex = processedOptions?.findIndex((option: string) => 
             option.toLowerCase().includes(correctAnswerText.toLowerCase()) ||
             correctAnswerText.toLowerCase().includes(option.toLowerCase())
-          );
+              ) ?? -1;
           if (partialIndex !== -1) {
             correctAnswerLetter = String.fromCharCode(65 + partialIndex);
           } else {
@@ -1275,27 +1481,174 @@ JSON Format:
           }
         }
 
-        return {
-          id: `ai_${Date.now()}_${index}_${Math.random().toString(36).substr(2, 9)}`,
-          type: selectedQuestionType as any,
-          question: q.question.trim(),
-          answer: correctAnswerLetter, // Store the letter (A, B, C, D) instead of text
+            processedQuestion = {
+              ...processedQuestion,
+              answer: correctAnswerLetter,
           options: processedOptions,
-          optionImages: optionImages,
-          pairs: undefined,
-          order: undefined,
-          reorderItems: undefined,
-          passage: undefined,
-          subQuestions: undefined,
-          multiAnswer: false,
-          reorderDirection: 'asc',
-          questionImage: questionImage,
+              optionImages: optionImages
+            };
+            break;
+
+          case 'identification':
+            // Process alternative answers for identification questions
+            let altAnswers = undefined;
+            if (q.alternativeAnswers && Array.isArray(q.alternativeAnswers)) {
+              altAnswers = q.alternativeAnswers.map((alt: any) => String(alt).trim()).filter(Boolean);
+            }
+
+            processedQuestion = {
+              ...processedQuestion,
+              answer: q.answer.trim(),
           fillSettings: {
             caseSensitive: false,
-            showBoxes: true,
-            allowShowWork: false
+                showBoxes: false,
+                allowShowWork: false,
+                altAnswers: altAnswers
+              }
+            };
+            break;
+
+          case 'matching':
+            // Process pairs
+            let processedPairs = undefined;
+            if (q.pairs && Array.isArray(q.pairs)) {
+              processedPairs = q.pairs.map((pair: any) => ({
+                left: pair.left?.trim() || '',
+                right: pair.right?.trim() || '',
+                leftImage: pair.leftImage ? findStockImageByName(pair.leftImage) : null,
+                rightImage: pair.rightImage ? findStockImageByName(pair.rightImage) : null
+              }));
+            }
+
+            processedQuestion = {
+              ...processedQuestion,
+              answer: Array.isArray(q.answer) ? q.answer : [],
+              pairs: processedPairs
+            };
+            break;
+
+          case 're-order':
+            // Process reorder items
+            let processedReorderItems = undefined;
+            if (q.reorderItems && Array.isArray(q.reorderItems)) {
+              processedReorderItems = q.reorderItems.map((item: any) => ({
+                id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                type: item.type || 'text',
+                content: item.content?.trim() || '',
+                imageUrl: item.imageUrl || (item.type === 'image' ? findStockImageByName(item.content) : undefined)
+              }));
+            }
+
+            processedQuestion = {
+              ...processedQuestion,
+              answer: Array.isArray(q.answer) ? q.answer : [],
+              reorderItems: processedReorderItems,
+              reorderDirection: 'asc'
+            };
+            break;
+
+          case 'reading-passage':
+            processedQuestion = {
+              ...processedQuestion,
+              answer: q.answer.trim(),
+              passage: q.passage?.trim() || ''
+            };
+            break;
+        }
+
+        // Handle images based on question type
+        let questionImage = null;
+        let questionImages = undefined;
+
+        // Check if this is a pattern question (has questionImages or multiple imageReferences)
+        const isPatternQuestion = (q.questionImages && Array.isArray(q.questionImages) && q.questionImages.length > 0) ||
+                                 (q.imageReferences && Array.isArray(q.imageReferences) && q.imageReferences.length > 1 && 
+                                  (q.question.toLowerCase().includes('pattern') || q.question.toLowerCase().includes('sunod') || 
+                                   q.question.toLowerCase().includes('next') || q.question.toLowerCase().includes('susunod')));
+
+        if (q.imageReferences && Array.isArray(q.imageReferences) && q.imageReferences.length > 0) {
+          if (selectedQuestionType === 're-order' && (q.imageReferences.length > 1 || isPatternQuestion)) {
+            // For re-order questions with multiple images or pattern questions, use questionImages array
+            questionImages = q.imageReferences.map((imgRef: string) => findStockImageByName(imgRef)).filter(Boolean);
+          } else {
+            // For other question types, use single questionImage
+            questionImage = findStockImageByName(q.imageReferences[0]);
           }
+        }
+
+        // Handle special case for pattern questions with multiple images
+        if (q.questionImages && Array.isArray(q.questionImages) && q.questionImages.length > 0) {
+          questionImages = q.questionImages.map((imgRef: string) => findStockImageByName(imgRef)).filter(Boolean);
+        }
+
+        // If no specific image references, try to find images from question text
+        if (!questionImage && !questionImages) {
+          const questionText = q.question.toLowerCase();
+          const usedOptionImages = new Set(
+            (processedQuestion.optionImages || [])
+              .filter((img: any) => img)
+              .map((img: any) => img.toLowerCase())
+          );
+          
+          // For pattern questions, collect up to 4 images
+          const maxImages = isPatternQuestion ? 4 : 1;
+          let imageCount = 0;
+          
+          for (const category of Object.keys(stockImages)) {
+            for (const img of stockImages[category]) {
+              const imgName = img.name.toLowerCase();
+              // Only use image if it's relevant to question AND not used in options
+              if (isImageRelevant(imgName, questionText) && !usedOptionImages.has(imgName)) {
+                if (selectedQuestionType === 're-order' || isPatternQuestion || (q.questionImages && q.questionImages.length > 1)) {
+                  // For pattern questions or re-order questions, collect multiple images
+                  if (!questionImages) {
+                    questionImages = [];
+                  }
+                  questionImages.push(Image.resolveAssetSource(img.uri).uri);
+                  imageCount++;
+                  console.log(`✅ Selected relevant question image: ${imgName} for pattern question: ${q.question.substring(0, 50)}...`);
+                  
+                  // Stop collecting images if we have enough or if it's not a pattern question
+                  if (imageCount >= maxImages || !isPatternQuestion) {
+                    break;
+                  }
+                } else {
+                  questionImage = Image.resolveAssetSource(img.uri).uri;
+                  console.log(`✅ Selected relevant question image: ${imgName} for question: ${q.question.substring(0, 50)}...`);
+                  break;
+                }
+              }
+            }
+            if (questionImage || (questionImages && imageCount >= maxImages)) break;
+          }
+          
+          // If no relevant image found, log it
+          if (!questionImage && !questionImages) {
+            console.log(`⚠️ No relevant image found for question: ${q.question.substring(0, 50)}...`);
+          }
+        }
+
+        const finalQuestion = {
+          ...processedQuestion,
+          questionImage: questionImage,
+          questionImages: questionImages
         };
+
+        // Debug logging for pattern questions
+        if (isPatternQuestion) {
+          console.log(`🔍 Pattern question detected: ${q.question.substring(0, 50)}...`);
+          console.log(`📸 Question images:`, questionImages);
+          console.log(`🖼️ Single image:`, questionImage);
+        }
+
+        // Debug logging for identification questions with alternative answers
+        if (selectedQuestionType === 'identification' && finalQuestion.fillSettings?.altAnswers?.length) {
+          console.log(`🏷️ Identification question with alternatives: ${q.question.substring(0, 50)}...`);
+          console.log(`📝 Main answer:`, finalQuestion.answer);
+          console.log(`🔄 Alternative answers:`, finalQuestion.fillSettings.altAnswers);
+        }
+
+        return finalQuestion;
       });
 
       // Add generated questions to existing questions
@@ -2204,6 +2557,10 @@ Enhanced text with emotions:`;
             cleanQuestion.questionImage = q.questionImage;
           }
           
+          if (q.questionImages && q.questionImages.length > 0) {
+            cleanQuestion.questionImages = q.questionImages;
+          }
+          
           if (q.passage) {
             cleanQuestion.passage = q.passage;
           }
@@ -2459,6 +2816,8 @@ Enhanced text with emotions:`;
       updateQuestion(questionId, { pairs: nextPairs });
     } else if (type === 'question') {
       updateQuestion(questionId, { questionImage: imageUri });
+    } else if (type === 'multiple-question') {
+      addQuestionImage(questionId, imageUri);
     } else if (type === 'reorder' && reorderItemIndex !== undefined) {
       updateReorderItem(questionId, reorderItemIndex, { 
         type: 'image', 
@@ -2611,6 +2970,33 @@ Enhanced text with emotions:`;
     setImageLibraryContext({ questionId, type: 'question' });
     setShowImageLibrary(true);
     openModal('imageLibrary');
+  };
+
+  const pickMultipleQuestionImages = async (questionId: string) => {
+    // Open the Image Library for multiple question image selection
+    setImageLibraryContext({ questionId, type: 'multiple-question' });
+    setShowImageLibrary(true);
+    openModal('imageLibrary');
+  };
+
+  const addQuestionImage = (questionId: string, imageUri: string) => {
+    const question = questions.find(q => q.id === questionId);
+    if (!question) return;
+
+    const currentImages = question.questionImages || [];
+    updateQuestion(questionId, { 
+      questionImages: [...currentImages, imageUri] 
+    });
+  };
+
+  const removeQuestionImage = (questionId: string, imageIndex: number) => {
+    const question = questions.find(q => q.id === questionId);
+    if (!question || !question.questionImages) return;
+
+    const updatedImages = question.questionImages.filter((_, index) => index !== imageIndex);
+    updateQuestion(questionId, { 
+      questionImages: updatedImages.length > 0 ? updatedImages : undefined 
+    });
   };
 
   // Helper function to clean undefined values from objects
@@ -2867,7 +3253,13 @@ Enhanced text with emotions:`;
               <TextInput
                 style={styles.textInput}
                 value={editingQuestion.question}
-                onChangeText={(text) => updateQuestion(editingQuestion.id, { question: text })}
+                onChangeText={(text) => {
+                  // Clean the question text to remove any answers
+                  const cleanedText = editingQuestion.type === 'identification' && editingQuestion.answer 
+                    ? cleanQuestionText(text, editingQuestion.answer as string)
+                    : text;
+                  updateQuestion(editingQuestion.id, { question: cleanedText });
+                }}
                 placeholder="Enter your question..."
                 placeholderTextColor="#64748b"
                 multiline
@@ -2930,12 +3322,25 @@ Enhanced text with emotions:`;
                 </View>
               </View>
               
-              <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
                 <TouchableOpacity onPress={() => pickQuestionImage(editingQuestion.id)} style={styles.pickFileButton}>
                   <MaterialCommunityIcons name="image-plus" size={16} color="#ffffff" />
                   <Text style={styles.pickFileButtonText}>{editingQuestion.questionImage ? 'Change image' : 'Add image'}</Text>
                 </TouchableOpacity>
+                
+                {/* Multiple images button for pattern questions */}
+                {(editingQuestion.type === 're-order' || editingQuestion.type === 'identification') && (
+                  <TouchableOpacity 
+                    onPress={() => pickMultipleQuestionImages(editingQuestion.id)} 
+                    style={[styles.pickFileButton, { marginLeft: 8, backgroundColor: '#f97316' }]}
+                  >
+                    <MaterialCommunityIcons name="image-multiple" size={16} color="#ffffff" />
+                    <Text style={styles.pickFileButtonText}>Add Multiple Images</Text>
+                  </TouchableOpacity>
+                )}
               </View>
+              
+              {/* Single question image */}
                 {editingQuestion.questionImage && (
                   <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center' }}>
                     <Image 
@@ -2949,6 +3354,41 @@ Enhanced text with emotions:`;
                     </TouchableOpacity>
                   </View>
                 )}
+              
+              {/* Multiple question images */}
+              {editingQuestion.questionImages && editingQuestion.questionImages.length > 0 && (
+                <View style={{ marginTop: 8 }}>
+                  <Text style={[styles.inputLabel, { marginBottom: 8 }]}>Question Images ({editingQuestion.questionImages.length})</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
+                    {editingQuestion.questionImages.map((imageUri, index) => (
+                      <View key={index} style={{ marginRight: 8, position: 'relative' }}>
+                        <Image 
+                          source={{ uri: imageUri }} 
+                          style={{ width: 100, height: 100, borderRadius: 8 }} 
+                          resizeMode="cover"
+                          loadingIndicatorSource={require('../assets/images/icon.png')}
+                        />
+                        <TouchableOpacity 
+                          onPress={() => removeQuestionImage(editingQuestion.id, index)}
+                          style={{
+                            position: 'absolute',
+                            top: -8,
+                            right: -8,
+                            backgroundColor: '#ef4444',
+                            borderRadius: 12,
+                            width: 24,
+                            height: 24,
+                            justifyContent: 'center',
+                            alignItems: 'center'
+                          }}
+                        >
+                          <MaterialCommunityIcons name="close" size={16} color="#ffffff" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
               </View>
 
               {editingQuestion.type === 'identification' && (
@@ -4664,39 +5104,6 @@ Enhanced text with emotions:`;
                 {stockImages['Numbers'].map((image, index) => (
                   <TouchableOpacity
                     key={`number-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
-
-            {/* Pattern Section */}
-            <View style={styles.imageCategory}>
-              <Text style={styles.categoryTitle}>Pattern</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
-                contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Pattern')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {stockImages['Pattern'].slice(0, 8).map((image, index) => (
-                  <TouchableOpacity
-                    key={`pattern-${index}`}
                     style={styles.horizontalImageItem}
                     onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
                   >
