@@ -8,8 +8,19 @@ import {
     updateMetadata,
     uploadBytes,
     uploadBytesResumable,
+    uploadString,
 } from 'firebase/storage';
 import { storage } from './firebase';
+
+// Polyfill for atob in React Native
+const atob = (str: string) => {
+  try {
+    return global.atob ? global.atob(str) : Buffer.from(str, 'base64').toString('binary');
+  } catch (e) {
+    // Fallback for environments where neither global.atob nor Buffer is available
+    return str;
+  }
+};
 
 // Storage utility functions
 export const uploadFile = async (path: string, file: File | Blob, metadata?: any) => {
@@ -116,15 +127,37 @@ export const downloadFileAsBlob = async (path: string) => {
   }
 };
 
-// Helper function to create file from base64
+// Helper function to create blob from base64 (for TTS audio upload)
 export const createFileFromBase64 = (base64: string, filename: string, mimeType: string) => {
-  const byteCharacters = atob(base64);
-  const byteNumbers = new Array(byteCharacters.length);
+  // For React Native, we need to use a different approach
+  // Convert base64 to binary string format that React Native Blob can handle
+  const base64Data = base64.includes(',') ? base64.split(',')[1] : base64;
   
-  for (let i = 0; i < byteCharacters.length; i++) {
-    byteNumbers[i] = byteCharacters.charCodeAt(i);
+  // Convert base64 to binary string
+  const binaryString = atob(base64Data);
+  
+  // Create a Blob using the binary string
+  // React Native Blob constructor accepts strings
+  return new Blob([binaryString], { type: mimeType });
+};
+
+// Alternative upload function specifically for base64 data
+export const uploadBase64File = async (path: string, base64: string, mimeType: string, metadata?: any) => {
+  try {
+    const storageRef = ref(storage, path);
+    
+    // Clean the base64 data
+    const base64Data = base64.includes(',') ? base64.split(',')[1] : base64;
+    
+    // Use uploadString with base64 format - this is the React Native compatible way
+    const snapshot = await uploadString(storageRef, base64Data, 'base64', {
+      ...metadata,
+      contentType: mimeType
+    });
+    
+    const downloadURL = await getDownloadURL(snapshot.ref);
+    return { downloadURL, error: null };
+  } catch (error: any) {
+    return { downloadURL: null, error: error.message };
   }
-  
-  const byteArray = new Uint8Array(byteNumbers);
-  return new File([byteArray], filename, { type: mimeType });
 };

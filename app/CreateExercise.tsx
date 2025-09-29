@@ -1,6 +1,7 @@
 import { AntDesign, MaterialCommunityIcons } from '@expo/vector-icons';
+import { AudioSource, AudioStatus, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -14,12 +15,14 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
 import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
+
+// Configuration - Now using direct API calls to Gemini and ElevenLabs
 
 // Stock image library data
 const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
@@ -251,6 +254,8 @@ interface Question {
     ignoreAccents?: boolean;
     allowShowWork?: boolean;
   };
+  // TTS fields
+  ttsAudioUrl?: string;
 }
 
 export default function CreateExercise() {
@@ -275,6 +280,8 @@ export default function CreateExercise() {
     'Word Problems',
     'Geometry',
     'Fractions',
+    'Succession',
+    'Pattern',
     'Measurement',
     'Time & Money',
     'Custom'
@@ -286,6 +293,25 @@ export default function CreateExercise() {
   const [loading, setLoading] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [exerciseId, setExerciseId] = useState<string | null>(null);
+
+  // TTS state
+  const [isGeneratingTTS, setIsGeneratingTTS] = useState(false);
+  const [isPlayingTTS, setIsPlayingTTS] = useState(false);
+  const [currentAudioUri, setCurrentAudioUri] = useState<string | null>(null);
+  // TTS language is now handled directly in the API call, no need for state
+  const [currentAudioPlayer, setCurrentAudioPlayer] = useState<any | null>(null);
+  
+  // Local TTS audio management
+  const [localTTSAudio, setLocalTTSAudio] = useState<{
+    questionId: string;
+    localUri: string;
+    base64Data: string;
+  } | null>(null);
+  const [pendingTTSUploads, setPendingTTSUploads] = useState<Array<{
+    questionId: string;
+    localUri: string;
+    base64Data: string;
+  }>>([]);
   
   // User state
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -327,6 +353,31 @@ export default function CreateExercise() {
     return code;
   };
 
+  // Initialize Audio
+  useEffect(() => {
+    const setupAudio = async () => {
+      try {
+        // Configure audio mode for playback
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          shouldPlayInBackground: false,
+        });
+        console.log('Audio mode configured successfully');
+      } catch (error) {
+        console.warn('Audio mode setup failed:', error);
+      }
+    };
+    
+    setupAudio();
+    
+    return () => {
+      // Cleanup audio player on unmount
+      if (currentAudioPlayer) {
+        currentAudioPlayer.remove();
+      }
+    };
+  }, []);
+
   // Handle authentication and fetch teacher data
   useEffect(() => {
     const unsubscribe = onAuthChange((user) => {
@@ -339,6 +390,60 @@ export default function CreateExercise() {
     });
     return unsubscribe;
   }, []);
+
+  // Cleanup TTS audio when component unmounts or question changes
+  useEffect(() => {
+    return () => {
+      if (currentAudioPlayer) {
+        currentAudioPlayer.remove();
+      }
+      // Clean up local TTS files
+      cleanupLocalTTSFiles();
+    };
+  }, [currentAudioPlayer]);
+
+  // Function to clean up local TTS files (but preserve pending uploads for retry)
+  const cleanupLocalTTSFiles = async () => {
+    try {
+      // Only clean up current local TTS audio (not pending uploads)
+      if (localTTSAudio?.localUri) {
+        // Check if this file is in pending uploads - if so, don't delete it
+        const isInPendingUploads = pendingTTSUploads.some(p => p.localUri === localTTSAudio.localUri);
+        
+        if (!isInPendingUploads) {
+          try {
+            const fileInfo = await FileSystem.getInfoAsync(localTTSAudio.localUri);
+            if (fileInfo.exists) {
+              await FileSystem.deleteAsync(localTTSAudio.localUri);
+              console.log('Cleaned up current local TTS file:', localTTSAudio.localUri);
+            }
+          } catch (error) {
+            console.warn('Failed to clean up current local TTS file:', error);
+          }
+        } else {
+          console.log('Skipping cleanup - file is in pending uploads:', localTTSAudio.localUri);
+        }
+      }
+      
+      // DON'T clean up pending uploads - they need to stay for upload
+      console.log(`Keeping ${pendingTTSUploads.length} pending TTS files for upload/retry`);
+      
+      // Only clear the current local audio, NOT the pending uploads
+      setLocalTTSAudio(null);
+      // Note: We don't clear pendingTTSUploads here - they should only be cleared after successful upload
+    } catch (error) {
+      console.warn('Error cleaning up local TTS files:', error);
+    }
+  };
+
+  // Stop audio when switching to a different question
+  useEffect(() => {
+    if (currentAudioPlayer) {
+      currentAudioPlayer.remove();
+      setCurrentAudioPlayer(null);
+      setIsPlayingTTS(false);
+    }
+  }, [editingQuestion?.id, currentAudioPlayer]);
 
   // Load exercise data when editing
   useEffect(() => {
@@ -731,6 +836,685 @@ export default function CreateExercise() {
     }
   };
 
+  // Function to save TTS audio locally
+  const saveTTSAudioLocally = async (base64Audio: string, questionId: string): Promise<string> => {
+    try {
+      console.log('Saving TTS audio locally...');
+      
+      // Create file name and local path using the cache directory
+      const fileName = `tts_${questionId}_${Date.now()}.mp3`;
+      const localUri = `${FileSystem.cacheDirectory}${fileName}`;
+      
+      // Write to local file system using the legacy API
+      await FileSystem.writeAsStringAsync(localUri, base64Audio, {
+        encoding: 'base64',
+      });
+      
+      console.log('TTS audio saved locally as MP3:', localUri);
+      console.log('File will be kept for upload - not deleted immediately');
+      return localUri;
+      
+    } catch (error) {
+      console.error('Error saving TTS audio locally:', error);
+      throw error;
+    }
+  };
+
+  // Function to upload local MP3 file to Firebase Storage
+  const uploadTTSAudioToStorage = async (localUri: string, exerciseCode: string, questionId: string): Promise<string> => {
+    try {
+      console.log('Uploading local MP3 file to Firebase Storage...');
+      console.log('Local file path:', localUri);
+      
+      // Check if file exists
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (!fileInfo.exists) {
+        throw new Error(`Local TTS file not found: ${localUri}`);
+      }
+      
+      console.log('File exists, size:', fileInfo.size, 'bytes');
+      
+      // Create file name and storage path
+      const fileName = `tts_${questionId}_${Date.now()}.mp3`;
+      const storagePath = `exercises/${exerciseCode}/tts/${fileName}`;
+      
+      // Fetch the local file and convert to blob
+      console.log('Fetching local file...');
+      const response = await fetch(localUri);
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch local file: ${response.status} ${response.statusText}`);
+      }
+      
+      console.log('Converting response to blob...');
+      const blob = await response.blob();
+      
+      console.log('Blob created, size:', blob.size, 'bytes, type:', blob.type);
+      
+      // Upload blob to Firebase Storage
+      console.log('Uploading to Firebase Storage...');
+      const result = await uploadFile(storagePath, blob, {
+        contentType: 'audio/mpeg'
+      });
+      
+      if (result.error) {
+        throw new Error(`Firebase Storage error: ${result.error}`);
+      }
+      
+      if (!result.downloadURL) {
+        throw new Error('Firebase Storage did not return a download URL');
+      }
+      
+      // Validate the download URL
+      if (!result.downloadURL.startsWith('http')) {
+        throw new Error('Invalid download URL received from Firebase Storage');
+      }
+      
+      console.log('TTS audio uploaded successfully to Firebase Storage as MP3');
+      console.log('Download URL:', result.downloadURL);
+      
+      return result.downloadURL;
+      
+    } catch (error) {
+      console.error('Error uploading TTS audio to Firebase Storage:', error);
+      throw new Error('Audio generated but failed to upload TTS audio to Firebase.');
+    }
+  };
+
+  // Function to upload all pending TTS audio files
+  const uploadPendingTTSAudio = async (exerciseCode: string, currentQuestions: Question[]): Promise<Question[]> => {
+    if (pendingTTSUploads.length === 0) return currentQuestions;
+    
+    const uploadStart = Date.now();
+    console.log(`🎵 Uploading ${pendingTTSUploads.length} pending TTS audio files as MP3...`);
+    
+    let updatedQuestions = [...currentQuestions];
+    const successfulUploads: string[] = [];
+    const failedUploads: any[] = [];
+    
+    for (const ttsAudio of pendingTTSUploads) {
+      try {
+        const fileStart = Date.now();
+        console.log(`🎵 Uploading TTS for question ${ttsAudio.questionId} from: ${ttsAudio.localUri}`);
+        
+        // Upload using local file path
+        const audioUrl = await uploadTTSAudioToStorage(ttsAudio.localUri, exerciseCode, ttsAudio.questionId);
+        const fileTime = Date.now() - fileStart;
+        
+        console.log(`✅ TTS uploaded as MP3 for question ${ttsAudio.questionId} in ${fileTime}ms`);
+        
+        // Update the question with the Firebase URL in the local array
+        updatedQuestions = updatedQuestions.map(q => 
+          q.id === ttsAudio.questionId ? { ...q, ttsAudioUrl: audioUrl } : q
+        );
+        
+        // Also update the state for UI consistency
+        updateQuestion(ttsAudio.questionId, {
+          ttsAudioUrl: audioUrl
+        });
+        
+        // Clean up local file ONLY after successful upload
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(ttsAudio.localUri);
+          if (fileInfo.exists) {
+            await FileSystem.deleteAsync(ttsAudio.localUri);
+            console.log(`🗑️ Cleaned up local TTS file for question ${ttsAudio.questionId}`);
+          }
+        } catch (cleanupError) {
+          console.warn('⚠️ Failed to clean up local TTS file:', cleanupError);
+        }
+        
+        // Track successful upload
+        successfulUploads.push(ttsAudio.questionId);
+        
+      } catch (error) {
+        console.error(`❌ Failed to upload TTS audio for question ${ttsAudio.questionId}:`, error);
+        console.log(`🔄 Local file kept for retry: ${ttsAudio.localUri}`);
+        
+        // Track failed upload
+        failedUploads.push(ttsAudio);
+      }
+    }
+    
+    const totalTime = Date.now() - uploadStart;
+    console.log(`🎵 TTS Upload Complete: ${successfulUploads.length} successful, ${failedUploads.length} failed in ${totalTime}ms`);
+    
+    // Only clear successful uploads from pending list
+    if (successfulUploads.length > 0) {
+      setPendingTTSUploads(prev => prev.filter(p => !successfulUploads.includes(p.questionId)));
+      console.log(`🎵 Cleared ${successfulUploads.length} successful uploads from pending list`);
+    }
+    
+    // Keep failed uploads in pending list for retry
+    if (failedUploads.length > 0) {
+      console.log(`🔄 Keeping ${failedUploads.length} failed uploads for retry`);
+    }
+    
+    // Clear current local audio only if no pending uploads remain
+    if (pendingTTSUploads.length === successfulUploads.length) {
+      setLocalTTSAudio(null);
+    }
+    
+    return updatedQuestions;
+  };
+
+  // Helper function to add basic stage directions if GPT fails
+  const addBasicStageDirections = (text: string): string => {
+    let enhanced = text;
+    
+    // Add excitement at the beginning if it's a greeting or instruction
+    if (/^(hello|hi|good|welcome|kumusta|let's|today)/i.test(text)) {
+      enhanced = `[excited]${enhanced}`;
+    }
+    
+    // Add curiosity for questions
+    if (text.includes('?') && !enhanced.includes('[')) {
+      enhanced = enhanced.replace('?', '? [curious]');
+    }
+    
+    // Add laughter for positive statements
+    if (/\b(good|great|correct|yes|tama|magaling)\b/i.test(text)) {
+      enhanced = enhanced.replace(/\b(good|great|correct|yes|tama|magaling)\b/i, '[laughs]$1');
+    }
+    
+    // Add whisper for secrets or special information
+    if (/\b(secret|special|amazing|surprise)\b/i.test(text)) {
+      enhanced = enhanced.replace(/\b(secret|special|amazing|surprise)\b/i, '[whispers]$1');
+    }
+    
+    // If still no stage directions, add a general excited tone
+    if (!enhanced.includes('[')) {
+      enhanced = `[excited]${enhanced}`;
+    }
+    
+    return enhanced;
+  };
+
+  // TTS Preprocessing Function - Direct Gemini API call
+  const preprocessTextForTTS = async (text: string): Promise<string> => {
+    try {
+      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
+      const prompt = `Transform this text for Text-to-Speech by adding emotional stage directions and improving punctuation. You MUST add at least 2-3 stage directions to make it engaging.
+
+REQUIRED: Use these stage directions in square brackets:
+[excited], [curious], [laughs], [whispers], [sighs], [mischievously], [sarcastic], [starts laughing], [exhales]
+
+Rules:
+1. ALWAYS add stage directions - don't return text unchanged
+2. Add proper punctuation for natural pauses
+3. Make it sound like a lively teacher or storyteller
+4. Keep the original language (90% Filipino/10% English mix)
+5. Place directions where they feel natural
+6. Dont limit it to 1 emotion, add as many as you can
+7. Dont say Ok Class, because it will show up 1 by one per student in their home phones.
+8. Dont give the answer. hints only.
+9. Dont use too much english words. Target audience are grade 1 students and their mother tongue is filipino.
+
+Examples:
+- "Hello kids" → "[excited]Hello kids!"
+- "Let me tell you" → "[whispers]Let me tell you something amazing..."
+- "That's correct" → "[laughs]That's absolutely correct!"
+
+Original text: "${text}"
+
+Enhanced text with emotions:`;
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    text: prompt
+                  }
+                ]
+              }
+            ]
+          })
+        }
+      );
+
+      if (!response.ok) {
+        console.warn('⚠️ Gemini API failed, using original text');
+        return text;
+      }
+
+      const data = await response.json();
+      let processedText = data.candidates?.[0]?.content?.parts?.[0]?.text || text;
+      console.log('Processed text:', processedText);
+      
+      // Check if Gemini actually added stage directions, if not, add some basic ones
+      if (processedText === text || !processedText.includes('[')) {
+        processedText = addBasicStageDirections(text);
+      }
+      
+      return processedText.trim();
+      
+    } catch (error) {
+      console.warn('⚠️ Gemini preprocessing failed, using original text');
+      return text;
+    }
+  };
+
+  // Function to handle TTS regeneration for existing questions
+  const regenerateTTSForQuestion = async (questionId: string, text: string) => {
+    // Clear any existing local TTS for this question
+    setLocalTTSAudio(prev => prev?.questionId === questionId ? null : prev);
+    setPendingTTSUploads(prev => {
+      const filtered = prev.filter(p => p.questionId !== questionId);
+      console.log('🎵 Regenerating TTS - cleared existing for question:', questionId, 'remaining count:', filtered.length);
+      return filtered;
+    });
+    
+    // Generate new TTS
+    await generateTTS(text, true);
+  };
+
+  // TTS Functions
+  const generateTTS = async (text: string, isRegenerate: boolean = false) => {
+    if (!text.trim()) {
+      Alert.alert('Error', 'Please enter some text to convert to speech');
+      return;
+    }
+
+    // Performance Analytics
+    const startTime = Date.now();
+    const performanceLog = {
+      textLength: text.trim().length,
+      isRegenerate,
+      steps: {} as Record<string, number>
+    };
+
+    console.log('🎤 TTS Generation Started:', {
+      textLength: performanceLog.textLength,
+      isRegenerate: performanceLog.isRegenerate
+    });
+
+    setIsGeneratingTTS(true);
+    
+    try {
+      // Stop current audio if playing
+      if (currentAudioPlayer) {
+        currentAudioPlayer.remove();
+        setCurrentAudioPlayer(null);
+        setIsPlayingTTS(false);
+      }
+
+      // Step 1: Preprocess text through Gemini API
+      const preprocessStart = Date.now();
+      const processedText = await preprocessTextForTTS(text.trim());
+      performanceLog.steps.preprocessing = Date.now() - preprocessStart;
+      
+      // Show processed text to teacher for approval
+      const shouldProceed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          'Review Processed Text',
+          `Original: "${text.trim()}"\n\nProcessed: "${processedText}"\n\nDo you want to generate TTS with this enhanced text?`,
+          [
+            {
+              text: 'Cancel',
+              style: 'cancel',
+              onPress: () => resolve(false)
+            },
+            {
+              text: 'Use Original',
+              onPress: () => {
+                // Use original text instead
+                resolve(true);
+              }
+            },
+            {
+              text: 'Use Enhanced',
+              onPress: () => resolve(true)
+            }
+          ]
+        );
+      });
+      
+      if (!shouldProceed) {
+        setIsGeneratingTTS(false);
+        return;
+      }
+      
+      // Use processed text for TTS generation
+      const finalTextForTTS = processedText;
+
+      // Generate parameters for natural speech - ElevenLabs v3 only accepts specific stability values
+      const stabilityOptions = [0.0, 0.5, 1.0]; // 0.0 = Creative, 0.5 = Natural, 1.0 = Robust
+      const stability = isRegenerate ? 
+        stabilityOptions[Math.floor(Math.random() * stabilityOptions.length)] :
+        0.5; // Use Natural (0.5) as default
+      
+      const similarityBoost = isRegenerate ?
+        Math.random() * 0.2 + 0.7 : // 0.7 to 0.9
+        Math.random() * 0.1 + 0.8;  // 0.8 to 0.9
+
+      // Step 2: Prepare request payload with final text and validated parameters
+      const requestPayload: any = {
+        text: finalTextForTTS,
+        model_id: 'eleven_v3',
+        voice_settings: {
+          stability: stability,
+          similarity_boost: Math.max(0, Math.min(1, similarityBoost)),
+          style: 0.0,
+          use_speaker_boost: true
+        }
+      };
+
+      // Step 3: ElevenLabs API call
+      const elevenLabsStart = Date.now();
+      const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9?output_format=mp3_44100_128', {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'Content-Type': 'application/json',
+          'xi-api-key': 'sk_53ad6c84355ad43ebc9421a481ce4d0cf3392aaf401ffb83'
+        },
+        body: JSON.stringify(requestPayload)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ ElevenLabs API Error:', response.status, errorText);
+        
+        // Try fallback request
+        const fallbackStart = Date.now();
+        const fallbackPayload = {
+          text: finalTextForTTS,
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.8
+          }
+        };
+        
+        const fallbackResponse = await fetch('https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9', {
+          method: 'POST',
+          headers: {
+            'Accept': 'audio/mpeg',
+            'Content-Type': 'application/json',
+            'xi-api-key': 'sk_53ad6c84355ad43ebc9421a481ce4d0cf3392aaf401ffb83'
+          },
+          body: JSON.stringify(fallbackPayload)
+        });
+        
+        if (!fallbackResponse.ok) {
+          const fallbackErrorText = await fallbackResponse.text();
+          console.error('❌ Fallback API Error:', fallbackErrorText);
+          throw new Error(`API Error: ${response.status} - ${errorText}. Fallback also failed: ${fallbackErrorText}`);
+        }
+        
+        performanceLog.steps.elevenLabsFallback = Date.now() - fallbackStart;
+        
+        // Use fallback response
+        const audioBlob = await fallbackResponse.blob();
+        const reader = new FileReader();
+        
+        reader.onloadend = async () => {
+          const base64data = reader.result as string;
+          
+          // Save audio locally
+          console.log('🎵 Fallback TTS Audio generated, editingQuestion:', editingQuestion ? editingQuestion.id : 'null');
+          if (editingQuestion) {
+            try {
+              const base64Audio = base64data.split(',')[1];
+              const localUri = await saveTTSAudioLocally(base64Audio, editingQuestion.id);
+              
+              const ttsAudioData = {
+                questionId: editingQuestion.id,
+                localUri,
+                base64Data: base64Audio
+              };
+              
+              console.log('🎵 Adding fallback TTS audio to pending uploads for question:', editingQuestion.id);
+              setLocalTTSAudio(ttsAudioData);
+              setPendingTTSUploads(prev => {
+                const filtered = prev.filter(p => p.questionId !== editingQuestion.id);
+                const updated = [...filtered, ttsAudioData];
+                console.log('🎵 Fallback pending uploads updated, count:', updated.length);
+                return updated;
+              });
+            } catch (saveError) {
+              console.error('❌ Failed to save fallback TTS audio:', saveError);
+              Alert.alert('Save Error', 'Audio generated but failed to save locally. Please try again.');
+              return;
+            }
+          } else {
+            // If no editingQuestion, we still need to save the audio for the current question being worked on
+            // This handles cases where TTS is generated outside of the question editor
+            console.warn('⚠️ Fallback TTS generated but no editingQuestion set - audio will not be saved for upload');
+          }
+          
+          // Auto-play the generated speech
+          try {
+            setCurrentAudioUri(base64data);
+            setIsPlayingTTS(true);
+            
+            const audioSource: AudioSource = { uri: base64data };
+            const player = createAudioPlayer(audioSource);
+            setCurrentAudioPlayer(player);
+            
+            const subscription = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+              if (status.isLoaded && status.didJustFinish) {
+                setIsPlayingTTS(false);
+                player.remove();
+                setCurrentAudioPlayer(null);
+              }
+            });
+            
+            setTimeout(() => {
+              try {
+                player.play();
+              } catch (playError) {
+                console.error('❌ Fallback auto-play failed:', playError);
+                setIsPlayingTTS(false);
+              }
+            }, 100);
+            
+          } catch (playError) {
+            console.error('❌ Auto-play Error:', playError);
+            setIsPlayingTTS(false);
+            setCurrentAudioPlayer(null);
+          }
+        };
+        
+        reader.readAsDataURL(audioBlob);
+        return; // Exit early for fallback
+      }
+
+      performanceLog.steps.elevenLabs = Date.now() - elevenLabsStart;
+
+      // Convert response to base64 for React Native
+      const audioBlob = await response.blob();
+      const reader = new FileReader();
+      
+      reader.onloadend = async () => {
+        const base64data = reader.result as string;
+        
+        // Save audio locally
+        console.log('🎵 TTS Audio generated, editingQuestion:', editingQuestion ? editingQuestion.id : 'null');
+        if (editingQuestion) {
+          try {
+            const base64Audio = base64data.split(',')[1];
+            const localUri = await saveTTSAudioLocally(base64Audio, editingQuestion.id);
+            
+            const ttsAudioData = {
+              questionId: editingQuestion.id,
+              localUri,
+              base64Data: base64Audio
+            };
+            
+            console.log('🎵 Adding TTS audio to pending uploads for question:', editingQuestion.id);
+            setLocalTTSAudio(ttsAudioData);
+            setPendingTTSUploads(prev => {
+              const filtered = prev.filter(p => p.questionId !== editingQuestion.id);
+              const updated = [...filtered, ttsAudioData];
+              console.log('🎵 Pending uploads updated, count:', updated.length);
+              return updated;
+            });
+          } catch (saveError) {
+            console.error('❌ Failed to save TTS audio locally:', saveError);
+            Alert.alert('Save Error', 'Audio generated but failed to save locally. Please try again.');
+            return;
+          }
+        } else {
+          // If no editingQuestion, we still need to save the audio for the current question being worked on
+          // This handles cases where TTS is generated outside of the question editor
+          console.warn('⚠️ TTS generated but no editingQuestion set - audio will not be saved for upload');
+        }
+        
+        // Auto-play the generated speech
+        try {
+          setCurrentAudioUri(base64data);
+          setIsPlayingTTS(true);
+          
+          const audioSource: AudioSource = { uri: base64data };
+          const player = createAudioPlayer(audioSource);
+          setCurrentAudioPlayer(player);
+          
+          const subscription = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+            if (status.isLoaded && status.didJustFinish) {
+              setIsPlayingTTS(false);
+              player.remove();
+              setCurrentAudioPlayer(null);
+            }
+          });
+          
+          setTimeout(() => {
+            try {
+              player.play();
+            } catch (playError) {
+              console.error('❌ Auto-play failed:', playError);
+              setIsPlayingTTS(false);
+            }
+          }, 100);
+          
+        } catch (playError) {
+          console.error('❌ Auto-play Error:', playError);
+          setIsPlayingTTS(false);
+          setCurrentAudioPlayer(null);
+        }
+      };
+      
+      reader.readAsDataURL(audioBlob);
+      
+      // Performance Analytics - Success
+      const totalTime = Date.now() - startTime;
+      performanceLog.steps.total = totalTime;
+      
+      console.log('✅ TTS Generation Complete:', {
+        totalTime: `${totalTime}ms`,
+        preprocessing: `${performanceLog.steps.preprocessing}ms`,
+        elevenLabs: `${performanceLog.steps.elevenLabs}ms`,
+        textLength: performanceLog.textLength,
+        finalLength: finalTextForTTS.length
+      });
+      
+    } catch (error) {
+      const totalTime = Date.now() - startTime;
+      console.error('❌ TTS Generation Failed:', {
+        error: error instanceof Error ? error.message : String(error),
+        totalTime: `${totalTime}ms`,
+        steps: performanceLog.steps
+      });
+      Alert.alert('Error', 'Failed to generate speech. Please try again.');
+    } finally {
+      setIsGeneratingTTS(false);
+    }
+  };
+
+  const playTTS = async (audioData?: string) => {
+    // Use provided audioData (base64 for immediate playback) or stored Firebase URL
+    const audioToPlay = audioData || editingQuestion?.ttsAudioUrl;
+    
+    console.log('playTTS called with:', {
+      hasAudioData: !!audioData,
+      hasEditingQuestionTTS: !!editingQuestion?.ttsAudioUrl,
+      audioToPlay: audioToPlay ? (audioToPlay.startsWith('http') ? audioToPlay : audioToPlay.substring(0, 50) + '...') : 'null'
+    });
+    
+    if (!audioToPlay) {
+      Alert.alert('No Audio', 'Please generate speech first');
+      return;
+    }
+
+    try {
+      // Stop current audio if playing
+      if (currentAudioPlayer) {
+        console.log('Stopping current audio...');
+        currentAudioPlayer.remove();
+        setCurrentAudioPlayer(null);
+        setIsPlayingTTS(false);
+      }
+
+      console.log('Creating new audio player...');
+      setCurrentAudioUri(audioToPlay);
+
+      // Create audio player with expo-audio
+      const audioSource: AudioSource = { uri: audioToPlay };
+      const player = createAudioPlayer(audioSource);
+      
+      setCurrentAudioPlayer(player);
+      
+      // Set up status listener
+      const subscription = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+        console.log('Audio status:', status);
+        
+        if (status.isLoaded) {
+          if (status.playing) {
+            setIsPlayingTTS(true);
+            console.log('Audio is now playing');
+          } else if (status.didJustFinish) {
+            console.log('Audio playback finished');
+            setIsPlayingTTS(false);
+            player.remove();
+            setCurrentAudioPlayer(null);
+          }
+        } else if ('error' in status) {
+          console.error('Audio loading error:', (status as any).error);
+          Alert.alert('Audio Error', 'Failed to load audio file');
+          setIsPlayingTTS(false);
+          player.remove();
+          setCurrentAudioPlayer(null);
+        }
+      });
+      
+      // Wait a moment for the player to load, then start playback
+      setTimeout(() => {
+        try {
+          console.log('Starting audio playback...');
+          player.play();
+          setIsPlayingTTS(true);
+          console.log('Play command sent successfully');
+        } catch (playError) {
+          console.error('Play command failed:', playError);
+          Alert.alert('Playback Error', 'Failed to start audio playback');
+          setIsPlayingTTS(false);
+        }
+      }, 100);
+      
+    } catch (error: any) {
+      console.error('Playback Error:', error);
+      Alert.alert('Error', `Failed to play audio: ${error.message}`);
+      setIsPlayingTTS(false);
+      setCurrentAudioPlayer(null);
+    }
+  };
+
+  const stopTTS = async () => {
+    if (currentAudioPlayer) {
+      console.log('Stopping audio...');
+      currentAudioPlayer.remove();
+      setCurrentAudioPlayer(null);
+      setIsPlayingTTS(false);
+    }
+  };
+
   const deleteQuestion = (questionId: string) => {
     Alert.alert(
       'Delete Question',
@@ -856,6 +1640,25 @@ export default function CreateExercise() {
       const questionsWithRemoteImages = await uploadLocalImages(questions, finalExerciseCode);
       console.log('Local images uploaded successfully');
       
+      // Upload pending TTS audio files to Firebase Storage
+      let finalQuestions = questions;
+      console.log('🎵 Checking pending TTS uploads, count:', pendingTTSUploads.length);
+      console.log('🎵 Pending uploads:', pendingTTSUploads.map(p => ({ questionId: p.questionId, hasBase64: !!p.base64Data })));
+      
+      if (pendingTTSUploads.length > 0) {
+        console.log(`🎵 Uploading ${pendingTTSUploads.length} TTS audio files...`);
+        try {
+          finalQuestions = await uploadPendingTTSAudio(finalExerciseCode, questions);
+          console.log('✅ TTS audio files uploaded successfully');
+        } catch (ttsError) {
+          console.error('❌ Failed to upload TTS audio files:', ttsError);
+          Alert.alert('Upload Error', 'Audio generated but failed to upload TTS audio to Firebase.');
+          return; // Stop the save process if TTS upload fails
+        }
+      } else {
+        console.log('ℹ️ No TTS audio files to upload');
+      }
+      
       // Clean the payload to ensure it's serializable
       const cleanPayload = {
         title: exerciseTitle.trim(),
@@ -863,9 +1666,9 @@ export default function CreateExercise() {
         resourceUrl: uploadedUrl || null,
         teacherId: currentUserId,
         teacherName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
-        questionCount: questionsWithRemoteImages.length,
+        questionCount: finalQuestions.length,
         timesUsed: 0,
-        questions: questionsWithRemoteImages.map(q => {
+        questions: finalQuestions.map(q => {
           // Create a clean question object, removing all undefined values
           const cleanQuestion: any = {
             id: q.id,
@@ -917,6 +1720,11 @@ export default function CreateExercise() {
           
           if (q.fillSettings) {
             cleanQuestion.fillSettings = q.fillSettings;
+          }
+          
+          // TTS fields
+          if (q.ttsAudioUrl) {
+            cleanQuestion.ttsAudioUrl = q.ttsAudioUrl;
           }
 
           return cleanQuestion;
@@ -1557,6 +2365,7 @@ export default function CreateExercise() {
           <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
             <View style={styles.inputGroup}>
               <Text style={styles.inputLabel}>Question</Text>
+              <View style={styles.questionInputContainer}>
               <TextInput
                 style={styles.textInput}
                 value={editingQuestion.question}
@@ -1567,6 +2376,62 @@ export default function CreateExercise() {
                 textAlignVertical="top"
                 autoFocus={true}
               />
+                <View style={styles.ttsButtonsContainer}>
+                  <TouchableOpacity
+                    style={[styles.ttsButton, isGeneratingTTS && styles.ttsButtonDisabled]}
+                    onPress={() => generateTTS(editingQuestion.question)}
+                    disabled={isGeneratingTTS || !editingQuestion.question.trim()}
+                  >
+                    <MaterialCommunityIcons 
+                      name={isGeneratingTTS ? "loading" : "volume-high"} 
+                      size={16} 
+                      color={isGeneratingTTS || !editingQuestion.question.trim() ? "#9ca3af" : "#3b82f6"} 
+                    />
+                    <Text style={[styles.ttsButtonText, (isGeneratingTTS || !editingQuestion.question.trim()) && styles.ttsButtonTextDisabled]}>
+                      {isGeneratingTTS ? 'Generating...' : 'Generate Speech'}
+                    </Text>
+                    {localTTSAudio?.questionId === editingQuestion.id && (
+                      <View style={styles.pendingUploadIndicator}>
+                        <MaterialCommunityIcons name="cloud-upload" size={12} color="#10b981" />
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                  
+                  {editingQuestion.ttsAudioUrl && (
+                    <TouchableOpacity
+                      style={styles.ttsButton}
+                      onPress={isPlayingTTS ? stopTTS : () => playTTS()}
+                    >
+                      <MaterialCommunityIcons 
+                        name={isPlayingTTS ? "stop" : "play"} 
+                        size={16} 
+                        color="#10b981" 
+                      />
+                      <Text style={[styles.ttsButtonText, { color: '#10b981' }]}>
+                        {isPlayingTTS ? 'Stop' : 'Play'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                  
+                  {editingQuestion.ttsAudioUrl && (
+                    <TouchableOpacity
+                      style={[styles.ttsButton, isGeneratingTTS && styles.ttsButtonDisabled]}
+                      onPress={() => generateTTS(editingQuestion.question, true)}
+                      disabled={isGeneratingTTS}
+                    >
+                      <MaterialCommunityIcons 
+                        name="refresh" 
+                        size={16} 
+                        color={isGeneratingTTS ? "#9ca3af" : "#f59e0b"} 
+                      />
+                      <Text style={[styles.ttsButtonText, isGeneratingTTS && styles.ttsButtonTextDisabled, { color: isGeneratingTTS ? '#9ca3af' : '#f59e0b' }]}>
+                        Regenerate
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+              
               <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
                 <TouchableOpacity onPress={() => pickQuestionImage(editingQuestion.id)} style={styles.pickFileButton}>
                   <MaterialCommunityIcons name="image-plus" size={16} color="#ffffff" />
@@ -1796,18 +2661,18 @@ export default function CreateExercise() {
                   {(editingQuestion.pairs || []).length > 0 && (
                     <View style={styles.previewSection}>
                       <View style={styles.previewHeader}>
-                        <Text style={styles.previewLabel}>Preview</Text>
+                      <Text style={styles.previewLabel}>Preview</Text>
                         {(editingQuestion.pairs || []).length > 3 && (
                           <Text style={styles.scrollHint}>Scroll to see all pairs</Text>
                         )}
                       </View>
                       <View style={styles.scrollContainer}>
-                        <ScrollView
-                          style={styles.pairsPreviewVScroll}
-                          showsVerticalScrollIndicator={true}
-                          contentContainerStyle={styles.pairsPreviewVContainer}
+                      <ScrollView
+                        style={styles.pairsPreviewVScroll}
+                        showsVerticalScrollIndicator={true}
+                        contentContainerStyle={styles.pairsPreviewVContainer}
                           nestedScrollEnabled={true}
-                        >
+                      >
                         {(editingQuestion.pairs || []).map((pair, idx) => (
                           <View key={`pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                             <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
@@ -1829,7 +2694,7 @@ export default function CreateExercise() {
                             </View>
                           </View>
                         ))}
-                        </ScrollView>
+                      </ScrollView>
                       </View>
                     </View>
                   )}
@@ -1976,20 +2841,20 @@ export default function CreateExercise() {
                   
                   {/* Add Item Buttons */}
                   <View style={styles.reorderAddButtons}>
-                    <TouchableOpacity
+                        <TouchableOpacity
                       style={styles.addReorderButton}
                       onPress={() => addReorderItem(editingQuestion.id, 'text')}
                     >
                       <MaterialCommunityIcons name="text" size={16} color="#3b82f6" />
                       <Text style={styles.addReorderButtonText}>Add Text Item</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
+                        </TouchableOpacity>
+                  <TouchableOpacity
                       style={styles.addReorderButton}
                       onPress={() => addReorderItem(editingQuestion.id, 'image')}
                     >
                       <MaterialCommunityIcons name="image-plus" size={16} color="#3b82f6" />
                       <Text style={styles.addReorderButtonText}>Add Image Item</Text>
-                    </TouchableOpacity>
+                  </TouchableOpacity>
                   </View>
                   
                   {/* Preview */}
@@ -2010,9 +2875,9 @@ export default function CreateExercise() {
                             )}
                             <View style={styles.reorderPreviewNumber}>
                               <Text style={styles.reorderPreviewNumberText}>{i + 1}</Text>
-                            </View>
                           </View>
-                        ))}
+                        </View>
+                      ))}
                       </View>
                     </View>
                   )}
@@ -2060,6 +2925,7 @@ export default function CreateExercise() {
 
                         <View style={styles.inputGroup}>
                           <Text style={styles.inputLabel}>Question</Text>
+                          <View style={styles.questionInputContainer}>
                           <TextInput
                             style={styles.textInput}
                             value={sub.question}
@@ -2072,6 +2938,61 @@ export default function CreateExercise() {
                             multiline
                             textAlignVertical="top"
                           />
+                            <View style={styles.ttsButtonsContainer}>
+                              <TouchableOpacity
+                                style={[styles.ttsButton, isGeneratingTTS && styles.ttsButtonDisabled]}
+                                onPress={() => generateTTS(sub.question)}
+                                disabled={isGeneratingTTS || !sub.question.trim()}
+                              >
+                                <MaterialCommunityIcons 
+                                  name={isGeneratingTTS ? "loading" : "volume-high"} 
+                                  size={16} 
+                                  color={isGeneratingTTS || !sub.question.trim() ? "#9ca3af" : "#3b82f6"} 
+                                />
+                                <Text style={[styles.ttsButtonText, (isGeneratingTTS || !sub.question.trim()) && styles.ttsButtonTextDisabled]}>
+                                  {isGeneratingTTS ? 'Generating...' : 'Generate Speech'}
+                                </Text>
+                                {localTTSAudio?.questionId === editingQuestion.id && (
+                                  <View style={styles.pendingUploadIndicator}>
+                                    <MaterialCommunityIcons name="cloud-upload" size={12} color="#10b981" />
+                                  </View>
+                                )}
+                              </TouchableOpacity>
+                              
+                              {sub.ttsAudioUrl && (
+                                <TouchableOpacity
+                                  style={styles.ttsButton}
+                                  onPress={isPlayingTTS ? stopTTS : () => playTTS(sub.ttsAudioUrl)}
+                                >
+                                  <MaterialCommunityIcons 
+                                    name={isPlayingTTS ? "stop" : "play"} 
+                                    size={16} 
+                                    color="#10b981" 
+                                  />
+                                  <Text style={[styles.ttsButtonText, { color: '#10b981' }]}>
+                                    {isPlayingTTS ? 'Stop' : 'Play'}
+                                  </Text>
+                                </TouchableOpacity>
+                              )}
+                              
+                              {sub.ttsAudioUrl && (
+                                <TouchableOpacity
+                                  style={[styles.ttsButton, isGeneratingTTS && styles.ttsButtonDisabled]}
+                                  onPress={() => generateTTS(sub.question, true)}
+                                  disabled={isGeneratingTTS}
+                                >
+                                  <MaterialCommunityIcons 
+                                    name="refresh" 
+                                    size={16} 
+                                    color={isGeneratingTTS ? "#9ca3af" : "#f59e0b"} 
+                                  />
+                                  <Text style={[styles.ttsButtonText, isGeneratingTTS && styles.ttsButtonTextDisabled, { color: isGeneratingTTS ? '#9ca3af' : '#f59e0b' }]}>
+                                    Regenerate
+                                  </Text>
+                                </TouchableOpacity>
+                              )}
+                            </View>
+                          </View>
                         </View>
 
                         {sub.type === 'identification' && (
@@ -2160,18 +3081,18 @@ export default function CreateExercise() {
                             {(sub.pairs || []).length > 0 && (
                               <View style={styles.previewSection}>
                                 <View style={styles.previewHeader}>
-                                  <Text style={styles.previewLabel}>Preview</Text>
+                                <Text style={styles.previewLabel}>Preview</Text>
                                   {(sub.pairs || []).length > 3 && (
                                     <Text style={styles.scrollHint}>Scroll to see all pairs</Text>
                                   )}
                                 </View>
                                 <View style={styles.scrollContainer}>
-                                  <ScrollView
-                                    style={styles.pairsPreviewVScroll}
-                                    showsVerticalScrollIndicator={true}
-                                    contentContainerStyle={styles.pairsPreviewVContainer}
+                                <ScrollView
+                                  style={styles.pairsPreviewVScroll}
+                                  showsVerticalScrollIndicator={true}
+                                  contentContainerStyle={styles.pairsPreviewVContainer}
                                     nestedScrollEnabled={true}
-                                  >
+                                >
                                   {(sub.pairs || []).map((pair, idx) => (
                                     <View key={`sub-pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                                       <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
@@ -2193,7 +3114,7 @@ export default function CreateExercise() {
                                       </View>
                                     </View>
                                   ))}
-                                  </ScrollView>
+                                </ScrollView>
                                 </View>
                               </View>
                             )}
@@ -2703,7 +3624,10 @@ export default function CreateExercise() {
         {/* Save Button */}
         <View style={styles.saveSection}>
           <TouchableOpacity style={styles.saveExerciseButton} onPress={saveExercise}>
-            <Text style={styles.saveExerciseButtonText}>{uploading ? 'Uploading...' : (isEditing ? 'Update Exercise' : 'Create Exercise')}</Text>
+            <Text style={styles.saveExerciseButtonText}>
+              {uploading ? 'Uploading...' : (isEditing ? 'Update Exercise' : 'Create Exercise')}
+              {pendingTTSUploads.length > 0 && ` (${pendingTTSUploads.length} TTS pending)`}
+            </Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -3551,6 +4475,55 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+  },
+  
+  // TTS Styles
+  questionInputContainer: {
+    position: 'relative',
+  },
+  ttsButtonsContainer: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+    flexWrap: 'wrap',
+  },
+  ttsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  ttsButtonDisabled: {
+    backgroundColor: '#f1f5f9',
+    borderColor: '#d1d5db',
+  },
+  ttsButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3b82f6',
+    marginLeft: 4,
+  },
+  ttsButtonTextDisabled: {
+    color: '#9ca3af',
+  },
+  pendingUploadIndicator: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 2,
+    borderWidth: 1,
+    borderColor: '#10b981',
   },
   textArea: {
     height: 100,
