@@ -22,6 +22,8 @@ import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
+const elevenLabsApiKey = "sk_44bc790290208dcf327cc264fc303fd19dfcbcf2503fff5b";
+
 // Configuration - Now using direct API calls to Gemini and ElevenLabs
 
 // Stock image library data
@@ -312,6 +314,14 @@ export default function CreateExercise() {
     localUri: string;
     base64Data: string;
   }>>([]);
+
+  // AI Questions Generator state
+  const [showAIGenerator, setShowAIGenerator] = useState(false);
+  const [isGeneratingQuestions, setIsGeneratingQuestions] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [numberOfQuestions, setNumberOfQuestions] = useState(5);
+  const [selectedQuestionType, setSelectedQuestionType] = useState('multiple-choice');
+  const [ttsProgress, setTtsProgress] = useState({ current: 0, total: 0 });
   
   // User state
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -998,6 +1008,381 @@ export default function CreateExercise() {
     return updatedQuestions;
   };
 
+  // AI Questions Generator function
+  const generateAIQuestions = async () => {
+    if (!exerciseTitle.trim() || !exerciseDescription.trim() || !exerciseCategory.trim()) {
+      Alert.alert('Error', 'Please fill in the exercise title, description, and category first');
+      return;
+    }
+
+    if (!aiPrompt.trim()) {
+      Alert.alert('Error', 'Please provide additional details for the AI to generate questions');
+      return;
+    }
+
+    setIsGeneratingQuestions(true);
+
+    try {
+      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
+      
+      console.log('Starting AI question generation with model: gemini-2.0-flash');
+      
+      // Get available stock images for reference
+      const availableImages = Object.keys(stockImages).map(category => 
+        `${category}: ${stockImages[category].map(img => img.name).join(', ')}`
+      ).join('\n');
+
+      const prompt = `You are an expert educational content creator for Grade 1 students in the Philippines. Generate ${numberOfQuestions} ${selectedQuestionType} questions based on the following exercise details:
+
+EXERCISE DETAILS:
+- Title: ${exerciseTitle}
+- Description: ${exerciseDescription}
+- Category: ${exerciseCategory}
+- Additional Requirements: ${aiPrompt}
+
+QUESTION TYPE: ${selectedQuestionType}
+
+AVAILABLE STOCK IMAGES (use these in your questions when relevant):
+${availableImages}
+
+REQUIREMENTS FOR FILIPINO GRADE 1 STUDENTS:
+1. Use simple Filipino language (Tagalog) mixed with English when necessary
+2. Questions should be age-appropriate for 6-7 year old Filipino children
+3. Use familiar Filipino words and concepts (e.g., "bahay", "pamilya", "pagkain", "kulay")
+4. Make questions engaging with Filipino cultural context
+5. Use simple sentence structures
+6. Include visual concepts that Filipino children can relate to
+7. For multiple choice: Provide 4 simple options with only 1 correct answer
+8. For identification: Ask for specific Filipino words, objects, or concepts
+9. For matching: Create pairs that Filipino children can easily understand
+10. For re-order: Create simple sequences (numbers, letters, daily activities)
+11. MAXIMIZE USE OF STOCK IMAGES: Reference specific images from the available list in questions and options
+12. When using images, mention the exact image name from the stock images list
+
+CRITICAL IMAGE RELEVANCE RULES:
+- questionImage MUST be factually relevant to the main subject of the question
+- If question asks about animals that give milk, questionImage should be a cow, goat, or milk-related image
+- If question asks about shapes, questionImage should show the specific shape being asked about
+- If question asks about colors, questionImage should show objects of that color
+- NEVER use irrelevant images (e.g., pig image for milk question, cat image for dog question)
+- questionImage should help students understand what the question is asking about
+- If no relevant image exists in stock images, do NOT include questionImage
+
+CRITICAL RULES FOR MULTIPLE CHOICE:
+- The "answer" field should contain the EXACT text that appears in the options array
+- The correct answer must be placed in a RANDOM position in the options array (not always first)
+- All options should be plausible but only one should be correct
+- Use simple, clear language for all options
+- Include image references in options when relevant (e.g., "Apple", "Cat", "Circle")
+
+IMPORTANT: Respond ONLY with valid JSON array. No additional text before or after.
+
+JSON Format:
+[
+  {
+    "question": "Simple question in Filipino/English mix (mention specific images when relevant)",
+    "answer": "Exact text that appears in options array",
+    "options": ["Option A", "Correct Answer", "Option C", "Option D"],
+    "imageReferences": ["Image Name 1", "Image Name 2"] // Optional: specific images to use
+  }
+]`;
+
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
+      console.log('API URL:', apiUrl);
+      
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: prompt
+                }
+              ]
+            }
+          ],
+          generationConfig: {
+            temperature: 0.8,
+            topK: 40,
+            topP: 0.95,
+            maxOutputTokens: 2048,
+          }
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('API Error:', response.status, errorText);
+        throw new Error(`API Error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log('Full API Response:', JSON.stringify(data, null, 2));
+      
+      const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      
+      if (!generatedText) {
+        throw new Error('No content generated by AI');
+      }
+      
+      console.log('Generated questions text:', generatedText);
+      
+      // Clean and extract JSON from the response
+      let cleanText = generatedText.trim();
+      
+      // Remove any markdown formatting
+      cleanText = cleanText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+      
+      // Find JSON array in the response
+      const jsonMatch = cleanText.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) {
+        console.error('No JSON array found in response:', cleanText);
+        throw new Error('No valid JSON array found in AI response');
+      }
+
+      let questionsData;
+      try {
+        questionsData = JSON.parse(jsonMatch[0]);
+      } catch (parseError) {
+        console.error('JSON Parse Error:', parseError);
+        console.error('Raw JSON string:', jsonMatch[0]);
+        throw new Error('Invalid JSON format from AI response');
+      }
+      
+      if (!Array.isArray(questionsData)) {
+        throw new Error('Generated data is not an array');
+      }
+
+      if (questionsData.length === 0) {
+        throw new Error('No questions generated');
+      }
+
+      // Helper function to find stock image by name
+      const findStockImageByName = (imageName: string): string | null => {
+        for (const category of Object.keys(stockImages)) {
+          const found = stockImages[category].find(img => 
+            img.name.toLowerCase() === imageName.toLowerCase()
+          );
+          if (found) {
+            return Image.resolveAssetSource(found.uri).uri;
+          }
+        }
+        return null;
+      };
+
+      // Convert to Question objects with proper validation and image assignment
+      const newQuestions: Question[] = questionsData.map((q: any, index: number) => {
+        // Validate required fields
+        if (!q.question || !q.answer) {
+          throw new Error(`Question ${index + 1} is missing required fields`);
+        }
+
+        // Process options and assign images
+        let processedOptions = undefined;
+        let optionImages = undefined;
+        
+        if (q.options && Array.isArray(q.options)) {
+          processedOptions = q.options.map((opt: any) => String(opt).trim());
+          optionImages = q.options.map((opt: any) => {
+            const imageName = String(opt).trim();
+            return findStockImageByName(imageName);
+          });
+        }
+
+        // Find question image if imageReferences are provided
+        let questionImage = null;
+        if (q.imageReferences && Array.isArray(q.imageReferences) && q.imageReferences.length > 0) {
+          questionImage = findStockImageByName(q.imageReferences[0]);
+        }
+
+        // If no specific image references, try to find images from question text
+        // BUT avoid using images that are already used in answer options
+        if (!questionImage) {
+          const questionText = q.question.toLowerCase();
+          const usedOptionImages = new Set(optionImages.filter((img: any) => img).map((img: any) => img.toLowerCase()));
+          
+          // Helper function to check if image is relevant to question
+          const isImageRelevant = (imgName: string, questionText: string) => {
+            const imgLower = imgName.toLowerCase();
+            const questionLower = questionText.toLowerCase();
+            
+            // Check for direct mentions
+            if (questionLower.includes(imgLower)) return true;
+            
+            // Check for conceptual relevance (e.g., "milk" question should use cow/goat, not pig)
+            if (questionLower.includes('gatas') || questionLower.includes('milk')) {
+              return imgLower.includes('cow') || imgLower.includes('goat') || imgLower.includes('milk');
+            }
+            if (questionLower.includes('kulay') || questionLower.includes('color')) {
+              return imgLower.includes('red') || imgLower.includes('blue') || imgLower.includes('green') || 
+                     imgLower.includes('yellow') || imgLower.includes('orange') || imgLower.includes('purple');
+            }
+            if (questionLower.includes('hugis') || questionLower.includes('shape')) {
+              return imgLower.includes('circle') || imgLower.includes('square') || imgLower.includes('triangle') || 
+                     imgLower.includes('rectangle') || imgLower.includes('oval');
+            }
+            if (questionLower.includes('numero') || questionLower.includes('number')) {
+              return imgLower.match(/\d/) || imgLower.includes('number');
+            }
+            
+            return false;
+          };
+          
+          for (const category of Object.keys(stockImages)) {
+            for (const img of stockImages[category]) {
+              const imgName = img.name.toLowerCase();
+              // Only use image if it's relevant to question AND not used in options
+              if (isImageRelevant(imgName, questionText) && !usedOptionImages.has(imgName)) {
+                questionImage = Image.resolveAssetSource(img.uri).uri;
+                console.log(`✅ Selected relevant question image: ${imgName} for question: ${q.question.substring(0, 50)}...`);
+                break;
+              }
+            }
+            if (questionImage) break;
+          }
+          
+          // If no relevant image found, log it and leave questionImage as null
+          if (!questionImage) {
+            console.log(`⚠️ No relevant image found for question: ${q.question.substring(0, 50)}...`);
+          }
+        }
+
+        // Find the correct answer letter by matching the answer text with options
+        let correctAnswerLetter = '';
+        const correctAnswerText = q.answer.trim();
+        const correctIndex = processedOptions.findIndex((option: string) => 
+          option.toLowerCase() === correctAnswerText.toLowerCase()
+        );
+        
+        if (correctIndex !== -1) {
+          correctAnswerLetter = String.fromCharCode(65 + correctIndex); // A, B, C, D
+        } else {
+          // Fallback: if no exact match, try partial match
+          const partialIndex = processedOptions.findIndex((option: string) => 
+            option.toLowerCase().includes(correctAnswerText.toLowerCase()) ||
+            correctAnswerText.toLowerCase().includes(option.toLowerCase())
+          );
+          if (partialIndex !== -1) {
+            correctAnswerLetter = String.fromCharCode(65 + partialIndex);
+          } else {
+            // Default to first option if no match found
+            correctAnswerLetter = 'A';
+            console.warn(`Could not match answer "${correctAnswerText}" with any option for question ${index}`);
+          }
+        }
+
+        return {
+          id: `ai_${Date.now()}_${index}_${Math.random().toString(36).substr(2, 9)}`,
+          type: selectedQuestionType as any,
+          question: q.question.trim(),
+          answer: correctAnswerLetter, // Store the letter (A, B, C, D) instead of text
+          options: processedOptions,
+          optionImages: optionImages,
+          pairs: undefined,
+          order: undefined,
+          reorderItems: undefined,
+          passage: undefined,
+          subQuestions: undefined,
+          multiAnswer: false,
+          reorderDirection: 'asc',
+          questionImage: questionImage,
+          fillSettings: {
+            caseSensitive: false,
+            showBoxes: true,
+            allowShowWork: false
+          }
+        };
+      });
+
+      // Add generated questions to existing questions
+      setQuestions(prev => [...prev, ...newQuestions]);
+      
+      // Generate TTS audio for all new questions sequentially to avoid rate limits
+      console.log('Generating TTS audio for AI-generated questions sequentially...');
+      setIsGeneratingTTS(true);
+      
+      // Process questions one by one with 3-second delays
+      const processTTSSequentially = async () => {
+        // Initialize progress tracking
+        setTtsProgress({ current: 0, total: newQuestions.length });
+        
+        for (let i = 0; i < newQuestions.length; i++) {
+          const question = newQuestions[i];
+          
+          try {
+            console.log(`Processing TTS for question ${i + 1}/${newQuestions.length}: ${question.id}`);
+            
+            // Update progress
+            setTtsProgress({ current: i + 1, total: newQuestions.length });
+            
+            // Preprocess the question text for TTS (enhanced version)
+            const processedText = await preprocessTextForTTS(question.question);
+            
+            // Generate TTS audio directly without user prompt (use enhanced version)
+            const audioData = await generateTTSForAI(processedText, question.id);
+            
+            if (audioData && typeof audioData === 'string') {
+              // Save TTS audio locally
+              const localUri = await saveTTSAudioLocally(audioData, question.id);
+              
+              // Add to pending uploads for later upload to Firebase
+              setPendingTTSUploads(prev => [...prev, {
+                questionId: question.id,
+                localUri: localUri,
+                base64Data: audioData
+              }]);
+              
+              // Update the question to show it has TTS audio
+              setQuestions(prev => prev.map(q => 
+                q.id === question.id 
+                  ? { ...q, ttsAudioUrl: 'pending' }
+                  : q
+              ));
+              
+              console.log(`✅ TTS generated for question: ${question.id}`);
+            } else {
+              console.warn(`⚠️ No audio data returned for question: ${question.id}`);
+            }
+          } catch (error) {
+            console.error(`❌ Failed to generate TTS for question ${question.id}:`, error);
+            // Continue with next question even if this one fails
+          }
+          
+          // Add 3-second delay between requests (except for the last question)
+          if (i < newQuestions.length - 1) {
+            console.log('⏳ Waiting 3 seconds before next TTS generation...');
+            await new Promise(resolve => setTimeout(resolve, 3000));
+          }
+        }
+        
+        console.log('🎉 Sequential TTS generation completed for all AI-generated questions');
+        setIsGeneratingTTS(false);
+        setTtsProgress({ current: 0, total: 0 }); // Reset progress
+      };
+      
+      // Start sequential processing (don't await to keep UI responsive)
+      processTTSSequentially().catch((error) => {
+        console.error('Sequential TTS generation failed:', error);
+        setIsGeneratingTTS(false);
+      });
+      
+      Alert.alert('Success', `Generated ${newQuestions.length} questions successfully! TTS audio is being generated in the background.`);
+      setShowAIGenerator(false);
+      setAiPrompt('');
+
+    } catch (error) {
+      console.error('Error generating AI questions:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      Alert.alert('Error', `Failed to generate questions: ${errorMessage}`);
+    } finally {
+      setIsGeneratingQuestions(false);
+    }
+  };
+
   // Helper function to add basic stage directions if GPT fails
   const addBasicStageDirections = (text: string): string => {
     let enhanced = text;
@@ -1214,7 +1599,7 @@ Enhanced text with emotions:`;
         headers: {
           'Accept': 'audio/mpeg',
           'Content-Type': 'application/json',
-          'xi-api-key': 'sk_53ad6c84355ad43ebc9421a481ce4d0cf3392aaf401ffb83'
+          'xi-api-key': elevenLabsApiKey
         },
         body: JSON.stringify(requestPayload)
       });
@@ -1238,7 +1623,7 @@ Enhanced text with emotions:`;
           headers: {
             'Accept': 'audio/mpeg',
             'Content-Type': 'application/json',
-            'xi-api-key': 'sk_53ad6c84355ad43ebc9421a481ce4d0cf3392aaf401ffb83'
+            'xi-api-key': elevenLabsApiKey
           },
           body: JSON.stringify(fallbackPayload)
         });
@@ -1428,9 +1813,122 @@ Enhanced text with emotions:`;
     }
   };
 
+  // TTS function specifically for AI-generated questions (no user prompt, uses enhanced version)
+  const generateTTSForAI = async (processedText: string, questionId: string): Promise<string | null> => {
+    if (!processedText.trim()) {
+      console.error('No text provided for AI TTS generation');
+      return null;
+    }
+
+    console.log('🎤 AI TTS Generation Started for question:', questionId);
+
+    try {
+      // Generate parameters for natural speech
+      const stabilityOptions = [0.0, 0.5, 1.0];
+      const stability = 0.5; // Use Natural (0.5) as default
+      const similarityBoost = Math.random() * 0.1 + 0.8; // 0.8 to 0.9
+
+      // Prepare request payload
+      const requestPayload: any = {
+        text: processedText,
+        model_id: 'eleven_v3',
+        voice_settings: {
+          stability: stability,
+          similarity_boost: Math.max(0, Math.min(1, similarityBoost)),
+          style: 0.0,
+          use_speaker_boost: true
+        }
+      };
+
+      // ElevenLabs API call
+      const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9?output_format=mp3_44100_128', {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'Content-Type': 'application/json',
+          'xi-api-key': elevenLabsApiKey
+        },
+        body: JSON.stringify(requestPayload)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ ElevenLabs API Error for AI TTS:', response.status, errorText);
+        
+        // Try fallback request
+        const fallbackPayload = {
+          text: processedText,
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.8
+          }
+        };
+        
+        const fallbackResponse = await fetch('https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9', {
+          method: 'POST',
+          headers: {
+            'Accept': 'audio/mpeg',
+            'Content-Type': 'application/json',
+            'xi-api-key': elevenLabsApiKey
+          },
+          body: JSON.stringify(fallbackPayload)
+        });
+        
+        if (!fallbackResponse.ok) {
+          const fallbackErrorText = await fallbackResponse.text();
+          console.error('❌ Fallback API Error for AI TTS:', fallbackErrorText);
+          throw new Error(`AI TTS API Error: ${response.status} - ${errorText}. Fallback also failed: ${fallbackErrorText}`);
+        }
+        
+        // Use fallback response
+        const audioBlob = await fallbackResponse.blob();
+        const reader = new FileReader();
+        
+        return new Promise((resolve, reject) => {
+          reader.onloadend = () => {
+            const base64data = reader.result as string;
+            const base64Audio = base64data.split(',')[1];
+            console.log('🎵 AI TTS Audio generated successfully (fallback)');
+            resolve(base64Audio);
+          };
+          reader.onerror = () => reject(new Error('Failed to read audio blob'));
+          reader.readAsDataURL(audioBlob);
+        });
+      }
+
+      // Process successful response
+      const audioBlob = await response.blob();
+      const reader = new FileReader();
+      
+      return new Promise((resolve, reject) => {
+        reader.onloadend = () => {
+          const base64data = reader.result as string;
+          const base64Audio = base64data.split(',')[1];
+          console.log('🎵 AI TTS Audio generated successfully');
+          resolve(base64Audio);
+        };
+        reader.onerror = () => reject(new Error('Failed to read audio blob'));
+        reader.readAsDataURL(audioBlob);
+      });
+
+    } catch (error) {
+      console.error('❌ AI TTS Generation Error:', error);
+      return null;
+    }
+  };
+
   const playTTS = async (audioData?: string) => {
     // Use provided audioData (base64 for immediate playback) or stored Firebase URL
-    const audioToPlay = audioData || editingQuestion?.ttsAudioUrl;
+    let audioToPlay = audioData || editingQuestion?.ttsAudioUrl;
+    
+    // If TTS is pending, try to get the local audio file
+    if (audioToPlay === 'pending' && editingQuestion) {
+      const pendingTTS = pendingTTSUploads.find(p => p.questionId === editingQuestion.id);
+      if (pendingTTS) {
+        audioToPlay = pendingTTS.localUri;
+        console.log('Using local TTS audio for pending question:', editingQuestion.id);
+      }
+    }
     
     console.log('playTTS called with:', {
       hasAudioData: !!audioData,
@@ -2408,7 +2906,7 @@ Enhanced text with emotions:`;
                         color="#10b981" 
                       />
                       <Text style={[styles.ttsButtonText, { color: '#10b981' }]}>
-                        {isPlayingTTS ? 'Stop' : 'Play'}
+                        {isPlayingTTS ? 'Stop' : editingQuestion.ttsAudioUrl === 'pending' ? 'Play (Local)' : 'Play'}
                       </Text>
                     </TouchableOpacity>
                   )}
@@ -2970,7 +3468,7 @@ Enhanced text with emotions:`;
                                     color="#10b981" 
                                   />
                                   <Text style={[styles.ttsButtonText, { color: '#10b981' }]}>
-                                    {isPlayingTTS ? 'Stop' : 'Play'}
+                                    {isPlayingTTS ? 'Stop' : sub.ttsAudioUrl === 'pending' ? 'Play (Local)' : 'Play'}
                                   </Text>
                                 </TouchableOpacity>
                               )}
@@ -3386,7 +3884,7 @@ Enhanced text with emotions:`;
                       style={styles.addButton}
                       onPress={() => {
                         const newSub: Question = {
-                          id: `${Date.now()}-sub`,
+                          id: `sub_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
                           type: 'identification',
                           question: '',
                           answer: '',
@@ -3567,16 +4065,26 @@ Enhanced text with emotions:`;
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Questions ({questions.length})</Text>
-            <TouchableOpacity
-              style={styles.addQuestionButton}
-              onPress={() => {
-                setShowQuestionTypeModal(true);
-                openModal('questionType');
-              }}
-            >
-              <AntDesign name="plus" size={16} color="#ffffff" />
-              <Text style={styles.addQuestionButtonText}>Add Question</Text>
-            </TouchableOpacity>
+            <View style={styles.buttonContainer}>
+              <TouchableOpacity
+                style={styles.aiGeneratorButton}
+                onPress={() => setShowAIGenerator(true)}
+                disabled={!exerciseTitle.trim() || !exerciseDescription.trim() || !exerciseCategory.trim()}
+              >
+                <MaterialCommunityIcons name="robot" size={16} color="#ffffff" />
+                <Text style={styles.aiGeneratorButtonText}>AI Generator</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.addQuestionButton}
+                onPress={() => {
+                  setShowQuestionTypeModal(true);
+                  openModal('questionType');
+                }}
+              >
+                <AntDesign name="plus" size={16} color="#ffffff" />
+                <Text style={styles.addQuestionButtonText}>Add Question</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           {questions.map((question, index) => (
@@ -3634,6 +4142,134 @@ Enhanced text with emotions:`;
 
       {renderQuestionTypeModal()}
       {renderQuestionEditor()}
+      
+      {/* AI Questions Generator Modal */}
+      <Modal
+        visible={showAIGenerator}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAIGenerator(false)}
+      >
+        <View style={styles.aiModalOverlay}>
+          <ScrollView 
+            contentContainerStyle={styles.aiModalScrollContainer}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            <View style={styles.aiModal}>
+              <View style={styles.aiModalHeader}>
+                <Text style={styles.aiModalTitle}>AI Questions Generator</Text>
+                <TouchableOpacity 
+                  onPress={() => setShowAIGenerator(false)}
+                  style={styles.aiModalClose}
+                >
+                  <AntDesign name="close" size={20} color="#64748b" />
+                </TouchableOpacity>
+              </View>
+              
+              <View style={styles.aiModalContent}>
+                <Text style={styles.aiModalLabel}>Exercise Details</Text>
+                <View style={styles.aiExerciseInfo}>
+                  <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Title:</Text> {exerciseTitle}</Text>
+                  <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Category:</Text> {exerciseCategory}</Text>
+                  <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Description:</Text> {exerciseDescription}</Text>
+                </View>
+                
+                <Text style={styles.aiModalLabel}>Additional Requirements</Text>
+                <TextInput
+                  style={styles.aiModalTextArea}
+                  value={aiPrompt}
+                  onChangeText={setAiPrompt}
+                  placeholder="Halimbawa: 'Tungkol sa mga hayop sa bahay', 'Mga kulay at hugis', 'Bilang 1-10', 'Mga letra A-Z'"
+                  placeholderTextColor="#9ca3af"
+                  multiline
+                  textAlignVertical="top"
+                />
+                
+                <View style={styles.aiModalRow}>
+                  <View style={styles.aiModalInputGroup}>
+                    <Text style={styles.aiModalLabel}>Number of Questions</Text>
+                    <View style={styles.aiNumberSelector}>
+                      <TouchableOpacity 
+                        style={styles.aiNumberButton}
+                        onPress={() => setNumberOfQuestions(Math.max(1, numberOfQuestions - 1))}
+                      >
+                        <AntDesign name="minus" size={16} color="#7c3aed" />
+                      </TouchableOpacity>
+                      <Text style={styles.aiNumberText}>{numberOfQuestions}</Text>
+                      <TouchableOpacity 
+                        style={styles.aiNumberButton}
+                        onPress={() => setNumberOfQuestions(Math.min(20, numberOfQuestions + 1))}
+                      >
+                        <AntDesign name="plus" size={16} color="#7c3aed" />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                  
+                  <View style={styles.aiModalInputGroup}>
+                    <Text style={styles.aiModalLabel}>Question Type</Text>
+                    <View style={styles.aiTypeSelector}>
+                      {['multiple-choice', 'identification', 'matching', 're-order'].map((type) => (
+                        <TouchableOpacity
+                          key={type}
+                          style={[
+                            styles.aiTypeOption,
+                            selectedQuestionType === type && styles.aiTypeOptionSelected
+                          ]}
+                          onPress={() => setSelectedQuestionType(type)}
+                        >
+                          <Text style={[
+                            styles.aiTypeOptionText,
+                            selectedQuestionType === type && styles.aiTypeOptionTextSelected
+                          ]}>
+                            {type === 'multiple-choice' ? 'Multiple Choice' : 
+                             type === 'identification' ? 'Identification' :
+                             type === 'matching' ? 'Matching' : 'Re-order'}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                </View>
+                
+                <TouchableOpacity
+                  style={[styles.aiGenerateButton, (isGeneratingQuestions || isGeneratingTTS) && styles.aiGenerateButtonDisabled]}
+                  onPress={generateAIQuestions}
+                  disabled={isGeneratingQuestions || isGeneratingTTS || !aiPrompt.trim()}
+                >
+                  {isGeneratingQuestions ? (
+                    <>
+                      <MaterialCommunityIcons name="loading" size={16} color="#ffffff" />
+                      <Text style={styles.aiGenerateButtonText}>Generating Questions...</Text>
+                    </>
+                  ) : isGeneratingTTS ? (
+                    <>
+                      <MaterialCommunityIcons name="volume-high" size={16} color="#ffffff" />
+                      <Text style={styles.aiGenerateButtonText}>Generating Audio...</Text>
+                    </>
+                  ) : (
+                    <>
+                      <MaterialCommunityIcons name="robot" size={16} color="#ffffff" />
+                      <Text style={styles.aiGenerateButtonText}>Generate Questions</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                
+                {(isGeneratingQuestions || isGeneratingTTS) && (
+                  <Text style={styles.aiStatusText}>
+                    {isGeneratingQuestions 
+                      ? "Creating questions with AI..." 
+                      : ttsProgress.total > 0
+                        ? `Generating TTS audio... (${ttsProgress.current}/${ttsProgress.total})`
+                        : "Generating TTS audio for questions..."
+                    }
+                  </Text>
+                )}
+              </View>
+            </View>
+          </ScrollView>
+        </View>
+      </Modal>
       
       {/* Stock Image Modal */}
       <Modal
@@ -4604,6 +5240,33 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#1e293b',
     flex: 1,
+  },
+  
+  // Button Container
+  buttonContainer: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  
+  // AI Generator Button
+  aiGeneratorButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#10b981',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  aiGeneratorButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 6,
   },
   
   // Add Question Button
@@ -5955,5 +6618,186 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 12,
     fontWeight: '600',
+  },
+  
+  // AI Questions Generator Modal Styles
+  aiModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 20,
+  },
+  aiModalScrollContainer: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    minHeight: '100%',
+  },
+  aiModal: {
+    width: '100%',
+    maxWidth: '100%',
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    maxHeight: '95%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 25,
+  },
+  aiModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  aiModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    flex: 1,
+    marginRight: 16,
+  },
+  aiModalClose: {
+    padding: 8,
+    borderRadius: 20,
+    backgroundColor: '#f8fafc',
+  },
+  aiModalContent: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+  },
+  aiModalLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+    marginTop: 16,
+  },
+  aiExerciseInfo: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 8,
+  },
+  aiExerciseText: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 8,
+    lineHeight: 20,
+  },
+  aiExerciseLabel: {
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  aiModalTextArea: {
+    borderWidth: 2,
+    borderColor: '#7c3aed',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: '#1e293b',
+    backgroundColor: '#ffffff',
+    minHeight: 100,
+    textAlignVertical: 'top',
+  },
+  aiModalRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 16,
+  },
+  aiModalInputGroup: {
+    flex: 1,
+    minWidth: 120,
+  },
+  aiNumberSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 2,
+    borderColor: '#7c3aed',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#ffffff',
+  },
+  aiNumberButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#f5f3ff',
+  },
+  aiNumberText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    minWidth: 30,
+    textAlign: 'center',
+  },
+  aiTypeSelector: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  aiTypeOption: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#ffffff',
+    minWidth: 60,
+    alignItems: 'center',
+  },
+  aiTypeOptionSelected: {
+    borderColor: '#7c3aed',
+    backgroundColor: '#f5f3ff',
+  },
+  aiTypeOptionText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  aiTypeOptionTextSelected: {
+    color: '#7c3aed',
+  },
+  aiGenerateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#7c3aed',
+    paddingVertical: 16,
+    borderRadius: 12,
+    marginTop: 24,
+    marginBottom: 8,
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  aiGenerateButtonDisabled: {
+    backgroundColor: '#d1d5db',
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  aiGenerateButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginLeft: 8,
+  },
+  aiStatusText: {
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
+    marginTop: 12,
+    fontStyle: 'italic',
   },
 });

@@ -1313,21 +1313,20 @@ export default function TeacherDashboard() {
                    ) : (
                      myExercises.map((exercise) => (
                        <View key={exercise.id} style={styles.exerciseCard}>
-                         <View style={styles.exerciseIcon}>
-                           <View style={styles.exerciseIconBackground}>
-                             <MaterialCommunityIcons name="book-open-variant" size={24} color="#8b5cf6" />
+                         {exercise.category && (
+                           <View style={styles.categoryBadgeTopRight}>
+                             <Text style={styles.categoryBadgeText}>{exercise.category}</Text>
                            </View>
-                         </View>
+                         )}
                          <View style={styles.exerciseContent}>
-                           <View style={styles.exerciseTitleRow}>
-                             <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
-                             {exercise.category && (
-                               <View style={styles.categoryBadge}>
-                                 <Text style={styles.categoryBadgeText}>{exercise.category}</Text>
-                               </View>
-                             )}
-                           </View>
-                           <Text style={styles.exerciseDescription}>{exercise.description || 'No description available'}</Text>
+                           <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
+                           <Text 
+                             style={styles.exerciseDescription}
+                             numberOfLines={3}
+                             ellipsizeMode="tail"
+                           >
+                             {exercise.description || 'No description available'}
+                           </Text>
                            <View style={styles.exerciseStats}>
                              <Text style={styles.exerciseStat}>{exercise.questionCount || 0} Questions</Text>
                              <Text style={styles.exerciseStatSeparator}>•</Text>
@@ -1344,16 +1343,6 @@ export default function TeacherDashboard() {
                          </View>
                          <View style={styles.exerciseActions}>
                            <TouchableOpacity 
-                             style={styles.assignButton}
-                             onPress={() => {
-                               setSelectedExerciseForAssign(exercise);
-                               setShowAssignForm(true);
-                             }}
-                           >
-                             <MaterialCommunityIcons name="send" size={16} color="#ffffff" />
-                             <Text style={styles.assignButtonText}>Assign</Text>
-                           </TouchableOpacity>
-                           <TouchableOpacity 
                              style={styles.exerciseOptions}
                              onPress={() => {
                                Alert.alert(
@@ -1368,6 +1357,18 @@ export default function TeacherDashboard() {
                              }}
                            >
                              <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                           </TouchableOpacity>
+                         </View>
+                         <View style={styles.exerciseBottomActions}>
+                           <TouchableOpacity 
+                             style={styles.assignButtonBottom}
+                             onPress={() => {
+                               setSelectedExerciseForAssign(exercise);
+                               setShowAssignForm(true);
+                             }}
+                           >
+                             <MaterialCommunityIcons name="send" size={16} color="#ffffff" />
+                             <Text style={styles.assignButtonText}>Assign</Text>
                            </TouchableOpacity>
                          </View>
                        </View>
@@ -1447,6 +1448,11 @@ export default function TeacherDashboard() {
                          <Text style={styles.categoryHeader}>{category}</Text>
                          {groupedExercises[category].map((exercise: any) => (
                            <View key={exercise.id} style={styles.exerciseCard}>
+                             {exercise.category && (
+                               <View style={styles.categoryBadgeTopRight}>
+                                 <Text style={styles.categoryBadgeText}>{exercise.category}</Text>
+                               </View>
+                             )}
                              <View style={styles.exerciseIcon}>
                                <View style={styles.exerciseIconBackground}>
                                  <MaterialCommunityIcons name="book-open-variant" size={24} color="#8b5cf6" />
@@ -1454,7 +1460,13 @@ export default function TeacherDashboard() {
                              </View>
                              <View style={styles.exerciseContent}>
                                <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
-                               <Text style={styles.exerciseDescription}>{exercise.description || 'No description available'}</Text>
+                               <Text 
+                                 style={styles.exerciseDescription}
+                                 numberOfLines={3}
+                                 ellipsizeMode="tail"
+                               >
+                                 {exercise.description || 'No description available'}
+                               </Text>
                                <View style={styles.exerciseStats}>
                                  <Text style={styles.exerciseStat}>{exercise.questionCount || 0} Questions</Text>
                                  <Text style={styles.exerciseStatSeparator}>•</Text>
@@ -3497,6 +3509,7 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   exerciseCard: {
+    position: 'relative',
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#ffffff',
@@ -3647,7 +3660,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   
-  // Exercise Title Row Styles
+  // Exercise Card Content Styles
+  exerciseCardContent: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  // Top Right Category Badge
+  categoryBadgeTopRight: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    backgroundColor: '#7c3aed',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    zIndex: 1,
+  },
+  // Exercise Title Row Styles (deprecated - keeping for compatibility)
   exerciseTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3659,9 +3688,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 12,
+    alignSelf: 'flex-end',
+    flexShrink: 0,
+    marginTop: 4,
   },
   categoryBadgeText: {
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '600',
     color: '#ffffff',
   },
@@ -3696,13 +3728,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   exerciseCreator: {
-    fontSize: 12,
+    fontSize: 10,
     color: '#6b7280',
     fontWeight: '500',
   },
   exerciseDate: {
-    fontSize: 12,
+    fontSize: 10,
     color: '#9ca3af',
+    textAlign: 'right',
   },
   
   // Exercise Actions Styles
@@ -3719,9 +3752,22 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 6,
   },
+  // Bottom assign button styles
+  exerciseBottomActions: {
+    marginTop: 12,
+    alignItems: 'flex-start',
+  },
+  assignButtonBottom: {
+    backgroundColor: '#10b981',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   assignButtonText: {
     color: '#ffffff',
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '600',
     marginLeft: 4,
   },
