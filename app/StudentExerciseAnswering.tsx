@@ -394,6 +394,9 @@ export default function StudentExerciseAnswering() {
   
   // Animation on question change
   useEffect(() => {
+    // CRITICAL: Stop TTS immediately when question changes
+    stopCurrentTTS();
+    
     // Reset animations
     fadeAnim.setValue(0);
     slideAnim.setValue(50);
@@ -441,6 +444,9 @@ export default function StudentExerciseAnswering() {
 
   // Reset question timer when index changes
   useEffect(() => {
+    // CRITICAL: Stop TTS when question index changes
+    stopCurrentTTS();
+    
     // Accumulate time for the previous question, then reset timer for the new one
     if (exercise) {
       const now = Date.now();
@@ -552,13 +558,11 @@ export default function StudentExerciseAnswering() {
   const playTTS = async (audioUrl?: string | null, attempt: number = 0) => {
     try {
       if (!audioUrl) return;
+      
+      // CRITICAL: Always stop any existing TTS before starting new one
+      stopCurrentTTS();
+      
       setIsLoadingTTS(true);
-      // stop existing
-      if (currentAudioPlayer) {
-        try { currentAudioPlayer.remove(); } catch {}
-        setCurrentAudioPlayer(null);
-        setIsPlayingTTS(false);
-      }
       const source: AudioSource = { uri: audioUrl };
       const player = createAudioPlayer(source);
       setCurrentAudioPlayer(player);
@@ -603,9 +607,13 @@ export default function StudentExerciseAnswering() {
         currentAudioPlayer.remove();
       }
     } catch {}
+    // Force stop all TTS states immediately
     setIsPlayingTTS(false);
+    setIsLoadingTTS(false);
     setCurrentAudioPlayer(null);
     setCurrentAudioUri(null);
+    // Reset auto-play tracking to prevent immediate replay
+    lastAutoPlayedQuestionIdRef.current = null;
   };
 
   const stopCurrentTTS = () => {
@@ -2655,32 +2663,31 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   multipleChoiceGridOption: {
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    borderRadius: getResponsiveSize(15),
+    backgroundColor: '#10b981', // Solid green color like in the image
+    borderRadius: getResponsiveSize(20), // More rounded corners
     padding: getResponsivePadding(16),
     width: isTablet ? '30%' : '48%',
     aspectRatio: 1,
-    borderWidth: getResponsiveSize(2),
-    borderColor: '#e2e8f0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
+    borderWidth: 0, // Remove border for solid look
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
     justifyContent: 'center',
     alignItems: 'center',
     position: 'relative',
   },
   selectedMultipleChoiceGridOption: {
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    borderColor: '#4a90e2',
-    borderWidth: 3,
-    shadowColor: '#4a90e2',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
-    transform: [{ scale: 1.02 }],
+    backgroundColor: '#059669', // Darker green when selected
+    borderColor: '#ffffff',
+    borderWidth: getResponsiveSize(3),
+    shadowColor: '#059669',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
+    transform: [{ scale: 1.05 }],
   },
   gridOptionImage: {
     width: '80%',
@@ -2707,9 +2714,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   gridOptionLabel: {
-    fontSize: 14,
+    fontSize: getResponsiveFontSize(16),
     fontWeight: '700',
     color: '#ffffff',
+    textShadowColor: 'rgba(0, 0, 0, 0.3)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   identificationContainer: {
     marginBottom: 10,
