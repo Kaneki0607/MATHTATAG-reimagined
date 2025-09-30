@@ -1,5 +1,7 @@
 import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useIsFocused } from '@react-navigation/native';
+import { AudioSource, AudioStatus, createAudioPlayer } from 'expo-audio';
 import { Image as ExpoImage } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
@@ -227,6 +229,8 @@ interface Question {
     ignoreAccents?: boolean;
     allowShowWork?: boolean;
   };
+  // Optional saved TTS audio URL for this question
+  ttsAudioUrl?: string;
 }
 
 interface Exercise {
@@ -254,12 +258,34 @@ interface StudentAnswer {
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
+// Responsive design helpers
+const isTablet = screenWidth >= 768;
+const isSmallScreen = screenWidth < 375;
+const isLargeScreen = screenWidth >= 1024;
+
+// Dynamic sizing based on screen dimensions
+const getResponsiveSize = (baseSize: number, scaleFactor: number = 1) => {
+  const scale = Math.min(screenWidth / 375, screenHeight / 667); // Base on iPhone 6/7/8
+  return Math.max(baseSize * scale * scaleFactor, baseSize * 0.8); // Minimum 80% of base size
+};
+
+const getResponsiveFontSize = (baseSize: number) => {
+  const scale = Math.min(screenWidth / 375, screenHeight / 667);
+  return Math.max(baseSize * scale, baseSize * 0.85);
+};
+
+const getResponsivePadding = (basePadding: number) => {
+  const scale = Math.min(screenWidth / 375, 1.2);
+  return Math.max(basePadding * scale, basePadding * 0.8);
+};
+
 // Animated touchable for shake feedback
 const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
 
 export default function StudentExerciseAnswering() {
   const router = useRouter();
   const { exerciseId, questionIndex } = useLocalSearchParams();
+  const isFocused = useIsFocused();
   
   // State
   const [exercise, setExercise] = useState<Exercise | null>(null);
@@ -276,7 +302,7 @@ export default function StudentExerciseAnswering() {
   const rafIdRef = useRef<number | null>(null);
   const questionElapsedRef = useRef<number>(0);
   const frozenElapsedRef = useRef<number | null>(null);
-  const [backgroundImage, setBackgroundImage] = useState<string>('bg.jpg');
+  const [backgroundImage, setBackgroundImage] = useState<string>('map1.1.png');
   const [showSettings, setShowSettings] = useState(false);
   const [matchingSelections, setMatchingSelections] = useState<{[key: string]: {[key: string]: string}}>({});
   const [reorderAnswers, setReorderAnswers] = useState<{[key: string]: ReorderItem[]}>({});
@@ -302,6 +328,12 @@ export default function StudentExerciseAnswering() {
   const [showWrong, setShowWrong] = useState(false);
   const wrongAnim = useRef(new Animated.Value(0)).current;
   const [attemptLogs, setAttemptLogs] = useState<{[questionId: string]: string[]}>({});
+  // TTS playback state
+  const [isPlayingTTS, setIsPlayingTTS] = useState(false);
+  const [isLoadingTTS, setIsLoadingTTS] = useState(false);
+  const [currentAudioPlayer, setCurrentAudioPlayer] = useState<any | null>(null);
+  const [currentAudioUri, setCurrentAudioUri] = useState<string | null>(null);
+  const lastAutoPlayedQuestionIdRef = useRef<string | null>(null);
 
   // Enable smooth layout transitions on Android
   if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -351,6 +383,12 @@ export default function StudentExerciseAnswering() {
       if (timerInterval) {
         clearInterval(timerInterval);
       }
+      // Stop any TTS audio on unmount
+      try {
+        if (currentAudioPlayer) {
+          currentAudioPlayer.remove();
+        }
+      } catch {}
     };
   }, [timerInterval]);
   
@@ -422,8 +460,18 @@ export default function StudentExerciseAnswering() {
   
   const getRandomBackground = () => {
     const mapImages = [
-      'bg.jpg',
-      'bg2.jpg'
+      'map1.1.png',
+      'map2.2.png',
+      'map3.3.png',
+      'map4.4.png',
+      'map5.5.png',
+      'map6.6.png',
+      'map7.7.png',
+      'map8.8.png',
+      'map9.9.png',
+      'map10.10.png',
+      'map11.11.png',
+      'map12.12.png'
     ];
     const randomIndex = Math.floor(Math.random() * mapImages.length);
     return mapImages[randomIndex];
@@ -431,12 +479,32 @@ export default function StudentExerciseAnswering() {
 
   const getBackgroundSource = (imageName: string) => {
     switch (imageName) {
-      case 'bg.jpg':
-        return require('../assets/images/bg.jpg');
-      case 'bg2.jpg':
-        return require('../assets/images/bg2.jpg');
+      case 'map1.1.png':
+        return require('../assets/images/Maps/map1.1.png');
+      case 'map2.2.png':
+        return require('../assets/images/Maps/map2.2.png');
+      case 'map3.3.png':
+        return require('../assets/images/Maps/map3.3.png');
+      case 'map4.4.png':
+        return require('../assets/images/Maps/map4.4.png');
+      case 'map5.5.png':
+        return require('../assets/images/Maps/map5.5.png');
+      case 'map6.6.png':
+        return require('../assets/images/Maps/map6.6.png');
+      case 'map7.7.png':
+        return require('../assets/images/Maps/map7.7.png');
+      case 'map8.8.png':
+        return require('../assets/images/Maps/map8.8.png');
+      case 'map9.9.png':
+        return require('../assets/images/Maps/map9.9.png');
+      case 'map10.10.png':
+        return require('../assets/images/Maps/map10.10.png');
+      case 'map11.11.png':
+        return require('../assets/images/Maps/map11.11.png');
+      case 'map12.12.png':
+        return require('../assets/images/Maps/map12.12.png');
       default:
-        return require('../assets/images/bg.jpg');
+        return require('../assets/images/Maps/map1.1.png');
     }
   };
 
@@ -479,6 +547,112 @@ export default function StudentExerciseAnswering() {
     if (item.type === 'image') return item.content || '[image]';
     return item.content;
   };
+
+  // TTS helpers
+  const playTTS = async (audioUrl?: string | null, attempt: number = 0) => {
+    try {
+      if (!audioUrl) return;
+      setIsLoadingTTS(true);
+      // stop existing
+      if (currentAudioPlayer) {
+        try { currentAudioPlayer.remove(); } catch {}
+        setCurrentAudioPlayer(null);
+        setIsPlayingTTS(false);
+      }
+      const source: AudioSource = { uri: audioUrl };
+      const player = createAudioPlayer(source);
+      setCurrentAudioPlayer(player);
+      setCurrentAudioUri(audioUrl);
+      player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+        if ('isLoaded' in status && status.isLoaded) {
+          if (status.playing) setIsPlayingTTS(true);
+          if (status.didJustFinish) {
+            setIsPlayingTTS(false);
+            try { player.remove(); } catch {}
+            setCurrentAudioPlayer(null);
+            setCurrentAudioUri(null);
+            setIsLoadingTTS(false);
+          }
+        } else if ('error' in status) {
+          // Retry a couple of times on load error
+          if (attempt < 2) {
+            setTimeout(() => playTTS(audioUrl, attempt + 1), 150);
+          } else {
+            setIsPlayingTTS(false);
+            setIsLoadingTTS(false);
+            try { player.remove(); } catch {}
+            setCurrentAudioPlayer(null);
+          }
+        }
+      });
+      setTimeout(() => {
+        try { player.play(); setIsPlayingTTS(true); setIsLoadingTTS(false); } catch {
+          if (attempt < 2) {
+            setTimeout(() => playTTS(audioUrl, attempt + 1), 200);
+          } else {
+            setIsLoadingTTS(false);
+          }
+        }
+      }, 60);
+    } catch {}
+  };
+
+  const stopTTS = () => {
+    try {
+      if (currentAudioPlayer) {
+        currentAudioPlayer.remove();
+      }
+    } catch {}
+    setIsPlayingTTS(false);
+    setCurrentAudioPlayer(null);
+    setCurrentAudioUri(null);
+  };
+
+  const stopCurrentTTS = () => {
+    // small wrapper for clarity
+    stopTTS();
+  };
+
+  const renderTTSButton = (audioUrl?: string | null) => {
+    if (!audioUrl) return null;
+    const isActive = isPlayingTTS && currentAudioUri === audioUrl;
+    return (
+      <TouchableOpacity
+        onPress={isActive ? stopTTS : () => playTTS(audioUrl)}
+        style={styles.ttsButton}
+        activeOpacity={0.8}
+      >
+        <MaterialIcons name={isActive ? 'stop-circle' : (isLoadingTTS ? 'hourglass-bottom' : 'volume-up')} size={18} color={'#ffffff'} />
+        <Text style={styles.ttsButtonText}>{isActive ? 'Stop' : (isLoadingTTS ? 'Loading…' : 'Listen')}</Text>
+      </TouchableOpacity>
+    );
+  };
+
+  // Auto-play TTS on question change when available
+  useEffect(() => {
+    if (!exercise) return;
+    const q = exercise.questions[currentQuestionIndex];
+    if (!q) return;
+    // avoid replaying same question automatically
+    // Always stop any previous audio when index changes
+    stopCurrentTTS();
+    if (!isFocused) return; // only auto-play when screen is focused
+    if (lastAutoPlayedQuestionIdRef.current === q.id) return;
+    if (q.ttsAudioUrl) {
+      lastAutoPlayedQuestionIdRef.current = q.id;
+      // small delay to let UI settle
+      setTimeout(() => playTTS(q.ttsAudioUrl!), 150);
+    } else {
+      lastAutoPlayedQuestionIdRef.current = q.id;
+    }
+  }, [exercise, currentQuestionIndex, isFocused]);
+
+  // Stop any TTS if screen loses focus
+  useEffect(() => {
+    if (!isFocused) {
+      stopCurrentTTS();
+    }
+  }, [isFocused]);
 
   const formatCorrectAnswer = (question: Question): string | string[] => {
     if (question.type === 'multiple-choice') {
@@ -689,6 +863,10 @@ export default function StudentExerciseAnswering() {
       Alert.alert('Try again', 'That is not correct yet. Please try again.');
       return;
     }
+    
+    // Stop TTS immediately when answer is correct
+    stopCurrentTTS();
+    
     setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
     // Log the successful attempt as well
     logAttempt(q, currentAns);
@@ -698,6 +876,8 @@ export default function StudentExerciseAnswering() {
   const advanceToNextOrFinish = () => {
     if (!exercise) return;
     // Do not accumulate here; index-change effect handles accumulation centrally
+    // Stop TTS if playing when moving forward
+    stopCurrentTTS();
     if (currentQuestionIndex < (exercise.questions.length || 0) - 1) {
       const nextIndex = currentQuestionIndex + 1;
       setCurrentQuestionIndex(nextIndex);
@@ -750,6 +930,8 @@ export default function StudentExerciseAnswering() {
   const handlePrevious = () => {
     if (currentQuestionIndex > 0) {
       // Accumulation handled by index-change effect; just move index
+      // Stop TTS on navigation
+      stopCurrentTTS();
       setCurrentQuestionIndex(prev => prev - 1);
       const prevQuestion = exercise?.questions[currentQuestionIndex - 1];
       if (prevQuestion) {
@@ -892,6 +1074,8 @@ export default function StudentExerciseAnswering() {
         clearInterval(timerInterval);
         setTimerInterval(null);
       }
+      // Stop any TTS during submit
+      stopCurrentTTS();
       
       // Validate last question on submit (try-again basis)
       if (exercise) {
@@ -974,6 +1158,8 @@ export default function StudentExerciseAnswering() {
 
   const handleLevelComplete = async () => {
     if (!exercise) return;
+    // Stop TTS when finishing a level
+    stopCurrentTTS();
     const q = exercise.questions[currentQuestionIndex];
     const currentAns = answers.find(a => a.questionId === q.id)?.answer;
     const correct = isAnswerCorrect(q, currentAns);
@@ -1023,6 +1209,7 @@ export default function StudentExerciseAnswering() {
         
         <View style={styles.questionTextContainer}>
           <Text style={styles.questionText}>{question.question}</Text>
+          {renderTTSButton(question.ttsAudioUrl)}
         </View>
         
         {useGridLayout ? (
@@ -1061,6 +1248,8 @@ export default function StudentExerciseAnswering() {
                         return;
                       }
                       // Correct -> set answer and move next
+                      // Stop TTS immediately when correct answer is selected
+                      stopCurrentTTS();
                       handleAnswerChange(option);
                       setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
                       logAttempt(question, option);
@@ -1134,6 +1323,8 @@ export default function StudentExerciseAnswering() {
                         triggerWrongFeedback();
                         return;
                       }
+                      // Stop TTS immediately when correct answer is selected
+                      stopCurrentTTS();
                       handleAnswerChange(option);
                       setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
                       logAttempt(question, option);
@@ -1233,6 +1424,7 @@ export default function StudentExerciseAnswering() {
           
           <View style={styles.questionTextContainer}>
             <Text style={[styles.fillBlankQuestionText, { fontSize: dynamicFontSize }]}>{question.question}</Text>
+          {renderTTSButton(question.ttsAudioUrl)}
           </View>
           <View style={styles.adaptiveBoxesRow}>
             {Array.isArray(question.answer) ? question.answer.map((expected, index) => {
@@ -1305,6 +1497,7 @@ export default function StudentExerciseAnswering() {
           
           <View style={styles.questionTextContainer}>
             <Text style={[styles.fillBlankQuestionText, { fontSize: dynamicFontSize }]}>{question.question}</Text>
+            {renderTTSButton(question.ttsAudioUrl)}
           </View>
           <TextInput
             style={styles.identificationInput}
@@ -1361,6 +1554,7 @@ export default function StudentExerciseAnswering() {
         
         <View style={styles.questionTextContainer}>
           <Text style={styles.questionText}>{question.question}</Text>
+          {renderTTSButton(question.ttsAudioUrl)}
         </View>
         
         {/* Progress removed per new design */}
@@ -1469,6 +1663,7 @@ export default function StudentExerciseAnswering() {
         )}
         <View style={styles.questionTextContainer}>
           <Text style={styles.questionText}>{question.question}</Text>
+          {renderTTSButton(question.ttsAudioUrl)}
         </View>
         <ReorderQuestion
           question={question}
@@ -1531,6 +1726,7 @@ export default function StudentExerciseAnswering() {
               {/* Sub-question Text container */}
               <View style={index === 0 ? styles.subQuestionTextContainer : styles.questionTextContainer}>
                 <Text style={styles.questionText}>{subQuestion.question}</Text>
+                {renderTTSButton((subQuestion as any).ttsAudioUrl)}
               </View>
 
               {subQuestion.type === 'multiple-choice' && (() => {
@@ -1957,7 +2153,10 @@ export default function StudentExerciseAnswering() {
           
           <TouchableOpacity
             style={styles.headerButton}
-            onPress={() => setShowSettings(!showSettings)}
+            onPress={() => {
+              // Toggle settings, but also provide quick TTS play of current question if available on long press
+              setShowSettings(!showSettings);
+            }}
             activeOpacity={0.7}
           >
             <MaterialIcons name="settings" size={24} color="#ffffff" />
@@ -2169,15 +2368,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: 60,
-    paddingBottom: 20,
+    paddingHorizontal: getResponsivePadding(20),
+    paddingTop: getResponsiveSize(60),
+    paddingBottom: getResponsiveSize(20),
     zIndex: 10,
   },
   headerButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: getResponsiveSize(44),
+    height: getResponsiveSize(44),
+    borderRadius: getResponsiveSize(22),
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
@@ -2219,11 +2418,11 @@ const styles = StyleSheet.create({
     textShadowRadius: 2,
   },
   exerciseTitle: {
-    fontSize: 20,
+    fontSize: getResponsiveFontSize(20),
     fontWeight: '700',
     color: '#ffffff',
     textAlign: 'center',
-    marginBottom: 10,
+    marginBottom: getResponsiveSize(10),
     textShadowColor: 'rgba(0, 0, 0, 0.5)',
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 4,
@@ -2239,16 +2438,16 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   progressContainer: {
-    marginHorizontal: 20,
-    marginBottom: 20,
+    marginHorizontal: getResponsivePadding(20),
+    marginBottom: getResponsiveSize(20),
     alignItems: 'center',
   },
   progressBarContainer: {
     width: '100%',
-    height: 25,
+    height: getResponsiveSize(25),
     backgroundColor: '#ffffff',
-    borderRadius: 12,
-    borderWidth: 2,
+    borderRadius: getResponsiveSize(12),
+    borderWidth: getResponsiveSize(2),
     borderColor: '#ffa500',
     shadowColor: '#ffa500',
     shadowOffset: { width: 0, height: 2 },
@@ -2291,17 +2490,17 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     flex: 1,
-    paddingHorizontal: 20,
-    paddingTop: 20,
+    paddingHorizontal: getResponsivePadding(20),
+    paddingTop: getResponsiveSize(20),
   },
   scrollContent: {
     flexGrow: 1,
-    paddingBottom: 20,
+    paddingBottom: getResponsiveSize(20),
   },
   questionWrapper: {
     flex: 1,
-    paddingHorizontal: 20,
-    paddingVertical: 20,
+    paddingHorizontal: getResponsivePadding(20),
+    paddingVertical: getResponsiveSize(20),
   },
   questionImagesGrid: {
     flexDirection: 'row',
@@ -2340,12 +2539,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   questionText: {
-    fontSize: 15,
+    fontSize: getResponsiveFontSize(15),
     fontWeight: '700',
     color: '#1e293b',
-    lineHeight: 28,
-    marginBottom: 30,
-    marginTop: -15,
+    lineHeight: getResponsiveFontSize(28),
+    marginBottom: getResponsiveSize(30),
+    marginTop: getResponsiveSize(-15),
     textShadowColor: 'rgba(255, 165, 0, 0.3)',
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 4,
@@ -2361,13 +2560,14 @@ const styles = StyleSheet.create({
     maxWidth: '90%',
   },
   optionsContainer: {
-    gap: 10,
+    gap: getResponsiveSize(10),
   },
   optionsGridContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    gap: 12,
+    justifyContent: isTablet ? 'flex-start' : 'space-between',
+    gap: getResponsiveSize(12),
+    paddingHorizontal: isTablet ? getResponsiveSize(20) : 0,
   },
   questionTypeLabel: {
     backgroundColor: '#4a90e2',
@@ -2387,17 +2587,17 @@ const styles = StyleSheet.create({
   },
   multipleChoiceOption: {
     backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    borderRadius: 15,
-    padding: 12,
-    marginBottom: 12,
-    borderWidth: 2,
+    borderRadius: getResponsiveSize(15),
+    padding: getResponsivePadding(12),
+    marginBottom: getResponsiveSize(12),
+    borderWidth: getResponsiveSize(2),
     borderColor: '#e2e8f0',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 3,
-    minHeight: 60,
+    minHeight: getResponsiveSize(60),
   },
   selectedMultipleChoiceOption: {
     backgroundColor: '#4a90e2',
@@ -2456,11 +2656,11 @@ const styles = StyleSheet.create({
   },
   multipleChoiceGridOption: {
     backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    borderRadius: 15,
-    padding: 16,
-    width: '48%',
+    borderRadius: getResponsiveSize(15),
+    padding: getResponsivePadding(16),
+    width: isTablet ? '30%' : '48%',
     aspectRatio: 1,
-    borderWidth: 2,
+    borderWidth: getResponsiveSize(2),
     borderColor: '#e2e8f0',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -2516,10 +2716,10 @@ const styles = StyleSheet.create({
   },
   questionTextContainer: {
     backgroundColor: '#ffffff',
-    borderRadius: 15,
-    padding: 20,
-    marginBottom: 20,
-    borderWidth: 3,
+    borderRadius: getResponsiveSize(15),
+    padding: getResponsivePadding(20),
+    marginBottom: getResponsiveSize(20),
+    borderWidth: getResponsiveSize(3),
     borderColor: '#ffa500',
     shadowColor: '#ffa500',
     shadowOffset: { width: 0, height: 4 },
@@ -2528,7 +2728,7 @@ const styles = StyleSheet.create({
     elevation: 4,
     justifyContent: 'center',
     alignItems: 'center',
-    minHeight: 80,
+    minHeight: getResponsiveSize(80),
   },
   characterBoxesContainer: {
     alignItems: 'center',
@@ -2715,6 +2915,23 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '700',
+  },
+  // TTS button
+  ttsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: getResponsiveSize(6),
+    backgroundColor: '#ffa500',
+    borderRadius: getResponsiveSize(12),
+    paddingHorizontal: getResponsivePadding(10),
+    paddingVertical: getResponsiveSize(6),
+    marginTop: getResponsiveSize(8),
+    alignSelf: 'flex-start',
+  },
+  ttsButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: getResponsiveFontSize(13),
   },
   // Matching question styles
   matchingContainer: {
