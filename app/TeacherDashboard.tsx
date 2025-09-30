@@ -5,16 +5,16 @@ import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
-  Alert,
-  Dimensions,
-  Image,
-  Modal,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    Alert,
+    Dimensions,
+    Image,
+    Modal,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
 import { AssignedExercise, useExercises } from '../hooks/useExercises';
@@ -29,18 +29,15 @@ const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
   'Water Animals': [
     { name: 'Water Animal 1', uri: require('../assets/images/Water Animals/1.png') },
     { name: 'Water Animal 2', uri: require('../assets/images/Water Animals/2.png') },
-    { name: 'Water Animal 3', uri: require('../assets/images/Water Animals/3.png') },
     { name: 'Water Animal 4', uri: require('../assets/images/Water Animals/4.png') },
     { name: 'Water Animal 5', uri: require('../assets/images/Water Animals/5.png') },
     { name: 'Water Animal 6', uri: require('../assets/images/Water Animals/6.png') },
     { name: 'Water Animal 7', uri: require('../assets/images/Water Animals/7.png') },
     { name: 'Water Animal 8', uri: require('../assets/images/Water Animals/8.png') },
-    { name: 'Water Animal 9', uri: require('../assets/images/Water Animals/9.png') },
     { name: 'Water Animal 10', uri: require('../assets/images/Water Animals/10.png') },
     { name: 'Water Animal 11', uri: require('../assets/images/Water Animals/11.png') },
     { name: 'Water Animal 12', uri: require('../assets/images/Water Animals/12.png') },
     { name: 'Water Animal 13', uri: require('../assets/images/Water Animals/13.png') },
-    { name: 'Water Animal 14', uri: require('../assets/images/Water Animals/14.png') },
     { name: 'Water Animal 15', uri: require('../assets/images/Water Animals/15.png') },
   ],
   'Alphabet': [

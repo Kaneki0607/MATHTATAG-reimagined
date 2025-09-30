@@ -22,28 +22,193 @@ import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
-const elevenLabsApiKey = "sk_44bc790290208dcf327cc264fc303fd19dfcbcf2503fff5b";
+// Import ElevenLabs API key management
+import {
+  addApiKey,
+  cleanupExpiredKeys,
+  getActiveApiKeys,
+  getApiKeyStatus,
+  markApiKeyAsFailed,
+  markApiKeyAsUsed,
+  removeLowCreditKeys,
+  updateApiKeyCredits
+} from '../lib/elevenlabs-keys';
+
+// Helper function to check if API key has low credits and update status
+const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, errorText: string): Promise<boolean> => {
+  try {
+    const errorData = JSON.parse(errorText);
+    
+    // Check if it's a quota exceeded error with specific credit information
+    if (errorData.detail && errorData.detail.status === 'quota_exceeded') {
+      const creditsRemaining = errorData.detail.credits_remaining || 0;
+      const creditsRequired = errorData.detail.credits_required || 0;
+      
+      console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
+      
+      // Update the API key credits and status
+      updateApiKeyCredits(apiKey, creditsRemaining);
+      
+      // If credits are below 300, mark this key for removal
+      if (creditsRemaining < 300) {
+        console.log(`🗑️ API key marked as low credits (${creditsRemaining} < 300)`);
+        return true; // Key has low credits
+      }
+    }
+  } catch (parseError) {
+    console.warn('⚠️ Could not parse error response for credit check:', parseError);
+  }
+  
+  return false; // Key was not marked as low credits
+};
+
+// Helper function to try multiple ElevenLabs API keys with fallback
+const callElevenLabsWithFallback = async (
+  text: string, 
+  voiceId: string = 'cgSgspJ2msm6clMCkdW9',
+  useV3: boolean = true,
+  outputFormat: string = 'mp3_44100_128'
+): Promise<{ audioBlob: Blob; usedApiKey: string; performanceLog: any }> => {
+  const performanceLog: any = {};
+  
+  // Clean up expired keys first
+  cleanupExpiredKeys();
+  
+  // Get active API keys
+  const activeKeys = getActiveApiKeys();
+  
+  if (activeKeys.length === 0) {
+    throw new Error('No active ElevenLabs API keys available');
+  }
+  
+  for (let i = 0; i < activeKeys.length; i++) {
+    const apiKey = activeKeys[i];
+    const attemptStart = Date.now();
+    
+    try {
+      console.log(`🔄 Trying ElevenLabs API key ${i + 1}/${activeKeys.length} (${apiKey.substring(0, 10)}...)`);
+      
+      // Prepare request payload based on version
+      const requestPayload = useV3 ? {
+        text: text,
+        model_id: 'eleven_v3',
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.8,
+          style: 0.0,
+          use_speaker_boost: true
+        }
+      } : {
+        text: text,
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.8
+        }
+      };
+
+      // Make API call
+      const url = useV3 
+        ? `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${outputFormat}`
+        : `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
+        
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'Content-Type': 'application/json',
+          'xi-api-key': apiKey
+        },
+        body: JSON.stringify(requestPayload)
+      });
+
+      if (response.ok) {
+        const audioBlob = await response.blob();
+        performanceLog[`apiKey${i + 1}`] = Date.now() - attemptStart;
+        console.log(`✅ ElevenLabs API key ${i + 1} succeeded`);
+        
+        // Mark this key as used
+        markApiKeyAsUsed(apiKey);
+        
+        return {
+          audioBlob,
+          usedApiKey: apiKey,
+          performanceLog
+        };
+      } else {
+        const errorText = await response.text();
+        console.warn(`⚠️ ElevenLabs API key ${i + 1} failed:`, response.status, errorText);
+        
+        // Check if this key has low credits and update status
+        const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
+        
+        // Mark key as failed if it's not a credit issue
+        if (!hasLowCredits) {
+          markApiKeyAsFailed(apiKey);
+        }
+        
+        // If this is the last key, throw the error
+        if (i === activeKeys.length - 1) {
+          throw new Error(`All ElevenLabs API keys failed. Last error: ${response.status} - ${errorText}`);
+        }
+      }
+    } catch (error) {
+      console.warn(`⚠️ ElevenLabs API key ${i + 1} error:`, error);
+      
+      // Mark key as failed
+      markApiKeyAsFailed(apiKey);
+      
+      // If this is the last key, throw the error
+      if (i === activeKeys.length - 1) {
+        throw error;
+      }
+    }
+  }
+  
+  throw new Error('No ElevenLabs API keys available');
+};
+
+// Utility functions for API key management
+const addElevenLabsApiKey = (newApiKey: string) => {
+  return addApiKey(newApiKey);
+};
+
+const getElevenLabsApiKeyStatus = () => {
+  return getApiKeyStatus();
+};
+
+const cleanupLowCreditKeys = () => {
+  return removeLowCreditKeys();
+};
+
+// Periodic cleanup of low credit keys (call this periodically)
+const performApiKeyMaintenance = () => {
+  const removedCount = removeLowCreditKeys();
+  const expiredCount = cleanupExpiredKeys();
+  
+  if (removedCount > 0 || expiredCount > 0) {
+    console.log(`🧹 API Key Maintenance: Removed ${removedCount} low credit keys, ${expiredCount} expired keys`);
+  }
+  
+  return { removedCount, expiredCount };
+};
 
 // Configuration - Now using direct API calls to Gemini and ElevenLabs
 
 // Stock image library data
 const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
   'Water Animals': [
-    { name: 'Water Animal 1', uri: require('../assets/images/Water Animals/1.png') },
-    { name: 'Water Animal 2', uri: require('../assets/images/Water Animals/2.png') },
-    { name: 'Water Animal 3', uri: require('../assets/images/Water Animals/3.png') },
-    { name: 'Water Animal 4', uri: require('../assets/images/Water Animals/4.png') },
-    { name: 'Water Animal 5', uri: require('../assets/images/Water Animals/5.png') },
-    { name: 'Water Animal 6', uri: require('../assets/images/Water Animals/6.png') },
-    { name: 'Water Animal 7', uri: require('../assets/images/Water Animals/7.png') },
-    { name: 'Water Animal 8', uri: require('../assets/images/Water Animals/8.png') },
-    { name: 'Water Animal 9', uri: require('../assets/images/Water Animals/9.png') },
-    { name: 'Water Animal 10', uri: require('../assets/images/Water Animals/10.png') },
-    { name: 'Water Animal 11', uri: require('../assets/images/Water Animals/11.png') },
-    { name: 'Water Animal 12', uri: require('../assets/images/Water Animals/12.png') },
-    { name: 'Water Animal 13', uri: require('../assets/images/Water Animals/13.png') },
-    { name: 'Water Animal 14', uri: require('../assets/images/Water Animals/14.png') },
-    { name: 'Water Animal 15', uri: require('../assets/images/Water Animals/15.png') },
+    { name: 'Whale', uri: require('../assets/images/Water Animals/1.png') },
+    { name: 'Fish', uri: require('../assets/images/Water Animals/2.png') },
+    { name: 'Crab', uri: require('../assets/images/Water Animals/4.png') },
+    { name: 'Octopus', uri: require('../assets/images/Water Animals/5.png') },
+    { name: 'Starfish', uri: require('../assets/images/Water Animals/6.png') },
+    { name: 'Coral', uri: require('../assets/images/Water Animals/7.png') },
+    { name: 'Puffer Fish', uri: require('../assets/images/Water Animals/8.png') },
+    { name: 'Dolphin', uri: require('../assets/images/Water Animals/10.png') },
+    { name: 'Turtle', uri: require('../assets/images/Water Animals/11.png') },
+    { name: 'Clam', uri: require('../assets/images/Water Animals/12.png') },
+    { name: 'Shark', uri: require('../assets/images/Water Animals/13.png') },
+    { name: 'Seahorse', uri: require('../assets/images/Water Animals/15.png') },
   ],
   'Alphabet': [
     { name: 'A', uri: require('../assets/images/Alphabet/a.png') },
@@ -263,19 +428,27 @@ export default function CreateExercise() {
   
   // Category options
   const categoryOptions = [
+    'Whole Numbers',
+    'Ordinal Numbers',
     'Addition',
-    'Subtraction', 
-    'Multiplication',
-    'Division',
+    'Subtraction',
+    'Place Value',
+    'Counting',
+    'Patterns',
+    'Fractions',
+    'Money',
     'Word Problems',
     'Geometry',
-    'Fractions',
-    'Succession',
-    'Pattern',
-    'Measurement',
-    'Time & Money',
+    'Length & Distance',
+    'Movement & Turns',
+    'Time',
+    'Days, Weeks, Months, Years',
+    'Data & Pictographs',
+    'Data Collection',
+    'Data Interpretation',
     'Custom'
   ];
+  
   const [showQuestionTypeModal, setShowQuestionTypeModal] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
   const [resourceFile, setResourceFile] = useState<{ name: string; uri: string } | null>(null);
@@ -386,7 +559,19 @@ export default function CreateExercise() {
         router.replace('/TeacherLogin');
       }
     });
-    return unsubscribe;
+
+    // Perform API key maintenance on component mount
+    performApiKeyMaintenance();
+
+    // Set up periodic cleanup every 5 minutes
+    const maintenanceInterval = setInterval(() => {
+      performApiKeyMaintenance();
+    }, 5 * 60 * 1000); // 5 minutes
+
+    return () => {
+      unsubscribe();
+      clearInterval(maintenanceInterval);
+    };
   }, []);
 
   // Cleanup TTS audio when component unmounts or question changes
@@ -1945,131 +2130,24 @@ Enhanced text with emotions:`;
         }
       };
 
-      // Step 3: ElevenLabs API call
+      // Step 3: ElevenLabs API call with multiple API key fallback
       const elevenLabsStart = Date.now();
-      const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9?output_format=mp3_44100_128', {
-        method: 'POST',
-        headers: {
-          'Accept': 'audio/mpeg',
-          'Content-Type': 'application/json',
-          'xi-api-key': elevenLabsApiKey
-        },
-        body: JSON.stringify(requestPayload)
-      });
+      
+      try {
+        const result = await callElevenLabsWithFallback(
+          finalTextForTTS,
+          'cgSgspJ2msm6clMCkdW9',
+          true, // useV3
+          'mp3_44100_128'
+        );
+        
+        performanceLog.steps.elevenLabs = Date.now() - elevenLabsStart;
+        performanceLog.steps.elevenLabsDetails = result.performanceLog;
+        console.log(`✅ ElevenLabs TTS generated using API key: ${result.usedApiKey.substring(0, 10)}...`);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('❌ ElevenLabs API Error:', response.status, errorText);
-        
-        // Try fallback request
-        const fallbackStart = Date.now();
-        const fallbackPayload = {
-          text: finalTextForTTS,
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.8
-          }
-        };
-        
-        const fallbackResponse = await fetch('https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9', {
-          method: 'POST',
-          headers: {
-            'Accept': 'audio/mpeg',
-            'Content-Type': 'application/json',
-            'xi-api-key': elevenLabsApiKey
-          },
-          body: JSON.stringify(fallbackPayload)
-        });
-        
-        if (!fallbackResponse.ok) {
-          const fallbackErrorText = await fallbackResponse.text();
-          console.error('❌ Fallback API Error:', fallbackErrorText);
-          throw new Error(`API Error: ${response.status} - ${errorText}. Fallback also failed: ${fallbackErrorText}`);
-        }
-        
-        performanceLog.steps.elevenLabsFallback = Date.now() - fallbackStart;
-        
-        // Use fallback response
-        const audioBlob = await fallbackResponse.blob();
+        // Convert response to base64 for React Native
+        const audioBlob = result.audioBlob;
         const reader = new FileReader();
-        
-        reader.onloadend = async () => {
-          const base64data = reader.result as string;
-          
-          // Save audio locally
-          console.log('🎵 Fallback TTS Audio generated, editingQuestion:', editingQuestion ? editingQuestion.id : 'null');
-          if (editingQuestion) {
-            try {
-              const base64Audio = base64data.split(',')[1];
-              const localUri = await saveTTSAudioLocally(base64Audio, editingQuestion.id);
-              
-              const ttsAudioData = {
-                questionId: editingQuestion.id,
-                localUri,
-                base64Data: base64Audio
-              };
-              
-              console.log('🎵 Adding fallback TTS audio to pending uploads for question:', editingQuestion.id);
-              setLocalTTSAudio(ttsAudioData);
-              setPendingTTSUploads(prev => {
-                const filtered = prev.filter(p => p.questionId !== editingQuestion.id);
-                const updated = [...filtered, ttsAudioData];
-                console.log('🎵 Fallback pending uploads updated, count:', updated.length);
-                return updated;
-              });
-            } catch (saveError) {
-              console.error('❌ Failed to save fallback TTS audio:', saveError);
-              Alert.alert('Save Error', 'Audio generated but failed to save locally. Please try again.');
-              return;
-            }
-          } else {
-            // If no editingQuestion, we still need to save the audio for the current question being worked on
-            // This handles cases where TTS is generated outside of the question editor
-            console.warn('⚠️ Fallback TTS generated but no editingQuestion set - audio will not be saved for upload');
-          }
-          
-          // Auto-play the generated speech
-          try {
-            setCurrentAudioUri(base64data);
-            setIsPlayingTTS(true);
-            
-            const audioSource: AudioSource = { uri: base64data };
-            const player = createAudioPlayer(audioSource);
-            setCurrentAudioPlayer(player);
-            
-            const subscription = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
-              if (status.isLoaded && status.didJustFinish) {
-                setIsPlayingTTS(false);
-                player.remove();
-                setCurrentAudioPlayer(null);
-              }
-            });
-            
-            setTimeout(() => {
-              try {
-                player.play();
-              } catch (playError) {
-                console.error('❌ Fallback auto-play failed:', playError);
-                setIsPlayingTTS(false);
-              }
-            }, 100);
-            
-          } catch (playError) {
-            console.error('❌ Auto-play Error:', playError);
-            setIsPlayingTTS(false);
-            setCurrentAudioPlayer(null);
-          }
-        };
-        
-        reader.readAsDataURL(audioBlob);
-        return; // Exit early for fallback
-      }
-
-      performanceLog.steps.elevenLabs = Date.now() - elevenLabsStart;
-
-      // Convert response to base64 for React Native
-      const audioBlob = await response.blob();
-      const reader = new FileReader();
       
       reader.onloadend = async () => {
         const base64data = reader.result as string;
@@ -2141,6 +2219,12 @@ Enhanced text with emotions:`;
       
       reader.readAsDataURL(audioBlob);
       
+      } catch (elevenLabsError: any) {
+        console.error('❌ All ElevenLabs API keys failed:', elevenLabsError);
+        performanceLog.steps.elevenLabs = Date.now() - elevenLabsStart;
+        throw new Error(`TTS Generation failed: ${elevenLabsError.message}`);
+      }
+      
       // Performance Analytics - Success
       const totalTime = Date.now() - startTime;
       performanceLog.steps.total = totalTime;
@@ -2193,76 +2277,36 @@ Enhanced text with emotions:`;
         }
       };
 
-      // ElevenLabs API call
-      const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9?output_format=mp3_44100_128', {
-        method: 'POST',
-        headers: {
-          'Accept': 'audio/mpeg',
-          'Content-Type': 'application/json',
-          'xi-api-key': elevenLabsApiKey
-        },
-        body: JSON.stringify(requestPayload)
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('❌ ElevenLabs API Error for AI TTS:', response.status, errorText);
+      // ElevenLabs API call with multiple API key fallback
+      try {
+        const result = await callElevenLabsWithFallback(
+          processedText,
+          'cgSgspJ2msm6clMCkdW9',
+          true, // useV3
+          'mp3_44100_128'
+        );
         
-        // Try fallback request
-        const fallbackPayload = {
-          text: processedText,
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.8
-          }
-        };
+        console.log(`✅ AI TTS generated using API key: ${result.usedApiKey.substring(0, 10)}...`);
         
-        const fallbackResponse = await fetch('https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9', {
-          method: 'POST',
-          headers: {
-            'Accept': 'audio/mpeg',
-            'Content-Type': 'application/json',
-            'xi-api-key': elevenLabsApiKey
-          },
-          body: JSON.stringify(fallbackPayload)
-        });
-        
-        if (!fallbackResponse.ok) {
-          const fallbackErrorText = await fallbackResponse.text();
-          console.error('❌ Fallback API Error for AI TTS:', fallbackErrorText);
-          throw new Error(`AI TTS API Error: ${response.status} - ${errorText}. Fallback also failed: ${fallbackErrorText}`);
-        }
-        
-        // Use fallback response
-        const audioBlob = await fallbackResponse.blob();
+        // Process successful response
+        const audioBlob = result.audioBlob;
         const reader = new FileReader();
         
         return new Promise((resolve, reject) => {
           reader.onloadend = () => {
             const base64data = reader.result as string;
             const base64Audio = base64data.split(',')[1];
-            console.log('🎵 AI TTS Audio generated successfully (fallback)');
+            console.log('🎵 AI TTS Audio generated successfully');
             resolve(base64Audio);
           };
           reader.onerror = () => reject(new Error('Failed to read audio blob'));
           reader.readAsDataURL(audioBlob);
         });
+        
+      } catch (elevenLabsError: any) {
+        console.error('❌ All ElevenLabs API keys failed for AI TTS:', elevenLabsError);
+        throw new Error(`AI TTS Generation failed: ${elevenLabsError.message}`);
       }
-
-      // Process successful response
-      const audioBlob = await response.blob();
-      const reader = new FileReader();
-      
-      return new Promise((resolve, reject) => {
-        reader.onloadend = () => {
-          const base64data = reader.result as string;
-          const base64Audio = base64data.split(',')[1];
-          console.log('🎵 AI TTS Audio generated successfully');
-          resolve(base64Audio);
-        };
-        reader.onerror = () => reject(new Error('Failed to read audio blob'));
-        reader.readAsDataURL(audioBlob);
-      });
 
     } catch (error) {
       console.error('❌ AI TTS Generation Error:', error);
