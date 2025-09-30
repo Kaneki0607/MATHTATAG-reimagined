@@ -13,6 +13,11 @@ export interface ApiKeyInfo {
 // In-memory storage for API keys
 let apiKeys: ApiKeyInfo[] = [
   {
+    key: "sk_4eb0b7451a57aca5b342bc803e81117759dd16a64115474f",
+    addedAt: new Date(),
+    status: 'active'
+  },
+  {
     key: "sk_57b2f7ade082787cd0f3daedbd9be4d9d1a0b3c8c374b92e",
     addedAt: new Date(),
     status: 'active'
@@ -549,4 +554,22 @@ export const cleanupExpiredKeys = (): number => {
   }
   
   return removedCount;
+};
+
+// Debug function to check a specific key's status
+export const debugKeyStatus = (key: string) => {
+  const keyInfo = apiKeys.find(k => k.key === key);
+  if (keyInfo) {
+    console.log(`🔍 Key Status Debug:`, {
+      key: key.substring(0, 10) + '...',
+      status: keyInfo.status,
+      creditsRemaining: keyInfo.creditsRemaining,
+      addedAt: keyInfo.addedAt,
+      lastUsed: keyInfo.lastUsed
+    });
+    return keyInfo;
+  } else {
+    console.log(`❌ Key not found: ${key.substring(0, 10)}...`);
+    return null;
+  }
 };

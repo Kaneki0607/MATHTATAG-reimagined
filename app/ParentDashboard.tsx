@@ -30,6 +30,53 @@ interface Announcement {
   teacherGender?: string;
 }
 
+interface AssignedExercise {
+  id: string;
+  exerciseId: string;
+  classId: string;
+  deadline: string;
+  assignedBy: string;
+  createdAt: string;
+  exercise?: {
+    id: string;
+    title: string;
+    description: string;
+    teacherId: string;
+    questionCount: number;
+    timesUsed: number;
+    isPublic: boolean;
+    createdAt: string;
+  };
+  teacherName?: string;
+  teacherProfilePictureUrl?: string;
+  teacherGender?: string;
+}
+
+interface Task {
+  id: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  createdAt: string;
+  teacherId: string;
+  classIds: string[];
+  exerciseId?: string;
+  status: 'pending' | 'in-progress' | 'completed' | 'overdue';
+  completedAt?: string;
+  teacherName?: string;
+  teacherProfilePictureUrl?: string;
+  teacherGender?: string;
+  points?: number;
+  attachments?: Array<{
+    name: string;
+    url: string;
+    type: 'file' | 'image' | 'link';
+  }>;
+  // For assigned exercises
+  isAssignedExercise?: boolean;
+  assignedExerciseId?: string;
+}
+
 export default function ParentDashboard() {
   const router = useRouter();
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -54,6 +101,10 @@ export default function ParentDashboard() {
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   
+  // Tasks state
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  
   // Navigation state
   const [activeSection, setActiveSection] = useState('home');
   
@@ -77,10 +128,11 @@ export default function ParentDashboard() {
     loadParentData();
   }, []);
 
-  // Load announcements when parent data is available
+  // Load announcements and tasks when parent data is available
   useEffect(() => {
     if (parentData) {
       loadAnnouncements();
+      loadTasks();
     }
   }, [parentData]);
 
@@ -237,6 +289,165 @@ export default function ParentDashboard() {
   const closeAnnouncementModal = () => {
     setShowAnnouncementModal(false);
     setSelectedAnnouncement(null);
+  };
+
+  const loadAssignedExercises = async () => {
+    try {
+      const result = await readData('/assignedExercises');
+      if (result.data) {
+        const assignedExercisesList = Object.entries(result.data).map(([key, value]: [string, any]) => ({
+          ...value,
+          id: key
+        })) as AssignedExercise[];
+        
+        // Load exercise and teacher data for each assigned exercise
+        const assignedExercisesWithData = await Promise.all(
+          assignedExercisesList.map(async (assignedExercise) => {
+            try {
+              // Load exercise data
+              const exerciseResult = await readData(`/exercises/${assignedExercise.exerciseId}`);
+              let exerciseData = null;
+              if (exerciseResult.data) {
+                exerciseData = {
+                  ...exerciseResult.data,
+                  id: assignedExercise.exerciseId
+                };
+              }
+              
+              // Load teacher data
+              const teacherResult = await readData(`/teachers/${assignedExercise.assignedBy}`);
+              let teacherData = null;
+              if (teacherResult.data) {
+                teacherData = {
+                  teacherName: teacherResult.data.firstName + ' ' + teacherResult.data.lastName,
+                  teacherProfilePictureUrl: teacherResult.data.profilePictureUrl,
+                  teacherGender: teacherResult.data.gender
+                };
+              }
+              
+              return {
+                ...assignedExercise,
+                exercise: exerciseData,
+                ...teacherData
+              };
+            } catch (error) {
+              console.error('Failed to load data for assigned exercise:', error);
+            }
+            return assignedExercise;
+          })
+        );
+        
+        return assignedExercisesWithData;
+      }
+      return [];
+    } catch (error) {
+      console.error('Failed to load assigned exercises:', error);
+      return [];
+    }
+  };
+
+  const loadTasks = async () => {
+    try {
+      setTasksLoading(true);
+      
+      // Load both tasks and assigned exercises
+      const [tasksResult, assignedExercises] = await Promise.all([
+        readData('/tasks'),
+        loadAssignedExercises()
+      ]);
+      
+      let allTasks: Task[] = [];
+      
+      // Process regular tasks
+      if (tasksResult.data) {
+        const tasksList = Object.entries(tasksResult.data).map(([key, value]: [string, any]) => ({
+          ...value,
+          id: key
+        })) as Task[];
+        
+        // Load teacher data for each task
+        const tasksWithTeacherData = await Promise.all(
+          tasksList.map(async (task) => {
+            try {
+              const teacherResult = await readData(`/teachers/${task.teacherId}`);
+              if (teacherResult.data) {
+                return {
+                  ...task,
+                  teacherName: teacherResult.data.firstName + ' ' + teacherResult.data.lastName,
+                  teacherProfilePictureUrl: teacherResult.data.profilePictureUrl,
+                  teacherGender: teacherResult.data.gender
+                };
+              }
+            } catch (error) {
+              console.error('Failed to load teacher data for task:', error);
+            }
+            return task;
+          })
+        );
+        
+        allTasks = [...tasksWithTeacherData];
+      }
+      
+      // Convert assigned exercises to tasks
+      const assignedExerciseTasks: Task[] = assignedExercises
+        .filter(assignedExercise => assignedExercise.exercise) // Only include exercises that were loaded successfully
+        .map(assignedExercise => ({
+          id: assignedExercise.id,
+          title: assignedExercise.exercise!.title,
+          description: assignedExercise.exercise!.description,
+          dueDate: assignedExercise.deadline,
+          createdAt: assignedExercise.createdAt,
+          teacherId: assignedExercise.assignedBy,
+          classIds: [assignedExercise.classId],
+          exerciseId: assignedExercise.exerciseId,
+          status: 'pending' as const,
+          teacherName: assignedExercise.teacherName,
+          teacherProfilePictureUrl: assignedExercise.teacherProfilePictureUrl,
+          teacherGender: assignedExercise.teacherGender,
+          points: assignedExercise.exercise!.questionCount,
+          isAssignedExercise: true,
+          assignedExerciseId: assignedExercise.id
+        }));
+      
+      // Combine and sort all tasks by due date (earliest first)
+      const combinedTasks = [...allTasks, ...assignedExerciseTasks];
+      const sortedTasks = combinedTasks.sort((a, b) => 
+        new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()
+      );
+      
+      setTasks(sortedTasks);
+    } catch (error) {
+      console.error('Failed to load tasks:', error);
+    } finally {
+      setTasksLoading(false);
+    }
+  };
+
+  const updateTaskStatus = async (taskId: string, status: Task['status']) => {
+    try {
+      const { success, error } = await writeData(`/tasks/${taskId}/status`, status);
+      
+      if (success) {
+        // Update local state
+        setTasks(prev => 
+          prev.map(task => 
+            task.id === taskId 
+              ? { 
+                  ...task, 
+                  status,
+                  completedAt: status === 'completed' ? new Date().toISOString() : undefined
+                }
+              : task
+          )
+        );
+      } else {
+        console.error('Failed to update task status:', error);
+        Alert.alert('Error', 'Failed to update task status');
+      }
+    } catch (error) {
+      console.error('Failed to update task status:', error);
+      Alert.alert('Error', 'Failed to update task status');
+    }
   };
 
   // Registration form handlers
@@ -737,50 +948,203 @@ export default function ParentDashboard() {
         {/* Tasks Section */}
         {activeSection === 'tasks' && (
           <View style={styles.tasksSection}>
-            <Text style={styles.sectionTitle}>Student Tasks</Text>
-            <View style={styles.tasksCard}>
-              <View style={styles.taskItem}>
-                <View style={styles.taskIcon}>
-                  <MaterialCommunityIcons name="math-compass" size={24} color="#3b82f6" />
-                </View>
-                <View style={styles.taskContent}>
-                  <Text style={styles.taskTitle}>Math Practice - Addition</Text>
-                  <Text style={styles.taskDescription}>Complete 10 addition problems</Text>
-                  <Text style={styles.taskDueDate}>Due: Tomorrow</Text>
-                </View>
-                <View style={styles.taskStatus}>
-                  <Text style={styles.taskStatusText}>Pending</Text>
-                </View>
-              </View>
-
-              <View style={styles.taskItem}>
-                <View style={styles.taskIcon}>
-                  <MaterialCommunityIcons name="book-open-variant" size={24} color="#8b5cf6" />
-                </View>
-                <View style={styles.taskContent}>
-                  <Text style={styles.taskTitle}>Reading Assignment</Text>
-                  <Text style={styles.taskDescription}>Read Chapter 3 of English book</Text>
-                  <Text style={styles.taskDueDate}>Due: Friday</Text>
-                </View>
-                <View style={styles.taskStatus}>
-                  <Text style={styles.taskStatusText}>In Progress</Text>
-                </View>
-              </View>
-
-              <View style={styles.taskItem}>
-                <View style={styles.taskIcon}>
-                  <MaterialCommunityIcons name="palette" size={24} color="#f59e0b" />
-                </View>
-                <View style={styles.taskContent}>
-                  <Text style={styles.taskTitle}>Art Project</Text>
-                  <Text style={styles.taskDescription}>Create a family portrait</Text>
-                  <Text style={styles.taskDueDate}>Due: Next Week</Text>
-                </View>
-                <View style={styles.taskStatus}>
-                  <Text style={styles.taskStatusText}>Not Started</Text>
-                </View>
+            <View style={styles.tasksHeader}>
+              <Text style={styles.sectionTitle}>Student Tasks</Text>
+              <View style={styles.tasksSummary}>
+                <Text style={styles.tasksSummaryText}>
+                  {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} pending • {tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length} completed
+                </Text>
               </View>
             </View>
+            
+            {tasksLoading ? (
+              <View style={styles.loadingContainer}>
+                <Text style={styles.loadingText}>Loading tasks...</Text>
+              </View>
+            ) : tasks.filter(t => t.isAssignedExercise).length > 0 ? (
+              <View style={styles.tasksCard}>
+                {tasks.filter(t => t.isAssignedExercise).map((task, index) => {
+                  const isOverdue = new Date(task.dueDate) < new Date() && task.status !== 'completed';
+                  const dueDate = new Date(task.dueDate);
+                  const now = new Date();
+                  const diffTime = dueDate.getTime() - now.getTime();
+                  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                  
+                  let dueText = '';
+                  if (diffDays < 0) {
+                    dueText = `Overdue by ${Math.abs(diffDays)} day${Math.abs(diffDays) !== 1 ? 's' : ''}`;
+                  } else if (diffDays === 0) {
+                    dueText = 'Due today';
+                  } else if (diffDays === 1) {
+                    dueText = 'Due tomorrow';
+                  } else if (diffDays <= 7) {
+                    dueText = `Due in ${diffDays} days`;
+                  } else {
+                    dueText = dueDate.toLocaleDateString('en-US', { 
+                      month: 'short', 
+                      day: 'numeric',
+                      year: dueDate.getFullYear() !== now.getFullYear() ? 'numeric' : undefined
+                    });
+                  }
+
+                  const getStatusColor = (status: Task['status']) => {
+                    switch (status) {
+                      case 'completed': return '#10b981';
+                      case 'in-progress': return '#3b82f6';
+                      case 'overdue': return '#ef4444';
+                      default: return '#64748b';
+                    }
+                  };
+
+                  const getStatusText = (status: Task['status']) => {
+                    switch (status) {
+                      case 'completed': return 'Completed';
+                      case 'in-progress': return 'In Progress';
+                      case 'overdue': return 'Overdue';
+                      default: return 'Pending';
+                    }
+                  };
+
+                  return (
+                    <View key={task.id} style={[
+                      styles.taskItem,
+                      isOverdue && styles.overdueTaskItem,
+                      task.status === 'completed' && styles.completedTaskItem
+                    ]}>
+                      <View style={styles.taskLeftSection}>
+                        <TouchableOpacity 
+                          style={[
+                            styles.taskCheckbox,
+                            task.status === 'completed' && styles.taskCheckboxCompleted
+                          ]}
+                          onPress={() => {
+                            const newStatus = task.status === 'completed' ? 'pending' : 'completed';
+                            updateTaskStatus(task.id, newStatus);
+                          }}
+                        >
+                          {task.status === 'completed' && (
+                            <MaterialIcons name="check" size={16} color="#ffffff" />
+                          )}
+                        </TouchableOpacity>
+                        
+                        <View style={styles.taskIcon}>
+                          <MaterialIcons 
+                            name="quiz" 
+                            size={24} 
+                            color="#3b82f6" 
+                          />
+                        </View>
+                      </View>
+                      
+                      <View style={styles.taskContent}>
+                        <View style={styles.taskHeader}>
+                          <Text style={[
+                            styles.taskTitle,
+                            task.status === 'completed' && styles.completedTaskTitle
+                          ]}>
+                            {task.title}
+                          </Text>
+                          {task.points && (
+                            <View style={styles.pointsBadge}>
+                              <Text style={styles.pointsText}>{task.points} {task.isAssignedExercise ? 'questions' : 'pts'}</Text>
+                            </View>
+                          )}
+                        </View>
+                        
+                        <Text style={[
+                          styles.taskDescription,
+                          task.status === 'completed' && styles.completedTaskDescription
+                        ]}>
+                          {task.description}
+                        </Text>
+                        
+                        {task.isAssignedExercise && (
+                          <View style={styles.assignedExerciseInfo}>
+                            <View style={styles.assignedExerciseBadge}>
+                              <MaterialIcons name="assignment" size={12} color="#64748b" />
+                              <Text style={styles.assignedExerciseBadgeText}>Exercise</Text>
+                            </View>
+                          </View>
+                        )}
+                        
+                        <View style={styles.taskMeta}>
+                          <View style={styles.taskMetaRow}>
+                            <MaterialIcons name="event" size={14} color="#3b82f6" />
+                            <Text style={[
+                              styles.taskDueDate,
+                              styles.highlightedDueDate,
+                              isOverdue && styles.overdueText
+                            ]}>
+                              {dueText}
+                            </Text>
+                          </View>
+                          
+                          {task.teacherName && (
+                            <View style={styles.taskMetaRow}>
+                              <View style={styles.teacherAvatarSmall}>
+                                {task.teacherProfilePictureUrl ? (
+                                  <Image 
+                                    source={{ uri: task.teacherProfilePictureUrl }} 
+                                    style={styles.teacherProfileImageSmall}
+                                  />
+                                ) : (
+                                  <MaterialIcons name="person" size={12} color="#64748b" />
+                                )}
+                              </View>
+                              <Text style={styles.taskTeacher}>
+                                {task.teacherGender === 'Male' ? 'Sir' : task.teacherGender === 'Female' ? 'Ma\'am' : ''} {task.teacherName}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+                      
+                      <View style={styles.taskRightSection}>
+                        <View style={[
+                          styles.taskStatus,
+                          { backgroundColor: '#f8fafc' }
+                        ]}>
+                          <MaterialIcons 
+                            name={task.status === 'completed' ? 'check-circle' : 'schedule'} 
+                            size={12} 
+                            color="#64748b" 
+                          />
+                          <Text style={[
+                            styles.taskStatusText,
+                            { color: '#64748b' }
+                          ]}>
+                            {getStatusText(task.status)}
+                          </Text>
+                        </View>
+                        
+                        {(task.exerciseId || task.isAssignedExercise) && (
+                          <TouchableOpacity 
+                            style={[styles.playButton, task.isAssignedExercise && styles.startExerciseButton]}
+                            onPress={() => {
+                              // Navigate to StudentExerciseAnswering with the exercise ID
+                              router.push({
+                                pathname: '/StudentExerciseAnswering',
+                                params: { exerciseId: task.exerciseId }
+                              });
+                            }}
+                          >
+                            <MaterialIcons name="play-arrow" size={16} color={task.isAssignedExercise ? "#ffffff" : "#3b82f6"} />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <View style={styles.emptyTasksCard}>
+                <MaterialIcons name="quiz" size={48} color="#9ca3af" />
+                <Text style={styles.emptyTasksTitle}>No exercises assigned</Text>
+                <Text style={styles.emptyTasksDescription}>
+                  Exercises assigned by your teacher will appear here
+                </Text>
+              </View>
+            )}
           </View>
         )}
 
@@ -1094,74 +1458,75 @@ export default function ParentDashboard() {
       </Modal>
       
       {/* Announcement Detail Modal */}
-      <Modal visible={showAnnouncementModal} animationType="fade" transparent>
-        <View style={styles.announcementModalOverlay}>
+      <Modal visible={showAnnouncementModal} animationType="slide" transparent>
+        <KeyboardAvoidingView 
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
           <View style={styles.announcementModal}>
-            <View style={styles.announcementModalHeader}>
-              <Text style={styles.announcementModalTitle}>Announcement Details</Text>
-              <TouchableOpacity onPress={closeAnnouncementModal} style={styles.announcementModalCloseButton}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Announcement Details</Text>
+              <TouchableOpacity onPress={closeAnnouncementModal} style={styles.closeButton}>
                 <AntDesign name="close" size={24} color="#1e293b" />
               </TouchableOpacity>
             </View>
             
             {selectedAnnouncement && (
-              <ScrollView 
-                style={styles.announcementModalScrollView}
-                showsVerticalScrollIndicator={false}
-                contentContainerStyle={styles.announcementModalContent}
-              >
-                <View style={styles.announcementModalCard}>
-                  <View style={styles.announcementModalCardHeader}>
-                    <View style={styles.announcementModalIcon}>
-                      <View style={styles.announcementIconContainer}>
-                        <MaterialIcons name="campaign" size={20} color="#ffffff" />
+              <View style={styles.announcementModalContent}>
+                <ScrollView showsVerticalScrollIndicator={false} style={styles.announcementScrollView}>
+                  <View style={styles.announcementModalCard}>
+                    <View style={styles.announcementModalHeader}>
+                      <View style={styles.announcementModalIcon}>
+                        <View style={styles.announcementIconContainer}>
+                          <MaterialIcons name="campaign" size={20} color="#ffffff" />
+                        </View>
+                        <Text style={styles.announcementModalTitle}>{selectedAnnouncement.title}</Text>
                       </View>
-                      <Text style={styles.announcementModalCardTitle}>{selectedAnnouncement.title}</Text>
                     </View>
-                  </View>
-                  
-                  <View style={styles.announcementModalCardBody}>
-                    <Text style={styles.announcementModalMessage}>{selectedAnnouncement.message}</Text>
-                  </View>
-                  
-                  <View style={styles.announcementModalCardFooter}>
-                    <View style={styles.announcementModalMeta}>
-                      <View style={styles.announcementModalMetaRow}>
-                        <Text style={styles.announcementModalMetaLabel}>Posted on:</Text>
-                        <Text style={styles.announcementModalMetaValue}>
-                          {selectedAnnouncement.dateTime ? new Date(selectedAnnouncement.dateTime).toLocaleString('en-US', {
-                            weekday: 'short',
-                            year: 'numeric',
-                            month: 'long',
-                            day: 'numeric',
-                            hour: 'numeric',
-                            minute: '2-digit',
-                            hour12: true
-                          }) : 'No date'}
-                        </Text>
-                      </View>
-                      <View style={styles.announcementModalMetaRow}>
-                        <View style={styles.teacherProfileRow}>
-                          <View style={styles.teacherAvatarSmall}>
-                            {selectedAnnouncement.teacherProfilePictureUrl ? (
-                              <Image 
-                                source={{ uri: selectedAnnouncement.teacherProfilePictureUrl }} 
-                                style={styles.teacherProfileImageSmall}
-                              />
-                            ) : (
-                              <MaterialIcons name="person" size={16} color="#64748b" />
-                            )}
-                          </View>
-                          <Text style={styles.announcementModalMetaLabel}>Posted by: </Text>
+                    
+                    <View style={styles.announcementModalBody}>
+                      <Text style={styles.announcementModalMessage}>{selectedAnnouncement.message}</Text>
+                    </View>
+                    
+                    <View style={styles.announcementModalFooter}>
+                      <View style={styles.announcementModalMeta}>
+                        <View style={styles.announcementModalMetaRow}>
+                          <Text style={styles.announcementModalMetaLabel}>Posted on:</Text>
                           <Text style={styles.announcementModalMetaValue}>
-                            {selectedAnnouncement.teacherGender === 'Male' ? 'Sir' : selectedAnnouncement.teacherGender === 'Female' ? 'Ma\'am' : ''} {selectedAnnouncement.teacherName || 'Teacher'}
+                            {selectedAnnouncement.dateTime ? new Date(selectedAnnouncement.dateTime).toLocaleString('en-US', {
+                              weekday: 'short',
+                              year: 'numeric',
+                              month: 'long',
+                              day: 'numeric',
+                              hour: 'numeric',
+                              minute: '2-digit',
+                              hour12: true
+                            }) : 'No date'}
                           </Text>
+                        </View>
+                        <View style={styles.announcementModalMetaRow}>
+                          <View style={styles.teacherProfileRow}>
+                            <View style={styles.teacherAvatarSmall}>
+                              {selectedAnnouncement.teacherProfilePictureUrl ? (
+                                <Image 
+                                  source={{ uri: selectedAnnouncement.teacherProfilePictureUrl }} 
+                                  style={styles.teacherProfileImageSmall}
+                                />
+                              ) : (
+                                <MaterialIcons name="person" size={16} color="#64748b" />
+                              )}
+                            </View>
+                            <Text style={styles.announcementModalMetaLabel}>Posted by: </Text>
+                            <Text style={styles.announcementModalMetaValue}>
+                              {selectedAnnouncement.teacherGender === 'Male' ? 'Sir' : selectedAnnouncement.teacherGender === 'Female' ? 'Ma\'am' : ''} {selectedAnnouncement.teacherName || 'Teacher'}
+                            </Text>
+                          </View>
                         </View>
                       </View>
                     </View>
                   </View>
-                </View>
-              </ScrollView>
+                </ScrollView>
+              </View>
             )}
             
             <View style={styles.announcementModalActions}>
@@ -1170,7 +1535,7 @@ export default function ParentDashboard() {
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
       
     </View>
@@ -1810,6 +2175,41 @@ const styles = StyleSheet.create({
   tasksSection: {
     marginBottom: 100,
   },
+  tasksHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  tasksSummary: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  tasksSummaryText: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  loadingContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 40,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  loadingText: {
+    fontSize: 16,
+    color: '#64748b',
+    fontWeight: '500',
+  },
   tasksCard: {
     backgroundColor: '#ffffff',
     borderRadius: 16,
@@ -1824,49 +2224,197 @@ const styles = StyleSheet.create({
   },
   taskItem: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     paddingVertical: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
   },
+  overdueTaskItem: {
+    backgroundColor: '#fef2f2',
+    borderRadius: 12,
+    marginBottom: 8,
+    paddingHorizontal: 16,
+    borderBottomWidth: 0,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+  },
+  completedTaskItem: {
+    opacity: 0.7,
+  },
+  taskLeftSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  taskCheckbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: '#d1d5db',
+    marginRight: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  taskCheckboxCompleted: {
+    backgroundColor: '#10b981',
+    borderColor: '#10b981',
+  },
   taskIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: '#f8fafc',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 16,
   },
   taskContent: {
     flex: 1,
+    marginRight: 12,
+  },
+  taskHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
   },
   taskTitle: {
     fontSize: 16,
     fontWeight: '600',
     color: '#1e293b',
-    marginBottom: 4,
+    flex: 1,
+  },
+  completedTaskTitle: {
+    textDecorationLine: 'line-through',
+    color: '#9ca3af',
+  },
+  pointsBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    marginLeft: 8,
+  },
+  pointsText: {
+    fontSize: 10,
+    color: '#ffffff',
+    fontWeight: '600',
   },
   taskDescription: {
     fontSize: 14,
     color: '#64748b',
+    marginBottom: 8,
+    lineHeight: 20,
+  },
+  completedTaskDescription: {
+    color: '#9ca3af',
+  },
+  taskMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+  },
+  taskMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 16,
     marginBottom: 4,
   },
   taskDueDate: {
     fontSize: 12,
     color: '#64748b',
     fontWeight: '500',
+    marginLeft: 4,
   },
-  taskStatus: {
-    backgroundColor: '#f1f5f9',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+  highlightedDueDate: {
+    color: '#3b82f6',
+    fontWeight: '600',
   },
-  taskStatusText: {
+  overdueText: {
+    color: '#ef4444',
+    fontWeight: '700',
+  },
+  taskTeacher: {
     fontSize: 12,
     color: '#64748b',
+    fontWeight: '500',
+    marginLeft: 4,
+  },
+  taskRightSection: {
+    alignItems: 'flex-end',
+  },
+  taskStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 8,
+  },
+  taskStatusText: {
+    fontSize: 10,
+    fontWeight: '500',
+    marginLeft: 4,
+  },
+  playButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f0f9ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e0f2fe',
+  },
+  startExerciseButton: {
+    backgroundColor: '#3b82f6',
+    borderColor: '#3b82f6',
+  },
+  assignedExerciseInfo: {
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  assignedExerciseBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  assignedExerciseBadgeText: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '500',
+    marginLeft: 4,
+  },
+  emptyTasksCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 40,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  emptyTasksTitle: {
+    fontSize: 18,
     fontWeight: '600',
+    color: '#1e293b',
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  emptyTasksDescription: {
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 20,
   },
   historySection: {
     marginBottom: 100,
@@ -2064,58 +2612,40 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   // Announcement Modal Styles
-  announcementModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 40,
-  },
   announcementModal: {
     width: '100%',
     maxWidth: 500,
-    maxHeight: '90%',
-    backgroundColor: '#ffffff',
+    maxHeight: '85%',
+    backgroundColor: 'rgba(255,255,255,0.95)',
     borderRadius: 20,
-    shadowColor: '#000',
-    shadowOpacity: 0.25,
+    borderWidth: 2,
+    borderColor: 'rgba(35, 177, 248, 0.4)',
+    shadowColor: '#00aaff',
+    shadowOpacity: 0.5,
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 10 },
     elevation: 25,
   },
-  announcementModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  announcementModalContent: {
+    flex: 1,
     paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
   },
-  announcementModalTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1e293b',
-  },
-  announcementModalCloseButton: {
-    padding: 4,
-  },
-  announcementModalScrollView: {
+  announcementScrollView: {
     flex: 1,
   },
-  announcementModalContent: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-  },
   announcementModalCard: {
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#ffffff',
     borderRadius: 16,
     padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
-  announcementModalCardHeader: {
+  announcementModalHeader: {
     marginBottom: 16,
   },
   announcementModalIcon: {
@@ -2123,14 +2653,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  announcementModalCardTitle: {
+  announcementModalTitle: {
     fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
     marginLeft: 12,
-    flex: 1,
   },
-  announcementModalCardBody: {
+  announcementModalBody: {
     marginBottom: 20,
   },
   announcementModalMessage: {
@@ -2138,9 +2667,9 @@ const styles = StyleSheet.create({
     color: '#1e293b',
     lineHeight: 24,
   },
-  announcementModalCardFooter: {
+  announcementModalFooter: {
     borderTopWidth: 1,
-    borderTopColor: '#e2e8f0',
+    borderTopColor: '#f1f5f9',
     paddingTop: 16,
   },
   announcementModalMeta: {
@@ -2161,28 +2690,28 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#1e293b',
     fontWeight: '600',
-    flex: 1,
   },
   announcementModalActions: {
     flexDirection: 'row',
     justifyContent: 'center',
     paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingVertical: 15,
     borderTopWidth: 1,
-    borderTopColor: '#f1f5f9',
-    backgroundColor: '#ffffff',
+    borderTopColor: 'rgba(0,170,255,0.2)',
+    backgroundColor: 'rgba(255,255,255,0.95)',
   },
   closeAnnouncementButton: {
-    backgroundColor: '#3b82f6',
+    backgroundColor: 'rgb(40, 127, 214)',
     borderRadius: 12,
     paddingVertical: 12,
-    paddingHorizontal: 32,
+    paddingHorizontal: 24,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(0,170,255,0.3)',
   },
   closeAnnouncementButtonText: {
     color: '#ffffff',
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: 'bold',
   },
 });
-

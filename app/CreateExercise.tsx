@@ -26,6 +26,7 @@ import { uploadFile } from '../lib/firebase-storage';
 import {
   addApiKey,
   cleanupExpiredKeys,
+  debugKeyStatus,
   getActiveApiKeys,
   getApiKeyStatus,
   markApiKeyAsFailed,
@@ -37,26 +38,63 @@ import {
 // Helper function to check if API key has low credits and update status
 const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, errorText: string): Promise<boolean> => {
   try {
-    const errorData = JSON.parse(errorText);
+    console.log('🔍 Raw error text:', errorText);
     
-    // Check if it's a quota exceeded error with specific credit information
-    if (errorData.detail && errorData.detail.status === 'quota_exceeded') {
-      const creditsRemaining = errorData.detail.credits_remaining || 0;
-      const creditsRequired = errorData.detail.credits_required || 0;
+    // Try to extract credits directly from the raw text using regex
+    const creditsMatch = errorText.match(/"credits_remaining":\s*(\d+)/);
+    const requiredMatch = errorText.match(/"credits_required":\s*(\d+)/);
+    
+    if (creditsMatch) {
+      const creditsRemaining = parseInt(creditsMatch[1]);
+      const creditsRequired = requiredMatch ? parseInt(requiredMatch[1]) : 0;
       
       console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
+      
+      // Debug: Check key status before update
+      console.log('🔍 Key status before update:');
+      debugKeyStatus(apiKey);
       
       // Update the API key credits and status
       updateApiKeyCredits(apiKey, creditsRemaining);
       
-      // If credits are below 300, mark this key for removal
+      // Debug: Check key status after update
+      console.log('🔍 Key status after update:');
+      debugKeyStatus(apiKey);
+      
+      // If credits are below 300, immediately remove this key
       if (creditsRemaining < 300) {
-        console.log(`🗑️ API key marked as low credits (${creditsRemaining} < 300)`);
+        console.log(`🗑️ API key marked as low credits (${creditsRemaining} < 300) - removing immediately`);
+        // Immediately remove low credit keys instead of waiting for periodic cleanup
+        removeLowCreditKeys();
         return true; // Key has low credits
+      }
+    } else {
+      // Fallback to JSON parsing
+      const errorData = JSON.parse(errorText);
+      console.log('🔍 Parsed error data:', JSON.stringify(errorData, null, 2));
+      
+      // Check if it's a quota exceeded error with specific credit information
+      if (errorData.detail && (errorData.detail.status === 'quota_exceeded' || errorData.detail.status === 'qquota_exceeded')) {
+        const creditsRemaining = errorData.detail.credits_remaining || 0;
+        const creditsRequired = errorData.detail.credits_required || 0;
+        
+        console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
+        
+        // Update the API key credits and status
+        updateApiKeyCredits(apiKey, creditsRemaining);
+        
+        // If credits are below 300, immediately remove this key
+        if (creditsRemaining < 300) {
+          console.log(`🗑️ API key marked as low credits (${creditsRemaining} < 300) - removing immediately`);
+          // Immediately remove low credit keys instead of waiting for periodic cleanup
+          removeLowCreditKeys();
+          return true; // Key has low credits
+        }
       }
     }
   } catch (parseError) {
     console.warn('⚠️ Could not parse error response for credit check:', parseError);
+    console.log('Raw error text:', errorText);
   }
   
   return false; // Key was not marked as low credits
