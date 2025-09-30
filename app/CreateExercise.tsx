@@ -469,7 +469,7 @@ export default function CreateExercise() {
     'Whole Numbers',
     'Ordinal Numbers',
     'Addition',
-    'Subtraction',
+    'Subtraction', 
     'Place Value',
     'Counting',
     'Patterns',
@@ -2178,14 +2178,14 @@ Enhanced text with emotions:`;
           true, // useV3
           'mp3_44100_128'
         );
-        
-        performanceLog.steps.elevenLabs = Date.now() - elevenLabsStart;
+
+      performanceLog.steps.elevenLabs = Date.now() - elevenLabsStart;
         performanceLog.steps.elevenLabsDetails = result.performanceLog;
         console.log(`✅ ElevenLabs TTS generated using API key: ${result.usedApiKey.substring(0, 10)}...`);
 
-        // Convert response to base64 for React Native
+      // Convert response to base64 for React Native
         const audioBlob = result.audioBlob;
-        const reader = new FileReader();
+      const reader = new FileReader();
       
       reader.onloadend = async () => {
         const base64data = reader.result as string;
@@ -2325,21 +2325,21 @@ Enhanced text with emotions:`;
         );
         
         console.log(`✅ AI TTS generated using API key: ${result.usedApiKey.substring(0, 10)}...`);
-        
-        // Process successful response
+
+      // Process successful response
         const audioBlob = result.audioBlob;
-        const reader = new FileReader();
-        
-        return new Promise((resolve, reject) => {
-          reader.onloadend = () => {
-            const base64data = reader.result as string;
-            const base64Audio = base64data.split(',')[1];
-            console.log('🎵 AI TTS Audio generated successfully');
-            resolve(base64Audio);
-          };
-          reader.onerror = () => reject(new Error('Failed to read audio blob'));
-          reader.readAsDataURL(audioBlob);
-        });
+      const reader = new FileReader();
+      
+      return new Promise((resolve, reject) => {
+        reader.onloadend = () => {
+          const base64data = reader.result as string;
+          const base64Audio = base64data.split(',')[1];
+          console.log('🎵 AI TTS Audio generated successfully');
+          resolve(base64Audio);
+        };
+        reader.onerror = () => reject(new Error('Failed to read audio blob'));
+        reader.readAsDataURL(audioBlob);
+      });
         
       } catch (elevenLabsError: any) {
         console.error('❌ All ElevenLabs API keys failed for AI TTS:', elevenLabsError);

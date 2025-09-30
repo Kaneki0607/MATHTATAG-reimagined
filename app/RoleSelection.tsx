@@ -4,7 +4,7 @@ import { useEffect, useRef } from 'react';
 import { Animated, Dimensions, Image, ImageBackground, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 const { width } = Dimensions.get('window');
-const LOGO_WIDTH = width * 0.55;
+const LOGO_WIDTH = width * 0.75;
 
 export default function RoleSelection() {
   const router = useRouter();
@@ -51,6 +51,7 @@ export default function RoleSelection() {
       resizeMode="cover"
       imageStyle={{ opacity: 1 }}
     >
+      <View style={styles.overlay} />
       <View style={styles.container}>
         <View style={styles.card}>
           <View style={styles.logoBox}>
@@ -90,41 +91,52 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: '#f8fafc', // Modern light background
   },
+  overlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    zIndex: 0,
+  },
   container: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     width: '100%',
+    position: 'relative',
+    zIndex: 1,
   },
   card: {
     width: '90%',
     maxWidth: 400,
     backgroundColor: 'rgba(255, 255, 255, 0.13)', // White colored blur
     borderRadius: 28,
-    paddingTop: 10,
-    paddingBottom: 35,
-    paddingHorizontal: 24,
+    paddingTop: 0.2,
+    paddingBottom: 20,
+    paddingHorizontal: 10,
     alignItems: 'center',
-    shadowColor: '#000000', // Enhanced shadow for glass effect
-    shadowOpacity: 0.5,
-    shadowRadius: 30,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 20,
+    alignSelf: 'center',
+    shadowColor: 'transparent',
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 0,
     borderWidth: 2,
     borderColor: 'rgba(255,255,255,0.5)', // More visible glass border
-    marginBottom: -8,
-    backdropFilter: 'blur(8px)', // Slight blur inside the card
+    marginBottom: 8,
   },
   logoBox: {
     alignItems: 'center',
     marginBottom: -50,
-    marginTop: -55,
+    marginTop: -40,
   },
   logoImage: {
-    width: width * 1.0, // Increased logo size for the card
-    height: width * 9.9,
-    maxWidth: 350,
-    maxHeight: 350,
+    width: LOGO_WIDTH,
+    height: LOGO_WIDTH,
+    maxWidth: 550,
+    maxHeight: 550,
   },
   title: {
     fontSize: 30,
@@ -153,11 +165,11 @@ const styles = StyleSheet.create({
     marginVertical: 8,
     width: '100%',
     maxWidth: 320,
-    elevation: 4,
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
+    elevation: 0,
+    shadowColor: 'transparent',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0,
+    shadowRadius: 0,
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.4)', // Glass button border

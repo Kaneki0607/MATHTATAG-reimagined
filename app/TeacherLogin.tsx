@@ -290,7 +290,7 @@ export default function TeacherLogin() {
 
   return (
     <ImageBackground
-      source={require('../assets/images/bg2.jpg')}
+      source={require('../assets/images/bg.jpg')}
       style={styles.background}
       resizeMode="cover"
       imageStyle={{ opacity: 1 }}
@@ -353,7 +353,7 @@ export default function TeacherLogin() {
             </TouchableOpacity>
           </View>
 
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10, marginBottom: 6 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start', marginTop: 10, marginBottom: 6, paddingLeft: 20 }}>
             <TouchableOpacity
               style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: '#00aaff', alignItems: 'center', justifyContent: 'center', marginRight: 8 }}
               disabled={!canCheckAgreement}
@@ -363,9 +363,9 @@ export default function TeacherLogin() {
                 <View style={{ width: 14, height: 14, backgroundColor: '#00aaff', borderRadius: 3 }} />
               ) : null}
             </TouchableOpacity>
-            <Text style={{ color: '#ffffff', fontSize: 15, textShadowColor: 'rgba(0,0,0,0.3)', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 2 }}>
+            <Text style={{ color: '#ffffff', fontSize: 13, textShadowColor: 'rgba(0,0,0,0.3)', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 2 }}>
               I agree to the 
-              <Text style={{ color: '#00aaff', textDecorationLine: 'underline', textShadowColor: 'rgba(255, 247, 247, 0.3)', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 2 }} onPress={openTerms}> Terms and Conditions</Text>
+              <Text style={{ color: '#0000ff', textDecorationLine: 'underline', textShadowColor: 'rgba(255, 247, 247, 0.3)', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 2 }} onPress={openTerms}> Terms and Conditions</Text>
             </Text>
           </View>
           <TouchableOpacity 
@@ -645,28 +645,28 @@ const styles = StyleSheet.create({
   gradientOverlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    opacity: 0.3,
+    backgroundColor: 'rgba(0,20,40,0.2)',
+    opacity: 0.9,
   },
   card: {
     width: '90%',
     maxWidth: 400,
-    backgroundColor: 'rgba(255, 255, 255, 0.13)', // Even lighter spatial background
+    backgroundColor: 'rgba(255, 255, 255, 0.13)', // Lighter spatial background
     borderRadius: 28,
     paddingVertical: 36,
     paddingHorizontal: 24,
     alignItems: 'center',
     shadowColor: '#00aaff', // Blue spatial glow
-    shadowOpacity: 0.8,
+    shadowOpacity: 0.,
     shadowRadius: 40,
     shadowOffset: { width: 0, height: 15 },
     elevation: 25,
     marginBottom: 15,
-    backdropFilter: 'blur(12px)', // Enhanced spatial blur
+    backdropFilter: 'blur(30px)', // Enhanced spatial blur
     position: 'relative',
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.5)', // Even lighter white border
+    borderWidth: 0,
+    borderColor: 'rgba(255,255,255,0.5)', // Lighter white border
   },
   cardOverlay: {
     position: 'absolute',
@@ -674,8 +674,8 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)', // Even lighter overlay inside card
-    borderRadius: 28,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)', // Lighter overlay inside card
+    borderRadius: 20,
     zIndex: 1,
   },
   iconCircle: {
@@ -720,10 +720,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     width: '100%',
-    backgroundColor: 'rgba(0,50,100,0.1)', // Even lighter input background
+    backgroundColor: 'rgba(0,50,100,0.2)', // Lighter input background
     borderRadius: 24,
     borderWidth: 1.5,
-    borderColor: 'rgba(0,170,255,0.2)', // Even lighter spatial border
+    borderColor: 'rgba(0,170,255,0.3)', // Lighter spatial border
     marginBottom: 16,
     shadowColor: '#00aaff',
     shadowOpacity: 0.2,
@@ -758,9 +758,9 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.5,
     shadowRadius: 15,
-    backgroundColor: 'rgba(0,50,100,0.2)', // Even lighter button background
+    backgroundColor: 'rgba(0,50,100,0.3)', // Lighter button background
     borderWidth: 1,
-    borderColor: 'rgba(0,170,255,0.3)', // Even lighter button border
+    borderColor: 'rgba(0,170,255,0.4)', // Lighter button border
   },
   buttonDisabled: {
     backgroundColor: '#ccc',
@@ -776,17 +776,18 @@ const styles = StyleSheet.create({
   },
   signUpContainer: {
     marginTop: 16,
-    alignItems: 'center',
+    alignItems: 'flex-start',
+    paddingLeft: 20,
   },
   signUpText: {
     color: '#ffffff',
-    fontSize: 15,
+    fontSize: 13,
     textShadowColor: 'rgba(0,0,0,0.3)',
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 2,
   },
   signUpLink: {
-    color: '#00aaff',
+    color: '#0000ff',
     fontWeight: 'bold',
     textDecorationLine: 'underline',
     textShadowColor: 'rgba(255, 247, 247, 0.3)',

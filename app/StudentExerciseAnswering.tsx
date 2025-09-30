@@ -4,6 +4,7 @@ import { useIsFocused } from '@react-navigation/native';
 import { AudioSource, AudioStatus, createAudioPlayer } from 'expo-audio';
 import { Image as ExpoImage } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as Speech from 'expo-speech';
 import { useEffect, useRef, useState } from 'react';
 import {
     Alert,
@@ -327,13 +328,25 @@ export default function StudentExerciseAnswering() {
   const correctAnim = useRef(new Animated.Value(0)).current;
   const [showWrong, setShowWrong] = useState(false);
   const wrongAnim = useRef(new Animated.Value(0)).current;
-  const [attemptLogs, setAttemptLogs] = useState<{[questionId: string]: string[]}>({});
+  const [attemptLogs, setAttemptLogs] = useState<{[questionId: string]: Array<{answer: string, timeSpent: number, timestamp: number, attemptType: string, hesitationTime: number, isSignificantChange: boolean, questionPhase: string, confidence: string}>}>({});
+  
+  // Enhanced interaction tracking
+  const [interactionLogs, setInteractionLogs] = useState<{[questionId: string]: Array<{
+    type: 'option_hover' | 'option_click' | 'help_used' | 'navigation' | 'answer_change',
+    target: string,
+    timestamp: number,
+    duration?: number
+  }>}>({});
+  const [optionHoverTimes, setOptionHoverTimes] = useState<{[questionId: string]: {[optionKey: string]: number}}>({});
+  const [helpUsage, setHelpUsage] = useState<{[questionId: string]: {ttsCount: number, helpButtonClicks: number}}>({});
+  
   // TTS playback state
   const [isPlayingTTS, setIsPlayingTTS] = useState(false);
   const [isLoadingTTS, setIsLoadingTTS] = useState(false);
   const [currentAudioPlayer, setCurrentAudioPlayer] = useState<any | null>(null);
   const [currentAudioUri, setCurrentAudioUri] = useState<string | null>(null);
   const lastAutoPlayedQuestionIdRef = useRef<string | null>(null);
+  const currentTTSRef = useRef<any | null>(null);
 
   // Enable smooth layout transitions on Android
   if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -462,6 +475,13 @@ export default function StudentExerciseAnswering() {
     }
     setQuestionStartTime(Date.now());
     setQuestionElapsed(0);
+    
+    // Log initial attempt when question is displayed
+    if (exercise && exercise.questions[currentQuestionIndex]) {
+      const currentQuestion = exercise.questions[currentQuestionIndex];
+      const existingAnswer = answers.find(a => a.questionId === currentQuestion.id);
+      logAttempt(currentQuestion, existingAnswer?.answer || '', 'initial');
+    }
   }, [currentQuestionIndex]);
   
   const getRandomBackground = () => {
@@ -559,62 +579,98 @@ export default function StudentExerciseAnswering() {
     try {
       if (!audioUrl) return;
       
+      // TTS is auto-played, no need to track as user interaction
+      
       // CRITICAL: Always stop any existing TTS before starting new one
       stopCurrentTTS();
+      
+      // Wait for stopping to complete
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+
       
       setIsLoadingTTS(true);
       const source: AudioSource = { uri: audioUrl };
       const player = createAudioPlayer(source);
+      
+      // Store in both ref and state
+      currentTTSRef.current = player;
       setCurrentAudioPlayer(player);
       setCurrentAudioUri(audioUrl);
+      
       player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
         if ('isLoaded' in status && status.isLoaded) {
-          if (status.playing) setIsPlayingTTS(true);
+          if (status.playing) {
+            setIsPlayingTTS(true);
+
+          }
           if (status.didJustFinish) {
             setIsPlayingTTS(false);
-            try { player.remove(); } catch {}
+            setIsLoadingTTS(false);
+            try { 
+              player.remove(); 
+            } catch {}
+            currentTTSRef.current = null;
             setCurrentAudioPlayer(null);
             setCurrentAudioUri(null);
-            setIsLoadingTTS(false);
           }
         } else if ('error' in status) {
-          // Retry a couple of times on load error
-          if (attempt < 2) {
-            setTimeout(() => playTTS(audioUrl, attempt + 1), 150);
-          } else {
-            setIsPlayingTTS(false);
-            setIsLoadingTTS(false);
-            try { player.remove(); } catch {}
-            setCurrentAudioPlayer(null);
-          }
+          console.error('TTS playback error:', status.error);
+          setIsPlayingTTS(false);
+          setIsLoadingTTS(false);
+          try { 
+            player.remove(); 
+          } catch {}
+          currentTTSRef.current = null;
+          setCurrentAudioPlayer(null);
+          setCurrentAudioUri(null);
         }
       });
-      setTimeout(() => {
-        try { player.play(); setIsPlayingTTS(true); setIsLoadingTTS(false); } catch {
-          if (attempt < 2) {
-            setTimeout(() => playTTS(audioUrl, attempt + 1), 200);
-          } else {
-            setIsLoadingTTS(false);
-          }
-        }
-      }, 60);
-    } catch {}
+      
+      player.play();
+      setIsLoadingTTS(false);
+    } catch (error) {
+      console.error('TTS playback error:', error);
+      setIsPlayingTTS(false);
+      setIsLoadingTTS(false);
+      currentTTSRef.current = null;
+      setCurrentAudioPlayer(null);
+      setCurrentAudioUri(null);
+    }
   };
 
   const stopTTS = () => {
+
+  
     try {
-      if (currentAudioPlayer) {
-        currentAudioPlayer.remove();
+      // Stop expo-speech if it's running
+      Speech.stop();
+
+    } catch (error) {
+      console.warn('Error stopping speech:', error);
+    }
+
+    // Stop the expo-audio player if it exists
+    if (currentTTSRef.current) {
+      try {
+        currentTTSRef.current.pause();
+        currentTTSRef.current.remove();
+    
+      } catch (error) {
+        console.warn('Error stopping audio player:', error);
       }
-    } catch {}
-    // Force stop all TTS states immediately
+      currentTTSRef.current = null;
+    }
+  
+    // Reset all states
     setIsPlayingTTS(false);
     setIsLoadingTTS(false);
     setCurrentAudioPlayer(null);
     setCurrentAudioUri(null);
-    // Reset auto-play tracking to prevent immediate replay
     lastAutoPlayedQuestionIdRef.current = null;
   };
+  
+  
 
   const stopCurrentTTS = () => {
     // small wrapper for clarity
@@ -641,15 +697,19 @@ export default function StudentExerciseAnswering() {
     if (!exercise) return;
     const q = exercise.questions[currentQuestionIndex];
     if (!q) return;
-    // avoid replaying same question automatically
-    // Always stop any previous audio when index changes
+    
+    // CRITICAL: Stop any previous audio IMMEDIATELY
     stopCurrentTTS();
+    
     if (!isFocused) return; // only auto-play when screen is focused
     if (lastAutoPlayedQuestionIdRef.current === q.id) return;
+    
     if (q.ttsAudioUrl) {
       lastAutoPlayedQuestionIdRef.current = q.id;
-      // small delay to let UI settle
-      setTimeout(() => playTTS(q.ttsAudioUrl!), 150);
+      // Longer delay to ensure previous audio is fully stopped
+      setTimeout(() => {
+        playTTS(q.ttsAudioUrl!);
+      }, 500);
     } else {
       lastAutoPlayedQuestionIdRef.current = q.id;
     }
@@ -738,11 +798,152 @@ export default function StudentExerciseAnswering() {
     }
   };
 
-  const logAttempt = (question: Question, ans: any) => {
+  // Helper function to determine question phase
+  const getQuestionPhase = (question: Question, ans: any): 'reading' | 'thinking' | 'answering' | 'reviewing' => {
+    if (!ans || ans === '' || ans === null) return 'reading';
+    if (question.type === 'multiple-choice' && Array.isArray(ans) && ans.length === 0) return 'thinking';
+    if (question.type === 're-order' && Array.isArray(ans) && ans.length < (question.reorderItems?.length || 0)) return 'answering';
+    return 'reviewing';
+  };
+
+  // Helper function to estimate confidence based on behavior patterns
+  const estimateConfidence = (question: Question, ans: any, timeSpent: number, attemptNumber: number): 'high' | 'medium' | 'low' => {
+    const timePerAttempt = timeSpent / attemptNumber;
+    const isQuickAnswer = timePerAttempt < 5000; // Less than 5 seconds per attempt
+    const isSlowAnswer = timePerAttempt > 15000; // More than 15 seconds per attempt
+    
+    if (attemptNumber === 1 && isQuickAnswer) return 'high';
+    if (attemptNumber > 2 || isSlowAnswer) return 'low';
+    return 'medium';
+  };
+
+  // Helper function to extract question metadata and difficulty
+  const getQuestionMetadata = (question: Question) => {
+    const metadata = {
+      difficulty: 'medium' as 'easy' | 'medium' | 'hard',
+      topicTags: [] as string[],
+      learningObjectives: [] as string[],
+      cognitiveLoad: 'medium' as 'low' | 'medium' | 'high',
+      questionComplexity: 'medium' as 'simple' | 'medium' | 'complex'
+    };
+
+    // Analyze question text for difficulty indicators
+    const questionText = question.question?.toLowerCase() || '';
+    const hasImage = !!question.questionImage;
+    const hasMultipleSteps = questionText.includes('step') || questionText.includes('first') || questionText.includes('then');
+    const hasWordProblem = questionText.includes('has') || questionText.includes('bought') || questionText.includes('gave');
+    
+    // Determine difficulty based on content
+    if (question.type === 'multiple-choice' && question.options?.length === 2) {
+      metadata.difficulty = 'easy';
+    } else if (hasWordProblem || hasMultipleSteps || question.type === 're-order') {
+      metadata.difficulty = 'hard';
+    } else if (hasImage || question.type === 'matching') {
+      metadata.difficulty = 'medium';
+    }
+
+    // Extract topic tags based on question content
+    if (questionText.includes('add') || questionText.includes('plus') || questionText.includes('+')) {
+      metadata.topicTags.push('addition');
+    }
+    if (questionText.includes('subtract') || questionText.includes('minus') || questionText.includes('-')) {
+      metadata.topicTags.push('subtraction');
+    }
+    if (questionText.includes('count') || questionText.includes('number')) {
+      metadata.topicTags.push('counting');
+    }
+    if (questionText.includes('shape') || questionText.includes('circle') || questionText.includes('square')) {
+      metadata.topicTags.push('geometry');
+    }
+    if (questionText.includes('bigger') || questionText.includes('smaller') || questionText.includes('compare')) {
+      metadata.topicTags.push('comparison');
+    }
+
+    // Determine cognitive load
+    if (hasImage && hasWordProblem) {
+      metadata.cognitiveLoad = 'high';
+    } else if (hasImage || hasWordProblem) {
+      metadata.cognitiveLoad = 'medium';
+    } else {
+      metadata.cognitiveLoad = 'low';
+    }
+
+    // Determine question complexity
+    if (question.type === 're-order' || hasMultipleSteps) {
+      metadata.questionComplexity = 'complex';
+    } else if (question.type === 'matching' || hasImage) {
+      metadata.questionComplexity = 'medium';
+    } else {
+      metadata.questionComplexity = 'simple';
+    }
+
+    return metadata;
+  };
+
+  // Helper function to log interactions
+  const logInteraction = (questionId: string, type: 'option_hover' | 'option_click' | 'help_used' | 'navigation' | 'answer_change', target: string, duration?: number) => {
+    const interaction = {
+      type,
+      target,
+      timestamp: Date.now(),
+      duration: duration || 0 // Ensure duration is never undefined
+    };
+    
+    setInteractionLogs(prev => ({
+      ...prev,
+      [questionId]: [...(prev[questionId] || []), interaction]
+    }));
+  };
+
+  // Helper function to track option hover times
+  const trackOptionHover = (questionId: string, optionKey: string, startTime: number) => {
+    setOptionHoverTimes(prev => ({
+      ...prev,
+      [questionId]: {
+        ...(prev[questionId] || {}),
+        [optionKey]: startTime
+      }
+    }));
+  };
+
+  // Helper function to track help usage (only for user-initiated help actions)
+  const trackHelpUsage = (questionId: string, type: 'help_button') => {
+    setHelpUsage(prev => ({
+      ...prev,
+      [questionId]: {
+        ...(prev[questionId] || {ttsCount: 0, helpButtonClicks: 0}),
+        helpButtonClicks: (prev[questionId]?.helpButtonClicks || 0) + 1
+      }
+    }));
+    logInteraction(questionId, 'help_used', type, 0);
+  };
+
+  const logAttempt = (question: Question, ans: any, attemptType: 'initial' | 'change' | 'final' = 'change') => {
     const text = serializeAnswer(question, ans);
+    const currentTime = Date.now();
+    const timeSpent = currentTime - questionStartTime;
+    
+    // Calculate hesitation time (time between attempts)
+    const previousAttempts = attemptLogs[question.id] || [];
+    const lastAttemptTime = previousAttempts.length > 0 ? previousAttempts[previousAttempts.length - 1].timestamp : questionStartTime;
+    const hesitationTime = currentTime - lastAttemptTime;
+    
+    // Determine if this is a significant change or just a minor adjustment
+    const isSignificantChange = previousAttempts.length === 0 || 
+      (previousAttempts.length > 0 && previousAttempts[previousAttempts.length - 1].answer !== text);
+    
     setAttemptLogs(prev => ({
       ...prev,
-      [question.id]: [...(prev[question.id] || []), text],
+      [question.id]: [...(prev[question.id] || []), {
+        answer: text,
+        timeSpent: timeSpent,
+        timestamp: currentTime,
+        attemptType: attemptType,
+        hesitationTime: hesitationTime,
+        isSignificantChange: isSignificantChange,
+        questionPhase: getQuestionPhase(question, ans), // 'reading', 'thinking', 'answering', 'reviewing'
+        confidence: estimateConfidence(question, ans, timeSpent, previousAttempts.length + 1)
+      }],
     }));
   };
 
@@ -823,6 +1024,12 @@ export default function StudentExerciseAnswering() {
   const handleAnswerChange = (answer: string | string[] | {[key: string]: any}) => {
     setCurrentAnswer(answer);
     
+    // Track answer change interaction
+    if (exercise && exercise.questions[currentQuestionIndex]) {
+      const currentQuestion = exercise.questions[currentQuestionIndex];
+      logInteraction(currentQuestion.id, 'answer_change', 'user_input', 0);
+    }
+    
     // Update answers array
     setAnswers(prev => prev.map(a => 
       a.questionId === exercise?.questions[currentQuestionIndex].id 
@@ -858,7 +1065,7 @@ export default function StudentExerciseAnswering() {
     const correct = isAnswerCorrect(q, currentAns);
     if (!correct) {
       setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
-      logAttempt(q, currentAns);
+      logAttempt(q, currentAns, 'change');
       // Trigger global shake for non-selectable types
       Animated.sequence([
         Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
@@ -876,8 +1083,10 @@ export default function StudentExerciseAnswering() {
     stopCurrentTTS();
     
     setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
+    // Count the final successful attempt
+    setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
     // Log the successful attempt as well
-    logAttempt(q, currentAns);
+    logAttempt(q, currentAns, 'final');
     triggerCorrectFeedback(() => advanceToNextOrFinish());
   };
 
@@ -909,6 +1118,9 @@ export default function StudentExerciseAnswering() {
   };
 
   const triggerCorrectFeedback = (onComplete?: () => void) => {
+    // CRITICAL: Stop TTS immediately when answer is correct
+    stopCurrentTTS();
+    
     // Freeze UI timer at the moment of correctness; used when recording
     frozenElapsedRef.current = questionElapsedRef.current;
     setShowCorrect(true);
@@ -1073,6 +1285,169 @@ export default function StudentExerciseAnswering() {
     }
   };
 
+  // Handle final submission when Done is clicked
+  const handleFinalSubmission = async () => {
+    try {
+      // Get parent ID for privacy (no student ID stored)
+      let parentId = null;
+      try {
+        parentId = await AsyncStorage.getItem('parent_key');
+      } catch (error) {
+        console.warn('Could not get parent key from storage:', error);
+      }
+
+      // Calculate final answers with time spent
+      let finalAnswers = answers;
+      if (exercise) {
+        const currentQid = exercise.questions[currentQuestionIndex].id;
+        const currentDelta = Date.now() - questionStartTime;
+        finalAnswers = answers.map(a => ({
+          ...a,
+          timeSpent: a.questionId === currentQid ? (a.timeSpent || 0) + currentDelta : (a.timeSpent || 0),
+        }));
+      }
+
+      // Calculate results
+      const correctAnswers = finalAnswers.filter(answer => answer.isCorrect).length;
+      const totalQuestions = exercise?.questions.length || 0;
+      const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
+      const totalAttempts = Object.values(attemptCounts).reduce((sum, v) => sum + (v || 0), 0);
+      
+      // Create normalized result record
+      const resultId = `${exerciseId}_${parentId || 'anonymous'}_${Date.now()}`;
+      const resultData = {
+        // Core identifiers
+        resultId,
+        exerciseId: exerciseId as string,
+        parentId, // Privacy-focused: use parent ID instead of student ID
+        
+        // Exercise metadata
+        exerciseTitle: exercise?.title || 'Unknown Exercise',
+        classId: (exercise as any)?.classId || null,
+        teacherId: (exercise as any)?.teacherId || null,
+        
+        // Performance metrics
+        scorePercentage,
+        totalQuestions,
+        totalTimeSpent: elapsedTime,
+        
+        // Submission info
+        submittedAt: new Date().toISOString(),
+        deviceInfo: {
+          platform: Platform.OS,
+          timestamp: Date.now()
+        },
+        
+        // Student context and exercise metadata
+        studentContext: {
+          gradeLevel: 'Grade 1', // Could be dynamic based on student data
+          exerciseSequence: currentQuestionIndex + 1, // Current position in exercise
+          totalQuestions: exercise?.questions.length || 0,
+          completionRate: ((currentQuestionIndex + 1) / (exercise?.questions.length || 1)) * 100,
+          sessionStartTime: startTime,
+          sessionDuration: elapsedTime
+        },
+        
+        // Exercise metadata
+        exerciseMetadata: {
+          title: exercise?.title || '',
+          description: exercise?.description || '',
+          subject: 'Mathematics', // Default subject
+          difficulty: 'medium', // Default difficulty
+          totalQuestions: exercise?.questions.length || 0,
+          questionTypes: exercise?.questions.map(q => q.type) || [],
+          estimatedDuration: 0, // Default duration
+          learningObjectives: [] // Default empty array
+        },
+        
+        // Detailed question data (normalized)
+        questionResults: exercise?.questions.map((q, idx) => {
+          const metadata = getQuestionMetadata(q);
+          const questionAttempts = attemptLogs[q.id] || [];
+          const totalHesitationTime = questionAttempts.reduce((sum, attempt) => sum + (attempt.hesitationTime || 0), 0);
+          const averageConfidence = questionAttempts.length > 0 ? 
+            questionAttempts.reduce((sum, attempt) => {
+              const confValue = attempt.confidence === 'high' ? 3 : attempt.confidence === 'medium' ? 2 : 1;
+              return sum + confValue;
+            }, 0) / questionAttempts.length : 2;
+          
+          return {
+            questionId: q.id,
+            questionNumber: idx + 1,
+            questionType: q.type,
+            questionText: q.question || '',
+            questionImage: q.questionImage || null,
+            options: q.options || [],
+            isCorrect: true, // All questions are correct since student completed the exercise
+            timeSpent: getTimeMsForQuestion(q),
+            attempts: attemptCounts[q.id] || 1,
+            studentAnswer: finalAnswers.find(a => a.questionId === q.id)?.answer || '',
+            correctAnswer: formatCorrectAnswer(q),
+            attemptHistory: questionAttempts.map(attempt => ({
+              ...attempt,
+              hesitationTime: attempt.hesitationTime || 0,
+              isSignificantChange: attempt.isSignificantChange || false
+            })),
+            
+            // Enhanced metadata for better analysis
+            metadata: metadata,
+            totalHesitationTime: totalHesitationTime,
+            averageConfidence: averageConfidence,
+            significantChanges: questionAttempts.filter(attempt => attempt.isSignificantChange).length,
+            phaseDistribution: {
+              reading: questionAttempts.filter(attempt => attempt.questionPhase === 'reading').length,
+              thinking: questionAttempts.filter(attempt => attempt.questionPhase === 'thinking').length,
+              answering: questionAttempts.filter(attempt => attempt.questionPhase === 'answering').length,
+              reviewing: questionAttempts.filter(attempt => attempt.questionPhase === 'reviewing').length
+            },
+            
+            // Interaction tracking data
+            interactions: (interactionLogs[q.id] || []).map(interaction => ({
+              ...interaction,
+              duration: interaction.duration || 0 // Ensure no undefined values
+            })),
+            helpUsage: helpUsage[q.id] || {ttsCount: 0, helpButtonClicks: 0},
+            optionHoverTimes: optionHoverTimes[q.id] || {},
+            totalInteractions: (interactionLogs[q.id] || []).length,
+            interactionTypes: {
+              optionClicks: (interactionLogs[q.id] || []).filter(i => i.type === 'option_click').length,
+              helpUsed: (interactionLogs[q.id] || []).filter(i => i.type === 'help_used').length,
+              answerChanges: (interactionLogs[q.id] || []).filter(i => i.type === 'answer_change').length
+            },
+            
+            // Granular time tracking
+            timeBreakdown: {
+              totalTime: getTimeMsForQuestion(q),
+              readingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'reading').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
+              thinkingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'thinking').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
+              answeringTime: questionAttempts.filter(attempt => attempt.questionPhase === 'answering').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
+              reviewingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'reviewing').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
+              averageTimePerAttempt: questionAttempts.length > 0 ? getTimeMsForQuestion(q) / questionAttempts.length : 0,
+              timeToFirstAnswer: questionAttempts.length > 0 ? (questionAttempts[0].timeSpent || 0) : 0,
+              timeToFinalAnswer: questionAttempts.length > 0 ? (questionAttempts[questionAttempts.length - 1].timeSpent || 0) : 0
+            }
+          };
+        }) || []
+      };
+      
+      // Save to normalized ExerciseResults table
+      const exerciseResult = await writeData(`/ExerciseResults/${resultId}`, resultData);
+      if (!exerciseResult.success) {
+        throw new Error(`Failed to save exercise result: ${exerciseResult.error}`);
+      }
+      
+      // No need to update assignedExercises - completion status is determined by ExerciseResults existence
+      
+      // Close results panel and navigate back
+      setShowResults(false);
+      router.back();
+      
+    } catch (error: any) {
+      console.error('Failed to submit final answers:', error);
+      Alert.alert('Error', `Failed to submit answers: ${error.message || error}. Please try again.`);
+    }
+  };
+
   const handleSubmit = async () => {
     try {
       setSubmitting(true);
@@ -1104,61 +1479,20 @@ export default function StudentExerciseAnswering() {
           Alert.alert('Try again', 'Your current answer is not correct yet. Please try again.');
           setSubmitting(false);
           return;
+        } else {
+          // Count the final successful attempt
+          setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
         }
         setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
       }
 
-      // Calculate final answers with time spent
-      let finalAnswers = answers;
-      if (exercise) {
-        const currentQid = exercise.questions[currentQuestionIndex].id;
-        const currentDelta = Date.now() - questionStartTime;
-        finalAnswers = answers.map(a => ({
-          ...a,
-          timeSpent: a.questionId === currentQid ? (a.timeSpent || 0) + currentDelta : (a.timeSpent || 0),
-        }));
-      }
-
-      // Aggregate attempts
-      const attemptsPerQuestion = attemptCounts;
-      const totalAttempts = Object.values(attemptsPerQuestion).reduce((sum, v) => sum + (v || 0), 0);
+      // No need to update assignedExercises - completion status is determined by ExerciseResults existence
       
-      // Save student answers to database
-      const studentKey = 'student_key'; // This should come from authentication
-      const submissionData = {
-        exerciseId,
-        studentId: studentKey,
-        answers: finalAnswers,
-        submittedAt: new Date().toISOString(),
-        totalTimeSpent: elapsedTime,
-        score: 0, // Optional: adjust if you want to compute scoring
-        attemptsPerQuestion,
-        totalAttempts,
-        attemptLogs,
-        exerciseTitle: exercise?.title,
-        questionCount: exercise?.questions.length,
-      };
-      
-      // Save submission
-      await writeData(`/studentSubmissions/${exerciseId}_${studentKey}`, submissionData);
-      
-      // Update task status if this is an assigned exercise
-      try {
-        const taskUpdateData = {
-          status: 'completed',
-          completedAt: new Date().toISOString(),
-          timeSpent: elapsedTime,
-        };
-        await writeData(`/tasks/${exerciseId}`, taskUpdateData);
-      } catch (taskError) {
-        console.log('Task update failed (may not be an assigned exercise):', taskError);
-      }
-      
-      // Show results panel instead of alert/back
+      // Show results panel - database saving will happen when Done is clicked
       setShowResults(true);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to submit answers:', error);
-      Alert.alert('Error', 'Failed to submit answers. Please try again.');
+      Alert.alert('Error', `Failed to submit answers: ${error.message || error}. Please try again.`);
     } finally {
       setSubmitting(false);
     }
@@ -1176,6 +1510,8 @@ export default function StudentExerciseAnswering() {
       const delta = Date.now() - questionStartTime;
       setAnswers(prev => prev.map(a => a.questionId === q.id ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
       setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
+      // Count the final successful attempt
+      setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
       await unlockNextLevel();
       Alert.alert('Great job!', 'Level cleared!', [
         { text: 'Back to Map', onPress: () => router.replace({ pathname: '/Homepage', params: { exerciseId: exercise.id, session: String(Date.now()) } } as any) }
@@ -1244,7 +1580,7 @@ export default function StudentExerciseAnswering() {
                       if (!isCorrect) {
                         setLastShakeKey(optionKey);
                         setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
-                        logAttempt(question, option);
+                        logAttempt(question, option, 'change');
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
                           Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
@@ -1258,9 +1594,12 @@ export default function StudentExerciseAnswering() {
                       // Correct -> set answer and move next
                       // Stop TTS immediately when correct answer is selected
                       stopCurrentTTS();
+                      logInteraction(question.id, 'option_click', option, 0);
                       handleAnswerChange(option);
                       setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
-                      logAttempt(question, option);
+                      // Count the final successful attempt
+                      setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
+                      logAttempt(question, option, 'final');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
                     }
@@ -1268,6 +1607,7 @@ export default function StudentExerciseAnswering() {
                     const newAnswers = isSelected 
                       ? selectedAnswers.filter(a => a !== option)
                       : [...selectedAnswers, option];
+                    logInteraction(question.id, 'option_click', option, 0);
                     handleAnswerChange(newAnswers);
                   }}
                    activeOpacity={0.7}
@@ -1320,7 +1660,7 @@ export default function StudentExerciseAnswering() {
                       if (!isCorrect) {
                         setLastShakeKey(optionKey);
                         setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
-                        logAttempt(question, option);
+                        logAttempt(question, option, 'change');
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
                           Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
@@ -1335,7 +1675,7 @@ export default function StudentExerciseAnswering() {
                       stopCurrentTTS();
                       handleAnswerChange(option);
                       setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
-                      logAttempt(question, option);
+                      logAttempt(question, option, 'change');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
                     }
@@ -2290,7 +2630,7 @@ export default function StudentExerciseAnswering() {
                               {(attemptLogs[sq.id] && attemptLogs[sq.id].length > 0) && (
                                 <View style={{ marginTop: 4 }}>
                                   {attemptLogs[sq.id].map((log, li) => (
-                                    <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log || '(blank)'}</Text>
+                                    <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || '(blank)'} ({Math.round(log.timeSpent / 1000)}s)</Text>
                                   ))}
                                 </View>
                               )}
@@ -2311,7 +2651,7 @@ export default function StudentExerciseAnswering() {
                         {(attemptLogs[q.id] && attemptLogs[q.id].length > 0) && (
                           <View style={{ marginTop: 4 }}>
                             {attemptLogs[q.id].map((log, li) => (
-                              <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log || '(blank)'}</Text>
+                              <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || '(blank)'} ({Math.round(log.timeSpent / 1000)}s)</Text>
                             ))}
                           </View>
                         )}
@@ -2321,7 +2661,7 @@ export default function StudentExerciseAnswering() {
                 </ScrollView>
               </View>
               <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
-                <TouchableOpacity onPress={() => { setShowResults(false); router.back(); }} style={{ backgroundColor: '#ffa500', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10 }} activeOpacity={0.8}>
+                <TouchableOpacity onPress={handleFinalSubmission} style={{ backgroundColor: '#ffa500', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10 }} activeOpacity={0.8}>
                   <Text style={{ color: '#fff', fontWeight: '700' }}>Done</Text>
                 </TouchableOpacity>
               </View>
@@ -2573,9 +2913,10 @@ const styles = StyleSheet.create({
   optionsGridContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    justifyContent: isTablet ? 'flex-start' : 'space-between',
-    gap: getResponsiveSize(12),
-    paddingHorizontal: isTablet ? getResponsiveSize(20) : 0,
+    justifyContent: 'space-between', // Always space-between for 2 columns
+    gap: getResponsiveSize(8), // Smaller gap to ensure 2 columns fit
+    paddingHorizontal: 0,
+    width: '100%', // Ensure full width
   },
   questionTypeLabel: {
     backgroundColor: '#4a90e2',
@@ -2665,8 +3006,9 @@ const styles = StyleSheet.create({
   multipleChoiceGridOption: {
     backgroundColor: '#10b981', // Solid green color like in the image
     borderRadius: getResponsiveSize(20), // More rounded corners
-    padding: getResponsivePadding(16),
-    width: isTablet ? '30%' : '48%',
+    padding: getResponsivePadding(12),
+    width: '48%', // Always 48% for 2 columns regardless of screen size
+    maxWidth: 150, // Prevent too wide on larger screens
     aspectRatio: 1,
     borderWidth: 0, // Remove border for solid look
     shadowColor: '#10b981',
@@ -2677,6 +3019,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     position: 'relative',
+    minWidth: 100, // Ensure minimum width for smaller screens
   },
   selectedMultipleChoiceGridOption: {
     backgroundColor: '#059669', // Darker green when selected

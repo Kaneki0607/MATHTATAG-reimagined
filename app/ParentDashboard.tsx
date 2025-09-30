@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Easing, Image, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Animated, Easing, Image, KeyboardAvoidingView, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
@@ -37,6 +37,11 @@ interface AssignedExercise {
   deadline: string;
   assignedBy: string;
   createdAt: string;
+  status?: 'pending' | 'in-progress' | 'completed' | 'overdue';
+  completedAt?: string;
+  score?: number;
+  timeSpent?: number;
+  resultId?: string;
   exercise?: {
     id: string;
     title: string;
@@ -75,6 +80,9 @@ interface Task {
   // For assigned exercises
   isAssignedExercise?: boolean;
   assignedExerciseId?: string;
+  score?: number;
+  timeSpent?: number;
+  resultId?: string;
 }
 
 export default function ParentDashboard() {
@@ -105,8 +113,20 @@ export default function ParentDashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   
+  // Refresh state
+  const [refreshing, setRefreshing] = useState(false);
+  
   // Navigation state
   const [activeSection, setActiveSection] = useState('home');
+  
+  // Question Result view state
+  const [showQuestionResult, setShowQuestionResult] = useState(false);
+  const [selectedResult, setSelectedResult] = useState<any>(null);
+  const [geminiAnalysis, setGeminiAnalysis] = useState<any>(null);
+  const [loadingAnalysis, setLoadingAnalysis] = useState(false);
+  const [classAverages, setClassAverages] = useState<any>(null);
+  const [performanceRanking, setPerformanceRanking] = useState<any>(null);
+  const [dailyQuote, setDailyQuote] = useState<{quote: string, author: string} | null>(null);
   
   // Profile modal state
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -126,6 +146,7 @@ export default function ParentDashboard() {
   // Load parent data on component mount
   useEffect(() => {
     loadParentData();
+    fetchDailyQuote();
   }, []);
 
   // Load announcements and tasks when parent data is available
@@ -145,7 +166,10 @@ export default function ParentDashboard() {
         // Load parent data from Firebase
         const result = await readData(`/parents/${parentKey}`);
         if (result.data) {
-          setParentData(result.data);
+          setParentData({
+            ...result.data,
+            parentKey: parentKey
+          });
         } else {
           // No data found, show registration modal
           setShowRegistrationModal(true);
@@ -291,6 +315,520 @@ export default function ParentDashboard() {
     setSelectedAnnouncement(null);
   };
 
+  // Handle question result view
+  const handleShowQuestionResult = async (task: Task) => {
+    if (!task.resultId) return;
+    
+    try {
+      setLoadingAnalysis(true);
+      setSelectedResult(task);
+      setShowQuestionResult(true);
+      
+      // Load detailed result data and original exercise
+      const [resultData, exerciseData] = await Promise.all([
+        readData(`/ExerciseResults/${task.resultId}`),
+        readData(`/exercises/${task.exerciseId}`)
+      ]);
+      
+      if (resultData.data && exerciseData.data) {
+        // Enhance question results with original exercise data
+        const enhancedQuestionResults = resultData.data.questionResults?.map((qResult: any) => {
+          const originalQuestion = exerciseData.data.questions?.find((q: any) => q.id === qResult.questionId);
+          return {
+            ...qResult,
+            questionText: originalQuestion?.question || qResult.questionText || '',
+            questionImage: originalQuestion?.questionImage || qResult.questionImage || null,
+            options: originalQuestion?.options || qResult.options || [],
+            ttsAudioUrl: originalQuestion?.ttsAudioUrl || null,
+            // Ensure we have the full question data
+            originalQuestion: originalQuestion
+          };
+        }) || [];
+        
+        setSelectedResult({
+          ...task,
+          ...resultData.data,
+          questionResults: enhancedQuestionResults
+        });
+        
+        // Calculate class averages including per-question averages
+        await calculateClassAverages(resultData.data, exerciseData.data);
+        
+        // Calculate comprehensive performance metrics and ranking
+        await calculatePerformanceMetrics(resultData.data, exerciseData.data);
+        
+        // Generate Gemini analysis
+        await generateGeminiAnalysis({
+          ...resultData.data,
+          questionResults: enhancedQuestionResults
+        });
+      }
+    } catch (error) {
+      console.error('Failed to load question result:', error);
+      Alert.alert('Error', 'Failed to load exercise results. Please try again.');
+    } finally {
+      setLoadingAnalysis(false);
+    }
+  };
+
+  // Calculate comprehensive performance metrics for class ranking
+  const calculatePerformanceMetrics = async (resultData: any, exerciseData: any) => {
+    try {
+      const allResults = await readData('/ExerciseResults');
+      if (!allResults.data) return;
+
+      const results = Object.values(allResults.data) as any[];
+      const sameExerciseResults = results.filter((result: any) =>
+        result.exerciseId === resultData.exerciseId &&
+        result.classId === resultData.classId
+      );
+
+      if (sameExerciseResults.length === 0) return;
+
+      // Calculate performance metrics for each student
+      const studentMetrics = sameExerciseResults.map((result: any) => {
+        const questionResults = result.questionResults || [];
+        const totalQuestions = questionResults.length;
+        
+        // Calculate efficiency score (lower attempts and time = higher score)
+        const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+        const totalTime = result.totalTimeSpent || 0;
+        const avgAttemptsPerQuestion = totalAttempts / totalQuestions;
+        const avgTimePerQuestion = totalTime / totalQuestions;
+        
+        // Calculate consistency score (how consistent performance is across questions)
+        const attemptVariance = questionResults.reduce((sum: number, q: any) => {
+          const deviation = Math.abs((q.attempts || 1) - avgAttemptsPerQuestion);
+          return sum + (deviation * deviation);
+        }, 0) / totalQuestions;
+        
+        const timeVariance = questionResults.reduce((sum: number, q: any) => {
+          const deviation = Math.abs((q.timeSpent || 0) - avgTimePerQuestion);
+          return sum + (deviation * deviation);
+        }, 0) / totalQuestions;
+        
+        // Calculate mastery indicators
+        const quickCorrectAnswers = questionResults.filter((q: any) => 
+          (q.attempts || 1) === 1 && (q.timeSpent || 0) < 10000 // Less than 10 seconds
+        ).length;
+        
+        const masteryScore = quickCorrectAnswers / totalQuestions;
+        
+        // Calculate efficiency score (0-100, higher is better)
+        const maxExpectedAttempts = 3; // Reasonable maximum
+        const maxExpectedTime = 30000; // 30 seconds per question
+        const attemptEfficiency = Math.max(0, 100 - ((avgAttemptsPerQuestion - 1) / (maxExpectedAttempts - 1)) * 50);
+        const timeEfficiency = Math.max(0, 100 - (avgTimePerQuestion / maxExpectedTime) * 50);
+        const efficiencyScore = (attemptEfficiency + timeEfficiency) / 2;
+        
+        // Calculate consistency score (0-100, higher is better)
+        const maxVariance = 10000; // Maximum expected variance
+        const attemptConsistency = Math.max(0, 100 - (attemptVariance / maxVariance) * 50);
+        const timeConsistency = Math.max(0, 100 - (timeVariance / maxVariance) * 50);
+        const consistencyScore = (attemptConsistency + timeConsistency) / 2;
+        
+        // Calculate overall performance score
+        const overallScore = (efficiencyScore * 0.4) + (consistencyScore * 0.3) + (masteryScore * 100 * 0.3);
+        
+        return {
+          studentId: result.studentId,
+          studentName: result.studentName || 'Unknown Student',
+          totalAttempts,
+          totalTime,
+          avgAttemptsPerQuestion,
+          avgTimePerQuestion,
+          efficiencyScore,
+          consistencyScore,
+          masteryScore,
+          overallScore,
+          quickCorrectAnswers,
+          attemptVariance,
+          timeVariance,
+          questionResults: questionResults
+        };
+      });
+
+      // Sort students by overall performance (descending)
+      studentMetrics.sort((a, b) => b.overallScore - a.overallScore);
+      
+      // Calculate rankings
+      const rankedStudents = studentMetrics.map((student, index) => ({
+        ...student,
+        rank: index + 1,
+        percentile: Math.round(((studentMetrics.length - index) / studentMetrics.length) * 100)
+      }));
+
+      // Find current student's performance
+      const currentStudent = rankedStudents.find(s => s.studentId === resultData.studentId);
+      
+      // Calculate class statistics
+      const classStats = {
+        totalStudents: studentMetrics.length,
+        averageEfficiency: studentMetrics.reduce((sum, s) => sum + s.efficiencyScore, 0) / studentMetrics.length,
+        averageConsistency: studentMetrics.reduce((sum, s) => sum + s.consistencyScore, 0) / studentMetrics.length,
+        averageMastery: studentMetrics.reduce((sum, s) => sum + s.masteryScore, 0) / studentMetrics.length,
+        averageOverallScore: studentMetrics.reduce((sum, s) => sum + s.overallScore, 0) / studentMetrics.length
+      };
+
+      setPerformanceRanking({
+        currentStudent,
+        classStats,
+        allStudents: rankedStudents,
+        performanceLevel: currentStudent ? 
+          (currentStudent.overallScore >= 80 ? 'excellent' :
+           currentStudent.overallScore >= 60 ? 'good' :
+           currentStudent.overallScore >= 40 ? 'needs_improvement' : 'struggling') : 'unknown'
+      });
+
+    } catch (error) {
+      console.error('Failed to calculate performance metrics:', error);
+    }
+  };
+
+  const handleTaskAction = async (task: Task) => {
+    if (task.status === 'completed') {
+      // For completed tasks, switch to history tab and load the result
+      setActiveSection('history');
+      await handleShowQuestionResult(task);
+    } else {
+      // For pending tasks, start the exercise
+      router.push({
+        pathname: '/StudentExerciseAnswering',
+        params: { exerciseId: task.exerciseId }
+      });
+    }
+  };
+
+  const fetchDailyQuote = async () => {
+    try {
+      const response = await fetch('https://zenquotes.io/api/quotes');
+      if (response.ok) {
+        const quotes = await response.json();
+        if (quotes && quotes.length > 0) {
+          // Get the first quote from the array
+          setDailyQuote({
+            quote: quotes[0].q,
+            author: quotes[0].a
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch quote:', error);
+      // Set a fallback quote
+      setDailyQuote({
+        quote: "Education is the most powerful weapon which you can use to change the world.",
+        author: "Nelson Mandela"
+      });
+    }
+  };
+
+  const calculateClassAverages = async (resultData: any, exerciseData: any) => {
+    try {
+      // Get all results for the same exercise and class
+      const allResults = await readData('/ExerciseResults');
+      if (allResults.data) {
+        const results = Object.values(allResults.data) as any[];
+        const sameExerciseResults = results.filter((result: any) => 
+          result.exerciseId === resultData.exerciseId && 
+          result.classId === resultData.classId
+        );
+        
+        if (sameExerciseResults.length > 0) {
+          const totalTime = sameExerciseResults.reduce((sum, r) => sum + (r.totalTimeSpent || 0), 0);
+          const avgTime = totalTime / sameExerciseResults.length;
+          const avgScore = sameExerciseResults.reduce((sum, r) => sum + (r.scorePercentage || 0), 0) / sameExerciseResults.length;
+          
+          // Calculate per-question averages
+          const questionAverages: any = {};
+          if (exerciseData.questions) {
+            exerciseData.questions.forEach((question: any, index: number) => {
+              const questionTimes = sameExerciseResults
+                .map(r => r.questionResults?.find((qr: any) => qr.questionId === question.id)?.timeSpent || 0)
+                .filter(time => time > 0);
+              
+              const questionAttempts = sameExerciseResults
+                .map(r => r.questionResults?.find((qr: any) => qr.questionId === question.id)?.attempts || 1)
+                .filter(attempts => attempts > 0);
+              
+              questionAverages[question.id] = {
+                averageTime: questionTimes.length > 0 ? questionTimes.reduce((sum, time) => sum + time, 0) / questionTimes.length : 0,
+                averageAttempts: questionAttempts.length > 0 ? questionAttempts.reduce((sum, attempts) => sum + attempts, 0) / questionAttempts.length : 1,
+                totalStudents: questionTimes.length
+              };
+            });
+          }
+          
+          setClassAverages({
+            averageTime: avgTime,
+            averageScore: avgScore,
+            totalStudents: sameExerciseResults.length,
+            questionAverages: questionAverages
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to calculate class averages:', error);
+    }
+  };
+
+  const generateGeminiAnalysis = async (resultData: any) => {
+    try {
+      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
+      
+      // Prepare performance data for analysis
+      const performanceData = {
+        score: resultData.scorePercentage,
+        totalQuestions: resultData.totalQuestions,
+        timeSpent: resultData.totalTimeSpent,
+        questionResults: resultData.questionResults || [],
+        classAverage: classAverages?.averageScore || 0,
+        classAverageTime: classAverages?.averageTime || 0
+      };
+      
+      const prompt = `You are an expert educational psychologist analyzing a Grade 1 student's math exercise performance. Provide a comprehensive analysis in JSON format.
+
+STUDENT PERFORMANCE DATA:
+- Score: ${performanceData.score}%
+- Total Questions: ${performanceData.totalQuestions}
+- Time Spent: ${Math.round(performanceData.timeSpent / 1000)} seconds
+- Class Average Score: ${Math.round(performanceData.classAverage)}%
+- Class Average Time: ${Math.round(performanceData.classAverageTime / 1000)} seconds
+
+PERFORMANCE RANKING DATA:
+${performanceRanking?.currentStudent ? `
+- Class Rank: ${performanceRanking.currentStudent.rank} out of ${performanceRanking.classStats.totalStudents} students
+- Percentile: ${performanceRanking.currentStudent.percentile}th percentile
+- Overall Performance Score: ${Math.round(performanceRanking.currentStudent.overallScore)}/100
+- Efficiency Score: ${Math.round(performanceRanking.currentStudent.efficiencyScore)}/100 (attempts and time efficiency)
+- Consistency Score: ${Math.round(performanceRanking.currentStudent.consistencyScore)}/100 (performance consistency)
+- Mastery Score: ${Math.round(performanceRanking.currentStudent.masteryScore * 100)}/100 (quick correct answers)
+- Quick Correct Answers: ${performanceRanking.currentStudent.quickCorrectAnswers}/${performanceData.totalQuestions} questions
+- Average Attempts per Question: ${performanceRanking.currentStudent.avgAttemptsPerQuestion.toFixed(1)}
+- Average Time per Question: ${Math.round(performanceRanking.currentStudent.avgTimePerQuestion / 1000)}s
+- Performance Level: ${performanceRanking.performanceLevel}
+
+CLASS COMPARISON:
+- Class Average Efficiency: ${Math.round(performanceRanking.classStats.averageEfficiency)}/100
+- Class Average Consistency: ${Math.round(performanceRanking.classStats.averageConsistency)}/100
+- Class Average Mastery: ${Math.round(performanceRanking.classStats.averageMastery * 100)}/100
+- Class Average Overall Score: ${Math.round(performanceRanking.classStats.averageOverallScore)}/100
+` : '- Performance ranking data not available'}
+
+DETAILED QUESTION RESULTS:
+${performanceData.questionResults.map((q: any, idx: number) => {
+  const classAvg = classAverages?.questionAverages?.[q.questionId];
+  return `Question ${q.questionNumber}: ${q.isCorrect ? 'CORRECT' : 'INCORRECT'} (${q.attempts} attempts, ${Math.round(q.timeSpent / 1000)}s)
+   Question Text: "${q.questionText}"
+   Question Type: ${q.questionType}
+   ${q.options && q.options.length > 0 ? `Options: ${q.options.join(', ')}` : ''}
+   Student Answer: "${q.studentAnswer}"
+   Correct Answer: "${q.correctAnswer}"
+   ${q.questionImage ? `Image: ${q.questionImage}` : ''}
+   
+   ENHANCED PERFORMANCE DATA:
+   - Difficulty Level: ${q.metadata?.difficulty || 'medium'}
+   - Topic Tags: ${q.metadata?.topicTags?.join(', ') || 'none'}
+   - Cognitive Load: ${q.metadata?.cognitiveLoad || 'medium'}
+   - Question Complexity: ${q.metadata?.questionComplexity || 'medium'}
+   - Total Hesitation Time: ${Math.round((q.totalHesitationTime || 0) / 1000)}s
+   - Average Confidence: ${q.averageConfidence?.toFixed(1) || '2.0'} (1=low, 2=medium, 3=high)
+   - Significant Changes: ${q.significantChanges || 0}
+   - Phase Distribution: Reading(${q.phaseDistribution?.reading || 0}), Thinking(${q.phaseDistribution?.thinking || 0}), Answering(${q.phaseDistribution?.answering || 0}), Reviewing(${q.phaseDistribution?.reviewing || 0})
+   
+   INTERACTION PATTERNS:
+   - Total Interactions: ${q.totalInteractions || 0}
+   - Option Clicks: ${q.interactionTypes?.optionClicks || 0}
+   - Help Used: ${q.interactionTypes?.helpUsed || 0} (Help Button: ${q.helpUsage?.helpButtonClicks || 0})
+   - Answer Changes: ${q.interactionTypes?.answerChanges || 0}
+   
+   TIME BREAKDOWN:
+   - Reading Time: ${Math.round((q.timeBreakdown?.readingTime || 0) / 1000)}s
+   - Thinking Time: ${Math.round((q.timeBreakdown?.thinkingTime || 0) / 1000)}s
+   - Answering Time: ${Math.round((q.timeBreakdown?.answeringTime || 0) / 1000)}s
+   - Reviewing Time: ${Math.round((q.timeBreakdown?.reviewingTime || 0) / 1000)}s
+   - Time to First Answer: ${Math.round((q.timeBreakdown?.timeToFirstAnswer || 0) / 1000)}s
+   - Time to Final Answer: ${Math.round((q.timeBreakdown?.timeToFinalAnswer || 0) / 1000)}s
+   
+   ${q.attemptHistory && q.attemptHistory.length > 0 ? `Attempt History: ${q.attemptHistory.map((a: any) => `"${a.answer || 'blank'}" (${Math.round((a.timeSpent || 0) / 1000)}s, ${a.attemptType}, ${a.questionPhase}, confidence: ${a.confidence})`).join(', ')}` : ''}
+   ${classAvg ? `Class Average Time: ${Math.round(classAvg.averageTime / 1000)}s, Class Average Attempts: ${Math.round(classAvg.averageAttempts)}` : ''}`;
+}).join('\n\n')}
+
+IMPORTANT: Since the student completed the exercise, ALL questions were answered correctly. Analyze the specific questions and provide tailored recommendations.
+
+ANALYSIS REQUIREMENTS:
+1. Analyze the student's performance ranking and percentile within the class
+2. Compare efficiency, consistency, and mastery scores against class averages
+3. Identify specific areas where the student excels or needs improvement based on ranking data
+4. Consider the student's position relative to peers (rank, percentile) in recommendations
+5. Analyze each specific question with enhanced performance data and ranking context
+6. Identify patterns in hesitation time, confidence levels, and interaction patterns
+7. Look for correlations between question difficulty, cognitive load, and student performance
+8. Analyze phase distribution to understand where students spend most time (reading, thinking, answering, reviewing)
+9. Consider interaction patterns (help usage, option clicks, answer changes) in your analysis
+10. Provide specific recommendations based on performance ranking and class comparison
+11. Focus on the specific math concepts, difficulty levels, and cognitive demands in the questions
+12. Consider the student's confidence levels, hesitation patterns, and class standing in recommendations
+
+Please provide analysis in this JSON format:
+{
+  "overallPerformance": {
+    "level": "excellent|good|needs_improvement|struggling",
+    "description": "Brief overall assessment in Tagalog for parents based on specific questions answered",
+    "score": ${performanceData.score}
+  },
+  "strengths": [
+    "List 2-3 specific strengths in Tagalog based on the actual questions (e.g., 'Mahusay sa pagbibilang ng mga numero', 'Mabilis sa pag-identify ng mga hugis')"
+  ],
+  "weaknesses": [
+    "List 2-3 specific areas needing improvement in Tagalog based on actual questions (e.g., 'Kailangan pa ng practice sa subtraction', 'Medyo mabagal sa word problems')"
+  ],
+  "questionAnalysis": [
+    "For each question that took longer or more attempts, provide specific analysis in Tagalog"
+  ],
+  "timeAnalysis": {
+    "studentTime": ${Math.round(performanceData.timeSpent / 1000)},
+    "classAverage": ${Math.round(performanceData.classAverageTime / 1000)},
+    "comparison": "faster|slower|similar",
+    "description": "Analysis of time performance in Tagalog based on specific questions"
+  },
+  "recommendations": [
+    "List 3-4 specific, actionable recommendations in Tagalog for parents based on the actual questions (e.g., 'Practice more addition with objects', 'Work on reading word problems slowly')"
+  ],
+  "encouragement": "A positive, encouraging message in Tagalog for the student based on their specific performance"
+}
+
+Focus on:
+1. Use Tagalog language for parents to understand
+2. Reference specific questions and math concepts from the exercise
+3. Analyze patterns in the actual questions answered
+4. Provide specific guidance based on the question types and content
+5. Make recommendations relevant to the specific skills tested
+6. Cultural sensitivity for Filipino families`;
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{
+                text: prompt
+              }]
+            }]
+          })
+        }
+      );
+
+      const data = await response.json();
+      if (data.candidates && data.candidates[0] && data.candidates[0].content) {
+        let analysisText = data.candidates[0].content.parts[0].text;
+        
+        // Clean up the response text to extract JSON
+        analysisText = analysisText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        
+        // Remove any leading/trailing text that's not JSON
+        const jsonStart = analysisText.indexOf('{');
+        const jsonEnd = analysisText.lastIndexOf('}');
+        
+        if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+          analysisText = analysisText.substring(jsonStart, jsonEnd + 1);
+        }
+        
+        // Additional cleaning for common issues
+        analysisText = analysisText
+          .replace(/,\s*}/g, '}')  // Remove trailing commas
+          .replace(/,\s*]/g, ']')  // Remove trailing commas in arrays
+          .replace(/\n/g, ' ')     // Replace newlines with spaces
+          .replace(/\s+/g, ' ')    // Replace multiple spaces with single space
+          .trim();
+        
+        try {
+          const analysis = JSON.parse(analysisText);
+          setGeminiAnalysis(analysis);
+        } catch (parseError) {
+          console.error('Failed to parse Gemini response:', parseError);
+          console.log('Cleaned response:', analysisText);
+          console.log('Original response:', data.candidates[0].content.parts[0].text);
+          
+          // Try to extract partial data from the response
+          try {
+            const fallbackAnalysis = {
+              overallPerformance: {
+                level: performanceData.score >= 80 ? 'excellent' : performanceData.score >= 60 ? 'good' : 'needs_improvement',
+                description: `Nakakuha ang bata ng ${performanceData.score}% sa pagsusulit na ito.`,
+                score: performanceData.score
+              },
+              strengths: ['Nakumpleto ang lahat ng tanong', 'Nagpakita ng pagsisikap'],
+              weaknesses: ['Kailangan pa ng karagdagang pagsasanay sa ilang tanong'],
+              questionAnalysis: ['Ang bata ay nakasagot nang tama sa lahat ng tanong'],
+              timeAnalysis: {
+                studentTime: Math.round(performanceData.timeSpent / 1000),
+                classAverage: Math.round(performanceData.classAverageTime / 1000),
+                comparison: 'similar',
+                description: 'Ang bilis ng pagsagot ay nasa normal na saklaw'
+              },
+              recommendations: ['Mag-practice pa ng mga katulad na pagsasanay', 'Magbasa nang mabuti ang mga tanong'],
+              encouragement: 'Magaling! Nakumpleto mo ang pagsasanay na ito! Patuloy na mag-practice para mas lalong gumaling!'
+            };
+            setGeminiAnalysis(fallbackAnalysis);
+          } catch (fallbackError) {
+            console.error('Fallback analysis failed:', fallbackError);
+            // Use minimal fallback
+            setGeminiAnalysis({
+              overallPerformance: {
+                level: 'good',
+                description: 'Nakumpleto ang pagsusulit',
+                score: performanceData.score
+              },
+              strengths: ['Nakumpleto ang lahat ng tanong'],
+              weaknesses: ['Kailangan pa ng practice'],
+              questionAnalysis: ['Nakasagot nang tama sa lahat ng tanong'],
+              timeAnalysis: {
+                studentTime: Math.round(performanceData.timeSpent / 1000),
+                classAverage: Math.round(performanceData.classAverageTime / 1000),
+                comparison: 'similar',
+                description: 'Normal na bilis'
+              },
+              recommendations: ['Mag-practice pa'],
+              encouragement: 'Magaling!'
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to generate Gemini analysis:', error);
+      // Fallback analysis
+      setGeminiAnalysis({
+        overallPerformance: {
+          level: resultData.scorePercentage >= 80 ? 'excellent' : resultData.scorePercentage >= 60 ? 'good' : 'needs_improvement',
+          description: `Nakakuha ang bata ng ${resultData.scorePercentage}% sa pagsusulit na ito.`,
+          score: resultData.scorePercentage
+        },
+        strengths: ['Nakumpleto ang lahat ng tanong', 'Nagpakita ng pagsisikap'],
+        weaknesses: ['Kailangan pa ng karagdagang pagsasanay sa ilang tanong'],
+        questionAnalysis: ['Ang bata ay nakasagot nang tama sa lahat ng tanong'],
+        timeAnalysis: {
+          studentTime: Math.round(resultData.totalTimeSpent / 1000),
+          classAverage: 0,
+          comparison: 'similar',
+          description: 'Ang bilis ng pagsagot ay nasa normal na saklaw'
+        },
+        recommendations: ['Mag-practice pa ng mga katulad na pagsasanay', 'Magbasa nang mabuti ang mga tanong'],
+        encouragement: 'Magaling! Nakumpleto mo ang pagsasanay na ito! Patuloy na mag-practice para mas lalong gumaling!'
+      });
+    }
+  };
+
+  const handleBackToHistory = () => {
+    setShowQuestionResult(false);
+    setSelectedResult(null);
+    setGeminiAnalysis(null);
+    setClassAverages(null);
+  };
+
   const loadAssignedExercises = async () => {
     try {
       const result = await readData('/assignedExercises');
@@ -350,10 +888,11 @@ export default function ParentDashboard() {
     try {
       setTasksLoading(true);
       
-      // Load both tasks and assigned exercises
-      const [tasksResult, assignedExercises] = await Promise.all([
+      // Load tasks, assigned exercises, and exercise results
+      const [tasksResult, assignedExercises, exerciseResultsResult] = await Promise.all([
         readData('/tasks'),
-        loadAssignedExercises()
+        loadAssignedExercises(),
+        readData('/ExerciseResults')
       ]);
       
       let allTasks: Task[] = [];
@@ -388,26 +927,44 @@ export default function ParentDashboard() {
         allTasks = [...tasksWithTeacherData];
       }
       
-      // Convert assigned exercises to tasks
-      const assignedExerciseTasks: Task[] = assignedExercises
-        .filter(assignedExercise => assignedExercise.exercise) // Only include exercises that were loaded successfully
-        .map(assignedExercise => ({
-          id: assignedExercise.id,
-          title: assignedExercise.exercise!.title,
-          description: assignedExercise.exercise!.description,
-          dueDate: assignedExercise.deadline,
-          createdAt: assignedExercise.createdAt,
-          teacherId: assignedExercise.assignedBy,
-          classIds: [assignedExercise.classId],
-          exerciseId: assignedExercise.exerciseId,
-          status: 'pending' as const,
-          teacherName: assignedExercise.teacherName,
-          teacherProfilePictureUrl: assignedExercise.teacherProfilePictureUrl,
-          teacherGender: assignedExercise.teacherGender,
-          points: assignedExercise.exercise!.questionCount,
-          isAssignedExercise: true,
-          assignedExerciseId: assignedExercise.id
-        }));
+      // Convert assigned exercises to tasks and check completion status from ExerciseResults
+      const assignedExerciseTasks: Task[] = await Promise.all(
+        assignedExercises
+          .filter(assignedExercise => assignedExercise.exercise) // Only include exercises that were loaded successfully
+          .map(async (assignedExercise) => {
+            // Check if there's a completed result for this exercise
+            let completionData = null;
+            if (exerciseResultsResult.data) {
+              const results = Object.values(exerciseResultsResult.data) as any[];
+              completionData = results.find((result: any) => 
+                result.exerciseId === assignedExercise.exerciseId && 
+                result.parentId === parentData?.parentKey
+              );
+            }
+            
+            return {
+              id: assignedExercise.id,
+              title: assignedExercise.exercise!.title,
+              description: assignedExercise.exercise!.description,
+              dueDate: assignedExercise.deadline,
+              createdAt: assignedExercise.createdAt,
+              teacherId: assignedExercise.assignedBy,
+              classIds: [assignedExercise.classId],
+              exerciseId: assignedExercise.exerciseId,
+              status: completionData ? 'completed' as const : 'pending' as const,
+              completedAt: completionData?.submittedAt,
+              teacherName: assignedExercise.teacherName,
+              teacherProfilePictureUrl: assignedExercise.teacherProfilePictureUrl,
+              teacherGender: assignedExercise.teacherGender,
+              points: assignedExercise.exercise!.questionCount,
+              isAssignedExercise: true,
+              assignedExerciseId: assignedExercise.id,
+              score: completionData?.scorePercentage,
+              timeSpent: completionData?.totalTimeSpent,
+              resultId: completionData?.resultId
+            };
+          })
+      );
       
       // Combine and sort all tasks by due date (earliest first)
       const combinedTasks = [...allTasks, ...assignedExerciseTasks];
@@ -420,6 +977,20 @@ export default function ParentDashboard() {
       console.error('Failed to load tasks:', error);
     } finally {
       setTasksLoading(false);
+    }
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        loadAnnouncements(),
+        loadTasks()
+      ]);
+    } catch (error) {
+      console.error('Failed to refresh data:', error);
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -749,7 +1320,18 @@ export default function ParentDashboard() {
       <View style={styles.backgroundPattern} />
 
       <Animated.View style={{ flex: 1, opacity: fadeAnim, transform: [{ translateY: translateAnim }] }}>
-      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+      <ScrollView 
+        style={styles.scrollView} 
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={['#3b82f6']}
+            tintColor="#3b82f6"
+          />
+        }
+      >
         <View style={styles.header}>
           <View style={styles.profileSection}>
             <TouchableOpacity style={styles.profileImageContainer} onPress={openProfileModal}>
@@ -776,7 +1358,12 @@ export default function ParentDashboard() {
 
         {/* Home Section */}
         {activeSection === 'home' && (
-          <>
+          <ScrollView 
+            style={styles.homeScrollView} 
+            contentContainerStyle={styles.homeScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Announcements Section */}
             <View style={styles.announcementSection}>
               <View style={styles.announcementHeader}>
                 <View style={styles.announcementTitleContainer}>
@@ -800,9 +1387,6 @@ export default function ParentDashboard() {
                     const parentKey = parentData?.parentKey;
                     const isRead = announcement.readBy && parentKey && announcement.readBy.includes(parentKey);
                     
-                    // Debug logging
-                    console.log('Announcement:', announcement.id, 'ParentKey:', parentKey, 'ReadBy:', announcement.readBy, 'IsRead:', isRead);
-                    
                     return (
                       <TouchableOpacity 
                         key={announcement.id} 
@@ -812,8 +1396,6 @@ export default function ParentDashboard() {
                         ]}
                         onPress={() => openAnnouncementModal(announcement)}
                       >
-                        
-
                         <View style={styles.announcementContent}>
                           <View style={styles.announcementIcon}>
                             <View style={styles.announcementIconContainer}>
@@ -877,92 +1459,95 @@ export default function ParentDashboard() {
               )}
             </View>
 
-            <View style={styles.studentProfileSection}>
-              <Text style={styles.studentProfileTitle}>Overview Student Profile</Text>
-
-            <View style={styles.studentProfileCard}>
-              <View style={styles.studentHeader}>
-                <View style={styles.studentAvatar}>
-                  <MaterialIcons name="person" size={28} color="#64748b" />
-                </View>
-                <View style={styles.studentInfo}>
-                  <Text style={styles.studentName}>Ken Cas</Text>
-                  <Text style={styles.studentId}>ID: Jbfwwhqwrh8</Text>
-                  <Text style={styles.studentGrade}>Grade 1 Mabait</Text>
-                </View>
-                <View style={styles.awardIcon}>
-                  <MaterialCommunityIcons name="medal" size={24} color="#fbbf24" />
-                </View>
+            {/* Tasks Preview Section */}
+            <View style={styles.tasksPreviewSection}>
+              <View style={styles.tasksPreviewHeader}>
+                <MaterialCommunityIcons name="clipboard-check" size={30} color="#3b82f6" />
+                <Text style={styles.tasksPreviewTitle}>Tasks Overview</Text>
               </View>
-
-              <View style={styles.progressSection}>
-                <View style={styles.progressCircle}>
-                  <Text style={styles.progressText}>58%</Text>
-                </View>
-                <Text style={styles.progressDescription}>58% of Quarter 2 activities completed</Text>
-              </View>
-
-              <View style={styles.metricsGrid}>
-                <View style={styles.metricCard}>
-                  <View style={styles.metricIcon}>
-                    <MaterialCommunityIcons name="bookshelf" size={24} color="#3b82f6" />
+              
+              <TouchableOpacity 
+                style={styles.tasksPreviewCard}
+                onPress={() => setActiveSection('tasks')}
+              >
+                <View style={styles.tasksPreviewContent}>
+                  <View style={styles.tasksPreviewInfo}>
+                    {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length > 0 ? (
+                      <>
+                        <Text style={styles.tasksPreviewCount}>
+                          {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} Task{tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length !== 1 ? 's' : ''} Pending
+                        </Text>
+                        <Text style={styles.tasksPreviewDescription}>
+                          {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length === 1 
+                            ? 'You have 1 exercise waiting to be completed'
+                            : `You have ${tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} exercises waiting to be completed`
+                          }
+                        </Text>
+                      </>
+                    ) : (
+                      <>
+                        <Text style={styles.tasksPreviewCount}>
+                          No Pending Tasks
+                        </Text>
+                        <Text style={styles.tasksPreviewDescription}>
+                          All exercises are completed! Check back for new assignments.
+                        </Text>
+                      </>
+                    )}
                   </View>
-                  <Text style={styles.metricText}>85% Overall Average</Text>
+                  <MaterialIcons name="chevron-right" size={24} color="#3b82f6" />
                 </View>
+              </TouchableOpacity>
+            </View>
 
-                <View style={styles.metricCard}>
-                  <View style={styles.metricIcon}>
-                    <MaterialCommunityIcons name="dice-2" size={24} color="#8b5cf6" />
-                  </View>
-                  <Text style={styles.metricText}>Last Played: Subtraction Game</Text>
+            {/* Daily Quote Section */}
+            <View style={styles.quoteSection}>
+              <View style={styles.quoteCard}>
+                <View style={styles.quoteIcon}>
+                  <MaterialCommunityIcons name="format-quote-open" size={24} color="#3b82f6" />
                 </View>
-
-                <View style={styles.metricCard}>
-                  <View style={styles.metricIcon}>
-                    <MaterialIcons name="star" size={24} color="#fbbf24" />
-                  </View>
-                  <Text style={styles.metricText}>Strongest Competency Patterns and Sequences</Text>
-                </View>
-
-                <View style={styles.metricCard}>
-                  <View style={styles.metricIcon}>
-                    <MaterialIcons name="warning" size={24} color="#f59e0b" />
-                  </View>
-                  <Text style={styles.metricText}>Needs Improvement Subtraction with borrowing</Text>
-                </View>
-              </View>
-
-              <View style={styles.feedbackCard}>
-                <View style={styles.feedbackIcon}>
-                  <MaterialIcons name="info" size={20} color="#3b82f6" />
-                </View>
-                <Text style={styles.feedbackText}>
-                  This week, Lino improved in subtraction but struggled with fractions. Try practicing with real coins at home.
+                <Text style={styles.quoteText}>
+                  {dailyQuote ? `"${dailyQuote.quote}"` : '"Education is the most powerful weapon which you can use to change the world."'}
+                </Text>
+                <Text style={styles.quoteAuthor}>
+                  — {dailyQuote ? dailyQuote.author : 'Nelson Mandela'}
                 </Text>
               </View>
             </View>
-          </View>
-          </>
+          </ScrollView>
         )}
 
         {/* Tasks Section */}
         {activeSection === 'tasks' && (
           <View style={styles.tasksSection}>
             <View style={styles.tasksHeader}>
-              <Text style={styles.sectionTitle}>Student Tasks</Text>
+              <View style={styles.tasksTitleContainer}>
+                <Text style={styles.sectionTitle}>Tasks</Text>
+              </View>
               <View style={styles.tasksSummary}>
-                <Text style={styles.tasksSummaryText}>
-                  {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} pending • {tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length} completed
-                </Text>
+                <View style={styles.summaryItem}>
+                  <View style={[styles.summaryDot, { backgroundColor: '#f59e0b' }]} />
+                  <Text style={styles.tasksSummaryText}>
+                    {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} Pending
+                  </Text>
+                </View>
+                <View style={styles.summaryDivider} />
+                <View style={styles.summaryItem}>
+                  <View style={[styles.summaryDot, { backgroundColor: '#10b981' }]} />
+                  <Text style={styles.tasksSummaryText}>
+                    {tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length} Completed
+                  </Text>
+                </View>
               </View>
             </View>
             
             {tasksLoading ? (
               <View style={styles.loadingContainer}>
+                <MaterialCommunityIcons name="loading" size={32} color="#3b82f6" />
                 <Text style={styles.loadingText}>Loading tasks...</Text>
               </View>
             ) : tasks.filter(t => t.isAssignedExercise).length > 0 ? (
-              <View style={styles.tasksCard}>
+              <ScrollView style={styles.tasksScrollView} showsVerticalScrollIndicator={false}>
                 {tasks.filter(t => t.isAssignedExercise).map((task, index) => {
                   const isOverdue = new Date(task.dueDate) < new Date() && task.status !== 'completed';
                   const dueDate = new Date(task.dueDate);
@@ -971,116 +1556,147 @@ export default function ParentDashboard() {
                   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
                   
                   let dueText = '';
+                  let dueIcon: 'event' | 'warning' | 'schedule' = 'event';
+                  let dueColor = '#3b82f6';
+                  
                   if (diffDays < 0) {
                     dueText = `Overdue by ${Math.abs(diffDays)} day${Math.abs(diffDays) !== 1 ? 's' : ''}`;
+                    dueIcon = 'warning';
+                    dueColor = '#ef4444';
                   } else if (diffDays === 0) {
                     dueText = 'Due today';
+                    dueIcon = 'schedule';
+                    dueColor = '#f59e0b';
                   } else if (diffDays === 1) {
                     dueText = 'Due tomorrow';
+                    dueIcon = 'schedule';
+                    dueColor = '#f59e0b';
                   } else if (diffDays <= 7) {
                     dueText = `Due in ${diffDays} days`;
+                    dueIcon = 'event';
+                    dueColor = '#3b82f6';
                   } else {
                     dueText = dueDate.toLocaleDateString('en-US', { 
                       month: 'short', 
                       day: 'numeric',
                       year: dueDate.getFullYear() !== now.getFullYear() ? 'numeric' : undefined
                     });
+                    dueIcon = 'event';
+                    dueColor = '#64748b';
                   }
 
-                  const getStatusColor = (status: Task['status']) => {
+                  const getStatusInfo = (status: Task['status']) => {
                     switch (status) {
-                      case 'completed': return '#10b981';
-                      case 'in-progress': return '#3b82f6';
-                      case 'overdue': return '#ef4444';
-                      default: return '#64748b';
+                      case 'completed': 
+                        return { 
+                          color: '#10b981', 
+                          bgColor: '#ecfdf5', 
+                          borderColor: '#d1fae5',
+                          icon: 'check-circle' as const,
+                          text: 'Completed'
+                        };
+                      case 'in-progress': 
+                        return { 
+                          color: '#3b82f6', 
+                          bgColor: '#eff6ff', 
+                          borderColor: '#dbeafe',
+                          icon: 'play-circle' as const,
+                          text: 'In Progress'
+                        };
+                      case 'overdue': 
+                        return { 
+                          color: '#ef4444', 
+                          bgColor: '#fef2f2', 
+                          borderColor: '#fecaca',
+                          icon: 'warning' as const,
+                          text: 'Overdue'
+                        };
+                      default: 
+                        return { 
+                          color: '#64748b', 
+                          bgColor: '#f8fafc', 
+                          borderColor: '#e2e8f0',
+                          icon: 'schedule' as const,
+                          text: 'Pending'
+                        };
                     }
                   };
 
-                  const getStatusText = (status: Task['status']) => {
-                    switch (status) {
-                      case 'completed': return 'Completed';
-                      case 'in-progress': return 'In Progress';
-                      case 'overdue': return 'Overdue';
-                      default: return 'Pending';
-                    }
-                  };
+                  const statusInfo = getStatusInfo(task.status);
 
                   return (
                     <View key={task.id} style={[
-                      styles.taskItem,
+                      styles.enhancedTaskItem,
                       isOverdue && styles.overdueTaskItem,
                       task.status === 'completed' && styles.completedTaskItem
                     ]}>
-                      <View style={styles.taskLeftSection}>
-                        <TouchableOpacity 
-                          style={[
-                            styles.taskCheckbox,
-                            task.status === 'completed' && styles.taskCheckboxCompleted
-                          ]}
-                          onPress={() => {
-                            const newStatus = task.status === 'completed' ? 'pending' : 'completed';
-                            updateTaskStatus(task.id, newStatus);
-                          }}
-                        >
-                          {task.status === 'completed' && (
-                            <MaterialIcons name="check" size={16} color="#ffffff" />
-                          )}
-                        </TouchableOpacity>
-                        
-                        <View style={styles.taskIcon}>
-                          <MaterialIcons 
-                            name="quiz" 
-                            size={24} 
-                            color="#3b82f6" 
-                          />
-                        </View>
-                      </View>
-                      
-                      <View style={styles.taskContent}>
-                        <View style={styles.taskHeader}>
+                      {/* Task Header with Icon and Status */}
+                      <View style={styles.taskHeaderRow}>
+                        <View style={styles.taskTitleContainer}>
                           <Text style={[
-                            styles.taskTitle,
+                            styles.enhancedTaskTitle,
                             task.status === 'completed' && styles.completedTaskTitle
                           ]}>
                             {task.title}
                           </Text>
-                          {task.points && (
-                            <View style={styles.pointsBadge}>
-                              <Text style={styles.pointsText}>{task.points} {task.isAssignedExercise ? 'questions' : 'pts'}</Text>
-                            </View>
-                          )}
                         </View>
-                        
-                        <Text style={[
-                          styles.taskDescription,
-                          task.status === 'completed' && styles.completedTaskDescription
-                        ]}>
-                          {task.description}
-                        </Text>
-                        
-                        {task.isAssignedExercise && (
-                          <View style={styles.assignedExerciseInfo}>
-                            <View style={styles.assignedExerciseBadge}>
-                              <MaterialIcons name="assignment" size={12} color="#64748b" />
-                              <Text style={styles.assignedExerciseBadgeText}>Exercise</Text>
-                            </View>
-                          </View>
-                        )}
-                        
-                        <View style={styles.taskMeta}>
-                          <View style={styles.taskMetaRow}>
-                            <MaterialIcons name="event" size={14} color="#3b82f6" />
-                            <Text style={[
-                              styles.taskDueDate,
-                              styles.highlightedDueDate,
-                              isOverdue && styles.overdueText
-                            ]}>
-                              {dueText}
+                        <View style={styles.taskRightHeader}>
+                          <View style={[
+                            styles.statusBadge,
+                            { 
+                              backgroundColor: statusInfo.bgColor,
+                              borderColor: statusInfo.borderColor
+                            }
+                          ]}>
+                            <MaterialIcons 
+                              name={statusInfo.icon} 
+                              size={14} 
+                              color={statusInfo.color} 
+                            />
+                            <Text style={[styles.statusText, { color: statusInfo.color }]}>
+                              {statusInfo.text}
                             </Text>
                           </View>
                           
-                          {task.teacherName && (
-                            <View style={styles.taskMetaRow}>
+                        </View>
+                      </View>
+
+                      {/* Task Description */}
+                      <Text style={[
+                        styles.enhancedTaskDescription,
+                        task.status === 'completed' && styles.completedTaskDescription
+                      ]}>
+                        {task.description}
+                      </Text>
+
+                      {/* Task Meta Information */}
+                      <View style={styles.taskMetaContainer}>
+                        <View style={styles.taskMetaRow}>
+                          <View style={[styles.metaIconContainer, { backgroundColor: `${dueColor}15` }]}>
+                            <MaterialIcons name={dueIcon} size={16} color={dueColor} />
+                          </View>
+                          <View style={styles.dueDateContainer}>
+                            <Text style={[styles.metaText, { color: dueColor }]}>
+                              {dueText}
+                            </Text>
+                            <Text style={styles.dueDateTimeText}>
+                              {dueDate.toLocaleDateString('en-US', {
+                                weekday: 'long',
+                                year: 'numeric',
+                                month: 'long',
+                                day: 'numeric'
+                              })} at {dueDate.toLocaleTimeString('en-US', {
+                                hour: 'numeric',
+                                minute: '2-digit',
+                                hour12: true
+                              })}
+                            </Text>
+                          </View>
+                        </View>
+                        
+                        {task.teacherName && (
+                          <View style={styles.taskMetaRow}>
+                            <View style={styles.teacherInfoContainer}>
                               <View style={styles.teacherAvatarSmall}>
                                 {task.teacherProfilePictureUrl ? (
                                   <Image 
@@ -1088,115 +1704,559 @@ export default function ParentDashboard() {
                                     style={styles.teacherProfileImageSmall}
                                   />
                                 ) : (
-                                  <MaterialIcons name="person" size={12} color="#64748b" />
+                                  <MaterialIcons name="person" size={14} color="#64748b" />
                                 )}
                               </View>
-                              <Text style={styles.taskTeacher}>
+                              <Text style={styles.teacherText}>
                                 {task.teacherGender === 'Male' ? 'Sir' : task.teacherGender === 'Female' ? 'Ma\'am' : ''} {task.teacherName}
                               </Text>
                             </View>
-                          )}
-                        </View>
-                      </View>
-                      
-                      <View style={styles.taskRightSection}>
-                        <View style={[
-                          styles.taskStatus,
-                          { backgroundColor: '#f8fafc' }
-                        ]}>
-                          <MaterialIcons 
-                            name={task.status === 'completed' ? 'check-circle' : 'schedule'} 
-                            size={12} 
-                            color="#64748b" 
-                          />
-                          <Text style={[
-                            styles.taskStatusText,
-                            { color: '#64748b' }
-                          ]}>
-                            {getStatusText(task.status)}
-                          </Text>
-                        </View>
-                        
-                        {(task.exerciseId || task.isAssignedExercise) && (
-                          <TouchableOpacity 
-                            style={[styles.playButton, task.isAssignedExercise && styles.startExerciseButton]}
-                            onPress={() => {
-                              // Navigate to StudentExerciseAnswering with the exercise ID
-                              router.push({
-                                pathname: '/StudentExerciseAnswering',
-                                params: { exerciseId: task.exerciseId }
-                              });
-                            }}
-                          >
-                            <MaterialIcons name="play-arrow" size={16} color={task.isAssignedExercise ? "#ffffff" : "#3b82f6"} />
-                          </TouchableOpacity>
+                          </View>
                         )}
                       </View>
+
+                      {/* Action Button */}
+                      {(task.exerciseId || task.isAssignedExercise) && (
+                        <TouchableOpacity 
+                          style={[
+                            styles.actionButton,
+                            task.status === 'completed' && styles.completedActionButton
+                          ]}
+                          onPress={() => handleTaskAction(task)}
+                        >
+                          <MaterialIcons 
+                            name={task.status === 'completed' ? 'visibility' : 'play-arrow'} 
+                            size={18} 
+                            color={task.status === 'completed' ? "#64748b" : "#ffffff"} 
+                          />
+                          <Text style={[
+                            styles.actionButtonText,
+                            task.status === 'completed' && styles.completedActionButtonText
+                          ]}>
+                            {task.status === 'completed' ? 'View Results' : 'Start Exercise'}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   );
                 })}
-              </View>
+              </ScrollView>
             ) : (
               <View style={styles.emptyTasksCard}>
-                <MaterialIcons name="quiz" size={48} color="#9ca3af" />
+                <View style={styles.emptyIconContainer}>
+                  <MaterialCommunityIcons name="clipboard-text-outline" size={64} color="#cbd5e1" />
+                </View>
                 <Text style={styles.emptyTasksTitle}>No exercises assigned</Text>
                 <Text style={styles.emptyTasksDescription}>
                   Exercises assigned by your teacher will appear here
                 </Text>
+                <View style={styles.emptyTasksHint}>
+                  <MaterialIcons name="info" size={16} color="#64748b" />
+                  <Text style={styles.emptyTasksHintText}>
+                    Check back later for new assignments
+                  </Text>
+                </View>
               </View>
             )}
           </View>
         )}
 
         {/* History Section */}
-        {activeSection === 'history' && (
+        {activeSection === 'history' && !showQuestionResult && (
           <View style={styles.historySection}>
-            <Text style={styles.sectionTitle}>Activity History</Text>
-            <View style={styles.historyCard}>
-              <View style={styles.historyItem}>
-                <View style={styles.historyIcon}>
-                  <MaterialCommunityIcons name="check-circle" size={20} color="#10b981" />
+            <View style={styles.historyHeader}>
+              <Text style={styles.sectionTitle}>Activity History</Text>
+              <View style={styles.historyStats}>
+                <View style={styles.historyStatItem}>
+                  <MaterialCommunityIcons name="check-circle" size={16} color="#10b981" />
+                  <Text style={styles.historyStatText}>
+                    {tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length} Completed
+                  </Text>
                 </View>
-                <View style={styles.historyContent}>
-                  <Text style={styles.historyTitle}>Math Quiz Completed</Text>
-                  <Text style={styles.historyDescription}>Scored 85% on Addition Quiz</Text>
-                  <Text style={styles.historyDate}>2 hours ago</Text>
-                </View>
-              </View>
-
-              <View style={styles.historyItem}>
-                <View style={styles.historyIcon}>
-                  <MaterialCommunityIcons name="book-open" size={20} color="#3b82f6" />
-                </View>
-                <View style={styles.historyContent}>
-                  <Text style={styles.historyTitle}>Reading Session</Text>
-                  <Text style={styles.historyDescription}>Completed 30 minutes of reading</Text>
-                  <Text style={styles.historyDate}>Yesterday</Text>
-                </View>
-              </View>
-
-              <View style={styles.historyItem}>
-                <View style={styles.historyIcon}>
-                  <MaterialCommunityIcons name="gamepad-variant" size={20} color="#8b5cf6" />
-                </View>
-                <View style={styles.historyContent}>
-                  <Text style={styles.historyTitle}>Math Game Played</Text>
-                  <Text style={styles.historyDescription}>Subtraction Game - Level 3</Text>
-                  <Text style={styles.historyDate}>2 days ago</Text>
-                </View>
-              </View>
-
-              <View style={styles.historyItem}>
-                <View style={styles.historyIcon}>
-                  <MaterialCommunityIcons name="pencil" size={20} color="#f59e0b" />
-                </View>
-                <View style={styles.historyContent}>
-                  <Text style={styles.historyTitle}>Writing Exercise</Text>
-                  <Text style={styles.historyDescription}>Completed handwriting practice</Text>
-                  <Text style={styles.historyDate}>3 days ago</Text>
+                <View style={styles.historyStatDivider} />
+                <View style={styles.historyStatItem}>
+                  <MaterialCommunityIcons name="clock-outline" size={16} color="#3b82f6" />
+                  <Text style={styles.historyStatText}>
+                    {tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length > 0 ? 
+                      Math.round(tasks.filter(t => t.isAssignedExercise && t.status === 'completed')
+                        .reduce((sum, t) => sum + (t.timeSpent || 0), 0) / 1000) : 0}s Total Time
+                  </Text>
                 </View>
               </View>
             </View>
+            {tasksLoading ? (
+              <View style={styles.loadingContainer}>
+                <MaterialCommunityIcons name="loading" size={32} color="#3b82f6" />
+                <Text style={styles.loadingText}>Loading history...</Text>
+              </View>
+            ) : tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length > 0 ? (
+              <ScrollView style={styles.historyScrollView} showsVerticalScrollIndicator={false}>
+                {tasks
+                  .filter(t => t.isAssignedExercise && t.status === 'completed')
+                  .sort((a, b) => new Date(b.completedAt || b.createdAt).getTime() - new Date(a.completedAt || a.createdAt).getTime())
+                  .map((task, index) => {
+                    const completedDate = task.completedAt ? new Date(task.completedAt) : new Date(task.createdAt);
+                    const now = new Date();
+                    const diffTime = now.getTime() - completedDate.getTime();
+                    const diffHours = Math.floor(diffTime / (1000 * 60 * 60));
+                    const diffDays = Math.floor(diffHours / 24);
+                    
+                    let timeAgo = '';
+                    if (diffHours < 1) {
+                      timeAgo = 'Just now';
+                    } else if (diffHours < 24) {
+                      timeAgo = `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
+                    } else if (diffDays < 7) {
+                      timeAgo = `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
+                    } else {
+                      timeAgo = completedDate.toLocaleDateString('en-US', { 
+                        month: 'short', 
+                        day: 'numeric',
+                        year: completedDate.getFullYear() !== now.getFullYear() ? 'numeric' : undefined
+                      });
+                    }
+
+                    const formatTime = (ms: number) => {
+                      const minutes = Math.floor(ms / 60000);
+                      const seconds = Math.floor((ms % 60000) / 1000);
+                      return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+                    };
+
+                    return (
+                      <TouchableOpacity 
+                        key={task.id} 
+                        style={styles.historyItem}
+                        onPress={() => {
+                          // Navigate to results view if resultId exists
+                          if (task.resultId) {
+                            handleShowQuestionResult(task);
+                          }
+                        }}
+                      >
+                        <View style={styles.historyIcon}>
+                          <MaterialCommunityIcons 
+                            name="check-circle" 
+                            size={20} 
+                            color={task.score && task.score >= 80 ? "#10b981" : task.score && task.score >= 60 ? "#f59e0b" : "#ef4444"} 
+                          />
+                        </View>
+                        <View style={styles.historyContent}>
+                          <Text style={styles.historyTitle}>{task.title}</Text>
+                          <Text style={styles.historyDescription}>
+                            {task.score ? `Scored ${task.score}%` : 'Completed'} • {task.points || 0} questions
+                            {task.timeSpent && ` • ${formatTime(task.timeSpent)}`}
+                          </Text>
+                          <Text style={styles.historyDate}>{timeAgo}</Text>
+                        </View>
+                        {task.resultId && (
+                          <MaterialIcons name="chevron-right" size={20} color="#9ca3af" />
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+              </ScrollView>
+            ) : (
+              <View style={styles.emptyHistoryCard}>
+                <View style={styles.emptyIconContainer}>
+                  <MaterialCommunityIcons name="history" size={64} color="#cbd5e1" />
+                </View>
+                <Text style={styles.emptyHistoryTitle}>No completed activities</Text>
+                <Text style={styles.emptyHistoryDescription}>
+                  Completed exercises will appear here with detailed performance analysis
+                </Text>
+                <View style={styles.emptyHistoryHint}>
+                  <MaterialIcons name="info" size={16} color="#64748b" />
+                  <Text style={styles.emptyHistoryHintText}>
+                    Complete some exercises to see your progress
+                  </Text>
+                </View>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* Question Result View */}
+        {activeSection === 'history' && showQuestionResult && selectedResult && (
+          <View style={styles.questionResultSection}>
+            {/* Header */}
+            <View style={styles.questionResultHeader}>
+              <TouchableOpacity 
+                style={styles.backButton}
+                onPress={handleBackToHistory}
+              >
+                <MaterialIcons name="arrow-back" size={24} color="#3b82f6" />
+              </TouchableOpacity>
+              <Text style={styles.questionResultTitle}>{selectedResult.title}</Text>
+            </View>
+
+            {loadingAnalysis ? (
+              <View style={styles.loadingContainer}>
+                <MaterialCommunityIcons name="loading" size={32} color="#3b82f6" />
+                <Text style={styles.loadingText}>Analyzing performance...</Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.questionResultContent} showsVerticalScrollIndicator={false}>
+                {/* Performance Overview */}
+                <View style={styles.performanceCard}>
+                  <Text style={styles.cardTitle}>Performance Overview</Text>
+                  <View style={styles.scoreContainer}>
+                    <Text style={styles.scoreText}>
+                      {performanceRanking?.currentStudent ? 
+                        Math.round(performanceRanking.currentStudent.overallScore) : 
+                        (selectedResult.scorePercentage || 0)
+                      }
+                    </Text>
+                    <Text style={styles.scoreLabel}>
+                      {performanceRanking?.currentStudent ? 'Performance Score' : 'Overall Score'}
+                    </Text>
+                    {performanceRanking?.currentStudent && (
+                      <Text style={styles.scoreNote}>
+                        Based on efficiency, consistency & mastery
+                      </Text>
+                    )}
+                  </View>
+                  <View style={styles.statsRow}>
+                    <View style={styles.statItem}>
+                      <Text style={styles.statValue}>{selectedResult.totalQuestions || 0}</Text>
+                      <Text style={styles.statLabel}>Questions</Text>
+                    </View>
+                    <View style={styles.statItem}>
+                      <Text style={styles.statValue}>{Math.round((selectedResult.totalTimeSpent || 0) / 1000)}s</Text>
+                      <Text style={styles.statLabel}>Time Spent</Text>
+                    </View>
+                    <View style={styles.statItem}>
+                      <Text style={styles.statValue}>
+                        {selectedResult.questionResults ? 
+                          selectedResult.questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0) : 0
+                        }
+                      </Text>
+                      <Text style={styles.statLabel}>Total Attempts</Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Performance Ranking */}
+                {performanceRanking?.currentStudent && (
+                  <View style={styles.rankingCard}>
+                    <Text style={styles.cardTitle}>Performance Ranking</Text>
+                    <View style={styles.disclaimerContainer}>
+                      <MaterialCommunityIcons name="information" size={14} color="#6b7280" />
+                      <Text style={styles.disclaimerText}>
+                        Rankings update as more students complete this activity
+                      </Text>
+                    </View>
+                    <View style={styles.rankingHeader}>
+                      <View style={styles.rankingItem}>
+                        <Text style={styles.rankingLabel}>Class Rank</Text>
+                        <Text style={styles.rankingValue}>
+                          #{performanceRanking.currentStudent.rank} of {performanceRanking.classStats.totalStudents}
+                        </Text>
+                      </View>
+                      <View style={styles.rankingItem}>
+                        <Text style={styles.rankingLabel}>Percentile</Text>
+                        <Text style={styles.rankingValue}>{performanceRanking.currentStudent.percentile}th</Text>
+                      </View>
+                    </View>
+                    <View style={styles.performanceMetrics}>
+                      <View style={styles.metricItem}>
+                        <Text style={styles.metricLabel}>Efficiency</Text>
+                        <Text style={styles.metricValue}>{Math.round(performanceRanking.currentStudent.efficiencyScore)}/100</Text>
+                        <Text style={styles.metricComparison}>
+                          vs {Math.round(performanceRanking.classStats.averageEfficiency)} class avg
+                        </Text>
+                      </View>
+                      <View style={styles.metricItem}>
+                        <Text style={styles.metricLabel}>Consistency</Text>
+                        <Text style={styles.metricValue}>{Math.round(performanceRanking.currentStudent.consistencyScore)}/100</Text>
+                        <Text style={styles.metricComparison}>
+                          vs {Math.round(performanceRanking.classStats.averageConsistency)} class avg
+                        </Text>
+                      </View>
+                      <View style={styles.metricItem}>
+                        <Text style={styles.metricLabel}>Mastery</Text>
+                        <Text style={styles.metricValue}>{Math.round(performanceRanking.currentStudent.masteryScore * 100)}/100</Text>
+                        <Text style={styles.metricComparison}>
+                          vs {Math.round(performanceRanking.classStats.averageMastery * 100)} class avg
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.overallScore}>
+                      <Text style={styles.overallScoreLabel}>Overall Performance</Text>
+                      <Text style={styles.overallScoreValue}>{Math.round(performanceRanking.currentStudent.overallScore)}/100</Text>
+                      <Text style={[styles.performanceLevelText, { 
+                        color: performanceRanking.performanceLevel === 'excellent' ? '#10b981' :
+                               performanceRanking.performanceLevel === 'good' ? '#3b82f6' :
+                               performanceRanking.performanceLevel === 'needs_improvement' ? '#f59e0b' : '#ef4444'
+                      }]}>
+                        {performanceRanking.performanceLevel.charAt(0).toUpperCase() + performanceRanking.performanceLevel.slice(1).replace('_', ' ')}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+
+                {/* Class Comparison */}
+                {classAverages && (
+                  <View style={styles.comparisonCard}>
+                    <Text style={styles.cardTitle}>Class Comparison</Text>
+                    <View style={styles.disclaimerContainer}>
+                      <MaterialCommunityIcons name="information" size={14} color="#6b7280" />
+                      <Text style={styles.disclaimerText}>
+                        Averages update as more students complete this activity
+                      </Text>
+                    </View>
+                    <View style={styles.comparisonRow}>
+                      <View style={styles.comparisonItem}>
+                        <Text style={styles.comparisonLabel}>
+                          {performanceRanking?.currentStudent ? 'Your Performance' : 'Your Score'}
+                        </Text>
+                        <Text style={styles.comparisonValue}>
+                          {performanceRanking?.currentStudent ? 
+                            Math.round(performanceRanking.currentStudent.overallScore) : 
+                            (selectedResult.scorePercentage || 0)
+                          }
+                        </Text>
+                      </View>
+                      <View style={styles.comparisonItem}>
+                        <Text style={styles.comparisonLabel}>
+                          {performanceRanking?.currentStudent ? 'Class Average' : 'Class Average'}
+                        </Text>
+                        <Text style={styles.comparisonValue}>
+                          {performanceRanking?.currentStudent ? 
+                            Math.round(performanceRanking.classStats.averageOverallScore) : 
+                            Math.round(classAverages.averageScore)
+                          }
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.comparisonRow}>
+                      <View style={styles.comparisonItem}>
+                        <Text style={styles.comparisonLabel}>Your Time</Text>
+                        <Text style={styles.comparisonValue}>{Math.round((selectedResult.totalTimeSpent || 0) / 1000)}s</Text>
+                      </View>
+                      <View style={styles.comparisonItem}>
+                        <Text style={styles.comparisonLabel}>Class Average</Text>
+                        <Text style={styles.comparisonValue}>{Math.round(classAverages.averageTime / 1000)}s</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.comparisonNote}>
+                      Based on {classAverages.totalStudents} students
+                    </Text>
+                  </View>
+                )}
+
+                {/* Gemini Analysis */}
+                {geminiAnalysis && (
+                  <>
+                    {/* Overall Performance */}
+                    <View style={styles.analysisCard}>
+                      <Text style={styles.cardTitle}>Performance Analysis</Text>
+                      <View style={styles.performanceLevel}>
+                        <Text style={[
+                          styles.performanceLevelText,
+                          { color: 
+                            geminiAnalysis.overallPerformance.level === 'excellent' ? '#10b981' :
+                            geminiAnalysis.overallPerformance.level === 'good' ? '#3b82f6' :
+                            geminiAnalysis.overallPerformance.level === 'needs_improvement' ? '#f59e0b' : '#ef4444'
+                          }
+                        ]}>
+                          {geminiAnalysis.overallPerformance.level === 'excellent' ? 'MAHUSAY' :
+                           geminiAnalysis.overallPerformance.level === 'good' ? 'MABUTI' :
+                           geminiAnalysis.overallPerformance.level === 'needs_improvement' ? 'KAYLANGAN PAGBUTIHIN' : 'MAHIRAP'}
+                        </Text>
+                        <Text style={styles.performanceDescription}>
+                          {geminiAnalysis.overallPerformance.description}
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Strengths */}
+                    <View style={styles.analysisCard}>
+                      <Text style={styles.cardTitle}>Strengths</Text>
+                      {geminiAnalysis.strengths.map((strength: string, index: number) => (
+                        <View key={index} style={styles.analysisItem}>
+                          <MaterialCommunityIcons name="check-circle" size={16} color="#10b981" />
+                          <Text style={styles.analysisText}>{strength}</Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    {/* Areas for Improvement */}
+                    <View style={styles.analysisCard}>
+                      <Text style={styles.cardTitle}>Areas for Improvement</Text>
+                      {geminiAnalysis.weaknesses.map((weakness: string, index: number) => (
+                        <View key={index} style={styles.analysisItem}>
+                          <MaterialCommunityIcons name="alert-circle" size={16} color="#f59e0b" />
+                          <Text style={styles.analysisText}>{weakness}</Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    {/* Question-Specific Analysis */}
+                    {geminiAnalysis.questionAnalysis && Array.isArray(geminiAnalysis.questionAnalysis) && geminiAnalysis.questionAnalysis.length > 0 && (
+                      <View style={styles.analysisCard}>
+                        <Text style={styles.cardTitle}>Question Analysis</Text>
+                        {geminiAnalysis.questionAnalysis.map((analysis: any, index: number) => (
+                          <View key={index} style={styles.analysisItem}>
+                            <MaterialCommunityIcons name="help-circle" size={16} color="#3b82f6" />
+                            <Text style={styles.analysisText}>
+                              {typeof analysis === 'string' ? analysis : 
+                               typeof analysis === 'object' && analysis.analysis ? analysis.analysis :
+                               typeof analysis === 'object' && analysis.questionNumber ? 
+                                 `Tanong ${analysis.questionNumber}: ${analysis.analysis || analysis.concept || JSON.stringify(analysis)}` :
+                               JSON.stringify(analysis)}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {/* Time Analysis */}
+                    {geminiAnalysis.timeAnalysis && (
+                      <View style={styles.analysisCard}>
+                        <Text style={styles.cardTitle}>Time Analysis</Text>
+                        <Text style={styles.timeAnalysisText}>
+                          {geminiAnalysis.timeAnalysis.description}
+                        </Text>
+                        <View style={styles.timeComparison}>
+                          <Text style={styles.timeComparisonText}>
+                            You: {geminiAnalysis.timeAnalysis.studentTime}s | 
+                            Class: {geminiAnalysis.timeAnalysis.classAverage}s
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Recommendations */}
+                    <View style={styles.analysisCard}>
+                      <Text style={styles.cardTitle}>Recommendations</Text>
+                      {geminiAnalysis.recommendations.map((recommendation: string, index: number) => (
+                        <View key={index} style={styles.analysisItem}>
+                          <MaterialCommunityIcons name="lightbulb" size={16} color="#3b82f6" />
+                          <Text style={styles.analysisText}>{recommendation}</Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    {/* Encouragement */}
+                    <View style={styles.encouragementCard}>
+                      <MaterialCommunityIcons name="heart" size={24} color="#ef4444" />
+                      <Text style={styles.encouragementText}>
+                        {geminiAnalysis.encouragement}
+                      </Text>
+                    </View>
+                  </>
+                )}
+
+                {/* Question Details */}
+                {selectedResult.questionResults && selectedResult.questionResults.length > 0 && (
+                  <View style={styles.questionDetailsCard}>
+                    <Text style={styles.cardTitle}>Question Details</Text>
+                    {selectedResult.questionResults.map((question: any, index: number) => (
+                      <View key={question.questionId} style={styles.questionDetailItem}>
+                        <View style={styles.questionDetailHeader}>
+                          <Text style={styles.questionNumber}>Tanong {question.questionNumber}</Text>
+                          <View style={[
+                            styles.questionStatus,
+                            { backgroundColor: '#10b981' } // All questions are correct since student completed
+                          ]}>
+                            <Text style={styles.questionStatusText}>
+                              TAMA
+                            </Text>
+                          </View>
+                        </View>
+                        
+                        {/* Show question text */}
+                        {question.questionText && (
+                          <View style={styles.questionInfo}>
+                            <Text style={styles.questionInfoLabel}>Tanong:</Text>
+                            <Text style={styles.questionInfoValue}>"{question.questionText}"</Text>
+                          </View>
+                        )}
+                        
+                        {/* Show question image if available */}
+                        {question.questionImage && (
+                          <View style={styles.questionInfo}>
+                            <Text style={styles.questionInfoLabel}>Larawan:</Text>
+                            <Text style={styles.questionInfoValue}>May kasamang larawan</Text>
+                          </View>
+                        )}
+                        
+                        {/* Show question type */}
+                        {question.questionType && (
+                          <View style={styles.questionInfo}>
+                            <Text style={styles.questionInfoLabel}>Uri ng Tanong:</Text>
+                            <Text style={styles.questionInfoValue}>{question.questionType}</Text>
+                          </View>
+                        )}
+                        
+                        {/* Show options if available */}
+                        {question.options && question.options.length > 0 && (
+                          <View style={styles.questionInfo}>
+                            <Text style={styles.questionInfoLabel}>Mga Pagpipilian:</Text>
+                            <Text style={styles.questionInfoValue}>{question.options.join(', ')}</Text>
+                          </View>
+                        )}
+                        
+                        {/* Show attempted answers history */}
+                        {question.attemptHistory && question.attemptHistory.length > 0 && (
+                          <View style={styles.questionInfo}>
+                            <Text style={styles.questionInfoLabel}>Attempted Answers:</Text>
+                            <Text style={styles.questionInfoValue}>
+                              {question.attemptHistory.map((attempt: any, idx: number) => {
+                                const timeSpent = attempt.timeSpent || 0;
+                                const timeInSeconds = Math.round(timeSpent / 1000);
+                                return `"${attempt.answer || 'blank'}" (${timeInSeconds}s)`;
+                              }).join(', ')}
+                            </Text>
+                          </View>
+                        )}
+                        
+                        {question.studentAnswer && (
+                          <View style={styles.questionInfo}>
+                            <Text style={styles.questionInfoLabel}>Huling Sagot:</Text>
+                            <Text style={styles.questionInfoValue}>"{question.studentAnswer}"</Text>
+                          </View>
+                        )}
+                        
+                        {question.correctAnswer && (
+                          <View style={styles.questionInfo}>
+                            <Text style={styles.questionInfoLabel}>Tamang Sagot:</Text>
+                            <Text style={styles.questionInfoValue}>"{question.correctAnswer}"</Text>
+                          </View>
+                        )}
+                        
+                        <View style={styles.questionDetailStats}>
+                          <Text style={styles.questionDetailStat}>
+                            Pagsubok: {question.attempts || 1}
+                          </Text>
+                          <Text style={styles.questionDetailStat}>
+                            Oras: {Math.round((question.timeSpent || 0) / 1000)}s
+                          </Text>
+                        </View>
+                        
+                        {/* Show class averages for this question */}
+                        {classAverages?.questionAverages?.[question.questionId] && (
+                          <View style={styles.questionClassAverages}>
+                            <Text style={styles.questionClassAveragesTitle}>Average Class Performance:</Text>
+                            <View style={styles.questionClassAveragesRow}>
+                              <Text style={styles.questionClassAveragesText}>
+                                Average Time: {Math.round(classAverages.questionAverages[question.questionId].averageTime / 1000)}s
+                              </Text>
+                              <Text style={styles.questionClassAveragesText}>
+                                Average Attempts: {Math.round(classAverages.questionAverages[question.questionId].averageAttempts)}
+                              </Text>
+                            </View>
+                            <Text style={styles.questionClassAveragesNote}>
+                              Batay sa {classAverages.questionAverages[question.questionId].totalStudents} mag-aaral
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </ScrollView>
+            )}
           </View>
         )}
       </ScrollView>
@@ -2167,35 +3227,63 @@ const styles = StyleSheet.create({
   },
   // Section Styles
   sectionTitle: {
-    fontSize: 20,
+    fontSize: 25,
     fontWeight: '700',
     color: '#1e293b',
     marginBottom: 16,
+    marginTop: 15,
   },
   tasksSection: {
     marginBottom: 100,
+  },
+  tasksScrollView: {
+    flex: 1,
   },
   tasksHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 20,
+  },
+  tasksTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   tasksSummary: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  summaryItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  summaryDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  summaryDivider: {
+    width: 1,
+    height: 16,
+    backgroundColor: '#e2e8f0',
+    marginHorizontal: 12,
   },
   tasksSummaryText: {
     fontSize: 12,
     color: '#64748b',
-    fontWeight: '500',
+    fontWeight: '600',
   },
   loadingContainer: {
     backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 40,
+    borderRadius: 20,
+    padding: 48,
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
@@ -2208,7 +3296,8 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 16,
     color: '#64748b',
-    fontWeight: '500',
+    fontWeight: '600',
+    marginTop: 12,
   },
   tasksCard: {
     backgroundColor: '#ffffff',
@@ -2222,24 +3311,196 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
+  // Enhanced Task Item Styles
+  enhancedTaskItem: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
   taskItem: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
   },
   overdueTaskItem: {
     backgroundColor: '#fef2f2',
-    borderRadius: 12,
-    marginBottom: 8,
-    paddingHorizontal: 16,
-    borderBottomWidth: 0,
-    borderWidth: 1,
+    borderRadius: 16,
+    marginBottom: 12,
+    borderWidth: 2,
     borderColor: '#fecaca',
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 6,
   },
   completedTaskItem: {
-    opacity: 0.7,
+    opacity: 0.8,
+    backgroundColor: '#f8fafc',
+    borderColor: '#e2e8f0',
+    marginBottom: 12,
+  },
+  taskHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 2,
+    marginTop: 2,
+  },
+  taskIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#f0f9ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  taskTitleContainer: {
+    flex: 1,
+    marginRight: 12,
+    marginTop: 3,
+  },
+  taskRightHeader: {
+    alignItems: 'flex-end',
+  },
+  enhancedTaskTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 8,
+    lineHeight: 22,
+  },
+  taskBadges: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  exerciseBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+  },
+  exerciseBadgeText: {
+    fontSize: 8,
+    color: '#3b82f6',
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  statusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    marginBottom: 4,
+  },
+  statusText: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  enhancedTaskDescription: {
+    fontSize: 14,
+    color: '#64748b',
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  taskMetaContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    marginBottom: 16,
+    gap: 16,
+  },
+  taskMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  metaIconContainer: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
+  },
+  metaText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  dueDateContainer: {
+    flex: 1,
+  },
+  dueDateTimeText: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  teacherInfoContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  teacherText: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '500',
+    marginLeft: 6,
+  },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#3b82f6',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  completedActionButton: {
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  actionButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ffffff',
+    marginLeft: 6,
+  },
+  completedActionButtonText: {
+    color: '#64748b',
   },
   taskLeftSection: {
     flexDirection: 'row',
@@ -2291,8 +3552,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#3b82f6',
     borderRadius: 8,
     paddingHorizontal: 8,
-    paddingVertical: 2,
-    marginLeft: 8,
+    paddingVertical: 4,
+    marginTop: 6,
+    alignSelf: 'flex-start',
   },
   pointsText: {
     fontSize: 10,
@@ -2312,12 +3574,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     flexWrap: 'wrap',
-  },
-  taskMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginRight: 16,
-    marginBottom: 4,
   },
   taskDueDate: {
     fontSize: 12,
@@ -2392,8 +3648,8 @@ const styles = StyleSheet.create({
   },
   emptyTasksCard: {
     backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 40,
+    borderRadius: 20,
+    padding: 48,
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
@@ -2403,21 +3659,208 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
-  emptyTasksTitle: {
+  emptyHistoryCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 48,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  emptyHistoryTitle: {
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: '700',
     color: '#1e293b',
     marginTop: 16,
     marginBottom: 8,
   },
-  emptyTasksDescription: {
+  emptyHistoryDescription: {
     fontSize: 14,
     color: '#64748b',
     textAlign: 'center',
     lineHeight: 20,
+    marginBottom: 16,
+  },
+  emptyHistoryHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  emptyHistoryHintText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginLeft: 6,
+    fontStyle: 'italic',
+  },
+  
+  // Home Section Styles
+  homeScrollView: {
+    flex: 1,
+  },
+  homeScrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 120, // Extra padding to ensure content is fully scrollable
+    flexGrow: 1,
+  },
+  tasksPreviewSection: {
+    marginTop: 20,
+    marginBottom: 20,
+  },
+  tasksPreviewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  tasksPreviewTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: 8,
+  },
+  tasksPreviewCard: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 16,
+    padding: 16,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  tasksPreviewContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  tasksPreviewInfo: {
+    flex: 1,
+  },
+  tasksPreviewCount: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e40af',
+    marginBottom: 4,
+  },
+  tasksPreviewDescription: {
+    fontSize: 14,
+    color: '#1e40af',
+    lineHeight: 20,
+  },
+  quoteSection: {
+    marginTop: 20,
+    marginBottom: 40, // Increased bottom margin to ensure quote is fully visible
+  },
+  quoteCard: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 16,
+    padding: 20,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  quoteIcon: {
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  quoteText: {
+    fontSize: 16,
+    fontStyle: 'italic',
+    color: '#1e293b',
+    textAlign: 'center',
+    lineHeight: 26,
+    marginBottom: 16,
+    paddingHorizontal: 8,
+  },
+  quoteAuthor: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#3b82f6',
+    textAlign: 'center',
+  },
+  emptyIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#f8fafc',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  emptyTasksTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  emptyTasksDescription: {
+    fontSize: 16,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 24,
+    marginBottom: 20,
+  },
+  emptyTasksHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  emptyTasksHintText: {
+    fontSize: 14,
+    color: '#64748b',
+    marginLeft: 8,
+    fontWeight: '500',
   },
   historySection: {
     marginBottom: 100,
+  },
+  historyHeader: {
+    marginBottom: 16,
+  },
+  historyStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingHorizontal: 4,
+  },
+  historyStatItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  historyStatText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginLeft: 4,
+    fontWeight: '500',
+  },
+  historyStatDivider: {
+    width: 1,
+    height: 16,
+    backgroundColor: '#e2e8f0',
+    marginHorizontal: 12,
+  },
+  historyScrollView: {
+    flex: 1,
   },
   historyCard: {
     backgroundColor: '#ffffff',
@@ -2713,5 +4156,395 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  // Question Result View Styles
+  questionResultSection: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+  },
+  questionResultHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 16,
+  },
+  backButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#3b82f6',
+    marginLeft: 4,
+  },
+  questionResultTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    flex: 1,
+  },
+  questionResultContent: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  performanceCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+  scoreContainer: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  scoreText: {
+    fontSize: 48,
+    fontWeight: '800',
+    color: '#3b82f6',
+    marginBottom: 4,
+  },
+  scoreLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  scoreNote: {
+    fontSize: 12,
+    color: '#9ca3af',
+    textAlign: 'center',
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  statsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  statItem: {
+    alignItems: 'center',
+  },
+  statValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#64748b',
+  },
+  comparisonCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  comparisonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  comparisonItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  comparisonLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  comparisonValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  comparisonNote: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  analysisCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  performanceLevel: {
+    alignItems: 'center',
+  },
+  performanceLevelText: {
+    fontSize: 20,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  
+  // Disclaimer Styles
+  disclaimerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    padding: 8,
+    borderRadius: 6,
+    marginBottom: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: '#3b82f6',
+  },
+  disclaimerText: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginLeft: 6,
+    flex: 1,
+    lineHeight: 16,
+  },
+  performanceDescription: {
+    fontSize: 16,
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  analysisItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  analysisText: {
+    fontSize: 16,
+    color: '#1e293b',
+    marginLeft: 12,
+    flex: 1,
+    lineHeight: 22,
+  },
+  timeAnalysisText: {
+    fontSize: 16,
+    color: '#1e293b',
+    marginBottom: 12,
+    lineHeight: 22,
+  },
+  timeComparison: {
+    backgroundColor: '#f1f5f9',
+    padding: 12,
+    borderRadius: 8,
+  },
+  timeComparisonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#475569',
+    textAlign: 'center',
+  },
+  encouragementCard: {
+    backgroundColor: '#fef2f2',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderLeftWidth: 4,
+    borderLeftColor: '#ef4444',
+  },
+  encouragementText: {
+    fontSize: 16,
+    color: '#1e293b',
+    marginLeft: 12,
+    flex: 1,
+    lineHeight: 22,
+    fontWeight: '500',
+  },
+  questionDetailsCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  questionDetailItem: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 12,
+  },
+  questionDetailHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  questionNumber: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  questionStatus: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  questionStatusText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  questionDetailStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  questionDetailStat: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  questionInfo: {
+    marginBottom: 8,
+  },
+  questionInfoLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#475569',
+    marginBottom: 2,
+  },
+  questionInfoValue: {
+    fontSize: 14,
+    color: '#1e293b',
+    backgroundColor: '#f1f5f9',
+    padding: 8,
+    borderRadius: 6,
+    fontStyle: 'italic',
+  },
+  questionClassAverages: {
+    backgroundColor: '#e0f2fe',
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 8,
+    borderLeftWidth: 3,
+    borderLeftColor: '#0ea5e9',
+  },
+  questionClassAveragesTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0c4a6e',
+    marginBottom: 6,
+  },
+  questionClassAveragesRow: {
+    flexDirection: 'column',
+    marginBottom: 4,
+  },
+  questionClassAveragesText: {
+    fontSize: 12,
+    color: '#0c4a6e',
+    fontWeight: '500',
+    marginBottom: 2,
+  },
+  questionClassAveragesNote: {
+    fontSize: 11,
+    color: '#64748b',
+    fontStyle: 'italic',
+  },
+  
+  // Performance Ranking Styles
+  rankingCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  rankingHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  rankingItem: {
+    alignItems: 'center',
+  },
+  rankingLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+    marginBottom: 4,
+  },
+  rankingValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  performanceMetrics: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  metricItem: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: 8,
+  },
+  metricLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+    marginBottom: 4,
+  },
+  metricValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+  metricComparison: {
+    fontSize: 10,
+    color: '#9ca3af',
+    textAlign: 'center',
+  },
+  overallScore: {
+    alignItems: 'center',
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+  overallScoreLabel: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+    marginBottom: 4,
+  },
+  overallScoreValue: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 4,
   },
 });

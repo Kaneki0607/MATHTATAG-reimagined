@@ -283,13 +283,14 @@ export default function TeacherDashboard() {
   const [parentsById, setParentsById] = useState<Record<string, any>>({});
   const [assignmentsByClass, setAssignmentsByClass] = useState<Record<string, { total: number; completed: number; pending: number }>>({});
   const [classAnalytics, setClassAnalytics] = useState<Record<string, { performance?: number; change?: number }>>({});
+  const [exerciseResults, setExerciseResults] = useState<Record<string, any[]>>({});
 
   // Auth state
   const [currentUserId, setCurrentUserId] = useState<string | undefined>(undefined);
   // Overflow menu state per-class (three dots)
   const [openMenuClassId, setOpenMenuClassId] = useState<string | null>(null);
   // Local navigation state to keep bottom nav persistent
-  const [activeTab, setActiveTab] = useState<'home' | 'list' | 'class' | 'exercises'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'list' | 'class' | 'exercises' | 'results'>('home');
   
   // Exercises Library state
   const [exercisesTab, setExercisesTab] = useState<'my' | 'public' | 'assigned'>('my');
@@ -370,14 +371,17 @@ export default function TeacherDashboard() {
     const classStudents = studentsByClass[assignment.classId] || [];
     const totalStudents = classStudents.length;
     
-    // Get completed students for this assignment
-    const assignmentCompletedStudents = completedStudents[assignment.id] || [];
-    const completedCount = assignmentCompletedStudents.length;
+    // Get exercise results for this assignment's exercise
+    const classResults = exerciseResults[assignment.classId] || [];
+    const assignmentResults = classResults.filter((result: any) => 
+      result.exerciseId === assignment.exerciseId
+    );
     
-    // TODO: Implement real completion tracking
-    // This would query a submissions/completions collection in Firebase:
-    // const submissions = await readData(`/submissions/${assignment.id}`);
-    // const completedStudents = Object.keys(submissions || {}).length;
+    // Count unique students who completed this exercise
+    const completedStudentIds = new Set(
+      assignmentResults.map((result: any) => result.studentId).filter(Boolean)
+    );
+    const completedCount = completedStudentIds.size;
     
     return {
       completed: completedCount,
@@ -388,17 +392,12 @@ export default function TeacherDashboard() {
 
   // Helper function to get individual student status
   const getStudentStatus = (studentId: string, assignment: AssignedExercise) => {
-    // Check if student has completed the assignment
-    const assignmentCompletedStudents = completedStudents[assignment.id] || [];
-    const isCompleted = assignmentCompletedStudents.includes(studentId);
-    
-    // TODO: Implement real completion tracking
-    // This would check if student has submitted the assignment:
-    // const submission = await readData(`/submissions/${assignment.id}/${studentId}`);
-    // return submission ? 'completed' : 'pending';
-    
-    // For now, check if student ID is in the completed list
-    return isCompleted ? 'completed' : 'pending';
+    // Check if student has completed the assignment by looking at ExerciseResults
+    const classResults = exerciseResults[assignment.classId] || [];
+    const studentResult = classResults.find((result: any) => 
+      result.studentId === studentId && result.exerciseId === assignment.exerciseId
+    );
+    return studentResult ? 'completed' : 'pending';
   };
 
   // Function to open student status modal
@@ -556,9 +555,16 @@ export default function TeacherDashboard() {
 
   const loadAssignments = async (classIds: string[]) => {
     try {
-      const { data } = await readData('/assignments');
+      // Load both assignments and exercise results
+      const [{ data: assignmentsData }, { data: exerciseResultsData }] = await Promise.all([
+        readData('/assignments'),
+        readData('/ExerciseResults')
+      ]);
+      
       const stats: Record<string, { total: number; completed: number; pending: number }> = {};
-      Object.entries(data || {}).forEach(([id, v]: any) => {
+      
+      // Process assignments
+      Object.entries(assignmentsData || {}).forEach(([id, v]: any) => {
         const a = { id, ...(v || {}) };
         if (!classIds.includes(a.classId)) return;
         if (!stats[a.classId]) stats[a.classId] = { total: 0, completed: 0, pending: 0 };
@@ -566,9 +572,35 @@ export default function TeacherDashboard() {
         if (a.status === 'completed') stats[a.classId].completed += 1;
         else stats[a.classId].pending += 1;
       });
+      
+      // Process exercise results to get more accurate completion counts
+      const resultsByClass: Record<string, Set<string>> = {}; // classId -> Set of completed exerciseIds
+      const resultsByClassArray: Record<string, any[]> = {}; // classId -> Array of results
+      
+      Object.entries(exerciseResultsData || {}).forEach(([resultId, result]: any) => {
+        const r = { resultId, ...(result || {}) };
+        if (r.classId && classIds.includes(r.classId)) {
+          if (!resultsByClass[r.classId]) resultsByClass[r.classId] = new Set();
+          if (!resultsByClassArray[r.classId]) resultsByClassArray[r.classId] = [];
+          resultsByClass[r.classId].add(r.exerciseId);
+          resultsByClassArray[r.classId].push(r);
+        }
+      });
+      
+      // Update stats with actual completion data from ExerciseResults
+      Object.entries(resultsByClass).forEach(([classId, completedExerciseIds]) => {
+        if (stats[classId]) {
+          stats[classId].completed = completedExerciseIds.size;
+          stats[classId].pending = Math.max(0, stats[classId].total - completedExerciseIds.size);
+        }
+      });
+      
       setAssignmentsByClass(stats);
-    } catch {
+      setExerciseResults(resultsByClassArray);
+    } catch (error) {
+      console.error('Error loading assignments:', error);
       setAssignmentsByClass({});
+      setExerciseResults({});
     }
   };
 
@@ -1698,6 +1730,156 @@ export default function TeacherDashboard() {
            </View>
          )}
 
+         {activeTab === 'results' && (
+           <View style={{ paddingBottom: 100 }}>
+             <Text style={styles.sectionTitle}>Exercise Results & Analytics</Text>
+             
+             {/* Overall Statistics */}
+             <View style={styles.resultsOverviewCard}>
+               <Text style={styles.resultsOverviewTitle}>Overall Performance</Text>
+               <View style={styles.resultsOverviewStats}>
+                 <View style={styles.resultsOverviewStat}>
+                   <Text style={styles.resultsOverviewStatValue}>
+                     {Object.values(exerciseResults).flat().length}
+                   </Text>
+                   <Text style={styles.resultsOverviewStatLabel}>Total Submissions</Text>
+                 </View>
+                 <View style={styles.resultsOverviewStat}>
+                   <Text style={styles.resultsOverviewStatValue}>
+                     {activeClasses.length}
+                   </Text>
+                   <Text style={styles.resultsOverviewStatLabel}>Active Classes</Text>
+                 </View>
+                 <View style={styles.resultsOverviewStat}>
+                   <Text style={styles.resultsOverviewStatValue}>
+                     {Object.values(exerciseResults).flat().reduce((sum: number, result: any) => 
+                       sum + (result.scorePercentage || 0), 0) / Math.max(Object.values(exerciseResults).flat().length, 1)
+                     }%
+                   </Text>
+                   <Text style={styles.resultsOverviewStatLabel}>Average Score</Text>
+                 </View>
+               </View>
+             </View>
+
+             {/* Class-wise Results */}
+             {activeClasses.map((cls) => {
+               const classResults = exerciseResults[cls.id] || [];
+               const classStudents = studentsByClass[cls.id] || [];
+               
+               // Calculate class statistics
+               const totalSubmissions = classResults.length;
+               const uniqueStudents = new Set(classResults.map((r: any) => r.studentId)).size;
+               const averageScore = totalSubmissions > 0 ? 
+                 classResults.reduce((sum: number, result: any) => sum + (result.scorePercentage || 0), 0) / totalSubmissions : 0;
+               
+               return (
+                 <View key={cls.id} style={styles.classroomCard}>
+                   <View style={styles.classroomHeader}>
+                     <Text style={styles.classroomTitle}>{cls.name}</Text>
+                     <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+                     <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                   </View>
+                   
+                   {/* Class Performance Summary */}
+                   <View style={styles.classPerformanceSummary}>
+                     <View style={styles.classPerformanceItem}>
+                       <MaterialCommunityIcons name="account-group" size={20} color="#3b82f6" />
+                       <Text style={styles.classPerformanceText}>
+                         {uniqueStudents}/{classStudents.length} students completed
+                       </Text>
+                     </View>
+                     <View style={styles.classPerformanceItem}>
+                       <MaterialCommunityIcons name="chart-line" size={20} color="#10b981" />
+                       <Text style={styles.classPerformanceText}>
+                         {Math.round(averageScore)}% average score
+                       </Text>
+                     </View>
+                     <View style={styles.classPerformanceItem}>
+                       <MaterialCommunityIcons name="file-document" size={20} color="#f59e0b" />
+                       <Text style={styles.classPerformanceText}>
+                         {totalSubmissions} total submissions
+                       </Text>
+                     </View>
+                   </View>
+
+                   {classResults.length === 0 ? (
+                     <View style={styles.emptyResultsCard}>
+                       <MaterialCommunityIcons name="chart-line" size={48} color="#cbd5e1" />
+                       <Text style={styles.emptyResultsText}>No completed exercises yet</Text>
+                       <Text style={styles.emptyResultsSubtext}>
+                         Results will appear here when students complete assignments
+                       </Text>
+                     </View>
+                   ) : (
+                     <View style={styles.resultsList}>
+                       {classResults.map((result: any, idx: number) => {
+                         const student = classStudents.find((s: any) => s.id === result.studentId);
+                         const studentName = student ? `${student.firstName} ${student.lastName}` : result.studentName || 'Unknown Student';
+                         
+                         return (
+                           <View key={result.resultId || idx} style={styles.resultItem}>
+                             <View style={styles.resultHeader}>
+                               <View style={styles.resultStudentInfo}>
+                                 <Text style={styles.resultStudentName}>{studentName}</Text>
+                                 <Text style={styles.resultExerciseTitle}>{result.exerciseTitle || 'Unknown Exercise'}</Text>
+                               </View>
+                               <View style={styles.resultScoreContainer}>
+                                 <Text style={[
+                                   styles.resultScore,
+                                   { color: result.scorePercentage >= 80 ? '#10b981' : 
+                                           result.scorePercentage >= 60 ? '#f59e0b' : '#ef4444' }
+                                 ]}>
+                                   {result.scorePercentage || 0}%
+                                 </Text>
+                               </View>
+                             </View>
+                             
+                             <View style={styles.resultDetails}>
+                               <View style={styles.resultDetailRow}>
+                                 <MaterialCommunityIcons name="help-circle-outline" size={16} color="#64748b" />
+                                 <Text style={styles.resultDetailText}>
+                                   {result.totalQuestions || 0} questions
+                                 </Text>
+                               </View>
+                               <View style={styles.resultDetailRow}>
+                                 <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
+                                 <Text style={styles.resultDetailText}>
+                                   {Math.round((result.totalTimeSpent || 0) / 1000)}s
+                                 </Text>
+                               </View>
+                               <View style={styles.resultDetailRow}>
+                                 <MaterialCommunityIcons name="calendar" size={16} color="#64748b" />
+                                 <Text style={styles.resultDetailText}>
+                                   {new Date(result.submittedAt || result.createdAt).toLocaleDateString()}
+                                 </Text>
+                               </View>
+                             </View>
+                             
+                             <View style={styles.resultProgress}>
+                               <View style={styles.resultProgressBar}>
+                                 <View 
+                                   style={[
+                                     styles.resultProgressFill, 
+                                     { 
+                                       width: `${result.scorePercentage || 0}%`,
+                                       backgroundColor: result.scorePercentage >= 80 ? '#10b981' : 
+                                                      result.scorePercentage >= 60 ? '#f59e0b' : '#ef4444'
+                                     }
+                                   ]} 
+                                 />
+                               </View>
+                             </View>
+                           </View>
+                         );
+                       })}
+                     </View>
+                   )}
+                 </View>
+               );
+             })}
+           </View>
+         )}
+
         {activeTab === 'class' && (
           <View style={{ paddingBottom: 100 }}>
             <Text style={styles.sectionTitle}>Classroom</Text>
@@ -1785,6 +1967,11 @@ export default function TeacherDashboard() {
         <TouchableOpacity style={[styles.navItem, activeTab === 'class' && styles.activeNavItem]} onPress={() => setActiveTab('class')}>
           <MaterialCommunityIcons name="account-group" size={24} color={activeTab === 'class' ? '#000000' : '#9ca3af'} />
           <Text style={[styles.navText, activeTab === 'class' && styles.activeNavText]}>Class</Text>
+        </TouchableOpacity>
+        
+        <TouchableOpacity style={[styles.navItem, activeTab === 'results' && styles.activeNavItem]} onPress={() => setActiveTab('results')}>
+          <MaterialIcons name="assessment" size={24} color={activeTab === 'results' ? '#000000' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'results' && styles.activeNavText]}>Results</Text>
         </TouchableOpacity>
         
         <TouchableOpacity style={[styles.navItem, activeTab === 'exercises' && styles.activeNavItem]} onPress={() => setActiveTab('exercises')}>
@@ -4481,6 +4668,157 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#ffffff',
     marginLeft: 4,
+  },
+  
+  // Exercise Results Styles
+  resultItem: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  resultHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  resultTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    flex: 1,
+    marginRight: 12,
+  },
+  resultScore: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#059669',
+  },
+  resultDetails: {
+    marginBottom: 12,
+  },
+  resultDetailText: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  resultProgress: {
+    marginTop: 8,
+  },
+  resultProgressBar: {
+    height: 6,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  resultProgressFill: {
+    height: '100%',
+    backgroundColor: '#059669',
+    borderRadius: 3,
+  },
+  
+  // Enhanced Results Visualization Styles
+  resultsOverviewCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  resultsOverviewTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 16,
+  },
+  resultsOverviewStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  resultsOverviewStat: {
+    alignItems: 'center',
+  },
+  resultsOverviewStatValue: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#3b82f6',
+    marginBottom: 4,
+  },
+  resultsOverviewStatLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  classPerformanceSummary: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  classPerformanceItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  classPerformanceText: {
+    fontSize: 14,
+    color: '#475569',
+    marginLeft: 8,
+    fontWeight: '500',
+  },
+  emptyResultsCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 32,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderStyle: 'dashed',
+  },
+  emptyResultsText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#64748b',
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  emptyResultsSubtext: {
+    fontSize: 14,
+    color: '#94a3b8',
+    textAlign: 'center',
+  },
+  resultsList: {
+    marginTop: 12,
+  },
+  resultStudentInfo: {
+    flex: 1,
+  },
+  resultStudentName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+  resultExerciseTitle: {
+    fontSize: 14,
+    color: '#64748b',
+  },
+  resultScoreContainer: {
+    alignItems: 'flex-end',
+  },
+  resultDetailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
   },
   
 });
