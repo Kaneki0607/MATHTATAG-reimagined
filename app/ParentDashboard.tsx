@@ -324,10 +324,11 @@ export default function ParentDashboard() {
       setSelectedResult(task);
       setShowQuestionResult(true);
       
-      // Load detailed result data and original exercise
-      const [resultData, exerciseData] = await Promise.all([
+      // Load detailed result data, original exercise, and existing performance metrics
+      const [resultData, exerciseData, performanceData] = await Promise.all([
         readData(`/ExerciseResults/${task.resultId}`),
-        readData(`/exercises/${task.exerciseId}`)
+        readData(`/exercises/${task.exerciseId}`),
+        readData(`/PerformanceMetrics/${task.resultId}`)
       ]);
       
       if (resultData.data && exerciseData.data) {
@@ -351,11 +352,22 @@ export default function ParentDashboard() {
           questionResults: enhancedQuestionResults
         });
         
-        // Calculate class averages including per-question averages
-        await calculateClassAverages(resultData.data, exerciseData.data);
-        
-        // Calculate comprehensive performance metrics and ranking
-        await calculatePerformanceMetrics(resultData.data, exerciseData.data);
+        // Check if performance metrics already exist
+        if (performanceData.data && performanceData.data.performanceMetrics) {
+          console.log('Using existing performance metrics:', performanceData.data);
+          setPerformanceRanking({
+            currentStudent: performanceData.data.performanceMetrics,
+            classStats: performanceData.data.classStats,
+            allStudents: [], // Not stored in performance data
+            performanceLevel: performanceData.data.performanceMetrics.performanceLevel
+          });
+        } else {
+          // Calculate class averages including per-question averages
+          await calculateClassAverages(resultData.data, exerciseData.data);
+          
+          // Calculate comprehensive performance metrics and ranking
+          await calculatePerformanceMetrics(resultData.data, exerciseData.data);
+        }
         
         // Generate Gemini analysis
         await generateGeminiAnalysis({
@@ -371,6 +383,98 @@ export default function ParentDashboard() {
     }
   };
 
+  // Helper function to calculate individual student metrics
+  const calculateStudentMetrics = (resultData: any) => {
+    const questionResults = resultData.questionResults || [];
+    const totalQuestions = questionResults.length;
+    
+    // Calculate efficiency score (lower attempts and time = higher score)
+    const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+    const totalTime = resultData.totalTimeSpent || 0;
+    const avgAttemptsPerQuestion = totalAttempts / totalQuestions;
+    const avgTimePerQuestion = totalTime / totalQuestions;
+    
+    // Calculate consistency score (how consistent performance is across questions)
+    const attemptVariance = questionResults.reduce((sum: number, q: any) => {
+      const deviation = Math.abs((q.attempts || 1) - avgAttemptsPerQuestion);
+      return sum + (deviation * deviation);
+    }, 0) / totalQuestions;
+    
+    const timeVariance = questionResults.reduce((sum: number, q: any) => {
+      const deviation = Math.abs((q.timeSpent || 0) - avgTimePerQuestion);
+      return sum + (deviation * deviation);
+    }, 0) / totalQuestions;
+    
+    // Calculate mastery score based on actual performance
+    const correctAnswers = questionResults.length; // All questions are correct since student completed
+    const masteryScore = Math.round((correctAnswers / totalQuestions) * 100);
+    
+    // Improved efficiency scoring with more granular scale
+    let efficiencyScore;
+    if (avgAttemptsPerQuestion <= 1) {
+      efficiencyScore = 100; // Perfect efficiency
+    } else if (avgAttemptsPerQuestion <= 1.5) {
+      efficiencyScore = 90; // Excellent efficiency
+    } else if (avgAttemptsPerQuestion <= 2) {
+      efficiencyScore = 80; // Good efficiency
+    } else if (avgAttemptsPerQuestion <= 2.5) {
+      efficiencyScore = 70; // Fair efficiency
+    } else if (avgAttemptsPerQuestion <= 3) {
+      efficiencyScore = 60; // Poor efficiency
+    } else {
+      efficiencyScore = Math.max(40, 100 - (avgAttemptsPerQuestion - 1) * 15); // Decreasing score
+    }
+    
+    // Improved consistency scoring
+    let consistencyScore;
+    if (attemptVariance <= 0.1) {
+      consistencyScore = 100; // Perfect consistency
+    } else if (attemptVariance <= 0.25) {
+      consistencyScore = 90; // Excellent consistency
+    } else if (attemptVariance <= 0.5) {
+      consistencyScore = 80; // Good consistency
+    } else if (attemptVariance <= 1.0) {
+      consistencyScore = 70; // Fair consistency
+    } else if (attemptVariance <= 1.5) {
+      consistencyScore = 60; // Poor consistency
+    } else {
+      consistencyScore = Math.max(40, 100 - attemptVariance * 20); // Decreasing score
+    }
+    
+    // Debug logging
+    console.log('DEBUG - Performance Calculation:', {
+      totalQuestions,
+      correctAnswers,
+      masteryScore,
+      avgAttemptsPerQuestion,
+      efficiencyScore,
+      attemptVariance,
+      consistencyScore
+    });
+    
+    // Calculate overall score with better weighting
+    const overallScore = Math.round(
+      (efficiencyScore * 0.5) +  // Increased weight for efficiency
+      (consistencyScore * 0.3) + 
+      (masteryScore * 0.2)       // Reduced weight for mastery since it's often 100%
+    );
+    
+    return {
+      studentId: resultData.studentId,
+      parentId: resultData.parentId,
+      efficiencyScore: Math.round(efficiencyScore),
+      consistencyScore: Math.round(consistencyScore),
+      masteryScore: Math.round(masteryScore),
+      overallScore,
+      totalAttempts,
+      totalTime,
+      avgAttemptsPerQuestion: Math.round(avgAttemptsPerQuestion * 10) / 10,
+      avgTimePerQuestion: Math.round(avgTimePerQuestion),
+      quickCorrectAnswers: correctAnswers,
+      scorePercentage: resultData.scorePercentage || 0
+    };
+  };
+
   // Calculate comprehensive performance metrics for class ranking
   const calculatePerformanceMetrics = async (resultData: any, exerciseData: any) => {
     try {
@@ -380,7 +484,8 @@ export default function ParentDashboard() {
       const results = Object.values(allResults.data) as any[];
       const sameExerciseResults = results.filter((result: any) =>
         result.exerciseId === resultData.exerciseId &&
-        result.classId === resultData.classId
+        result.classId === resultData.classId &&
+        result.parentId !== resultData.parentId // Exclude current student's result
       );
 
       if (sameExerciseResults.length === 0) return;
@@ -407,28 +512,48 @@ export default function ParentDashboard() {
           return sum + (deviation * deviation);
         }, 0) / totalQuestions;
         
-        // Calculate mastery indicators
-        const quickCorrectAnswers = questionResults.filter((q: any) => 
-          (q.attempts || 1) === 1 && (q.timeSpent || 0) < 10000 // Less than 10 seconds
-        ).length;
+        // Calculate mastery score based on actual performance
+        const correctAnswers = questionResults.length; // All questions are correct since student completed
+        const masteryScore = Math.round((correctAnswers / totalQuestions) * 100);
         
-        const masteryScore = quickCorrectAnswers / totalQuestions;
+        // Improved efficiency scoring with more granular scale
+        let efficiencyScore;
+        if (avgAttemptsPerQuestion <= 1) {
+          efficiencyScore = 100; // Perfect efficiency
+        } else if (avgAttemptsPerQuestion <= 1.5) {
+          efficiencyScore = 90; // Excellent efficiency
+        } else if (avgAttemptsPerQuestion <= 2) {
+          efficiencyScore = 80; // Good efficiency
+        } else if (avgAttemptsPerQuestion <= 2.5) {
+          efficiencyScore = 70; // Fair efficiency
+        } else if (avgAttemptsPerQuestion <= 3) {
+          efficiencyScore = 60; // Poor efficiency
+        } else {
+          efficiencyScore = Math.max(40, 100 - (avgAttemptsPerQuestion - 1) * 15); // Decreasing score
+        }
         
-        // Calculate efficiency score (0-100, higher is better)
-        const maxExpectedAttempts = 3; // Reasonable maximum
-        const maxExpectedTime = 30000; // 30 seconds per question
-        const attemptEfficiency = Math.max(0, 100 - ((avgAttemptsPerQuestion - 1) / (maxExpectedAttempts - 1)) * 50);
-        const timeEfficiency = Math.max(0, 100 - (avgTimePerQuestion / maxExpectedTime) * 50);
-        const efficiencyScore = (attemptEfficiency + timeEfficiency) / 2;
+        // Improved consistency scoring
+        let consistencyScore;
+        if (attemptVariance <= 0.1) {
+          consistencyScore = 100; // Perfect consistency
+        } else if (attemptVariance <= 0.25) {
+          consistencyScore = 90; // Excellent consistency
+        } else if (attemptVariance <= 0.5) {
+          consistencyScore = 80; // Good consistency
+        } else if (attemptVariance <= 1.0) {
+          consistencyScore = 70; // Fair consistency
+        } else if (attemptVariance <= 1.5) {
+          consistencyScore = 60; // Poor consistency
+        } else {
+          consistencyScore = Math.max(40, 100 - attemptVariance * 20); // Decreasing score
+        }
         
-        // Calculate consistency score (0-100, higher is better)
-        const maxVariance = 10000; // Maximum expected variance
-        const attemptConsistency = Math.max(0, 100 - (attemptVariance / maxVariance) * 50);
-        const timeConsistency = Math.max(0, 100 - (timeVariance / maxVariance) * 50);
-        const consistencyScore = (attemptConsistency + timeConsistency) / 2;
-        
-        // Calculate overall performance score
-        const overallScore = (efficiencyScore * 0.4) + (consistencyScore * 0.3) + (masteryScore * 100 * 0.3);
+        // Calculate overall performance score with better weighting
+        const overallScore = Math.round(
+          (efficiencyScore * 0.5) +  // Increased weight for efficiency
+          (consistencyScore * 0.3) + 
+          (masteryScore * 0.2)       // Reduced weight for mastery since it's often 100%
+        );
         
         return {
           studentId: result.studentId,
@@ -437,48 +562,170 @@ export default function ParentDashboard() {
           totalTime,
           avgAttemptsPerQuestion,
           avgTimePerQuestion,
-          efficiencyScore,
-          consistencyScore,
-          masteryScore,
-          overallScore,
-          quickCorrectAnswers,
+          efficiencyScore: Math.round(efficiencyScore),
+          consistencyScore: Math.round(consistencyScore),
+          masteryScore: Math.round(masteryScore),
+          overallScore: overallScore,
+          quickCorrectAnswers: correctAnswers,
           attemptVariance,
           timeVariance,
           questionResults: questionResults
         };
       });
 
-      // Sort students by overall performance (descending)
-      studentMetrics.sort((a, b) => b.overallScore - a.overallScore);
+      // Sort students by multiple criteria for more consistent ranking
+      studentMetrics.sort((a, b) => {
+        // Primary sort: overall score (descending)
+        if (b.overallScore !== a.overallScore) {
+          return b.overallScore - a.overallScore;
+        }
+        
+        // Secondary sort: efficiency score (descending)
+        if (b.efficiencyScore !== a.efficiencyScore) {
+          return b.efficiencyScore - a.efficiencyScore;
+        }
+        
+        // Tertiary sort: consistency score (descending)
+        if (b.consistencyScore !== a.consistencyScore) {
+          return b.consistencyScore - a.consistencyScore;
+        }
+        
+        // Quaternary sort: fewer total attempts (ascending)
+        if (a.totalAttempts !== b.totalAttempts) {
+          return a.totalAttempts - b.totalAttempts;
+        }
+        
+        // Quinary sort: less time spent (ascending)
+        return a.totalTime - b.totalTime;
+      });
       
-      // Calculate rankings
-      const rankedStudents = studentMetrics.map((student, index) => ({
-        ...student,
-        rank: index + 1,
-        percentile: Math.round(((studentMetrics.length - index) / studentMetrics.length) * 100)
-      }));
+      // Calculate rankings based on sorted position (no ties)
+      const rankedStudents = studentMetrics.map((student, index) => {
+        return {
+          ...student,
+          rank: index + 1, // Rank is simply the position in the sorted array
+          percentile: Math.round(((studentMetrics.length - index) / studentMetrics.length) * 100)
+        };
+      });
 
-      // Find current student's performance
-      const currentStudent = rankedStudents.find(s => s.studentId === resultData.studentId);
+      // Calculate current student's performance metrics
+      const currentStudentMetrics = calculateStudentMetrics(resultData);
       
-      // Calculate class statistics
-      const classStats = {
-        totalStudents: studentMetrics.length,
-        averageEfficiency: studentMetrics.reduce((sum, s) => sum + s.efficiencyScore, 0) / studentMetrics.length,
-        averageConsistency: studentMetrics.reduce((sum, s) => sum + s.consistencyScore, 0) / studentMetrics.length,
-        averageMastery: studentMetrics.reduce((sum, s) => sum + s.masteryScore, 0) / studentMetrics.length,
-        averageOverallScore: studentMetrics.reduce((sum, s) => sum + s.overallScore, 0) / studentMetrics.length
+      // Calculate class statistics (including current student)
+      const allStudentsIncludingCurrent = [...studentMetrics, currentStudentMetrics];
+      
+      // Re-sort all students including current student for proper ranking
+      allStudentsIncludingCurrent.sort((a, b) => {
+        // Primary sort: overall score (descending)
+        if (b.overallScore !== a.overallScore) {
+          return b.overallScore - a.overallScore;
+        }
+        
+        // Secondary sort: efficiency score (descending)
+        if (b.efficiencyScore !== a.efficiencyScore) {
+          return b.efficiencyScore - a.efficiencyScore;
+        }
+        
+        // Tertiary sort: consistency score (descending)
+        if (b.consistencyScore !== a.consistencyScore) {
+          return b.consistencyScore - a.consistencyScore;
+        }
+        
+        // Quaternary sort: fewer total attempts (ascending)
+        if (a.totalAttempts !== b.totalAttempts) {
+          return a.totalAttempts - b.totalAttempts;
+        }
+        
+        // Quinary sort: less time spent (ascending)
+        return a.totalTime - b.totalTime;
+      });
+      
+      // Find current student's rank in the complete list
+      const currentStudentIndex = allStudentsIncludingCurrent.findIndex(s => s.studentId === resultData.studentId);
+      const currentStudent = {
+        ...currentStudentMetrics,
+        rank: currentStudentIndex + 1, // Rank is the position in the sorted array
+        percentile: Math.round(((allStudentsIncludingCurrent.length - currentStudentIndex) / allStudentsIncludingCurrent.length) * 100)
       };
+      
+      const classStats = {
+        totalStudents: allStudentsIncludingCurrent.length,
+        averageEfficiency: allStudentsIncludingCurrent.reduce((sum, s) => sum + s.efficiencyScore, 0) / allStudentsIncludingCurrent.length,
+        averageConsistency: allStudentsIncludingCurrent.reduce((sum, s) => sum + s.consistencyScore, 0) / allStudentsIncludingCurrent.length,
+        averageMastery: allStudentsIncludingCurrent.reduce((sum, s) => sum + s.masteryScore, 0) / allStudentsIncludingCurrent.length,
+        averageOverallScore: allStudentsIncludingCurrent.reduce((sum, s) => sum + s.overallScore, 0) / allStudentsIncludingCurrent.length
+      };
+
+      console.log('DEBUG - Setting performance ranking:', {
+        currentStudent: {
+          overallScore: currentStudent.overallScore,
+          efficiencyScore: currentStudent.efficiencyScore,
+          consistencyScore: currentStudent.consistencyScore,
+          masteryScore: currentStudent.masteryScore,
+          rank: currentStudent.rank,
+          percentile: currentStudent.percentile,
+          totalAttempts: currentStudent.totalAttempts,
+          avgAttemptsPerQuestion: currentStudent.avgAttemptsPerQuestion
+        },
+        classStats,
+        allStudentsRanking: allStudentsIncludingCurrent.map(s => ({
+          studentId: s.studentId,
+          overallScore: s.overallScore,
+          efficiencyScore: s.efficiencyScore,
+          totalAttempts: s.totalAttempts,
+          avgAttemptsPerQuestion: s.avgAttemptsPerQuestion
+        }))
+      });
 
       setPerformanceRanking({
         currentStudent,
         classStats,
         allStudents: rankedStudents,
         performanceLevel: currentStudent ? 
-          (currentStudent.overallScore >= 80 ? 'excellent' :
-           currentStudent.overallScore >= 60 ? 'good' :
-           currentStudent.overallScore >= 40 ? 'needs_improvement' : 'struggling') : 'unknown'
+          (currentStudent.overallScore >= 70 ? 'excellent' : // Lowered from 80
+           currentStudent.overallScore >= 50 ? 'good' : // Lowered from 60
+           currentStudent.overallScore >= 30 ? 'needs_improvement' : 'struggling') : 'unknown' // Lowered from 40
       });
+
+      // Save performance metrics to the database
+      try {
+        const performanceData = {
+          resultId: resultData.resultId,
+          exerciseId: resultData.exerciseId,
+          studentId: resultData.studentId,
+          parentId: resultData.parentId,
+          classId: resultData.classId,
+          performanceMetrics: {
+            overallScore: currentStudent.overallScore,
+            efficiencyScore: currentStudent.efficiencyScore,
+            consistencyScore: currentStudent.consistencyScore,
+            masteryScore: currentStudent.masteryScore,
+            rank: currentStudent.rank,
+            percentile: currentStudent.percentile,
+            totalAttempts: currentStudent.totalAttempts,
+            totalTime: currentStudent.totalTime,
+            avgAttemptsPerQuestion: currentStudent.avgAttemptsPerQuestion,
+            avgTimePerQuestion: currentStudent.avgTimePerQuestion,
+            performanceLevel: currentStudent.overallScore >= 70 ? 'excellent' :
+                            currentStudent.overallScore >= 50 ? 'good' :
+                            currentStudent.overallScore >= 30 ? 'needs_improvement' : 'struggling'
+          },
+          classStats: {
+            totalStudents: classStats.totalStudents,
+            averageEfficiency: classStats.averageEfficiency,
+            averageConsistency: classStats.averageConsistency,
+            averageMastery: classStats.averageMastery,
+            averageOverallScore: classStats.averageOverallScore
+          },
+          calculatedAt: new Date().toISOString()
+        };
+
+        // Save to PerformanceMetrics table
+        await writeData(`/PerformanceMetrics/${resultData.resultId}`, performanceData);
+        console.log('Performance metrics saved to database:', performanceData);
+      } catch (error) {
+        console.error('Failed to save performance metrics:', error);
+      }
 
     } catch (error) {
       console.error('Failed to calculate performance metrics:', error);
@@ -524,13 +771,14 @@ export default function ParentDashboard() {
 
   const calculateClassAverages = async (resultData: any, exerciseData: any) => {
     try {
-      // Get all results for the same exercise and class
+      // Get all results for the same exercise and class (excluding current student for comparison)
       const allResults = await readData('/ExerciseResults');
       if (allResults.data) {
         const results = Object.values(allResults.data) as any[];
         const sameExerciseResults = results.filter((result: any) => 
           result.exerciseId === resultData.exerciseId && 
-          result.classId === resultData.classId
+          result.classId === resultData.classId &&
+          result.parentId !== resultData.parentId // Exclude current student's result
         );
         
         if (sameExerciseResults.length > 0) {
@@ -596,7 +844,6 @@ STUDENT PERFORMANCE DATA:
 
 PERFORMANCE RANKING DATA:
 ${performanceRanking?.currentStudent ? `
-- Class Rank: ${performanceRanking.currentStudent.rank} out of ${performanceRanking.classStats.totalStudents} students
 - Percentile: ${performanceRanking.currentStudent.percentile}th percentile
 - Overall Performance Score: ${Math.round(performanceRanking.currentStudent.overallScore)}/100
 - Efficiency Score: ${Math.round(performanceRanking.currentStudent.efficiencyScore)}/100 (attempts and time efficiency)
@@ -1902,7 +2149,10 @@ Focus on:
                   <View style={styles.scoreContainer}>
                     <Text style={styles.scoreText}>
                       {performanceRanking?.currentStudent ? 
-                        Math.round(performanceRanking.currentStudent.overallScore) : 
+                        (() => {
+                          console.log('DEBUG - Displaying overall score:', performanceRanking.currentStudent.overallScore);
+                          return Math.round(performanceRanking.currentStudent.overallScore);
+                        })() : 
                         (selectedResult.scorePercentage || 0)
                       }
                     </Text>
@@ -1939,44 +2189,42 @@ Focus on:
                 {performanceRanking?.currentStudent && (
                   <View style={styles.rankingCard}>
                     <Text style={styles.cardTitle}>Performance Ranking</Text>
-                    <View style={styles.disclaimerContainer}>
-                      <MaterialCommunityIcons name="information" size={14} color="#6b7280" />
-                      <Text style={styles.disclaimerText}>
-                        Rankings update as more students complete this activity
-                      </Text>
-                    </View>
-                    <View style={styles.rankingHeader}>
-                      <View style={styles.rankingItem}>
-                        <Text style={styles.rankingLabel}>Class Rank</Text>
-                        <Text style={styles.rankingValue}>
-                          #{performanceRanking.currentStudent.rank} of {performanceRanking.classStats.totalStudents}
-                        </Text>
-                      </View>
-                      <View style={styles.rankingItem}>
-                        <Text style={styles.rankingLabel}>Percentile</Text>
-                        <Text style={styles.rankingValue}>{performanceRanking.currentStudent.percentile}th</Text>
-                      </View>
-                    </View>
+                   
                     <View style={styles.performanceMetrics}>
                       <View style={styles.metricItem}>
                         <Text style={styles.metricLabel}>Efficiency</Text>
-                        <Text style={styles.metricValue}>{Math.round(performanceRanking.currentStudent.efficiencyScore)}/100</Text>
+                        <Text style={styles.metricValue}>
+                          {(() => {
+                            console.log('DEBUG - Displaying efficiency score:', performanceRanking.currentStudent.efficiencyScore);
+                            return Math.round(performanceRanking.currentStudent.efficiencyScore);
+                          })()}/100
+                        </Text>
                         <Text style={styles.metricComparison}>
                           vs {Math.round(performanceRanking.classStats.averageEfficiency)} class avg
                         </Text>
                       </View>
                       <View style={styles.metricItem}>
                         <Text style={styles.metricLabel}>Consistency</Text>
-                        <Text style={styles.metricValue}>{Math.round(performanceRanking.currentStudent.consistencyScore)}/100</Text>
+                        <Text style={styles.metricValue}>
+                          {(() => {
+                            console.log('DEBUG - Displaying consistency score:', performanceRanking.currentStudent.consistencyScore);
+                            return Math.round(performanceRanking.currentStudent.consistencyScore);
+                          })()}/100
+                        </Text>
                         <Text style={styles.metricComparison}>
                           vs {Math.round(performanceRanking.classStats.averageConsistency)} class avg
                         </Text>
                       </View>
                       <View style={styles.metricItem}>
                         <Text style={styles.metricLabel}>Mastery</Text>
-                        <Text style={styles.metricValue}>{Math.round(performanceRanking.currentStudent.masteryScore * 100)}/100</Text>
+                        <Text style={styles.metricValue}>
+                          {(() => {
+                            console.log('DEBUG - Displaying mastery score:', performanceRanking.currentStudent.masteryScore);
+                            return Math.round(performanceRanking.currentStudent.masteryScore);
+                          })()}/100
+                        </Text>
                         <Text style={styles.metricComparison}>
-                          vs {Math.round(performanceRanking.classStats.averageMastery * 100)} class avg
+                          vs {Math.round(performanceRanking.classStats.averageMastery)} class avg
                         </Text>
                       </View>
                     </View>
