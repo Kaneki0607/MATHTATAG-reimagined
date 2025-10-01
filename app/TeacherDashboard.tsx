@@ -5,16 +5,16 @@ import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
-    Alert,
-    Dimensions,
-    Image,
-    Modal,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  Alert,
+  Dimensions,
+  Image,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
 import { AssignedExercise, useExercises } from '../hooks/useExercises';
@@ -377,11 +377,29 @@ export default function TeacherDashboard() {
       result.exerciseId === assignment.exerciseId
     );
     
-    // Count unique students who completed this exercise
-    const completedStudentIds = new Set(
-      assignmentResults.map((result: any) => result.studentId).filter(Boolean)
+    console.log('Debug - getStudentCompletionStats for assignment:', {
+      assignmentId: assignment.id,
+      exerciseId: assignment.exerciseId,
+      classId: assignment.classId,
+      classStudents: classStudents.length,
+      classResults: classResults.length,
+      assignmentResults: assignmentResults.length,
+      assignmentResultsData: assignmentResults,
+      allExerciseResults: exerciseResults,
+      allStudentsByClass: studentsByClass
+    });
+    
+    // Count unique students who completed this exercise (using parentId since that's what we have)
+    const completedParentIds = new Set(
+      assignmentResults.map((result: any) => result.parentId).filter(Boolean)
     );
-    const completedCount = completedStudentIds.size;
+    const completedCount = completedParentIds.size;
+    
+    console.log('Debug - completion stats:', {
+      completedParentIds: Array.from(completedParentIds),
+      completedCount,
+      totalStudents
+    });
     
     return {
       completed: completedCount,
@@ -394,8 +412,13 @@ export default function TeacherDashboard() {
   const getStudentStatus = (studentId: string, assignment: AssignedExercise) => {
     // Check if student has completed the assignment by looking at ExerciseResults
     const classResults = exerciseResults[assignment.classId] || [];
+    
+    // Find the student to get their parentId
+    const student = studentsByClass[assignment.classId]?.find((s: any) => s.id === studentId);
+    if (!student) return 'pending';
+    
     const studentResult = classResults.find((result: any) => 
-      result.studentId === studentId && result.exerciseId === assignment.exerciseId
+      result.parentId === student.parentId && result.exerciseId === assignment.exerciseId
     );
     return studentResult ? 'completed' : 'pending';
   };
@@ -492,9 +515,30 @@ export default function TeacherDashboard() {
         loadPublicExercises();
       } else if (exercisesTab === 'assigned') {
         loadAssignedExercises();
+        // Also load assignments to get exercise results
+        if (activeClasses.length > 0) {
+          console.log('Debug - Calling loadAssignments from exercisesTab useEffect');
+          loadAssignments(activeClasses.map(c => c.id));
+        }
       }
     }
   }, [activeTab, exercisesTab, currentUserId]);
+
+  // Load assignments when activeClasses change to ensure exercise results are available
+  useEffect(() => {
+    console.log('Debug - useEffect for activeClasses triggered:', { activeClasses: activeClasses.length, classIds: activeClasses.map(c => c.id) });
+    if (activeClasses.length > 0) {
+      loadAssignments(activeClasses.map(c => c.id));
+    }
+  }, [activeClasses]);
+
+  // Also load assignments when the assigned exercises tab becomes active
+  useEffect(() => {
+    if (activeTab === 'exercises' && exercisesTab === 'assigned' && activeClasses.length > 0) {
+      console.log('Debug - Calling loadAssignments from assigned exercises useEffect');
+      loadAssignments(activeClasses.map(c => c.id));
+    }
+  }, [activeTab, exercisesTab, activeClasses]);
 
   const loadTeacherClasses = async (teacherId: string) => {
     try {
@@ -554,14 +598,19 @@ export default function TeacherDashboard() {
   };
 
   const loadAssignments = async (classIds: string[]) => {
+    console.log('Debug - loadAssignments called with classIds:', classIds);
     try {
-      // Load both assignments and exercise results
-      const [{ data: assignmentsData }, { data: exerciseResultsData }] = await Promise.all([
-        readData('/assignments'),
-        readData('/ExerciseResults')
+      // Load assignments, exercise results, and students data
+      const [{ data: assignmentsData }, { data: exerciseResultsData }, { data: studentsData }] = await Promise.all([
+        readData('/assignedExercises'),
+        readData('/ExerciseResults'),
+        readData('/students')
       ]);
       
       const stats: Record<string, { total: number; completed: number; pending: number }> = {};
+      
+      console.log('Debug - assignmentsData sample:', Object.values(assignmentsData || {}).slice(0, 2));
+      console.log('Debug - exerciseResultsData sample:', Object.values(exerciseResultsData || {}).slice(0, 2));
       
       // Process assignments
       Object.entries(assignmentsData || {}).forEach(([id, v]: any) => {
@@ -573,17 +622,45 @@ export default function TeacherDashboard() {
         else stats[a.classId].pending += 1;
       });
       
+      // Create a map of parentId to classId from students data
+      const parentToClassMap: Record<string, string> = {};
+      Object.entries(studentsData || {}).forEach(([studentId, student]: any) => {
+        if (student.parentId && student.classId && classIds.includes(student.classId)) {
+          parentToClassMap[student.parentId] = student.classId;
+        }
+      });
+      
+      console.log('Debug - parentToClassMap:', parentToClassMap);
+      console.log('Debug - classIds:', classIds);
+      console.log('Debug - studentsData sample:', Object.values(studentsData || {}).slice(0, 2));
+      console.log('Debug - Looking for parentId 001091 in students:', Object.values(studentsData || {}).find((s: any) => s.parentId === '001091'));
+      console.log('Debug - Looking for parentId 001091 in ExerciseResults:', Object.values(exerciseResultsData || {}).find((r: any) => r.parentId === '001091'));
+      console.log('Debug - All parentIds in students:', Object.values(studentsData || {}).map((s: any) => s.parentId).filter(Boolean));
+      console.log('Debug - All parentIds in ExerciseResults:', Object.values(exerciseResultsData || {}).map((r: any) => r.parentId).filter(Boolean));
+      
       // Process exercise results to get more accurate completion counts
       const resultsByClass: Record<string, Set<string>> = {}; // classId -> Set of completed exerciseIds
       const resultsByClassArray: Record<string, any[]> = {}; // classId -> Array of results
       
       Object.entries(exerciseResultsData || {}).forEach(([resultId, result]: any) => {
         const r = { resultId, ...(result || {}) };
-        if (r.classId && classIds.includes(r.classId)) {
-          if (!resultsByClass[r.classId]) resultsByClass[r.classId] = new Set();
-          if (!resultsByClassArray[r.classId]) resultsByClassArray[r.classId] = [];
-          resultsByClass[r.classId].add(r.exerciseId);
-          resultsByClassArray[r.classId].push(r);
+        
+        // Find the classId for this result using parentId
+        const classId = r.parentId ? parentToClassMap[r.parentId] : null;
+        
+        console.log('Debug - Processing result:', {
+          resultId,
+          parentId: r.parentId,
+          exerciseId: r.exerciseId,
+          mappedClassId: classId,
+          isInClassIds: classId ? classIds.includes(classId) : false
+        });
+        
+        if (classId && classIds.includes(classId)) {
+          if (!resultsByClass[classId]) resultsByClass[classId] = new Set();
+          if (!resultsByClassArray[classId]) resultsByClassArray[classId] = [];
+          resultsByClass[classId].add(r.exerciseId);
+          resultsByClassArray[classId].push(r);
         }
       });
       
@@ -595,8 +672,14 @@ export default function TeacherDashboard() {
         }
       });
       
+      console.log('Debug - Final stats:', stats);
+      console.log('Debug - resultsByClass:', resultsByClass);
+      console.log('Debug - resultsByClassArray:', resultsByClassArray);
+      
       setAssignmentsByClass(stats);
       setExerciseResults(resultsByClassArray);
+      
+      console.log('Debug - setExerciseResults called with:', resultsByClassArray);
     } catch (error) {
       console.error('Error loading assignments:', error);
       setAssignmentsByClass({});
@@ -1306,6 +1389,11 @@ export default function TeacherDashboard() {
                  onPress={() => {
                    setExercisesTab('assigned');
                    loadAssignedExercises();
+                   // Also load assignments to get exercise results
+                   if (activeClasses.length > 0) {
+                     console.log('Debug - Calling loadAssignments from tab click');
+                     loadAssignments(activeClasses.map(c => c.id));
+                   }
                  }}
                >
                  <Text style={[styles.exercisesTabText, exercisesTab === 'assigned' && styles.exercisesTabTextActive]}>Assigned</Text>
@@ -1810,14 +1898,39 @@ export default function TeacherDashboard() {
                          Results will appear here when students complete assignments
                        </Text>
                      </View>
-                   ) : (
-                     <View style={styles.resultsList}>
-                       {classResults.map((result: any, idx: number) => {
-                         const student = classStudents.find((s: any) => s.id === result.studentId);
-                         const studentName = student ? `${student.firstName} ${student.lastName}` : result.studentName || 'Unknown Student';
-                         
-                         return (
-                           <View key={result.resultId || idx} style={styles.resultItem}>
+                   ) : (() => {
+                     // Sort results by score percentage (descending) and calculate ranks
+                     const sortedResults = [...classResults].sort((a: any, b: any) => 
+                       (b.scorePercentage || 0) - (a.scorePercentage || 0)
+                     );
+                     
+                     // Calculate ranks (handling ties properly)
+                     const rankedResults = sortedResults.map((result: any, idx: number) => {
+                       let rank = idx + 1;
+                       
+                       // Handle ties - if previous result has same score, use same rank
+                       if (idx > 0 && sortedResults[idx - 1].scorePercentage === result.scorePercentage) {
+                         // Find the first result with this score to get its rank
+                         for (let i = idx - 1; i >= 0; i--) {
+                           if (sortedResults[i].scorePercentage === result.scorePercentage) {
+                             rank = i + 1;
+                           } else {
+                             break;
+                           }
+                         }
+                       }
+                       
+                       return { ...result, rank };
+                     });
+                     
+                     return (
+                       <View style={styles.resultsList}>
+                         {rankedResults.map((result: any, idx: number) => {
+                           const student = classStudents.find((s: any) => s.parentId === result.parentId);
+                           const studentName = student ? `${student.firstName || ''} ${student.lastName || ''}`.trim() || student.nickname || 'Unknown Student' : 'Unknown Student';
+                           
+                           return (
+                             <View key={result.resultId || idx} style={styles.resultItem}>
                              <View style={styles.resultHeader}>
                                <View style={styles.resultStudentInfo}>
                                  <Text style={styles.resultStudentName}>{studentName}</Text>
@@ -1830,6 +1943,9 @@ export default function TeacherDashboard() {
                                            result.scorePercentage >= 60 ? '#f59e0b' : '#ef4444' }
                                  ]}>
                                    {result.scorePercentage || 0}%
+                                 </Text>
+                                 <Text style={styles.resultRank}>
+                                   Rank #{result.rank} of {rankedResults.length}
                                  </Text>
                                </View>
                              </View>
@@ -1872,8 +1988,9 @@ export default function TeacherDashboard() {
                            </View>
                          );
                        })}
-                     </View>
-                   )}
+                       </View>
+                     );
+                   })()}
                  </View>
                );
              })}
@@ -4814,6 +4931,12 @@ const styles = StyleSheet.create({
   },
   resultScoreContainer: {
     alignItems: 'flex-end',
+  },
+  resultRank: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 2,
+    fontWeight: '500',
   },
   resultDetailRow: {
     flexDirection: 'row',

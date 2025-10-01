@@ -7,21 +7,21 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { useEffect, useRef, useState } from 'react';
 import {
-    Alert,
-    Animated,
-    Dimensions,
-    Easing,
-    Image,
-    ImageBackground,
-    LayoutAnimation,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    UIManager,
-    View,
+  Alert,
+  Animated,
+  Dimensions,
+  Easing,
+  Image,
+  ImageBackground,
+  LayoutAnimation,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  UIManager,
+  View,
 } from 'react-native';
 import { readData, writeData } from '../lib/firebase-database';
 
@@ -954,6 +954,29 @@ export default function StudentExerciseAnswering() {
       // Set random background
       setBackgroundImage(getRandomBackground());
       
+      // Get parent ID and find associated student ID
+      let parentId: string | null = null;
+      let studentId: string | null = null;
+      try {
+        parentId = await AsyncStorage.getItem('parent_key');
+        if (parentId) {
+          // Find the student associated with this parent
+          const studentsData = await readData('/students');
+          if (studentsData.data) {
+            const student = Object.values(studentsData.data).find((s: any) => s.parentId === parentId) as any;
+            if (student && student.studentId) {
+              studentId = student.studentId;
+              // Store student ID in AsyncStorage for future use
+              if (studentId) {
+                await AsyncStorage.setItem('student_id', studentId);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('Could not get parent key or student ID:', error);
+      }
+      
       const result = await readData(`/exercises/${exerciseId}`);
       if (result.data) {
         setExercise({
@@ -1287,13 +1310,36 @@ export default function StudentExerciseAnswering() {
 
   // Handle final submission when Done is clicked
   const handleFinalSubmission = async () => {
+    // Prevent double submission
+    if (submitting) {
+      console.log('Submission already in progress, ignoring duplicate call');
+      return;
+    }
+    
     try {
-      // Get parent ID for privacy (no student ID stored)
-      let parentId = null;
+      setSubmitting(true);
+      // Get parent ID and student ID from storage
+      let parentId: string | null = null;
+      let studentId: string | null = null;
       try {
         parentId = await AsyncStorage.getItem('parent_key');
+        studentId = await AsyncStorage.getItem('student_id');
+        
+        // If student ID is not found, try to find it again
+        if (!studentId && parentId) {
+          const studentsData = await readData('/students');
+          if (studentsData.data) {
+            const student = Object.values(studentsData.data).find((s: any) => s.parentId === parentId) as any;
+            if (student && student.studentId) {
+              studentId = student.studentId;
+              if (studentId) {
+                await AsyncStorage.setItem('student_id', studentId);
+              }
+            }
+          }
+        }
       } catch (error) {
-        console.warn('Could not get parent key from storage:', error);
+        console.warn('Could not get parent key or student ID from storage:', error);
       }
 
       // Calculate final answers with time spent
@@ -1315,11 +1361,21 @@ export default function StudentExerciseAnswering() {
       
       // Create normalized result record
       const resultId = `${exerciseId}_${parentId || 'anonymous'}_${Date.now()}`;
+      
+      // Debug logging
+      console.log('Recording exercise result with:', {
+        parentId,
+        studentId,
+        resultId,
+        exerciseId
+      });
+      
       const resultData = {
         // Core identifiers
         resultId,
         exerciseId: exerciseId as string,
-        parentId, // Privacy-focused: use parent ID instead of student ID
+        parentId, // Parent ID for linking to parent account
+        studentId, // Student ID for tracking individual student performance
         
         // Exercise metadata
         exerciseTitle: exercise?.title || 'Unknown Exercise',
@@ -1445,6 +1501,8 @@ export default function StudentExerciseAnswering() {
     } catch (error: any) {
       console.error('Failed to submit final answers:', error);
       Alert.alert('Error', `Failed to submit answers: ${error.message || error}. Please try again.`);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -2661,8 +2719,20 @@ export default function StudentExerciseAnswering() {
                 </ScrollView>
               </View>
               <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
-                <TouchableOpacity onPress={handleFinalSubmission} style={{ backgroundColor: '#ffa500', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10 }} activeOpacity={0.8}>
-                  <Text style={{ color: '#fff', fontWeight: '700' }}>Done</Text>
+                <TouchableOpacity 
+                  onPress={handleFinalSubmission} 
+                  disabled={submitting}
+                  style={{ 
+                    backgroundColor: submitting ? '#ccc' : '#ffa500', 
+                    paddingHorizontal: 16, 
+                    paddingVertical: 10, 
+                    borderRadius: 10 
+                  }} 
+                  activeOpacity={0.8}
+                >
+                  <Text style={{ color: '#fff', fontWeight: '700' }}>
+                    {submitting ? 'Submitting...' : 'Done'}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
