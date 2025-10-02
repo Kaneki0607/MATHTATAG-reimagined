@@ -6,16 +6,16 @@ import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
-  Alert,
-  Image,
-  Modal,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    Alert,
+    Image,
+    Modal,
+    ScrollView,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
 import { onAuthChange } from '../lib/firebase-auth';
@@ -24,15 +24,17 @@ import { uploadFile } from '../lib/firebase-storage';
 
 // Import ElevenLabs API key management
 import {
-  addApiKey,
-  cleanupExpiredKeys,
-  debugKeyStatus,
-  getActiveApiKeys,
-  getApiKeyStatus,
-  markApiKeyAsFailed,
-  markApiKeyAsUsed,
-  removeLowCreditKeys,
-  updateApiKeyCredits
+    addApiKey,
+    checkAllApiKeyCredits,
+    cleanupExpiredKeys,
+    debugKeyStatus,
+    getActiveApiKeys,
+    getApiKeyStatus,
+    markApiKeyAsFailed,
+    markApiKeyAsUsed,
+    performMaintenanceCleanup,
+    removeLowCreditKeys,
+    updateApiKeyCredits
 } from '../lib/elevenlabs-keys';
 
 // Helper function to check if API key has low credits and update status
@@ -176,12 +178,27 @@ const callElevenLabsWithFallback = async (
         const errorText = await response.text();
         console.warn(`⚠️ ElevenLabs API key ${i + 1} failed:`, response.status, errorText);
         
-        // Check if this key has low credits and update status
-        const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
-        
-        // Mark key as failed if it's not a credit issue
-        if (!hasLowCredits) {
+        // Handle different error types
+        if (response.status === 401) {
+          // Unauthorized - invalid API key
+          console.log(`🔑 API key ${i + 1} is invalid/unauthorized - marking as failed`);
           markApiKeyAsFailed(apiKey);
+        } else if (response.status === 429) {
+          // Rate limit or quota exceeded
+          console.log(`⏰ API key ${i + 1} hit rate limit or quota - checking credits`);
+          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
+          if (!hasLowCredits) {
+            // If not a credit issue, might be temporary rate limit
+            console.log(`⏰ API key ${i + 1} hit temporary rate limit`);
+          }
+        } else {
+          // Check if this key has low credits and update status
+          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
+          
+          // Mark key as failed if it's not a credit issue and not a temporary error
+          if (!hasLowCredits && response.status >= 400 && response.status < 500) {
+            markApiKeyAsFailed(apiKey);
+          }
         }
         
         // If this is the last key, throw the error
@@ -219,15 +236,24 @@ const cleanupLowCreditKeys = () => {
 };
 
 // Periodic cleanup of low credit keys (call this periodically)
-const performApiKeyMaintenance = () => {
-  const removedCount = removeLowCreditKeys();
-  const expiredCount = cleanupExpiredKeys();
+const performApiKeyMaintenance = async () => {
+  console.log('🔧 Starting API key maintenance...');
   
-  if (removedCount > 0 || expiredCount > 0) {
-    console.log(`🧹 API Key Maintenance: Removed ${removedCount} low credit keys, ${expiredCount} expired keys`);
+  // Use the enhanced maintenance function from elevenlabs-keys
+  performMaintenanceCleanup();
+  
+  // Optionally check credits for all keys every 10th maintenance cycle (50 minutes)
+  const shouldCheckCredits = Math.random() < 0.1; // 10% chance
+  if (shouldCheckCredits) {
+    console.log('🔍 Performing proactive credit check...');
+    try {
+      await checkAllApiKeyCredits();
+    } catch (error) {
+      console.warn('⚠️ Proactive credit check failed:', error);
+    }
   }
   
-  return { removedCount, expiredCount };
+  console.log('✅ API key maintenance completed');
 };
 
 // Configuration - Now using direct API calls to Gemini and ElevenLabs
