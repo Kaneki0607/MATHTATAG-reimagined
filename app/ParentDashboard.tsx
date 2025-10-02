@@ -269,23 +269,19 @@ export default function ParentDashboard() {
     try {
       const parentKey = await AsyncStorage.getItem('parent_key');
       if (!parentKey) {
-        console.log('No parent key found');
         return;
       }
 
       const announcement = announcements.find(a => a.id === announcementId);
       if (!announcement) {
-        console.log('Announcement not found:', announcementId);
         return;
       }
 
       // Check if already read
       if (announcement.readBy && announcement.readBy.includes(parentKey)) {
-        console.log('Announcement already read');
         return;
       }
 
-      console.log('Marking announcement as read:', announcementId, 'for parent:', parentKey);
 
       // Add parent to readBy array
       const updatedReadBy = [...(announcement.readBy || []), parentKey];
@@ -294,7 +290,6 @@ export default function ParentDashboard() {
       const { success, error } = await writeData(`/announcements/${announcementId}/readBy`, updatedReadBy);
       
       if (success) {
-        console.log('Successfully updated Firebase');
         
         // Update local state
         setAnnouncements(prev => 
@@ -375,7 +370,6 @@ export default function ParentDashboard() {
         
         // Check if performance metrics already exist
         if (performanceData.data && performanceData.data.performanceMetrics) {
-          console.log('Using existing performance metrics:', performanceData.data);
           setPerformanceRanking({
             currentStudent: performanceData.data.performanceMetrics,
             classStats: performanceData.data.classStats,
@@ -462,16 +456,6 @@ export default function ParentDashboard() {
       consistencyScore = Math.max(40, 100 - attemptVariance * 20); // Decreasing score
     }
     
-    // Debug logging
-    console.log('DEBUG - Performance Calculation:', {
-      totalQuestions,
-      correctAnswers,
-      masteryScore,
-      avgAttemptsPerQuestion,
-      efficiencyScore,
-      attemptVariance,
-      consistencyScore
-    });
     
     // Calculate overall score with better weighting
     const overallScore = Math.round(
@@ -677,26 +661,6 @@ export default function ParentDashboard() {
         averageOverallScore: allStudentsIncludingCurrent.reduce((sum, s) => sum + s.overallScore, 0) / allStudentsIncludingCurrent.length
       };
 
-      console.log('DEBUG - Setting performance ranking:', {
-        currentStudent: {
-          overallScore: currentStudent.overallScore,
-          efficiencyScore: currentStudent.efficiencyScore,
-          consistencyScore: currentStudent.consistencyScore,
-          masteryScore: currentStudent.masteryScore,
-          rank: currentStudent.rank,
-          percentile: currentStudent.percentile,
-          totalAttempts: currentStudent.totalAttempts,
-          avgAttemptsPerQuestion: currentStudent.avgAttemptsPerQuestion
-        },
-        classStats,
-        allStudentsRanking: allStudentsIncludingCurrent.map(s => ({
-          studentId: s.studentId,
-          overallScore: s.overallScore,
-          efficiencyScore: s.efficiencyScore,
-          totalAttempts: s.totalAttempts,
-          avgAttemptsPerQuestion: s.avgAttemptsPerQuestion
-        }))
-      });
 
       setPerformanceRanking({
         currentStudent,
@@ -743,7 +707,6 @@ export default function ParentDashboard() {
 
         // Save to PerformanceMetrics table
         await writeData(`/PerformanceMetrics/${resultData.resultId}`, performanceData);
-        console.log('Performance metrics saved to database:', performanceData);
       } catch (error) {
         console.error('Failed to save performance metrics:', error);
       }
@@ -1018,8 +981,6 @@ Focus on:
           setGeminiAnalysis(analysis);
         } catch (parseError) {
           console.error('Failed to parse Gemini response:', parseError);
-          console.log('Cleaned response:', analysisText);
-          console.log('Original response:', data.candidates[0].content.parts[0].text);
           
           // Try to extract partial data from the response
           try {
@@ -2196,7 +2157,6 @@ Focus on:
                     <Text style={styles.scoreText}>
                       {performanceRanking?.currentStudent ? 
                         (() => {
-                          console.log('DEBUG - Displaying overall score:', performanceRanking.currentStudent.overallScore);
                           return Math.round(performanceRanking.currentStudent.overallScore);
                         })() : 
                         (selectedResult.scorePercentage || 0)
@@ -2241,7 +2201,6 @@ Focus on:
                         <Text style={styles.metricLabel}>Efficiency</Text>
                         <Text style={styles.metricValue}>
                           {(() => {
-                            console.log('DEBUG - Displaying efficiency score:', performanceRanking.currentStudent.efficiencyScore);
                             return Math.round(performanceRanking.currentStudent.efficiencyScore);
                           })()}/100
                         </Text>
@@ -2253,7 +2212,6 @@ Focus on:
                         <Text style={styles.metricLabel}>Consistency</Text>
                         <Text style={styles.metricValue}>
                           {(() => {
-                            console.log('DEBUG - Displaying consistency score:', performanceRanking.currentStudent.consistencyScore);
                             return Math.round(performanceRanking.currentStudent.consistencyScore);
                           })()}/100
                         </Text>
@@ -2265,7 +2223,6 @@ Focus on:
                         <Text style={styles.metricLabel}>Mastery</Text>
                         <Text style={styles.metricValue}>
                           {(() => {
-                            console.log('DEBUG - Displaying mastery score:', performanceRanking.currentStudent.masteryScore);
                             return Math.round(performanceRanking.currentStudent.masteryScore);
                           })()}/100
                         </Text>

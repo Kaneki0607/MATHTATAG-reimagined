@@ -23,7 +23,6 @@ export default function RootLayout() {
           <Stack.Screen name="ParentLogin" />
           <Stack.Screen name="TeacherLogin" />
           <Stack.Screen name="TeacherDashboard" />
-          <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
         </Stack>
         <StatusBar style="light" hidden={false} translucent={true} />
       </ThemeProvider>

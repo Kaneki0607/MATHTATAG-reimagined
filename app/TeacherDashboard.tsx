@@ -383,17 +383,6 @@ export default function TeacherDashboard() {
       result.exerciseId === assignment.exerciseId
     );
     
-    console.log('Debug - getStudentCompletionStats for assignment:', {
-      assignmentId: assignment.id,
-      exerciseId: assignment.exerciseId,
-      classId: assignment.classId,
-      classStudents: classStudents.length,
-      classResults: classResults.length,
-      assignmentResults: assignmentResults.length,
-      assignmentResultsData: assignmentResults,
-      allExerciseResults: exerciseResults,
-      allStudentsByClass: studentsByClass
-    });
     
     // Count students who have completed this exercise using flexible matching
     const completedStudentIds = new Set<string>();
@@ -423,12 +412,6 @@ export default function TeacherDashboard() {
     
     const completedCount = completedStudentIds.size;
     
-    console.log('Debug - completion stats:', {
-      completedStudentIds: Array.from(completedStudentIds),
-      completedCount,
-      totalStudents,
-      assignmentResults: assignmentResults.map(r => ({ parentId: r.parentId, studentId: r.studentId }))
-    });
     
     return {
       completed: completedCount,
@@ -563,7 +546,6 @@ export default function TeacherDashboard() {
         loadAssignedExercises();
         // Also load assignments to get exercise results
         if (activeClasses.length > 0) {
-          console.log('Debug - Calling loadAssignments from exercisesTab useEffect');
           loadAssignments(activeClasses.map(c => c.id));
         }
       }
@@ -572,7 +554,6 @@ export default function TeacherDashboard() {
 
   // Load assignments when activeClasses change to ensure exercise results are available
   useEffect(() => {
-    console.log('Debug - useEffect for activeClasses triggered:', { activeClasses: activeClasses.length, classIds: activeClasses.map(c => c.id) });
     if (activeClasses.length > 0) {
       loadAssignments(activeClasses.map(c => c.id));
     }
@@ -581,7 +562,6 @@ export default function TeacherDashboard() {
   // Also load assignments when the assigned exercises tab becomes active
   useEffect(() => {
     if (activeTab === 'exercises' && exercisesTab === 'assigned' && activeClasses.length > 0) {
-      console.log('Debug - Calling loadAssignments from assigned exercises useEffect');
       loadAssignments(activeClasses.map(c => c.id));
     }
   }, [activeTab, exercisesTab, activeClasses]);
@@ -647,9 +627,6 @@ export default function TeacherDashboard() {
         return acc;
       }, {});
       
-      console.log('Debug - Loaded parents:', Object.keys(parentsMap).length, 'parents');
-      console.log('Debug - Sample parent data:', Object.values(parentsMap)[0]);
-      console.log('Debug - Parent ID to Login Code mapping:', Object.keys(parentIdToLoginCode).length, 'mappings');
       
       const grouped: Record<string, any[]> = {};
       Object.entries(students || {}).forEach(([id, v]: any) => {
@@ -658,7 +635,6 @@ export default function TeacherDashboard() {
         if (!grouped[s.classId]) grouped[s.classId] = [];
         grouped[s.classId].push(s);
       });
-      console.log('Debug - Loaded students by class:', Object.keys(grouped).map(classId => `${classId}: ${grouped[classId].length} students`));
       
       setParentsById(parentsMap);
       setStudentsByClass(grouped);
@@ -668,7 +644,6 @@ export default function TeacherDashboard() {
   };
 
   const loadAssignments = async (classIds: string[]) => {
-    console.log('Debug - loadAssignments called with classIds:', classIds);
     try {
       // Load assignments, exercise results, students data, parents data, and login codes
       const [{ data: assignmentsData }, { data: exerciseResultsData }, { data: studentsData }, { data: parentsData }, { data: loginCodesData }] = await Promise.all([
@@ -681,8 +656,6 @@ export default function TeacherDashboard() {
       
       const stats: Record<string, { total: number; completed: number; pending: number }> = {};
       
-      console.log('Debug - assignmentsData sample:', Object.values(assignmentsData || {}).slice(0, 2));
-      console.log('Debug - exerciseResultsData sample:', Object.values(exerciseResultsData || {}).slice(0, 2));
       
       // Process assignments
       Object.entries(assignmentsData || {}).forEach(([id, v]: any) => {
@@ -724,16 +697,6 @@ export default function TeacherDashboard() {
         }
       });
       
-      console.log('Debug - parentToClassMap:', parentToClassMap);
-      console.log('Debug - classIds:', classIds);
-      console.log('Debug - studentsData sample:', Object.values(studentsData || {}).slice(0, 2));
-      console.log('Debug - parentsData sample:', Object.values(parentsData || {}).slice(0, 2));
-      console.log('Debug - loginCodesData sample:', Object.entries(loginCodesData || {}).slice(0, 2));
-      console.log('Debug - Looking for parentId 008136 in students:', Object.values(studentsData || {}).find((s: any) => s.parentId === '008136'));
-      console.log('Debug - Looking for parentId 008136 in ExerciseResults:', Object.values(exerciseResultsData || {}).find((r: any) => r.parentId === '008136'));
-      console.log('Debug - Looking for login code 008136 in loginCodesData:', loginCodesData?.['008136']);
-      console.log('Debug - All parentIds in students:', Object.values(studentsData || {}).map((s: any) => s.parentId).filter(Boolean));
-      console.log('Debug - All parentIds in ExerciseResults:', Object.values(exerciseResultsData || {}).map((r: any) => r.parentId).filter(Boolean));
       
       // Process exercise results to get more accurate completion counts
       const resultsByClass: Record<string, Set<string>> = {}; // classId -> Set of completed exerciseIds
@@ -745,13 +708,6 @@ export default function TeacherDashboard() {
         // Find the classId for this result using parentId
         const classId = r.parentId ? parentToClassMap[r.parentId] : null;
         
-        console.log('Debug - Processing result:', {
-          resultId,
-          parentId: r.parentId,
-          exerciseId: r.exerciseId,
-          mappedClassId: classId,
-          isInClassIds: classId ? classIds.includes(classId) : false
-        });
         
         if (classId && classIds.includes(classId)) {
           if (!resultsByClass[classId]) resultsByClass[classId] = new Set();
@@ -769,14 +725,10 @@ export default function TeacherDashboard() {
         }
       });
       
-      console.log('Debug - Final stats:', stats);
-      console.log('Debug - resultsByClass:', resultsByClass);
-      console.log('Debug - resultsByClassArray:', resultsByClassArray);
       
       setAssignmentsByClass(stats);
       setExerciseResults(resultsByClassArray);
       
-      console.log('Debug - setExerciseResults called with:', resultsByClassArray);
     } catch (error) {
       console.error('Error loading assignments:', error);
       setAssignmentsByClass({});
@@ -1534,11 +1486,10 @@ export default function TeacherDashboard() {
                  onPress={() => {
                    setExercisesTab('assigned');
                    loadAssignedExercises();
-                   // Also load assignments to get exercise results
-                   if (activeClasses.length > 0) {
-                     console.log('Debug - Calling loadAssignments from tab click');
-                     loadAssignments(activeClasses.map(c => c.id));
-                   }
+                  // Also load assignments to get exercise results
+                  if (activeClasses.length > 0) {
+                    loadAssignments(activeClasses.map(c => c.id));
+                  }
                  }}
                >
                  <Text style={[styles.exercisesTabText, exercisesTab === 'assigned' && styles.exercisesTabTextActive]}>Assigned</Text>
@@ -1905,7 +1856,6 @@ export default function TeacherDashboard() {
                       {(studentsByClass[cls.id] || []).map((s: any, idx: number) => {
                       const p = s.parentId ? parentsById[s.parentId] : undefined;
                       const loginCode = p?.loginCode || 'N/A';
-                      console.log('Debug - Student:', s.nickname, 'ParentId:', s.parentId, 'Parent data:', p, 'Login code:', loginCode);
                       return (
                         <View key={s.studentId} style={styles.studentRow}>
                           <Text style={styles.studentIndex}>{idx + 1}.</Text>
