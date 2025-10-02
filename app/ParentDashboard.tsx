@@ -166,16 +166,25 @@ export default function ParentDashboard() {
       const parentKey = await AsyncStorage.getItem('parent_key');
       
       if (parentKey) {
-        // Load parent data from Firebase
-        const result = await readData(`/parents/${parentKey}`);
-        if (result.data) {
-          setParentData({
-            ...result.data,
-            parentKey: parentKey
-          });
+        // Resolve login code to actual parent ID
+        const parentIdResult = await readData(`/parentLoginCodes/${parentKey}`);
+        if (parentIdResult.data) {
+          const actualParentId = parentIdResult.data;
+          
+          // Load parent data from Firebase using the actual parent ID
+          const result = await readData(`/parents/${actualParentId}`);
+          if (result.data) {
+            setParentData({
+              ...result.data,
+              parentKey: parentKey
+            });
+          } else {
+            // No data found, show registration modal
+            setShowRegistrationModal(true);
+          }
         } else {
-          // No data found, show registration modal
-          setShowRegistrationModal(true);
+          // Invalid parent key
+          router.replace('/ParentLogin');
         }
       } else {
         // No parent key, redirect to login
@@ -1376,7 +1385,17 @@ Focus on:
         }
       }
       
-      // Save parent data to Firebase
+      // Resolve login code to actual parent ID
+      const parentIdResult = await readData(`/parentLoginCodes/${parentKey}`);
+      if (!parentIdResult.data) {
+        Alert.alert('Error', 'Invalid parent key. Please contact your teacher.');
+        setRegistrationLoading(false);
+        return;
+      }
+      
+      const actualParentId = parentIdResult.data;
+      
+      // Save parent data to Firebase under the correct parent ID
       const parentData = {
         firstName: registrationData.firstName,
         lastName: registrationData.lastName,
@@ -1385,9 +1404,11 @@ Focus on:
         profilePictureUrl: profilePictureUrl,
         parentKey: parentKey,
         createdAt: new Date().toISOString(),
+        parentId: actualParentId,
+        infoStatus: 'completed',
       };
       
-      const { success, error: dbError } = await writeData(`/parents/${parentKey}`, parentData);
+      const { success, error: dbError } = await writeData(`/parents/${actualParentId}`, parentData);
       
       if (success) {
         Alert.alert('Success', 'Profile completed successfully!');

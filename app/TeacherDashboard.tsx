@@ -5,16 +5,17 @@ import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
-  Alert,
-  Dimensions,
-  Image,
-  Modal,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    Alert,
+    Dimensions,
+    Image,
+    Modal,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    TouchableWithoutFeedback,
+    View
 } from 'react-native';
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
 import { AssignedExercise, useExercises } from '../hooks/useExercises';
@@ -277,6 +278,11 @@ export default function TeacherDashboard() {
   const [studentNickname, setStudentNickname] = useState('');
   const [studentGender, setStudentGender] = useState<'male' | 'female'>('male');
   const [savingStudent, setSavingStudent] = useState(false);
+  
+  // Student menu and parent info state
+  const [studentMenuVisible, setStudentMenuVisible] = useState<string | null>(null);
+  const [showParentInfoModal, setShowParentInfoModal] = useState(false);
+  const [selectedParentInfo, setSelectedParentInfo] = useState<any>(null);
   // List modal state
   const [showListModal, setShowListModal] = useState(false);
   const [studentsByClass, setStudentsByClass] = useState<Record<string, any[]>>({});
@@ -389,16 +395,39 @@ export default function TeacherDashboard() {
       allStudentsByClass: studentsByClass
     });
     
-    // Count unique students who completed this exercise (using parentId since that's what we have)
-    const completedParentIds = new Set(
-      assignmentResults.map((result: any) => result.parentId).filter(Boolean)
-    );
-    const completedCount = completedParentIds.size;
+    // Count students who have completed this exercise using flexible matching
+    const completedStudentIds = new Set<string>();
+    
+    assignmentResults.forEach((result: any) => {
+      // Try to find which student this result belongs to
+      const matchingStudent = classStudents.find((student: any) => {
+        // Try Firebase parent ID match (new format)
+        if (result.parentId === student.parentId) return true;
+        
+        // Try studentId match (if available in result)
+        if (result.studentId === student.studentId) return true;
+        
+        // Try login code match (old format - backward compatibility)
+        const parentData = parentsById[student.parentId];
+        if (parentData && parentData.loginCode && result.parentId === parentData.loginCode) {
+          return true;
+        }
+        
+        return false;
+      });
+      
+      if (matchingStudent) {
+        completedStudentIds.add(matchingStudent.studentId);
+      }
+    });
+    
+    const completedCount = completedStudentIds.size;
     
     console.log('Debug - completion stats:', {
-      completedParentIds: Array.from(completedParentIds),
+      completedStudentIds: Array.from(completedStudentIds),
       completedCount,
-      totalStudents
+      totalStudents,
+      assignmentResults: assignmentResults.map(r => ({ parentId: r.parentId, studentId: r.studentId }))
     });
     
     return {
@@ -414,12 +443,29 @@ export default function TeacherDashboard() {
     const classResults = exerciseResults[assignment.classId] || [];
     
     // Find the student to get their parentId
-    const student = studentsByClass[assignment.classId]?.find((s: any) => s.id === studentId);
+    const student = studentsByClass[assignment.classId]?.find((s: any) => s.studentId === studentId);
     if (!student) return 'pending';
     
-    const studentResult = classResults.find((result: any) => 
-      result.parentId === student.parentId && result.exerciseId === assignment.exerciseId
-    );
+    // Check for exercise results using both Firebase parent ID and login code (for backward compatibility)
+    const studentResult = classResults.find((result: any) => {
+      if (result.exerciseId !== assignment.exerciseId) return false;
+      
+      // Try to match by Firebase parent ID (new format)
+      if (result.parentId === student.parentId) return true;
+      
+      // Try to match by studentId directly (if available in result)
+      if (result.studentId === studentId) return true;
+      
+      // Try to match by login code (old format - backward compatibility)
+      // This requires resolving the student's parent to their login code
+      const parentData = parentsById[student.parentId];
+      if (parentData && parentData.loginCode && result.parentId === parentData.loginCode) {
+        return true;
+      }
+      
+      return false;
+    });
+    
     return studentResult ? 'completed' : 'pending';
   };
 
@@ -575,14 +621,36 @@ export default function TeacherDashboard() {
 
   const loadStudentsAndParents = async (classIds: string[]) => {
     try {
-      const [{ data: students }, { data: parents }] = [
+      const [{ data: students }, { data: parents }, { data: parentLoginCodes }] = [
         await readData('/students'),
         await readData('/parents'),
+        await readData('/parentLoginCodes'),
       ];
+      
+      // Create a reverse lookup map from parentId to loginCode
+      const parentIdToLoginCode: Record<string, string> = {};
+      if (parentLoginCodes) {
+        Object.entries(parentLoginCodes).forEach(([loginCode, parentId]) => {
+          if (typeof parentId === 'string') {
+            parentIdToLoginCode[parentId] = loginCode;
+          }
+        });
+      }
+      
       const parentsMap: Record<string, any> = Object.entries(parents || {}).reduce((acc: any, [id, v]: any) => {
-        acc[id] = { id, ...(v || {}) };
+        const parentData = { id, ...(v || {}) };
+        // Ensure loginCode is available - try from parent data first, then from reverse lookup
+        if (!parentData.loginCode && parentIdToLoginCode[id]) {
+          parentData.loginCode = parentIdToLoginCode[id];
+        }
+        acc[id] = parentData;
         return acc;
       }, {});
+      
+      console.log('Debug - Loaded parents:', Object.keys(parentsMap).length, 'parents');
+      console.log('Debug - Sample parent data:', Object.values(parentsMap)[0]);
+      console.log('Debug - Parent ID to Login Code mapping:', Object.keys(parentIdToLoginCode).length, 'mappings');
+      
       const grouped: Record<string, any[]> = {};
       Object.entries(students || {}).forEach(([id, v]: any) => {
         const s = { studentId: id, ...(v || {}) };
@@ -590,21 +658,25 @@ export default function TeacherDashboard() {
         if (!grouped[s.classId]) grouped[s.classId] = [];
         grouped[s.classId].push(s);
       });
+      console.log('Debug - Loaded students by class:', Object.keys(grouped).map(classId => `${classId}: ${grouped[classId].length} students`));
+      
       setParentsById(parentsMap);
       setStudentsByClass(grouped);
-    } catch {
-      // ignore
+    } catch (error) {
+      console.error('Error loading students and parents:', error);
     }
   };
 
   const loadAssignments = async (classIds: string[]) => {
     console.log('Debug - loadAssignments called with classIds:', classIds);
     try {
-      // Load assignments, exercise results, and students data
-      const [{ data: assignmentsData }, { data: exerciseResultsData }, { data: studentsData }] = await Promise.all([
+      // Load assignments, exercise results, students data, parents data, and login codes
+      const [{ data: assignmentsData }, { data: exerciseResultsData }, { data: studentsData }, { data: parentsData }, { data: loginCodesData }] = await Promise.all([
         readData('/assignedExercises'),
         readData('/ExerciseResults'),
-        readData('/students')
+        readData('/students'),
+        readData('/parents'),
+        readData('/parentLoginCodes')
       ]);
       
       const stats: Record<string, { total: number; completed: number; pending: number }> = {};
@@ -623,18 +695,43 @@ export default function TeacherDashboard() {
       });
       
       // Create a map of parentId to classId from students data
+      // This map will include both Firebase parent IDs and login codes for backward compatibility
       const parentToClassMap: Record<string, string> = {};
       Object.entries(studentsData || {}).forEach(([studentId, student]: any) => {
         if (student.parentId && student.classId && classIds.includes(student.classId)) {
+          // Map Firebase parent ID to class ID
           parentToClassMap[student.parentId] = student.classId;
+          
+          // Also map login code to class ID (for backward compatibility)
+          const parentData = parentsData?.[student.parentId];
+          if (parentData && parentData.loginCode) {
+            parentToClassMap[parentData.loginCode] = student.classId;
+          }
+          
+          // Also check if there's a parent record under the login code format (old data structure)
+          if (parentData && parentData.parentKey) {
+            parentToClassMap[parentData.parentKey] = student.classId;
+          }
+        }
+      });
+      
+      // Also add reverse mappings from login codes to class IDs
+      Object.entries(loginCodesData || {}).forEach(([loginCode, parentId]: any) => {
+        // Find which class this parent belongs to
+        const student = Object.values(studentsData || {}).find((s: any) => s.parentId === parentId);
+        if (student && classIds.includes((student as any).classId)) {
+          parentToClassMap[loginCode] = (student as any).classId;
         }
       });
       
       console.log('Debug - parentToClassMap:', parentToClassMap);
       console.log('Debug - classIds:', classIds);
       console.log('Debug - studentsData sample:', Object.values(studentsData || {}).slice(0, 2));
-      console.log('Debug - Looking for parentId 001091 in students:', Object.values(studentsData || {}).find((s: any) => s.parentId === '001091'));
-      console.log('Debug - Looking for parentId 001091 in ExerciseResults:', Object.values(exerciseResultsData || {}).find((r: any) => r.parentId === '001091'));
+      console.log('Debug - parentsData sample:', Object.values(parentsData || {}).slice(0, 2));
+      console.log('Debug - loginCodesData sample:', Object.entries(loginCodesData || {}).slice(0, 2));
+      console.log('Debug - Looking for parentId 008136 in students:', Object.values(studentsData || {}).find((s: any) => s.parentId === '008136'));
+      console.log('Debug - Looking for parentId 008136 in ExerciseResults:', Object.values(exerciseResultsData || {}).find((r: any) => r.parentId === '008136'));
+      console.log('Debug - Looking for login code 008136 in loginCodesData:', loginCodesData?.['008136']);
       console.log('Debug - All parentIds in students:', Object.values(studentsData || {}).map((s: any) => s.parentId).filter(Boolean));
       console.log('Debug - All parentIds in ExerciseResults:', Object.values(exerciseResultsData || {}).map((r: any) => r.parentId).filter(Boolean));
       
@@ -991,6 +1088,54 @@ export default function TeacherDashboard() {
     } finally {
       setSavingStudent(false);
     }
+  };
+
+  // Student menu handlers
+  const handleEditStudent = (student: any, classInfo: { id: string; name: string }) => {
+    setSelectedClassForStudent(classInfo);
+    setStudentNickname(String(student.nickname || ''));
+    setStudentGender(String(student.gender || 'male') === 'female' ? 'female' : 'male');
+    setShowAddStudentModal(true);
+    setStudentMenuVisible(null);
+  };
+
+  const handleDeleteStudent = (student: any, classId: string) => {
+    Alert.alert(
+      'Delete Student',
+      `Remove "${student.nickname}" from this class? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteData(`/students/${student.studentId}`);
+              await loadStudentsAndParents([classId]);
+              Alert.alert('Removed', 'Student deleted.');
+            } catch (e) {
+              Alert.alert('Error', 'Failed to delete student.');
+            }
+          },
+        },
+      ]
+    );
+    setStudentMenuVisible(null);
+  };
+
+  const handleViewParentInfo = (student: any) => {
+    const parentData = student.parentId ? parentsById[student.parentId] : null;
+    if (parentData) {
+      setSelectedParentInfo({
+        ...parentData,
+        student: student,
+        loginCode: parentData.loginCode || 'N/A'
+      });
+      setShowParentInfoModal(true);
+    } else {
+      Alert.alert('Info', 'Parent information not available.');
+    }
+    setStudentMenuVisible(null);
   };
 
   const fetchTeacherData = async (userId: string) => {
@@ -1750,68 +1895,61 @@ export default function TeacherDashboard() {
                  {(studentsByClass[cls.id] || []).length === 0 ? (
                    <Text style={{ color: '#64748b' }}>No students yet.</Text>
                 ) : (
-                  <>
-                    <View style={styles.studentHeaderRow}>
-                      <Text style={[styles.studentIndex, { width: 28 }]}>#</Text>
-                      <Text style={[styles.studentName, { fontWeight: '700', color: '#374151' }]}>Student Name</Text>
-                      <Text style={[styles.studentCode, { color: '#374151' }]}>Parent Access Code</Text>
-                    </View>
-                    {(studentsByClass[cls.id] || []).map((s: any, idx: number) => {
+                  <TouchableWithoutFeedback onPress={() => setStudentMenuVisible(null)}>
+                    <View>
+                      <View style={styles.studentHeaderRow}>
+                        <Text style={[styles.studentIndex, { width: 28 }]}>#</Text>
+                        <Text style={[styles.studentName, { fontWeight: '700', color: '#374151' }]}>Student Name</Text>
+                        <Text style={[styles.studentCode, { color: '#374151' }]}>Parent Access Code</Text>
+                      </View>
+                      {(studentsByClass[cls.id] || []).map((s: any, idx: number) => {
                       const p = s.parentId ? parentsById[s.parentId] : undefined;
+                      const loginCode = p?.loginCode || 'N/A';
+                      console.log('Debug - Student:', s.nickname, 'ParentId:', s.parentId, 'Parent data:', p, 'Login code:', loginCode);
                       return (
                         <View key={s.studentId} style={styles.studentRow}>
                           <Text style={styles.studentIndex}>{idx + 1}.</Text>
                           <Text style={styles.studentName}>{s.nickname}</Text>
+                          <Text style={styles.studentCode}>{loginCode}</Text>
                           <View style={styles.studentActionsWrap}>
                             <TouchableOpacity
-                              accessibilityLabel="Edit student"
-                              onPress={() => {
-                                setSelectedClassForStudent({ id: cls.id, name: cls.name });
-                                setStudentNickname(String(s.nickname || ''));
-                                setStudentGender(String(s.gender || 'male') === 'female' ? 'female' : 'male');
-                                setShowAddStudentModal(true);
-                              }}
+                              accessibilityLabel="Student options"
+                              onPress={() => setStudentMenuVisible(studentMenuVisible === s.studentId ? null : s.studentId)}
                               style={styles.iconBtn}
                             >
-                              <MaterialIcons name="edit" size={18} color="#64748b" />
+                              <MaterialIcons name="more-vert" size={20} color="#64748b" />
                             </TouchableOpacity>
-                            <TouchableOpacity
-                              accessibilityLabel="Delete student"
-                              onPress={() => {
-                                Alert.alert(
-                                  'Delete Student',
-                                  `Remove "${s.nickname}" from ${cls.name}? This cannot be undone.`,
-                                  [
-                                    { text: 'Cancel', style: 'cancel' },
-                                    {
-                                      text: 'Delete',
-                                      style: 'destructive',
-                                      onPress: async () => {
-                                        try {
-                                          await deleteData(`/students/${s.studentId}`);
-                                          if (s.parentId) {
-                                            // Optional: orphan parent cleanup can be handled server-side; keep code simple here
-                                          }
-                                          await loadStudentsAndParents([cls.id]);
-                                          Alert.alert('Removed', 'Student deleted.');
-                                        } catch (e) {
-                                          Alert.alert('Error', 'Failed to delete student.');
-                                        }
-                                      },
-                                    },
-                                  ]
-                                );
-                              }}
-                              style={styles.iconBtn}
-                            >
-                              <MaterialIcons name="delete" size={18} color="#ef4444" />
-                            </TouchableOpacity>
-                            <Text style={styles.studentCode}>{p?.loginCode || '—'}</Text>
+                            {studentMenuVisible === s.studentId && (
+                              <View style={styles.studentMenuDropdown}>
+                                <TouchableOpacity
+                                  style={styles.studentMenuItem}
+                                  onPress={() => handleEditStudent(s, { id: cls.id, name: cls.name })}
+                                >
+                                  <MaterialIcons name="edit" size={16} color="#64748b" />
+                                  <Text style={styles.studentMenuText}>Edit Student</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  style={styles.studentMenuItem}
+                                  onPress={() => handleViewParentInfo(s)}
+                                >
+                                  <MaterialIcons name="person" size={16} color="#3b82f6" />
+                                  <Text style={styles.studentMenuText}>View Parent Info</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
+                                  onPress={() => handleDeleteStudent(s, cls.id)}
+                                >
+                                  <MaterialIcons name="delete" size={16} color="#ef4444" />
+                                  <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
+                                </TouchableOpacity>
+                              </View>
+                            )}
                           </View>
                         </View>
                       );
                     })}
-                  </>
+                    </View>
+                  </TouchableWithoutFeedback>
                 )}
                </View>
              ))}
@@ -2945,7 +3083,107 @@ export default function TeacherDashboard() {
         </View>
       </Modal>
 
+      {/* Parent Info Modal */}
+      <Modal visible={showParentInfoModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.parentInfoModal}>
+            <View style={styles.parentInfoHeader}>
+              <TouchableOpacity
+                onPress={() => setShowParentInfoModal(false)}
+                style={styles.parentInfoCloseButton}
+              >
+                <MaterialIcons name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+              <Text style={styles.parentInfoTitle}>Parent Information</Text>
+              <View style={styles.parentInfoPlaceholder} />
+            </View>
 
+            {selectedParentInfo && (
+              <ScrollView style={styles.parentInfoContent} showsVerticalScrollIndicator={false}>
+                <View style={styles.parentInfoSection}>
+                  <Text style={styles.parentInfoSectionTitle}>Student Information</Text>
+                  <View style={styles.parentInfoRow}>
+                    <Text style={styles.parentInfoLabel}>Student Name:</Text>
+                    <Text style={styles.parentInfoValue}>{selectedParentInfo.student?.nickname || 'N/A'}</Text>
+                  </View>
+                  <View style={styles.parentInfoRow}>
+                    <Text style={styles.parentInfoLabel}>Gender:</Text>
+                    <Text style={styles.parentInfoValue}>{selectedParentInfo.student?.gender || 'N/A'}</Text>
+                  </View>
+                </View>
+
+                <View style={styles.parentInfoSection}>
+                  <Text style={styles.parentInfoSectionTitle}>Access Information</Text>
+                  <View style={styles.parentInfoRow}>
+                    <Text style={styles.parentInfoLabel}>Parent Access Code:</Text>
+                    <Text style={[styles.parentInfoValue, styles.parentInfoCodeValue]}>{selectedParentInfo.loginCode}</Text>
+                  </View>
+                  <View style={styles.parentInfoRow}>
+                    <Text style={styles.parentInfoLabel}>Account Status:</Text>
+                    <Text style={[styles.parentInfoValue, selectedParentInfo.infoStatus === 'completed' ? styles.parentInfoStatusCompleted : styles.parentInfoStatusPending]}>
+                      {selectedParentInfo.infoStatus === 'completed' ? 'Profile Complete' : 'Profile Pending'}
+                    </Text>
+                  </View>
+                </View>
+
+                {selectedParentInfo.infoStatus === 'completed' && (
+                  <View style={styles.parentInfoSection}>
+                    <Text style={styles.parentInfoSectionTitle}>Parent Details</Text>
+                    <View style={styles.parentInfoRow}>
+                      <Text style={styles.parentInfoLabel}>Name:</Text>
+                      <Text style={styles.parentInfoValue}>
+                        {selectedParentInfo.firstName && selectedParentInfo.lastName 
+                          ? `${selectedParentInfo.firstName} ${selectedParentInfo.lastName}`
+                          : 'Not provided'}
+                      </Text>
+                    </View>
+                    <View style={styles.parentInfoRow}>
+                      <Text style={styles.parentInfoLabel}>Email:</Text>
+                      <Text style={styles.parentInfoValue}>{selectedParentInfo.email || 'Not provided'}</Text>
+                    </View>
+                    <View style={styles.parentInfoRow}>
+                      <Text style={styles.parentInfoLabel}>Mobile:</Text>
+                      <Text style={styles.parentInfoValue}>{selectedParentInfo.mobile || 'Not provided'}</Text>
+                    </View>
+                    {selectedParentInfo.profilePictureUrl && (
+                      <View style={styles.parentInfoRow}>
+                        <Text style={styles.parentInfoLabel}>Profile Picture:</Text>
+                        <View style={styles.parentInfoImageContainer}>
+                          <Image 
+                            source={{ uri: selectedParentInfo.profilePictureUrl }} 
+                            style={styles.parentInfoImage}
+                            resizeMode="cover"
+                          />
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                )}
+
+                {selectedParentInfo.infoStatus === 'pending' && (
+                  <View style={styles.parentInfoSection}>
+                    <View style={styles.parentInfoPendingContainer}>
+                      <MaterialIcons name="info" size={24} color="#f59e0b" />
+                      <Text style={styles.parentInfoPendingText}>
+                        Parent hasn't completed their profile yet. Share the access code with them to get started.
+                      </Text>
+                    </View>
+                  </View>
+                )}
+              </ScrollView>
+            )}
+
+            <View style={styles.parentInfoActions}>
+              <TouchableOpacity
+                style={styles.parentInfoCloseActionButton}
+                onPress={() => setShowParentInfoModal(false)}
+              >
+                <Text style={styles.parentInfoCloseActionButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
     </View>
   );
@@ -4942,6 +5180,180 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 6,
+  },
+  
+  // Student menu dropdown styles
+  studentMenuDropdown: {
+    position: 'absolute',
+    top: 30,
+    right: 0,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    paddingVertical: 4,
+    minWidth: 160,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.1)',
+    zIndex: 1000,
+  },
+  studentMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  studentMenuItemDanger: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(239, 68, 68, 0.1)',
+  },
+  studentMenuText: {
+    marginLeft: 8,
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '500',
+  },
+  studentMenuTextDanger: {
+    color: '#ef4444',
+  },
+  
+  // Parent info modal styles
+  parentInfoModal: {
+    width: '90%',
+    maxWidth: 500,
+    maxHeight: '85%',
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 25,
+  },
+  parentInfoHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,0,0,0.1)',
+  },
+  parentInfoCloseButton: {
+    padding: 4,
+  },
+  parentInfoTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#1e293b',
+  },
+  parentInfoPlaceholder: {
+    width: 32,
+  },
+  parentInfoContent: {
+    maxHeight: 400,
+    paddingHorizontal: 20,
+  },
+  parentInfoSection: {
+    marginVertical: 16,
+  },
+  parentInfoSectionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,0,0,0.1)',
+    paddingBottom: 4,
+  },
+  parentInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+    paddingVertical: 4,
+  },
+  parentInfoLabel: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+    flex: 1,
+  },
+  parentInfoValue: {
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '400',
+    flex: 2,
+    textAlign: 'right',
+  },
+  parentInfoCodeValue: {
+    fontFamily: 'monospace',
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#059669',
+    backgroundColor: 'rgba(5, 150, 105, 0.1)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  parentInfoStatusCompleted: {
+    color: '#059669',
+    fontWeight: '600',
+  },
+  parentInfoStatusPending: {
+    color: '#f59e0b',
+    fontWeight: '600',
+  },
+  parentInfoImageContainer: {
+    flex: 2,
+    alignItems: 'flex-end',
+  },
+  parentInfoImage: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    borderWidth: 2,
+    borderColor: 'rgba(0,0,0,0.1)',
+  },
+  parentInfoPendingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    padding: 16,
+    borderRadius: 8,
+    borderLeftWidth: 4,
+    borderLeftColor: '#f59e0b',
+  },
+  parentInfoPendingText: {
+    marginLeft: 12,
+    fontSize: 14,
+    color: '#92400e',
+    lineHeight: 20,
+    flex: 1,
+  },
+  parentInfoActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,0,0,0.1)',
+  },
+  parentInfoCloseActionButton: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 8,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  parentInfoCloseActionButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   
 });

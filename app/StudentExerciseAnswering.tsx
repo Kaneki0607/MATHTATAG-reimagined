@@ -958,19 +958,36 @@ export default function StudentExerciseAnswering() {
       let parentId: string | null = null;
       let studentId: string | null = null;
       try {
-        parentId = await AsyncStorage.getItem('parent_key');
-        if (parentId) {
-          // Find the student associated with this parent
-          const studentsData = await readData('/students');
-          if (studentsData.data) {
-            const student = Object.values(studentsData.data).find((s: any) => s.parentId === parentId) as any;
-            if (student && student.studentId) {
-              studentId = student.studentId;
-              // Store student ID in AsyncStorage for future use
-              if (studentId) {
-                await AsyncStorage.setItem('student_id', studentId);
+        const loginCode = await AsyncStorage.getItem('parent_key');
+        console.log('Debug - Login code from AsyncStorage:', loginCode);
+        
+        if (loginCode) {
+          // Resolve login code to actual parent ID
+          const parentIdResult = await readData(`/parentLoginCodes/${loginCode}`);
+          console.log('Debug - Parent ID resolution result:', parentIdResult);
+          
+          if (parentIdResult.data) {
+            parentId = parentIdResult.data;
+            console.log('Debug - Resolved parentId:', parentId);
+            
+            // Find the student associated with this parent
+            const studentsData = await readData('/students');
+            if (studentsData.data) {
+              const student = Object.values(studentsData.data).find((s: any) => s.parentId === parentId) as any;
+              console.log('Debug - Found student:', student);
+              
+              if (student && student.studentId) {
+                studentId = student.studentId;
+                console.log('Debug - Final studentId:', studentId);
+                
+                // Store student ID in AsyncStorage for future use
+                if (studentId) {
+                  await AsyncStorage.setItem('student_id', studentId);
+                }
               }
             }
+          } else {
+            console.warn('Debug - No parent ID found for login code:', loginCode);
           }
         }
       } catch (error) {
@@ -1369,6 +1386,10 @@ export default function StudentExerciseAnswering() {
         resultId,
         exerciseId
       });
+      
+      if (!parentId) {
+        console.warn('No parentId found - exercise result may not be properly tracked');
+      }
       
       const resultData = {
         // Core identifiers

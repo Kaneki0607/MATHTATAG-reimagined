@@ -4,9 +4,11 @@ import { useFonts } from 'expo-font';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, NativeScrollEvent, NativeSyntheticEvent, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import TermsAndConditions from '../components/TermsAndConditions';
 import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
+import { hasParentAgreedToTerms, recordParentTermsAgreement } from '../lib/terms-utils';
 
 const { width } = Dimensions.get('window'); // Removed unused height variable
 
@@ -19,13 +21,9 @@ export default function ParentLogin() {
     'LeagueSpartan-Bold': require('../assets/fonts/LeagueSpartan-Bold.ttf'),
   });
 
-  const TERMS_KEY = 'parentAgreedToTerms';
-  const TERMS_TEXT = `MATH TATAG - TERMS AND CONDITIONS\n\n1. Data Privacy: We comply with the Philippine Data Privacy Act (RA 10173). Your personal information is collected, processed, and stored solely for educational purposes. We do not sell or share your data with third parties except as required by law.\n\n2. Consent: By using this app, you consent to the collection and use of your data for learning analytics, progress tracking, and communication with your school.\n\n3. User Responsibilities: You agree to use this app for lawful, educational purposes only. Do not share your login credentials.\n\n4. Intellectual Property: All content, including lessons and activities, is owned by the app developers and licensors.\n\n5. Limitation of Liability: The app is provided as-is. We are not liable for any damages arising from its use.\n\n6. Updates: We may update these terms. Continued use means you accept the new terms.\n\n7. Contact: For privacy concerns, contact your school or the app administrator.\n\nBy agreeing, you acknowledge you have read and understood these terms in accordance with Philippine law.`;
-
   const [showTermsModal, setShowTermsModal] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
-  const [canCheckAgreement, setCanCheckAgreement] = useState(false);
-  const [hasScrolledToEnd, setHasScrolledToEnd] = useState(false);
+  const [currentParentId, setCurrentParentId] = useState<string | null>(null);
   
   // Parent Registration Modal States
   const [showRegistrationModal, setShowRegistrationModal] = useState(false);
@@ -42,15 +40,28 @@ export default function ParentLogin() {
   const STORAGE_PARENT_KEY = 'parent_key';
 
   useEffect(() => {
-    // Show terms modal on mount
-    setShowTermsModal(true);
-    // Load saved parent key
+    // Load saved parent key and check terms agreement
     (async () => {
       try {
         const savedKey = await AsyncStorage.getItem(STORAGE_PARENT_KEY);
-        if (savedKey) setParentKey(savedKey);
+        if (savedKey) {
+          setParentKey(savedKey);
+          
+          // Check if this parent has already agreed to terms
+          const hasAgreed = await hasParentAgreedToTerms();
+          if (hasAgreed) {
+            setAgreedToTerms(true);
+          } else {
+            // Show terms modal only if they haven't agreed yet
+            setShowTermsModal(true);
+          }
+        } else {
+          // No saved key, show terms modal for new users
+          setShowTermsModal(true);
+        }
       } catch {
-        // ignore storage errors
+        // ignore storage errors, show terms modal as fallback
+        setShowTermsModal(true);
       }
     })();
   }, []);
@@ -58,19 +69,13 @@ export default function ParentLogin() {
   // Handler for opening terms modal
   const openTerms = () => setShowTermsModal(true);
 
-  // Handler for agreeing
-  const handleAgree = () => {
+  // Handler for agreeing to terms
+  const handleTermsAgree = async () => {
     setShowTermsModal(false);
     setAgreedToTerms(true);
-    setCanCheckAgreement(true);
-  };
-
-  // Handler for scroll to end
-  const handleTermsScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
-    if (layoutMeasurement.height + contentOffset.y >= contentSize.height - 20) {
-      setHasScrolledToEnd(true);
-    }
+    
+    // Record the agreement
+    await recordParentTermsAgreement(currentParentId);
   };
 
   // Registration handlers
@@ -165,7 +170,17 @@ export default function ParentLogin() {
         }
       }
       
-      // Save parent data to Firebase
+      // Resolve login code to actual parent ID
+      const parentIdResult = await readData(`/parentLoginCodes/${parentKey.trim()}`);
+      if (!parentIdResult.data) {
+        Alert.alert('Error', 'Invalid parent key. Please contact your teacher.');
+        setRegistrationLoading(false);
+        return;
+      }
+      
+      const actualParentId = parentIdResult.data;
+      
+      // Save parent data to Firebase under the correct parent ID
       const parentData = {
         firstName: registrationData.firstName,
         lastName: registrationData.lastName,
@@ -174,9 +189,11 @@ export default function ParentLogin() {
         profilePictureUrl: profilePictureUrl,
         parentKey: parentKey.trim(),
         createdAt: new Date().toISOString(),
+        parentId: actualParentId,
+        infoStatus: 'completed',
       };
       
-      const { success, error: dbError } = await writeData(`/parents/${parentKey.trim()}`, parentData);
+      const { success, error: dbError } = await writeData(`/parents/${actualParentId}`, parentData);
       
       if (success) {
         // Save parent key to storage
@@ -215,16 +232,28 @@ export default function ParentLogin() {
     }
 
     try {
-      // Check if parent exists in database
-      const parentData = await readData(`/parents/${parentKey.trim()}`);
+      // First, resolve the login code to get the actual parent ID
+      const parentIdResult = await readData(`/parentLoginCodes/${parentKey.trim()}`);
       
-      if (parentData) {
-        // Parent exists, save key and navigate to dashboard
+      if (!parentIdResult.data) {
+        setError('Invalid parent key. Please contact your teacher.');
+        setLoading(false);
+        return;
+      }
+      
+      const actualParentId = parentIdResult.data;
+      setCurrentParentId(actualParentId);
+      
+      // Check if parent profile exists
+      const parentProfileResult = await readData(`/parents/${actualParentId}`);
+      
+      if (parentProfileResult.data && parentProfileResult.data.infoStatus === 'completed') {
+        // Parent profile is complete, save key and navigate to dashboard
         await AsyncStorage.setItem(STORAGE_PARENT_KEY, parentKey.trim());
         setLoading(false);
         router.replace('/ParentDashboard');
       } else {
-        // Parent doesn't exist, show registration modal
+        // Parent profile doesn't exist or is incomplete, show registration modal
         setLoading(false);
         setShowRegistrationModal(true);
       }
@@ -281,8 +310,7 @@ export default function ParentLogin() {
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start', marginTop: 10, marginBottom: 6, paddingLeft: 20 }}>
             <TouchableOpacity
               style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: '#00aaff', alignItems: 'center', justifyContent: 'center', marginRight: 8 }}
-              disabled={!canCheckAgreement}
-              onPress={() => canCheckAgreement && setAgreedToTerms(v => !v)}
+              onPress={() => setAgreedToTerms(v => !v)}
             >
               {agreedToTerms ? (
                 <View style={{ width: 14, height: 14, backgroundColor: '#00aaff', borderRadius: 3 }} />
@@ -298,23 +326,11 @@ export default function ParentLogin() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
-      <Modal visible={showTermsModal} animationType="slide" transparent>
-        <View style={{ flex: 1, backgroundColor: 'srgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center' }}>
-          <View style={{ width: '90%', maxWidth: 420, backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 18, padding: 0, overflow: 'hidden', maxHeight: '85%', borderWidth: 2, borderColor: 'rgba(35, 177, 248, 0.4)', shadowColor: '#00aaff', shadowOpacity: 0.5, shadowRadius: 15, shadowOffset: { width: 0, height: 8 }, elevation: 15 }}>
-            <Text style={{ fontWeight: 'bold', fontSize: 20, color: 'rgb(40, 127, 214)', textAlign: 'center', marginTop: 18, marginBottom: 8 }}>Terms and Conditions</Text>
-            <ScrollView style={{ paddingHorizontal: 18, paddingBottom: 18, maxHeight: 380 }} onScroll={handleTermsScroll} scrollEventThrottle={16} showsVerticalScrollIndicator={true}>
-              <Text style={{ fontSize: 15, color: '#1e293b', lineHeight: 22 }}>{TERMS_TEXT}</Text>
-            </ScrollView>
-            <TouchableOpacity
-              style={{ backgroundColor: hasScrolledToEnd ? 'rgb(40, 127, 214)' : 'rgba(236, 236, 236, 1)', borderRadius: 16, margin: 18, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: hasScrolledToEnd ? 'rgba(0,170,255,0.3)' : 'rgba(150,150,150,0.2)' }}
-              disabled={!hasScrolledToEnd}
-              onPress={handleAgree}
-            >
-              <Text style={{ color: '#ffffff', fontWeight: 'bold', fontSize: 16 }}>Agree</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      <TermsAndConditions
+        visible={showTermsModal}
+        onAgree={handleTermsAgree}
+        title="Terms and Conditions"
+      />
       
       {/* Parent Registration Modal */}
       <Modal visible={showRegistrationModal} animationType="slide" transparent>
@@ -331,6 +347,30 @@ export default function ParentLogin() {
             </View>
             
             <ScrollView style={styles.registrationForm} showsVerticalScrollIndicator={false}>
+              {/* Terms and Conditions Section */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Terms and Conditions</Text>
+                <View style={styles.termsContainer}>
+                  <View style={styles.termsCheckboxContainer}>
+                    <TouchableOpacity
+                      style={[styles.termsCheckbox, agreedToTerms && styles.termsCheckboxChecked]}
+                      onPress={() => setAgreedToTerms(!agreedToTerms)}
+                    >
+                      {agreedToTerms && <AntDesign name="check" size={14} color="#ffffff" />}
+                    </TouchableOpacity>
+                    <Text style={styles.termsCheckboxText}>
+                      I agree to the{' '}
+                      <Text style={styles.termsLink} onPress={openTerms}>
+                        Terms and Conditions
+                      </Text>
+                    </Text>
+                  </View>
+                  <Text style={styles.termsNote}>
+                    You must agree to the terms and conditions to complete registration.
+                  </Text>
+                </View>
+              </View>
+
               {/* Personal Information */}
               <View style={styles.inputGroup}>
                 <Text style={styles.inputLabel}>Personal Information</Text>
@@ -415,9 +455,9 @@ export default function ParentLogin() {
                 <Text style={styles.cancelButtonText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity 
-                style={[styles.createButton, registrationLoading && styles.buttonDisabled]} 
+                style={[styles.createButton, (registrationLoading || !agreedToTerms) && styles.buttonDisabled]} 
                 onPress={handleRegistration}
-                disabled={registrationLoading}
+                disabled={registrationLoading || !agreedToTerms}
               >
                 <Text style={styles.createButtonText}>
                   {registrationLoading ? 'Creating Profile...' : 'Complete Registration'}
@@ -761,5 +801,48 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     marginLeft: 6,
+  },
+  // Terms section styles for registration modal
+  termsContainer: {
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,170,255,0.3)',
+    borderRadius: 12,
+    padding: 15,
+  },
+  termsCheckboxContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  termsCheckbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: 'rgba(0,170,255,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    backgroundColor: 'transparent',
+  },
+  termsCheckboxChecked: {
+    backgroundColor: 'rgb(40, 127, 214)',
+    borderColor: 'rgb(40, 127, 214)',
+  },
+  termsCheckboxText: {
+    fontSize: 14,
+    color: '#1e293b',
+    flex: 1,
+  },
+  termsLink: {
+    color: 'rgb(40, 127, 214)',
+    textDecorationLine: 'underline',
+    fontWeight: '600',
+  },
+  termsNote: {
+    fontSize: 12,
+    color: '#64748b',
+    fontStyle: 'italic',
   },
 }); 

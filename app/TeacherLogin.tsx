@@ -4,10 +4,12 @@ import { useFonts } from 'expo-font';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, NativeScrollEvent, NativeSyntheticEvent, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import TermsAndConditions from '../components/TermsAndConditions';
 import { signInUser, signUpUser } from '../lib/firebase-auth';
 import { writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
+import { hasTeacherAgreedToTerms, recordTeacherTermsAgreement } from '../lib/terms-utils';
 
 const { width } = Dimensions.get('window'); // Removed unused height variable
 
@@ -21,13 +23,9 @@ export default function TeacherLogin() {
     'LeagueSpartan-Bold': require('../assets/fonts/LeagueSpartan-Bold.ttf'),
   });
 
-  const TERMS_KEY = 'teacherAgreedToTerms';
-  const TERMS_TEXT = `MATH TATAG - TERMS AND CONDITIONS\n\n1. Data Privacy: We comply with the Philippine Data Privacy Act (RA 10173). Your personal information is collected, processed, and stored solely for educational purposes. We do not sell or share your data with third parties except as required by law.\n\n2. Consent: By using this app, you consent to the collection and use of your data for learning analytics, progress tracking, and communication with your school.\n\n3. User Responsibilities: You agree to use this app for lawful, educational purposes only. Do not share your login credentials.\n\n4. Intellectual Property: All content, including lessons and activities, is owned by the app developers and licensors.\n\n5. Limitation of Liability: The app is provided as-is. We are not liable for any damages arising from its use.\n\n6. Updates: We may update these terms. Continued use means you accept the new terms.\n\n7. Contact: For privacy concerns, contact your school or the app administrator.\n\nBy agreeing, you acknowledge you have read and understood these terms in accordance with Philippine law.`;
-
   const [showTermsModal, setShowTermsModal] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
-  const [canCheckAgreement, setCanCheckAgreement] = useState(false);
-  const [hasScrolledToEnd, setHasScrolledToEnd] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   
   // Remember me keys
   const STORAGE_EMAIL_KEY = 'teacher_email';
@@ -51,9 +49,7 @@ export default function TeacherLogin() {
   const [signUpLoading, setSignUpLoading] = useState(false);
 
   useEffect(() => {
-    // Show terms modal on mount
-    setShowTermsModal(true);
-    // Load saved credentials
+    // Load saved credentials and check terms agreement
     (async () => {
       try {
         const [savedEmail, savedPassword] = await Promise.all([
@@ -62,8 +58,18 @@ export default function TeacherLogin() {
         ]);
         if (savedEmail) setEmail(savedEmail);
         if (savedPassword) setPassword(savedPassword);
+
+        // Check if teacher has already agreed to terms
+        const hasAgreed = await hasTeacherAgreedToTerms();
+        if (hasAgreed) {
+          setAgreedToTerms(true);
+        } else {
+          // Show terms modal only if they haven't agreed yet
+          setShowTermsModal(true);
+        }
       } catch {
-        // ignore storage errors
+        // ignore storage errors, show terms modal as fallback
+        setShowTermsModal(true);
       }
     })();
   }, []);
@@ -87,6 +93,7 @@ export default function TeacherLogin() {
       }
       
       if (user) {
+        setCurrentUserId(user.uid);
         router.replace('/TeacherDashboard');
       }
     } catch (error) {
@@ -99,11 +106,13 @@ export default function TeacherLogin() {
   // Handler for opening terms modal
   const openTerms = () => setShowTermsModal(true);
 
-  // Handler for agreeing
-  const handleAgree = () => {
+  // Handler for agreeing to terms
+  const handleTermsAgree = async () => {
     setShowTermsModal(false);
     setAgreedToTerms(true);
-    setCanCheckAgreement(true);
+    
+    // Record the agreement
+    await recordTeacherTermsAgreement(currentUserId || undefined);
   };
 
   // Sign Up Handlers
@@ -278,13 +287,6 @@ export default function TeacherLogin() {
     }
   };
 
-  // Handler for scroll to end
-  const handleTermsScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
-    if (layoutMeasurement.height + contentOffset.y >= contentSize.height - 20) {
-      setHasScrolledToEnd(true);
-    }
-  };
 
   if (!fontsLoaded) return null;
 
@@ -356,8 +358,7 @@ export default function TeacherLogin() {
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start', marginTop: 10, marginBottom: 6, paddingLeft: 20 }}>
             <TouchableOpacity
               style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: '#00aaff', alignItems: 'center', justifyContent: 'center', marginRight: 8 }}
-              disabled={!canCheckAgreement}
-              onPress={() => canCheckAgreement && setAgreedToTerms(v => !v)}
+              onPress={() => setAgreedToTerms(v => !v)}
             >
               {agreedToTerms ? (
                 <View style={{ width: 14, height: 14, backgroundColor: '#00aaff', borderRadius: 3 }} />
@@ -390,23 +391,11 @@ export default function TeacherLogin() {
           </View>
         </View>
       </KeyboardAvoidingView>
-      <Modal visible={showTermsModal} animationType="slide" transparent>
-        <View style={{ flex: 1, backgroundColor: 'srgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center' }}>
-          <View style={{ width: '90%', maxWidth: 420, backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 18, padding: 0, overflow: 'hidden', maxHeight: '85%', borderWidth: 2, borderColor: 'rgba(35, 177, 248, 0.4)', shadowColor: '#00aaff', shadowOpacity: 0.5, shadowRadius: 15, shadowOffset: { width: 0, height: 8 }, elevation: 15 }}>
-            <Text style={{ fontWeight: 'bold', fontSize: 20, color: 'rgb(40, 127, 214)', textAlign: 'center', marginTop: 18, marginBottom: 8 }}>Terms and Conditions</Text>
-            <ScrollView style={{ paddingHorizontal: 18, paddingBottom: 18, maxHeight: 380 }} onScroll={handleTermsScroll} scrollEventThrottle={16} showsVerticalScrollIndicator={true}>
-              <Text style={{ fontSize: 15, color: '#1e293b', lineHeight: 22 }}>{TERMS_TEXT}</Text>
-            </ScrollView>
-            <TouchableOpacity
-              style={{ backgroundColor: hasScrolledToEnd ? 'rgb(40, 127, 214)' : 'rgba(236, 236, 236, 1)', borderRadius: 16, margin: 18, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: hasScrolledToEnd ? 'rgba(0,170,255,0.3)' : 'rgba(150,150,150,0.2)' }}
-              disabled={!hasScrolledToEnd}
-              onPress={handleAgree}
-            >
-              <Text style={{ color: '#ffffff', fontWeight: 'bold', fontSize: 16 }}>Agree</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      <TermsAndConditions
+        visible={showTermsModal}
+        onAgree={handleTermsAgree}
+        title="Terms and Conditions"
+      />
       
       {/* Sign Up Modal */}
       <Modal visible={showSignUpModal} animationType="slide" transparent>
@@ -610,9 +599,9 @@ export default function TeacherLogin() {
                 <Text style={styles.cancelButtonText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity 
-                style={[styles.createButton, signUpLoading && styles.buttonDisabled]} 
+                style={[styles.createButton, (signUpLoading || !signUpData.agreedToEULA) && styles.buttonDisabled]} 
                 onPress={handleSignUp}
-                disabled={signUpLoading}
+                disabled={signUpLoading || !signUpData.agreedToEULA}
               >
                 <Text style={styles.createButtonText}>
                   {signUpLoading ? 'Creating Account...' : 'Create Account'}
