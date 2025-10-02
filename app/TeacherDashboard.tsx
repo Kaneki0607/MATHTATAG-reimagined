@@ -5,17 +5,17 @@ import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
-    Alert,
-    Dimensions,
-    Image,
-    Modal,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    TouchableWithoutFeedback,
-    View
+  Alert,
+  Dimensions,
+  Image,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View
 } from 'react-native';
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
 import { AssignedExercise, useExercises } from '../hooks/useExercises';
@@ -283,6 +283,10 @@ export default function TeacherDashboard() {
   const [studentMenuVisible, setStudentMenuVisible] = useState<string | null>(null);
   const [showParentInfoModal, setShowParentInfoModal] = useState(false);
   const [selectedParentInfo, setSelectedParentInfo] = useState<any>(null);
+  
+  // Results sorting state
+  const [resultsSortBy, setResultsSortBy] = useState<'attempts' | 'time'>('attempts');
+  const [resultsSortOrder, setResultsSortOrder] = useState<'asc' | 'desc'>('asc');
   // List modal state
   const [showListModal, setShowListModal] = useState(false);
   const [studentsByClass, setStudentsByClass] = useState<Record<string, any[]>>({});
@@ -311,12 +315,22 @@ export default function TeacherDashboard() {
   const [editingAssignment, setEditingAssignment] = useState<AssignedExercise | null>(null);
   const [deletingAssignment, setDeletingAssignment] = useState<AssignedExercise | null>(null);
   const [editAssignmentLoading, setEditAssignmentLoading] = useState(false);
+  const [editAcceptLateSubmissions, setEditAcceptLateSubmissions] = useState(true);
   const [deleteAssignmentLoading, setDeleteAssignmentLoading] = useState(false);
 
   // Student completion status modal
   const [showStudentStatusModal, setShowStudentStatusModal] = useState(false);
   const [selectedAssignmentForStatus, setSelectedAssignmentForStatus] = useState<AssignedExercise | null>(null);
   const [completedStudents, setCompletedStudents] = useState<Record<string, string[]>>({}); // assignmentId -> studentIds[]
+
+  // Student performance modal
+  const [showStudentPerformanceModal, setShowStudentPerformanceModal] = useState(false);
+  const [selectedStudentPerformance, setSelectedStudentPerformance] = useState<any>(null);
+  const [selectedExerciseForPerformance, setSelectedExerciseForPerformance] = useState<any>(null);
+  const [studentPerformanceData, setStudentPerformanceData] = useState<any>(null);
+  const [loadingStudentPerformance, setLoadingStudentPerformance] = useState(false);
+  const [geminiAnalysis, setGeminiAnalysis] = useState<any>(null);
+  const [classAverages, setClassAverages] = useState<any>(null);
 
   // Date/Time picker state
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -519,6 +533,7 @@ export default function TeacherDashboard() {
     deleteExercise,
     assignExercise,
     deleteAssignment,
+    updateAssignmentStatus,
   } = useExercises(currentUserId || null);
   
 
@@ -781,9 +796,16 @@ export default function TeacherDashboard() {
     }
   };
 
-  const handleAssignExercise = async (classIds: string[], deadline: string) => {
+  const handleAssignExercise = async (classIds: string[], deadline: string, acceptLateSubmissions: boolean) => {
     try {
-      await assignExercise(selectedExerciseForAssign.id, classIds, deadline, currentUserId!);
+      await assignExercise(
+        selectedExerciseForAssign.id, 
+        classIds, 
+        deadline, 
+        currentUserId!, 
+        acceptLateSubmissions, 
+        'open' // Default to open status
+      );
       Alert.alert('Success', 'Exercise assigned successfully');
     } catch (error) {
       Alert.alert('Error', 'Failed to assign exercise');
@@ -793,6 +815,7 @@ export default function TeacherDashboard() {
   const handleEditAssignment = (assignment: AssignedExercise) => {
     setEditingAssignment(assignment);
     setNewDeadline(assignment.deadline || '');
+    setEditAcceptLateSubmissions(assignment.acceptLateSubmissions ?? true);
     
     // Initialize date/time pickers with current deadline or current date/time
     if (assignment.deadline) {
@@ -811,6 +834,33 @@ export default function TeacherDashboard() {
   const handleDeleteAssignment = (assignment: AssignedExercise) => {
     setDeletingAssignment(assignment);
     setShowDeleteAssignmentModal(true);
+  };
+
+  const handleToggleAcceptingStatus = async (assignment: AssignedExercise) => {
+    try {
+      const newStatus = assignment.acceptingStatus === 'closed' ? 'open' : 'closed';
+      const statusText = newStatus === 'closed' ? 'close' : 'reopen';
+      
+      Alert.alert(
+        `${statusText.charAt(0).toUpperCase() + statusText.slice(1)} Assignment`,
+        `Are you sure you want to ${statusText} "${assignment.exercise?.title}" for ${assignment.className}?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { 
+            text: statusText.charAt(0).toUpperCase() + statusText.slice(1), 
+            onPress: async () => {
+              await updateAssignmentStatus(assignment.id, newStatus);
+              Alert.alert(
+                'Success', 
+                `Assignment ${newStatus === 'closed' ? 'closed' : 'reopened'} successfully`
+              );
+            }
+          }
+        ]
+      );
+    } catch (error) {
+      Alert.alert('Error', 'Failed to update assignment status');
+    }
   };
 
   const confirmDeleteAssignment = async () => {
@@ -841,19 +891,32 @@ export default function TeacherDashboard() {
     
     setEditAssignmentLoading(true);
     try {
-      // Update the assignment in the database
-      const { success, error } = await updateData(`/assignments/${editingAssignment.id}`, {
-        deadline: newDeadline
-      });
+      // Get current assignment data
+      const { data: currentAssignment } = await readData(`/assignedExercises/${editingAssignment.id}`);
+      if (!currentAssignment) {
+        throw new Error('Assignment not found');
+      }
+
+      // Update the assignment with new deadline and late submissions setting
+      const updatedAssignment = {
+        ...currentAssignment,
+        deadline: newDeadline,
+        acceptLateSubmissions: editAcceptLateSubmissions,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const { success, error } = await writeData(`/assignedExercises/${editingAssignment.id}`, updatedAssignment);
       
       if (success) {
         setShowEditAssignmentModal(false);
         setEditingAssignment(null);
         setNewDeadline('');
-        // The useExercises hook will automatically refresh the list
-        Alert.alert('Success', 'Assignment deadline updated successfully');
+        setEditAcceptLateSubmissions(true);
+        // Refresh the assigned exercises list
+        await loadAssignedExercises();
+        Alert.alert('Success', 'Assignment updated successfully');
       } else {
-        Alert.alert('Error', `Failed to update assignment: ${error}`);
+        Alert.alert('Error', error || 'Failed to update assignment');
       }
     } catch (error) {
       Alert.alert('Error', 'Failed to update assignment');
@@ -869,6 +932,459 @@ export default function TeacherDashboard() {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+
+  // Helper function to calculate individual student metrics
+  const calculateStudentMetrics = (resultData: any) => {
+    const questionResults = resultData.questionResults || [];
+    const totalQuestions = questionResults.length;
+    
+    if (totalQuestions === 0) {
+      return {
+        efficiencyScore: 0,
+        consistencyScore: 0,
+        masteryScore: 0,
+        overallScore: 0,
+        totalAttempts: 0,
+        totalTime: 0,
+        avgAttemptsPerQuestion: 0,
+        avgTimePerQuestion: 0
+      };
+    }
+    
+    // Calculate efficiency score (lower attempts and time = higher score)
+    const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+    const totalTime = resultData.totalTimeSpent || 0;
+    const avgAttemptsPerQuestion = totalAttempts / totalQuestions;
+    const avgTimePerQuestion = totalTime / totalQuestions;
+    
+    // Calculate consistency score (how consistent performance is across questions)
+    const attemptVariance = questionResults.reduce((sum: number, q: any) => {
+      const deviation = Math.abs((q.attempts || 1) - avgAttemptsPerQuestion);
+      return sum + (deviation * deviation);
+    }, 0) / totalQuestions;
+    
+    const timeVariance = questionResults.reduce((sum: number, q: any) => {
+      const deviation = Math.abs((q.timeSpent || 0) - avgTimePerQuestion);
+      return sum + (deviation * deviation);
+    }, 0) / totalQuestions;
+    
+    // Calculate mastery score based on actual performance (same as parent dashboard)
+    const correctAnswers = questionResults.length; // All questions are correct since student completed
+    const masteryScore = Math.round((correctAnswers / totalQuestions) * 100);
+    
+    // Improved efficiency scoring with more granular scale (same as parent dashboard)
+    let efficiencyScore;
+    if (avgAttemptsPerQuestion <= 1) {
+      efficiencyScore = 100; // Perfect efficiency
+    } else if (avgAttemptsPerQuestion <= 1.5) {
+      efficiencyScore = 90; // Excellent efficiency
+    } else if (avgAttemptsPerQuestion <= 2) {
+      efficiencyScore = 80; // Good efficiency
+    } else if (avgAttemptsPerQuestion <= 2.5) {
+      efficiencyScore = 70; // Fair efficiency
+    } else if (avgAttemptsPerQuestion <= 3) {
+      efficiencyScore = 60; // Poor efficiency
+    } else {
+      efficiencyScore = Math.max(40, 100 - (avgAttemptsPerQuestion - 1) * 15); // Decreasing score
+    }
+    
+    // Improved consistency scoring (same as parent dashboard)
+    let consistencyScore;
+    if (attemptVariance <= 0.1) {
+      consistencyScore = 100; // Perfect consistency
+    } else if (attemptVariance <= 0.25) {
+      consistencyScore = 90; // Excellent consistency
+    } else if (attemptVariance <= 0.5) {
+      consistencyScore = 80; // Good consistency
+    } else if (attemptVariance <= 1.0) {
+      consistencyScore = 70; // Fair consistency
+    } else if (attemptVariance <= 1.5) {
+      consistencyScore = 60; // Poor consistency
+    } else {
+      consistencyScore = Math.max(40, 100 - attemptVariance * 20); // Decreasing score
+    }
+    
+    // Calculate overall score with better weighting (same as parent dashboard)
+    const overallScore = Math.round(
+      (efficiencyScore * 0.5) +  // Increased weight for efficiency
+      (consistencyScore * 0.3) + 
+      (masteryScore * 0.2)       // Reduced weight for mastery since it's often 100%
+    );
+    
+    return {
+      efficiencyScore: Math.round(efficiencyScore),
+      consistencyScore: Math.round(consistencyScore),
+      masteryScore: Math.round(masteryScore),
+      overallScore,
+      totalAttempts,
+      totalTime,
+      avgAttemptsPerQuestion: Math.round(avgAttemptsPerQuestion * 10) / 10,
+      avgTimePerQuestion: Math.round(avgTimePerQuestion)
+    };
+  };
+
+  // Function to load student performance data
+  const loadStudentPerformance = async (studentId: string, exerciseId: string, classId: string) => {
+    try {
+      setLoadingStudentPerformance(true);
+      
+      // Get the student's result for this exercise
+      const { data: allResults } = await readData('/ExerciseResults');
+      if (!allResults) return;
+
+      const results = Object.values(allResults) as any[];
+      const studentResult = results.find((result: any) => 
+        result.exerciseId === exerciseId && 
+        result.classId === classId && 
+        result.studentId === studentId
+      );
+
+      if (!studentResult) {
+        Alert.alert('No Data', 'No performance data found for this student.');
+        return;
+      }
+
+      // Get exercise data
+      const { data: exerciseData } = await readData(`/exercises/${exerciseId}`);
+      if (!exerciseData) {
+        Alert.alert('Error', 'Exercise data not found.');
+        return;
+      }
+
+      // Calculate performance metrics
+      const performanceMetrics = calculateStudentMetrics(studentResult);
+      
+      // Get class comparison data
+      const sameExerciseResults = results.filter((result: any) =>
+        result.exerciseId === exerciseId &&
+        result.classId === classId &&
+        result.studentId !== studentId // Exclude current student's result
+      );
+
+      let classStats = null;
+      if (sameExerciseResults.length > 0) {
+        const classMetrics = sameExerciseResults.map((result: any) => calculateStudentMetrics(result));
+        classStats = {
+          averageEfficiency: classMetrics.reduce((sum, m) => sum + m.efficiencyScore, 0) / classMetrics.length,
+          averageConsistency: classMetrics.reduce((sum, m) => sum + m.consistencyScore, 0) / classMetrics.length,
+          averageMastery: classMetrics.reduce((sum, m) => sum + m.masteryScore, 0) / classMetrics.length,
+          averageOverall: classMetrics.reduce((sum, m) => sum + m.overallScore, 0) / classMetrics.length,
+        };
+      }
+
+      // Determine performance level
+      let performanceLevel = 'needs_improvement';
+      if (performanceMetrics.overallScore >= 85) performanceLevel = 'excellent';
+      else if (performanceMetrics.overallScore >= 70) performanceLevel = 'good';
+      else if (performanceMetrics.overallScore >= 50) performanceLevel = 'fair';
+
+      // Calculate class averages for comparison
+      let classAveragesData = null;
+      if (sameExerciseResults.length > 0) {
+        const totalClassScore = sameExerciseResults.reduce((sum: number, result: any) => sum + (result.scorePercentage || 0), 0);
+        const totalClassTime = sameExerciseResults.reduce((sum: number, result: any) => sum + (result.totalTimeSpent || 0), 0);
+        
+        // Calculate question-level averages
+        const questionAverages: any = {};
+        const questionIds = new Set<string>();
+        
+        // Collect all question IDs from all results
+        sameExerciseResults.forEach((result: any) => {
+          if (result.questionResults) {
+            result.questionResults.forEach((q: any) => {
+              questionIds.add(q.questionId);
+            });
+          }
+        });
+        
+        // Calculate averages for each question
+        questionIds.forEach(questionId => {
+          const questionResults = sameExerciseResults
+            .map((result: any) => result.questionResults?.find((q: any) => q.questionId === questionId))
+            .filter(Boolean);
+          
+          if (questionResults.length > 0) {
+            const totalTime = questionResults.reduce((sum: number, q: any) => sum + (q.timeSpent || 0), 0);
+            const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+            
+            questionAverages[questionId] = {
+              averageTime: totalTime / questionResults.length,
+              averageAttempts: totalAttempts / questionResults.length,
+              totalStudents: questionResults.length
+            };
+          }
+        });
+        
+        classAveragesData = {
+          averageScore: totalClassScore / sameExerciseResults.length,
+          averageTime: totalClassTime / sameExerciseResults.length,
+          totalStudents: sameExerciseResults.length,
+          questionAverages
+        };
+      }
+
+      setClassAverages(classAveragesData);
+
+      setStudentPerformanceData({
+        studentResult,
+        exerciseData,
+        performanceMetrics,
+        classStats,
+        performanceLevel,
+        totalStudents: sameExerciseResults.length + 1
+      });
+
+      // Generate Gemini analysis
+      const analysis = await generateGeminiAnalysis(studentResult, classAveragesData);
+      setGeminiAnalysis(analysis);
+
+    } catch (error) {
+      console.error('Error loading student performance:', error);
+      Alert.alert('Error', 'Failed to load student performance data.');
+    } finally {
+      setLoadingStudentPerformance(false);
+    }
+  };
+
+  // Function to generate Gemini analysis with retry logic
+  const generateGeminiAnalysis = async (resultData: any, classAverages: any, retryCount: number = 0): Promise<any> => {
+    const maxRetries = 3;
+    const retryDelay = 1000 * (retryCount + 1); // Exponential backoff: 1s, 2s, 3s
+    
+    try {
+      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
+      
+      // Prepare performance data for analysis
+      const performanceData = {
+        score: resultData.scorePercentage,
+        totalQuestions: resultData.totalQuestions,
+        timeSpent: resultData.totalTimeSpent,
+        questionResults: resultData.questionResults || [],
+        classAverage: classAverages?.averageScore || 0,
+        classAverageTime: classAverages?.averageTime || 0
+      };
+      
+      const prompt = `You are an expert educational psychologist analyzing a Grade 1 student's math exercise performance. Provide a comprehensive analysis in JSON format.
+
+STUDENT PERFORMANCE DATA:
+- Score: ${performanceData.score}%
+- Total Questions: ${performanceData.totalQuestions}
+- Time Spent: ${Math.round(performanceData.timeSpent / 1000)} seconds
+- Class Average Score: ${Math.round(performanceData.classAverage)}%
+- Class Average Time: ${Math.round(performanceData.classAverageTime)} seconds
+
+DETAILED QUESTION RESULTS:
+${performanceData.questionResults.map((q: any, idx: number) => {
+  const classAvg = classAverages?.questionAverages?.[q.questionId];
+  return `Question ${q.questionNumber}: ${q.isCorrect ? 'CORRECT' : 'INCORRECT'} (${q.attempts} attempts, ${Math.round(q.timeSpent / 1000)}s)
+   Question Text: "${q.questionText}"
+   Question Type: ${q.questionType}
+   ${q.options && q.options.length > 0 ? `Options: ${q.options.join(', ')}` : ''}
+   Student Answer: "${q.studentAnswer}"
+   Correct Answer: "${q.correctAnswer}"
+   ${q.questionImage ? `Image: ${q.questionImage}` : ''}
+   
+   ENHANCED PERFORMANCE DATA:
+   - Difficulty Level: ${q.metadata?.difficulty || 'medium'}
+   - Topic Tags: ${q.metadata?.topicTags?.join(', ') || 'none'}
+   - Cognitive Load: ${q.metadata?.cognitiveLoad || 'medium'}
+   - Question Complexity: ${q.metadata?.questionComplexity || 'medium'}
+   - Total Hesitation Time: ${Math.round((q.totalHesitationTime || 0) / 1000)}s
+   - Average Confidence: ${q.averageConfidence?.toFixed(1) || '2.0'} (1=low, 2=medium, 3=high)
+   - Significant Changes: ${q.significantChanges || 0}
+   - Phase Distribution: Reading(${q.phaseDistribution?.reading || 0}), Thinking(${q.phaseDistribution?.thinking || 0}), Answering(${q.phaseDistribution?.answering || 0}), Reviewing(${q.phaseDistribution?.reviewing || 0})
+   
+   INTERACTION PATTERNS:
+   - Total Interactions: ${q.totalInteractions || 0}
+   - Option Clicks: ${q.interactionTypes?.optionClicks || 0}
+   - Help Used: ${q.interactionTypes?.helpUsed || 0} (Help Button: ${q.helpUsage?.helpButtonClicks || 0})
+   - Answer Changes: ${q.interactionTypes?.answerChanges || 0}
+   
+   TIME BREAKDOWN:
+   - Reading Time: ${Math.round((q.timeBreakdown?.readingTime || 0) / 1000)}s
+   - Thinking Time: ${Math.round((q.timeBreakdown?.thinkingTime || 0) / 1000)}s
+   - Answering Time: ${Math.round((q.timeBreakdown?.answeringTime || 0) / 1000)}s
+   - Reviewing Time: ${Math.round((q.timeBreakdown?.reviewingTime || 0) / 1000)}s
+   - Time to First Answer: ${Math.round((q.timeToFirstAnswer || 0) / 1000)}s
+   ${q.attemptHistory && q.attemptHistory.length > 0 ? `
+   ATTEMPT HISTORY:
+   ${q.attemptHistory.map((attempt: any, attemptIdx: number) => 
+     `   Attempt ${attemptIdx + 1}: "${attempt.answer || 'blank'}" (${Math.round((attempt.timeSpent || 0) / 1000)}s)`
+   ).join('\n')}` : ''}
+   
+   ${classAvg ? `CLASS AVERAGE: ${Math.round(classAvg.averageTime / 1000)}s, ${Math.round(classAvg.averageAttempts)} attempts` : '- Performance ranking data not available'}`;
+}).join('\n\n')}
+
+IMPORTANT: Respond with ONLY valid JSON. Do not include any markdown formatting, code blocks, or additional text. Return only the JSON object.
+
+Required JSON format:
+{
+  "strengths": ["strength1", "strength2", "strength3"],
+  "weaknesses": ["weakness1", "weakness2", "weakness3"],
+  "questionAnalysis": ["analysis1", "analysis2", "analysis3"],
+  "timeAnalysis": {
+    "description": "Time analysis description",
+    "studentTime": ${Math.round(performanceData.timeSpent / 1000)},
+    "classAverage": ${Math.round(performanceData.classAverageTime)}
+  },
+  "recommendations": ["recommendation1", "recommendation2", "recommendation3"],
+  "encouragement": "Encouraging message for the student"
+}
+
+Focus on:
+1. Mathematical concepts mastered
+2. Areas needing improvement
+3. Time management skills
+4. Specific question performance
+5. Age-appropriate recommendations
+6. Positive reinforcement
+
+Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
+
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{
+              text: prompt
+            }]
+          }],
+          generationConfig: {
+            temperature: 0.7,
+            topK: 40,
+            topP: 0.95,
+            maxOutputTokens: 2048,
+          }
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.warn(`Gemini API error (attempt ${retryCount + 1}): ${response.status} - ${errorText}`);
+        
+        // Retry on certain error codes
+        if ((response.status === 404 || response.status === 500 || response.status === 503) && retryCount < maxRetries) {
+          console.log(`Retrying Gemini analysis in ${retryDelay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+        }
+        
+        throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json();
+      const analysisText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (!analysisText) {
+        if (retryCount < maxRetries) {
+          console.log(`No analysis text received, retrying in ${retryDelay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+        }
+        throw new Error('No analysis generated');
+      }
+
+      // Parse the JSON response
+      try {
+        // Clean the response text to extract JSON
+        let cleanedText = analysisText.trim();
+        
+        // Remove markdown code blocks if present
+        if (cleanedText.startsWith('```json')) {
+          cleanedText = cleanedText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+        } else if (cleanedText.startsWith('```')) {
+          cleanedText = cleanedText.replace(/^```\s*/, '').replace(/\s*```$/, '');
+        }
+        
+        // Remove any leading/trailing text that's not JSON
+        const jsonStart = cleanedText.indexOf('{');
+        const jsonEnd = cleanedText.lastIndexOf('}');
+        
+        if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+          cleanedText = cleanedText.substring(jsonStart, jsonEnd + 1);
+        }
+        
+        console.log('Cleaned Gemini response:', cleanedText.substring(0, 200) + '...');
+        
+        const analysis = JSON.parse(cleanedText);
+        console.log(`Gemini analysis generated successfully (attempt ${retryCount + 1})`);
+        return analysis;
+      } catch (parseError) {
+        console.warn(`Failed to parse Gemini response (attempt ${retryCount + 1}):`, parseError);
+        console.warn('Raw response:', analysisText.substring(0, 500));
+        
+        if (retryCount < maxRetries) {
+          console.log(`Retrying due to parse error in ${retryDelay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+        }
+        
+        // If all retries failed, try to extract partial data or return fallback
+        console.log('All retries failed, attempting to extract partial data...');
+        try {
+          // Try to extract any valid JSON fragments
+          const jsonMatches = analysisText.match(/\{[^}]*"strengths"[^}]*\}/g);
+          if (jsonMatches && jsonMatches.length > 0) {
+            const partialAnalysis = JSON.parse(jsonMatches[0]);
+            console.log('Using partial analysis data');
+            return partialAnalysis;
+          }
+        } catch (partialError) {
+          console.warn('Could not extract partial data:', partialError);
+        }
+        
+        throw new Error('Failed to parse analysis response');
+      }
+    } catch (error: unknown) {
+      console.error(`Error generating Gemini analysis (attempt ${retryCount + 1}):`, error);
+      
+      // Retry on network errors or other retryable errors
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (retryCount < maxRetries && (
+        errorMessage.includes('fetch') || 
+        errorMessage.includes('network') || 
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('ECONNRESET') ||
+        errorMessage.includes('ENOTFOUND')
+      )) {
+        console.log(`Retrying due to network error in ${retryDelay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+      }
+      
+      // Return fallback analysis after all retries failed
+      console.log('All retries failed, returning fallback analysis');
+      return {
+        strengths: ["Completed the exercise successfully", "Showed persistence in problem-solving"],
+        weaknesses: ["Could improve time management", "May need more practice with certain concepts"],
+        questionAnalysis: ["Overall good performance across questions"],
+        timeAnalysis: {
+          description: "Student completed the exercise in a reasonable time",
+          studentTime: Math.round(resultData.totalTimeSpent / 1000),
+          classAverage: Math.round(classAverages?.averageTime || 0)
+        },
+        recommendations: ["Continue practicing regularly", "Focus on areas that took longer"],
+        encouragement: "Great job completing the exercise! Keep up the good work!"
+      };
+    }
+  };
+
+  // Function to handle student name click
+  const handleStudentNameClick = async (studentId: string, exerciseId: string, classId: string, studentNickname: string) => {
+    // Find the student data
+    const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === studentId);
+    if (!student) return;
+
+    setSelectedStudentPerformance(student);
+    setSelectedExerciseForPerformance({ exerciseId, classId, studentNickname });
+    setShowStudentPerformanceModal(true);
+    
+    // Load performance data
+    await loadStudentPerformance(studentId, exerciseId, classId);
+  };
 
   const exportClassListToPdf = async (cls: { id: string; name: string }) => {
     try {
@@ -1730,6 +2246,27 @@ export default function TeacherDashboard() {
                                </Text>
                              </View>
                              <View style={styles.assignmentOptions}>
+                               {/* Status Toggle */}
+                               <TouchableOpacity 
+                                 style={[
+                                   styles.statusToggleButton,
+                                   assignment.acceptingStatus === 'closed' && styles.statusToggleButtonClosed
+                                 ]}
+                                 onPress={() => handleToggleAcceptingStatus(assignment)}
+                               >
+                                 <MaterialCommunityIcons 
+                                   name={assignment.acceptingStatus === 'closed' ? 'lock' : 'lock-open'} 
+                                   size={16} 
+                                   color={assignment.acceptingStatus === 'closed' ? '#ef4444' : '#10b981'} 
+                                 />
+                                 <Text style={[
+                                   styles.statusToggleText,
+                                   assignment.acceptingStatus === 'closed' && styles.statusToggleTextClosed
+                                 ]}>
+                                   {assignment.acceptingStatus === 'closed' ? 'Closed' : 'Open'}
+                                 </Text>
+                               </TouchableOpacity>
+                               
                                <TouchableOpacity 
                                  style={styles.assignmentActionButton}
                                  onPress={() => handleEditAssignment(assignment)}
@@ -1955,28 +2492,7 @@ export default function TeacherDashboard() {
                      <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
                      <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
                    </View>
-                   
-                   {/* Class Performance Summary */}
-                   <View style={styles.classPerformanceSummary}>
-                     <View style={styles.classPerformanceItem}>
-                       <MaterialCommunityIcons name="account-group" size={20} color="#3b82f6" />
-                       <Text style={styles.classPerformanceText}>
-                         {uniqueStudents}/{classStudents.length} students completed
-                       </Text>
-                     </View>
-                     <View style={styles.classPerformanceItem}>
-                       <MaterialCommunityIcons name="chart-line" size={20} color="#10b981" />
-                       <Text style={styles.classPerformanceText}>
-                         {Math.round(averageScore)}% average score
-                       </Text>
-                     </View>
-                     <View style={styles.classPerformanceItem}>
-                       <MaterialCommunityIcons name="file-document" size={20} color="#f59e0b" />
-                       <Text style={styles.classPerformanceText}>
-                         {totalSubmissions} total submissions
-                       </Text>
-                     </View>
-                   </View>
+                  
 
                    {classResults.length === 0 ? (
                      <View style={styles.emptyResultsCard}>
@@ -2011,71 +2527,124 @@ export default function TeacherDashboard() {
                        return { ...result, rank };
                      });
                      
+                     // Group results by exercise for better organization
+                     const resultsByExercise = rankedResults.reduce((acc: any, result: any) => {
+                       const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
+                       if (!acc[exerciseTitle]) {
+                         acc[exerciseTitle] = [];
+                       }
+                       acc[exerciseTitle].push(result);
+                       return acc;
+                     }, {});
+
+                     // Handle sorting function
+                     const handleSort = (newSortBy: 'attempts' | 'time') => {
+                       if (resultsSortBy === newSortBy) {
+                         setResultsSortOrder(resultsSortOrder === 'asc' ? 'desc' : 'asc');
+                       } else {
+                         setResultsSortBy(newSortBy);
+                         setResultsSortOrder('asc');
+                       }
+                     };
+
                      return (
                        <View style={styles.resultsList}>
-                         {rankedResults.map((result: any, idx: number) => {
-                           const student = classStudents.find((s: any) => s.parentId === result.parentId);
-                           const studentName = student ? `${student.firstName || ''} ${student.lastName || ''}`.trim() || student.nickname || 'Unknown Student' : 'Unknown Student';
-                           
+                         {Object.entries(resultsByExercise).map(([exerciseTitle, exerciseResults]: [string, any]) => {
+                           // Sort the exercise results based on current sort settings
+                           const sortedResults = [...exerciseResults].sort((a: any, b: any) => {
+                             const aQuestionResults = a.questionResults || [];
+                             const bQuestionResults = b.questionResults || [];
+                             
+                             let aValue, bValue;
+                             
+                             if (resultsSortBy === 'attempts') {
+                               const aTotalAttempts = aQuestionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                               const bTotalAttempts = bQuestionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                               aValue = aQuestionResults.length > 0 ? aTotalAttempts / aQuestionResults.length : 1;
+                               bValue = bQuestionResults.length > 0 ? bTotalAttempts / bQuestionResults.length : 1;
+                             } else {
+                               aValue = a.totalTimeSpent || 0;
+                               bValue = b.totalTimeSpent || 0;
+                             }
+                             
+                             return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+                           });
+
                            return (
-                             <View key={result.resultId || idx} style={styles.resultItem}>
-                             <View style={styles.resultHeader}>
-                               <View style={styles.resultStudentInfo}>
-                                 <Text style={styles.resultStudentName}>{studentName}</Text>
-                                 <Text style={styles.resultExerciseTitle}>{result.exerciseTitle || 'Unknown Exercise'}</Text>
+                             <View key={exerciseTitle} style={styles.exerciseResultsSection}>
+                               {/* Exercise Name Header */}
+                               <View style={styles.exerciseTableHeader}>
+                                 <MaterialCommunityIcons name="book-open-variant" size={18} color="#3b82f6" />
+                                 <Text style={styles.exerciseTableTitle}>{exerciseTitle}</Text>
                                </View>
-                               <View style={styles.resultScoreContainer}>
-                                 <Text style={[
-                                   styles.resultScore,
-                                   { color: result.scorePercentage >= 80 ? '#10b981' : 
-                                           result.scorePercentage >= 60 ? '#f59e0b' : '#ef4444' }
-                                 ]}>
-                                   {result.scorePercentage || 0}%
-                                 </Text>
-                                 <Text style={styles.resultRank}>
-                                   Rank #{result.rank} of {rankedResults.length}
-                                 </Text>
+                               
+                               {/* Table Header with Sorting */}
+                               <View style={styles.resultsTableHeader}>
+                                 <Text style={[styles.tableHeaderText, { width: 40 }]}>#</Text>
+                                 <Text style={[styles.tableHeaderText, { flex: 2 }]}>Student</Text>
+                                 <TouchableOpacity 
+                                   style={styles.sortableHeaderCell}
+                                   onPress={() => handleSort('attempts')}
+                                 >
+                                   <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'attempts' && styles.activeSort]}>
+                                     Avg Attempts
+                                   </Text>
+                                   {resultsSortBy === 'attempts' && (
+                                     <MaterialIcons 
+                                       name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                                       size={16} 
+                                       color="#3b82f6" 
+                                     />
+                                   )}
+                                 </TouchableOpacity>
+                                 <TouchableOpacity 
+                                   style={styles.sortableHeaderCell}
+                                   onPress={() => handleSort('time')}
+                                 >
+                                   <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'time' && styles.activeSort]}>
+                                     Time
+                                   </Text>
+                                   {resultsSortBy === 'time' && (
+                                     <MaterialIcons 
+                                       name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                                       size={16} 
+                                       color="#3b82f6" 
+                                     />
+                                   )}
+                                 </TouchableOpacity>
                                </View>
-                             </View>
                              
-                             <View style={styles.resultDetails}>
-                               <View style={styles.resultDetailRow}>
-                                 <MaterialCommunityIcons name="help-circle-outline" size={16} color="#64748b" />
-                                 <Text style={styles.resultDetailText}>
-                                   {result.totalQuestions || 0} questions
-                                 </Text>
-                               </View>
-                               <View style={styles.resultDetailRow}>
-                                 <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
-                                 <Text style={styles.resultDetailText}>
-                                   {Math.round((result.totalTimeSpent || 0) / 1000)}s
-                                 </Text>
-                               </View>
-                               <View style={styles.resultDetailRow}>
-                                 <MaterialCommunityIcons name="calendar" size={16} color="#64748b" />
-                                 <Text style={styles.resultDetailText}>
-                                   {new Date(result.submittedAt || result.createdAt).toLocaleDateString()}
-                                 </Text>
-                               </View>
+                               {/* Table Rows */}
+                               {sortedResults.map((result: any, idx: number) => {
+                                 // Find student by studentId from the result (proper database lookup)
+                                 const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
+                                 const studentNickname = student?.nickname || 'Unknown Student';
+                                 
+                                 // Calculate average attempts and total time
+                                 const questionResults = result.questionResults || [];
+                                 const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                                 const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
+                                 const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
+                                 const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
+                                 const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
+                                 
+                                 return (
+                                   <View key={result.resultId || idx} style={styles.resultsTableRow}>
+                                     <Text style={[styles.tableRowText, { width: 40 }]}>{idx + 1}.</Text>
+                                     <TouchableOpacity 
+                                       style={{ flex: 2 }}
+                                       onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname)}
+                                     >
+                                       <Text style={[styles.tableRowText, styles.studentNameCell, { flex: 2, color: '#3b82f6' }]}>{studentNickname}</Text>
+                                     </TouchableOpacity>
+                                     <Text style={[styles.tableRowText, { flex: 1.5 }]}>{avgAttempts}</Text>
+                                     <Text style={[styles.tableRowText, { flex: 1.5 }]}>{timeDisplay}</Text>
+                                   </View>
+                                 );
+                               })}
                              </View>
-                             
-                             <View style={styles.resultProgress}>
-                               <View style={styles.resultProgressBar}>
-                                 <View 
-                                   style={[
-                                     styles.resultProgressFill, 
-                                     { 
-                                       width: `${result.scorePercentage || 0}%`,
-                                       backgroundColor: result.scorePercentage >= 80 ? '#10b981' : 
-                                                      result.scorePercentage >= 60 ? '#f59e0b' : '#ef4444'
-                                     }
-                                   ]} 
-                                 />
-                               </View>
-                             </View>
-                           </View>
-                         );
-                       })}
+                           );
+                         })}
                        </View>
                      );
                    })()}
@@ -2834,6 +3403,31 @@ export default function TeacherDashboard() {
                   )}
                 </View>
 
+                {/* Accept Late Submissions Toggle */}
+                <View style={styles.editInputGroup}>
+                  <Text style={styles.editInputLabel}>Submission Settings</Text>
+                  <TouchableOpacity 
+                    style={styles.editSettingItem}
+                    onPress={() => setEditAcceptLateSubmissions(!editAcceptLateSubmissions)}
+                  >
+                    <View style={styles.editSettingInfo}>
+                      <Text style={styles.editSettingTitle}>Accept Late Submissions</Text>
+                      <Text style={styles.editSettingDescription}>
+                        Allow students to submit after the deadline
+                      </Text>
+                    </View>
+                    <View style={[
+                      styles.editToggle,
+                      editAcceptLateSubmissions && styles.editToggleActive
+                    ]}>
+                      <View style={[
+                        styles.editToggleThumb,
+                        editAcceptLateSubmissions && styles.editToggleThumbActive
+                      ]} />
+                    </View>
+                  </TouchableOpacity>
+                </View>
+
                 <View style={styles.editAssignmentInfo}>
                   <Text style={styles.editInfoLabel}>Assignment Details</Text>
                   <View style={styles.editInfoRow}>
@@ -3132,6 +3726,408 @@ export default function TeacherDashboard() {
               </TouchableOpacity>
             </View>
           </View>
+        </View>
+      </Modal>
+
+      {/* Student Performance Modal */}
+      <Modal visible={showStudentPerformanceModal} animationType="slide" transparent={false}>
+        <View style={styles.studentPerformanceFullScreenContainer}>
+          <View style={styles.studentPerformanceFullScreenHeader}>
+            <View style={styles.studentPerformanceHeaderContent}>
+              <Text style={styles.studentPerformanceFullScreenTitle}>Student Performance Analysis</Text>
+              {selectedStudentPerformance && (
+                <Text style={styles.studentPerformanceStudentName}>
+                  {selectedStudentPerformance.nickname || selectedStudentPerformance.firstName}
+                </Text>
+              )}
+            </View>
+            <TouchableOpacity
+              onPress={() => setShowStudentPerformanceModal(false)}
+              style={styles.studentPerformanceCloseButton}
+            >
+              <MaterialIcons name="close" size={24} color="#1e293b" />
+            </TouchableOpacity>
+          </View>
+
+          {loadingStudentPerformance ? (
+            <View style={styles.studentPerformanceFullScreenLoading}>
+              <Text style={styles.studentPerformanceLoadingText}>Loading performance data...</Text>
+            </View>
+          ) : studentPerformanceData ? (
+            <ScrollView style={styles.studentPerformanceFullScreenContent} showsVerticalScrollIndicator={true}>
+                {/* Student Info */}
+                <View style={styles.studentPerformanceSection}>
+                  <Text style={styles.studentPerformanceSectionTitle}>Student Information</Text>
+                  <View style={styles.studentPerformanceInfo}>
+                    <Text style={styles.studentPerformanceName}>
+                      {selectedStudentPerformance?.nickname || 'Unknown Student'}
+                    </Text>
+                    <Text style={styles.studentPerformanceExercise}>
+                      {studentPerformanceData.exerciseData?.title || 'Unknown Exercise'}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Performance Overview */}
+                <View style={styles.studentPerformanceCard}>
+                  <Text style={styles.studentPerformanceCardTitle}>Performance Overview</Text>
+                  <View style={styles.studentPerformanceScoreContainer}>
+                    <Text style={styles.studentPerformanceScoreText}>
+                      {Math.round(studentPerformanceData.performanceMetrics.overallScore)}
+                    </Text>
+                    <Text style={styles.studentPerformanceScoreLabel}>Performance Score</Text>
+                    <Text style={styles.studentPerformanceScoreNote}>
+                      Based on efficiency, consistency & mastery
+                    </Text>
+                  </View>
+                  <View style={styles.studentPerformanceStatsRow}>
+                    <View style={styles.studentPerformanceStatItem}>
+                      <Text style={styles.studentPerformanceStatValue}>
+                        {studentPerformanceData.studentResult.questionResults?.length || 0}
+                      </Text>
+                      <Text style={styles.studentPerformanceStatLabel}>Questions</Text>
+                    </View>
+                    <View style={styles.studentPerformanceStatItem}>
+                      <Text style={styles.studentPerformanceStatValue}>
+                        {Math.round((studentPerformanceData.studentResult.totalTimeSpent || 0) / 1000)}s
+                      </Text>
+                      <Text style={styles.studentPerformanceStatLabel}>Time Spent</Text>
+                    </View>
+                    <View style={styles.studentPerformanceStatItem}>
+                      <Text style={styles.studentPerformanceStatValue}>
+                        {studentPerformanceData.performanceMetrics.totalAttempts}
+                      </Text>
+                      <Text style={styles.studentPerformanceStatLabel}>Total Attempts</Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Performance Metrics */}
+                {studentPerformanceData.classStats && (
+                  <View style={styles.studentPerformanceRankingCard}>
+                    <Text style={styles.studentPerformanceCardTitle}>Performance Metrics</Text>
+                    <View style={styles.studentPerformanceMetrics}>
+                      <View style={styles.studentPerformanceMetricItem}>
+                        <Text style={styles.studentPerformanceMetricLabel}>Efficiency</Text>
+                        <Text style={styles.studentPerformanceMetricValue}>
+                          {Math.round(studentPerformanceData.performanceMetrics.efficiencyScore)}/100
+                        </Text>
+                        <Text style={styles.studentPerformanceMetricComparison}>
+                          vs {Math.round(studentPerformanceData.classStats.averageEfficiency)} class avg
+                        </Text>
+                      </View>
+                      <View style={styles.studentPerformanceMetricItem}>
+                        <Text style={styles.studentPerformanceMetricLabel}>Consistency</Text>
+                        <Text style={styles.studentPerformanceMetricValue}>
+                          {Math.round(studentPerformanceData.performanceMetrics.consistencyScore)}/100
+                        </Text>
+                        <Text style={styles.studentPerformanceMetricComparison}>
+                          vs {Math.round(studentPerformanceData.classStats.averageConsistency)} class avg
+                        </Text>
+                      </View>
+                      <View style={styles.studentPerformanceMetricItem}>
+                        <Text style={styles.studentPerformanceMetricLabel}>Mastery</Text>
+                        <Text style={styles.studentPerformanceMetricValue}>
+                          {Math.round(studentPerformanceData.performanceMetrics.masteryScore)}/100
+                        </Text>
+                        <Text style={styles.studentPerformanceMetricComparison}>
+                          vs {Math.round(studentPerformanceData.classStats.averageMastery)} class avg
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.studentPerformanceOverallScore}>
+                      <Text style={styles.studentPerformanceOverallScoreLabel}>Overall Performance</Text>
+                      <Text style={styles.studentPerformanceOverallScoreValue}>
+                        {Math.round(studentPerformanceData.performanceMetrics.overallScore)}/100
+                      </Text>
+                      <Text style={[styles.studentPerformanceLevelText, { 
+                        color: studentPerformanceData.performanceLevel === 'excellent' ? '#10b981' :
+                               studentPerformanceData.performanceLevel === 'good' ? '#3b82f6' :
+                               studentPerformanceData.performanceLevel === 'fair' ? '#f59e0b' : '#ef4444'
+                      }]}>
+                        {studentPerformanceData.performanceLevel.charAt(0).toUpperCase() + 
+                         studentPerformanceData.performanceLevel.slice(1).replace('_', ' ')}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+
+                {/* Gemini Analysis Sections */}
+                {geminiAnalysis && (
+                  <>
+                    {/* Strengths */}
+                    <View style={styles.studentPerformanceAnalysisCard}>
+                      <Text style={styles.studentPerformanceCardTitle}>Strengths</Text>
+                      {geminiAnalysis.strengths.map((strength: string, index: number) => (
+                        <View key={index} style={styles.studentPerformanceAnalysisItem}>
+                          <MaterialCommunityIcons name="check-circle" size={16} color="#10b981" />
+                          <Text style={styles.studentPerformanceAnalysisText}>{strength}</Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    {/* Areas for Improvement */}
+                    <View style={styles.studentPerformanceAnalysisCard}>
+                      <Text style={styles.studentPerformanceCardTitle}>Areas for Improvement</Text>
+                      {geminiAnalysis.weaknesses.map((weakness: string, index: number) => (
+                        <View key={index} style={styles.studentPerformanceAnalysisItem}>
+                          <MaterialCommunityIcons name="alert-circle" size={16} color="#f59e0b" />
+                          <Text style={styles.studentPerformanceAnalysisText}>{weakness}</Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    {/* Question Analysis */}
+                    {geminiAnalysis.questionAnalysis && Array.isArray(geminiAnalysis.questionAnalysis) && geminiAnalysis.questionAnalysis.length > 0 && (
+                      <View style={styles.studentPerformanceAnalysisCard}>
+                        <Text style={styles.studentPerformanceCardTitle}>Question Analysis</Text>
+                        {geminiAnalysis.questionAnalysis.map((analysis: any, index: number) => (
+                          <View key={index} style={styles.studentPerformanceAnalysisItem}>
+                            <MaterialCommunityIcons name="help-circle" size={16} color="#3b82f6" />
+                            <Text style={styles.studentPerformanceAnalysisText}>
+                              {typeof analysis === 'string' ? analysis : 
+                               typeof analysis === 'object' && analysis.analysis ? analysis.analysis :
+                               typeof analysis === 'object' && analysis.questionNumber ? 
+                                 `Question ${analysis.questionNumber}: ${analysis.analysis || analysis.concept || JSON.stringify(analysis)}` :
+                               JSON.stringify(analysis)}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {/* Time Analysis */}
+                    {geminiAnalysis.timeAnalysis && (
+                      <View style={styles.studentPerformanceAnalysisCard}>
+                        <Text style={styles.studentPerformanceCardTitle}>Time Analysis</Text>
+                        <Text style={styles.studentPerformanceTimeAnalysisText}>
+                          {geminiAnalysis.timeAnalysis.description}
+                        </Text>
+                        <View style={styles.studentPerformanceTimeComparison}>
+                          <Text style={styles.studentPerformanceTimeComparisonText}>
+                            Student: {geminiAnalysis.timeAnalysis.studentTime}s | 
+                            Class: {geminiAnalysis.timeAnalysis.classAverage}s
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Recommendations */}
+                    <View style={styles.studentPerformanceAnalysisCard}>
+                      <Text style={styles.studentPerformanceCardTitle}>Recommendations</Text>
+                      {geminiAnalysis.recommendations.map((recommendation: string, index: number) => (
+                        <View key={index} style={styles.studentPerformanceAnalysisItem}>
+                          <MaterialCommunityIcons name="lightbulb" size={16} color="#3b82f6" />
+                          <Text style={styles.studentPerformanceAnalysisText}>{recommendation}</Text>
+                        </View>
+                      ))}
+                    </View>
+
+                    {/* Encouragement */}
+                    <View style={styles.studentPerformanceEncouragementCard}>
+                      <MaterialCommunityIcons name="heart" size={24} color="#ef4444" />
+                      <Text style={styles.studentPerformanceEncouragementText}>
+                        {geminiAnalysis.encouragement}
+                      </Text>
+                    </View>
+                  </>
+                )}
+
+                {/* Question Details */}
+                {studentPerformanceData?.studentResult?.questionResults && studentPerformanceData.studentResult.questionResults.length > 0 && (
+                  <View style={styles.studentPerformanceQuestionDetailsCard}>
+                    <Text style={styles.studentPerformanceCardTitle}>Question Details</Text>
+                    {studentPerformanceData.studentResult.questionResults.map((question: any, index: number) => (
+                      <View key={question.questionId} style={styles.studentPerformanceQuestionDetailItem}>
+                        <View style={styles.studentPerformanceQuestionDetailHeader}>
+                          <Text style={styles.studentPerformanceQuestionNumber}>Question {question.questionNumber}</Text>
+                          <View style={[
+                            styles.studentPerformanceQuestionStatus,
+                            { backgroundColor: '#10b981' } // All questions are correct since student completed
+                          ]}>
+                            <Text style={styles.studentPerformanceQuestionStatusText}>
+                              CORRECT
+                            </Text>
+                          </View>
+                        </View>
+                        
+                        {/* Show question text */}
+                        {question.questionText && (
+                          <View style={styles.studentPerformanceQuestionInfo}>
+                            <Text style={styles.studentPerformanceQuestionInfoLabel}>Question:</Text>
+                            <Text style={styles.studentPerformanceQuestionInfoValue}>"{question.questionText}"</Text>
+                          </View>
+                        )}
+                        
+                        {/* Show question image if available */}
+                        {question.questionImage && (
+                          <View style={styles.studentPerformanceQuestionInfo}>
+                            <Text style={styles.studentPerformanceQuestionInfoLabel}>Image:</Text>
+                            <Text style={styles.studentPerformanceQuestionInfoValue}>Contains image</Text>
+                          </View>
+                        )}
+                        
+                        {/* Show question type */}
+                        {question.questionType && (
+                          <View style={styles.studentPerformanceQuestionInfo}>
+                            <Text style={styles.studentPerformanceQuestionInfoLabel}>Question Type:</Text>
+                            <Text style={styles.studentPerformanceQuestionInfoValue}>{question.questionType}</Text>
+                          </View>
+                        )}
+                        
+                        {/* Show options if available */}
+                        {question.options && question.options.length > 0 && (
+                          <View style={styles.studentPerformanceQuestionInfo}>
+                            <Text style={styles.studentPerformanceQuestionInfoLabel}>Options:</Text>
+                            <Text style={styles.studentPerformanceQuestionInfoValue}>{question.options.join(', ')}</Text>
+                          </View>
+                        )}
+                        
+                        {/* Show attempted answers history */}
+                        {question.attemptHistory && question.attemptHistory.length > 0 && (
+                          <View style={styles.studentPerformanceQuestionInfo}>
+                            <Text style={styles.studentPerformanceQuestionInfoLabel}>Attempt History:</Text>
+                            <Text style={styles.studentPerformanceQuestionInfoValue}>
+                              {question.attemptHistory.map((attempt: any, idx: number) => {
+                                const timeSpent = attempt.timeSpent || 0;
+                                const timeInSeconds = Math.round(timeSpent / 1000);
+                                return `"${attempt.answer || 'blank'}" (${timeInSeconds}s)`;
+                              }).join(', ')}
+                            </Text>
+                          </View>
+                        )}
+                        
+                        {question.studentAnswer && (
+                          <View style={styles.studentPerformanceQuestionInfo}>
+                            <Text style={styles.studentPerformanceQuestionInfoLabel}>Final Answer:</Text>
+                            <Text style={styles.studentPerformanceQuestionInfoValue}>"{question.studentAnswer}"</Text>
+                          </View>
+                        )}
+                        
+                        {question.correctAnswer && (
+                          <View style={styles.studentPerformanceQuestionInfo}>
+                            <Text style={styles.studentPerformanceQuestionInfoLabel}>Correct Answer:</Text>
+                            <Text style={styles.studentPerformanceQuestionInfoValue}>"{question.correctAnswer}"</Text>
+                          </View>
+                        )}
+                        
+                        <View style={styles.studentPerformanceQuestionDetailStats}>
+                          <Text style={styles.studentPerformanceQuestionDetailStat}>
+                            Attempts: {question.attempts || 1}
+                          </Text>
+                          <Text style={styles.studentPerformanceQuestionDetailStat}>
+                            Time: {Math.round((question.timeSpent || 0) / 1000)}s
+                          </Text>
+                        </View>
+                        
+                        {/* Show enhanced performance data if available */}
+                        {question.metadata && (
+                          <View style={styles.studentPerformanceQuestionMetadata}>
+                            <Text style={styles.studentPerformanceQuestionMetadataTitle}>Performance Data:</Text>
+                            <View style={styles.studentPerformanceQuestionMetadataRow}>
+                              <Text style={styles.studentPerformanceQuestionMetadataText}>
+                                Difficulty: {question.metadata.difficulty || 'medium'}
+                              </Text>
+                              <Text style={styles.studentPerformanceQuestionMetadataText}>
+                                Complexity: {question.metadata.questionComplexity || 'medium'}
+                              </Text>
+                            </View>
+                            {question.metadata.topicTags && question.metadata.topicTags.length > 0 && (
+                              <Text style={styles.studentPerformanceQuestionMetadataText}>
+                                Topics: {question.metadata.topicTags.join(', ')}
+                              </Text>
+                            )}
+                          </View>
+                        )}
+                        
+                        {/* Show time breakdown if available */}
+                        {question.timeBreakdown && (
+                          <View style={styles.studentPerformanceQuestionTimeBreakdown}>
+                            <Text style={styles.studentPerformanceQuestionTimeBreakdownTitle}>Time Breakdown:</Text>
+                            <View style={styles.studentPerformanceQuestionTimeBreakdownRow}>
+                              <Text style={styles.studentPerformanceQuestionTimeBreakdownText}>
+                                Reading: {Math.round((question.timeBreakdown.readingTime || 0) / 1000)}s
+                              </Text>
+                              <Text style={styles.studentPerformanceQuestionTimeBreakdownText}>
+                                Thinking: {Math.round((question.timeBreakdown.thinkingTime || 0) / 1000)}s
+                              </Text>
+                            </View>
+                            <View style={styles.studentPerformanceQuestionTimeBreakdownRow}>
+                              <Text style={styles.studentPerformanceQuestionTimeBreakdownText}>
+                                Answering: {Math.round((question.timeBreakdown.answeringTime || 0) / 1000)}s
+                              </Text>
+                              <Text style={styles.studentPerformanceQuestionTimeBreakdownText}>
+                                Reviewing: {Math.round((question.timeBreakdown.reviewingTime || 0) / 1000)}s
+                              </Text>
+                            </View>
+                          </View>
+                        )}
+                        
+                        {/* Show class averages for this question */}
+                        {classAverages?.questionAverages?.[question.questionId] && (
+                          <View style={styles.studentPerformanceQuestionClassAverages}>
+                            <Text style={styles.studentPerformanceQuestionClassAveragesTitle}>Class Average:</Text>
+                            <View style={styles.studentPerformanceQuestionClassAveragesRow}>
+                              <Text style={styles.studentPerformanceQuestionClassAveragesText}>
+                                Time: {Math.round(classAverages.questionAverages[question.questionId].averageTime / 1000)}s
+                              </Text>
+                              <Text style={styles.studentPerformanceQuestionClassAveragesText}>
+                                Attempts: {Math.round(classAverages.questionAverages[question.questionId].averageAttempts)}
+                              </Text>
+                            </View>
+                          </View>
+                        )}
+                      </View>
+                    ))}
+                  </View>
+                )}
+
+                {/* Class Comparison */}
+                {classAverages && (
+                  <View style={styles.studentPerformanceComparisonCard}>
+                    <Text style={styles.studentPerformanceCardTitle}>Class Comparison</Text>
+                    <View style={styles.studentPerformanceDisclaimerContainer}>
+                      <MaterialCommunityIcons name="information" size={14} color="#6b7280" />
+                      <Text style={styles.studentPerformanceDisclaimerText}>
+                        Averages update as more students complete this activity
+                      </Text>
+                    </View>
+                    <View style={styles.studentPerformanceComparisonRow}>
+                      <View style={styles.studentPerformanceComparisonItem}>
+                        <Text style={styles.studentPerformanceComparisonLabel}>Student Score</Text>
+                        <Text style={styles.studentPerformanceComparisonValue}>
+                          {studentPerformanceData?.studentResult?.scorePercentage || 0}%
+                        </Text>
+                      </View>
+                      <View style={styles.studentPerformanceComparisonItem}>
+                        <Text style={styles.studentPerformanceComparisonLabel}>Class Average</Text>
+                        <Text style={styles.studentPerformanceComparisonValue}>
+                          {Math.round(classAverages.averageScore)}%
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.studentPerformanceComparisonRow}>
+                      <View style={styles.studentPerformanceComparisonItem}>
+                        <Text style={styles.studentPerformanceComparisonLabel}>Student Time</Text>
+                        <Text style={styles.studentPerformanceComparisonValue}>
+                          {Math.round((studentPerformanceData?.studentResult?.totalTimeSpent || 0) / 1000)}s
+                        </Text>
+                      </View>
+                      <View style={styles.studentPerformanceComparisonItem}>
+                        <Text style={styles.studentPerformanceComparisonLabel}>Class Average</Text>
+                        <Text style={styles.studentPerformanceComparisonValue}>
+                          {Math.round(classAverages.averageTime / 1000)}s
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                )}
+            </ScrollView>
+          ) : (
+            <View style={styles.studentPerformanceFullScreenNoData}>
+              <Text style={styles.studentPerformanceNoDataText}>No performance data available</Text>
+            </View>
+          )}
         </View>
       </Modal>
 
@@ -4307,6 +5303,32 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
+  
+  // Status Toggle Styles
+  statusToggleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    backgroundColor: '#f0fdf4',
+    borderWidth: 1,
+    borderColor: '#bbf7d0',
+    marginRight: 8,
+    gap: 4,
+  },
+  statusToggleButtonClosed: {
+    backgroundColor: '#fef2f2',
+    borderColor: '#fecaca',
+  },
+  statusToggleText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#15803d',
+  },
+  statusToggleTextClosed: {
+    color: '#dc2626',
+  },
   assignmentDetails: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -4451,6 +5473,61 @@ const styles = StyleSheet.create({
     color: '#64748b',
     marginTop: 4,
     fontStyle: 'italic',
+  },
+  
+  // Edit Modal Settings Styles
+  editSettingItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  editSettingInfo: {
+    flex: 1,
+    marginRight: 16,
+  },
+  editSettingTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  editSettingDescription: {
+    fontSize: 14,
+    color: '#64748b',
+    lineHeight: 20,
+  },
+  
+  // Edit Modal Toggle Styles
+  editToggle: {
+    width: 48,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#d1d5db',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  editToggleActive: {
+    backgroundColor: '#3b82f6',
+  },
+  editToggleThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  editToggleThumbActive: {
+    transform: [{ translateX: 20 }],
   },
   dateTimeButton: {
     flexDirection: 'row',
@@ -5132,6 +6209,89 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   
+  // Enhanced Results Table Styles
+  exerciseResultsSection: {
+    marginBottom: 12,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+  },
+  exerciseTableHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f9ff',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  exerciseTableTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e40af',
+    marginLeft: 8,
+    flex: 1,
+  },
+  resultsTableHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  tableHeaderText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#374151',
+    textAlign: 'center',
+  },
+  
+  sortableHeaderCell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 4,
+    flex: 1.5,
+  },
+  
+  activeSort: {
+    color: '#3b82f6',
+    fontWeight: '700',
+  },
+  resultsTableRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  tableRowText: {
+    fontSize: 14,
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+  studentNameCell: {
+    textAlign: 'left',
+    fontWeight: '600',
+  },
+  scoreCell: {
+    fontWeight: '700',
+  },
+  rankCell: {
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  
   // Student menu dropdown styles
   studentMenuDropdown: {
     position: 'absolute',
@@ -5304,6 +6464,442 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  
+  // Student Performance Modal Styles - Full Screen (Updated)
+  studentPerformanceFullScreenContainer: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+  },
+  studentPerformanceFullScreenHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    paddingTop: 50, // Account for status bar
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+  },
+  studentPerformanceHeaderContent: {
+    flex: 1,
+  },
+  studentPerformanceFullScreenTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  studentPerformanceStudentName: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#6b7280',
+  },
+  studentPerformanceCloseButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#f1f5f9',
+  },
+  studentPerformanceFullScreenContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+  },
+  studentPerformanceFullScreenLoading: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 60,
+  },
+  studentPerformanceLoadingText: {
+    fontSize: 16,
+    color: '#6b7280',
+  },
+  studentPerformanceFullScreenNoData: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 60,
+  },
+  studentPerformanceNoDataText: {
+    fontSize: 16,
+    color: '#6b7280',
+  },
+  studentPerformanceSection: {
+    marginBottom: 20,
+  },
+  studentPerformanceSectionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 12,
+  },
+  studentPerformanceInfo: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 16,
+  },
+  studentPerformanceName: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  studentPerformanceExercise: {
+    fontSize: 14,
+    color: '#64748b',
+  },
+  studentPerformanceCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 20,
+  },
+  studentPerformanceCardTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 16,
+  },
+  studentPerformanceScoreContainer: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  studentPerformanceScoreText: {
+    fontSize: 48,
+    fontWeight: '700',
+    color: '#3b82f6',
+    marginBottom: 4,
+  },
+  studentPerformanceScoreLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 4,
+  },
+  studentPerformanceScoreNote: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  studentPerformanceStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  studentPerformanceStatItem: {
+    alignItems: 'center',
+  },
+  studentPerformanceStatValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  studentPerformanceStatLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  studentPerformanceRankingCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 20,
+  },
+  studentPerformanceMetrics: {
+    marginBottom: 20,
+  },
+  studentPerformanceMetricItem: {
+    marginBottom: 16,
+  },
+  studentPerformanceMetricLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 4,
+  },
+  studentPerformanceMetricValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+  studentPerformanceMetricComparison: {
+    fontSize: 12,
+    color: '#64748b',
+  },
+  studentPerformanceOverallScore: {
+    alignItems: 'center',
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+  studentPerformanceOverallScoreLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  studentPerformanceOverallScoreValue: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  studentPerformanceLevelText: {
+    fontSize: 14,
+    fontWeight: '600',
+    textTransform: 'capitalize',
+  },
+  studentPerformanceActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+  studentPerformanceCloseActionButton: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 8,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  studentPerformanceCloseActionButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  
+  // Analysis Card Styles
+  studentPerformanceAnalysisCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 20,
+  },
+  studentPerformanceAnalysisItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  studentPerformanceAnalysisText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#374151',
+    marginLeft: 12,
+    lineHeight: 20,
+  },
+  studentPerformanceTimeAnalysisText: {
+    fontSize: 14,
+    color: '#374151',
+    marginBottom: 8,
+    lineHeight: 20,
+  },
+  studentPerformanceTimeComparison: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 8,
+    padding: 12,
+  },
+  studentPerformanceTimeComparisonText: {
+    fontSize: 12,
+    color: '#1e40af',
+    fontWeight: '600',
+  },
+  studentPerformanceEncouragementCard: {
+    backgroundColor: '#fef2f2',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  studentPerformanceEncouragementText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#dc2626',
+    marginLeft: 12,
+    fontWeight: '500',
+    lineHeight: 20,
+  },
+  
+  // Class Comparison Styles
+  studentPerformanceComparisonCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 20,
+  },
+  studentPerformanceDisclaimerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 8,
+    padding: 8,
+  },
+  studentPerformanceDisclaimerText: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginLeft: 8,
+    flex: 1,
+  },
+  studentPerformanceComparisonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  studentPerformanceComparisonItem: {
+    flex: 1,
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 12,
+    marginHorizontal: 4,
+  },
+  studentPerformanceComparisonLabel: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginBottom: 4,
+    fontWeight: '500',
+  },
+  studentPerformanceComparisonValue: {
+    fontSize: 16,
+    color: '#1e293b',
+    fontWeight: '700',
+  },
+  
+  // Question Details Styles
+  studentPerformanceQuestionDetailsCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 20,
+  },
+  studentPerformanceQuestionDetailItem: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  studentPerformanceQuestionDetailHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  studentPerformanceQuestionNumber: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  studentPerformanceQuestionStatus: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  studentPerformanceQuestionStatusText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  studentPerformanceQuestionInfo: {
+    marginBottom: 8,
+  },
+  studentPerformanceQuestionInfoLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6b7280',
+    marginBottom: 2,
+  },
+  studentPerformanceQuestionInfoValue: {
+    fontSize: 14,
+    color: '#374151',
+    lineHeight: 20,
+  },
+  studentPerformanceQuestionDetailStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  studentPerformanceQuestionDetailStat: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  studentPerformanceQuestionMetadata: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  studentPerformanceQuestionMetadataTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6b7280',
+    marginBottom: 8,
+  },
+  studentPerformanceQuestionMetadataRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  studentPerformanceQuestionMetadataText: {
+    fontSize: 12,
+    color: '#374151',
+  },
+  studentPerformanceQuestionTimeBreakdown: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  studentPerformanceQuestionTimeBreakdownTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6b7280',
+    marginBottom: 8,
+  },
+  studentPerformanceQuestionTimeBreakdownRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  studentPerformanceQuestionTimeBreakdownText: {
+    fontSize: 12,
+    color: '#374151',
+  },
+  studentPerformanceQuestionClassAverages: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+    backgroundColor: '#f1f5f9',
+    borderRadius: 6,
+    padding: 8,
+  },
+  studentPerformanceQuestionClassAveragesTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6b7280',
+    marginBottom: 8,
+  },
+  studentPerformanceQuestionClassAveragesRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  studentPerformanceQuestionClassAveragesText: {
+    fontSize: 12,
+    color: '#374151',
+    fontWeight: '500',
   },
   
 });

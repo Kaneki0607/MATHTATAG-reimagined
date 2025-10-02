@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { deleteData, pushData, readData } from '../lib/firebase-database';
+import { deleteData, pushData, readData, writeData } from '../lib/firebase-database';
 
 export interface Exercise {
   id: string;
@@ -16,6 +16,7 @@ export interface Exercise {
   originalAuthor?: string;
   originalExerciseId?: string;
   category?: string;
+  timeLimitPerItem?: number; // Time limit in seconds per item, null means no time limit
 }
 
 export interface AssignedExercise {
@@ -25,6 +26,8 @@ export interface AssignedExercise {
   deadline: string;
   assignedBy: string;
   createdAt: string;
+  acceptLateSubmissions?: boolean;
+  acceptingStatus?: 'open' | 'closed';
   exercise?: Exercise;
   className?: string;
 }
@@ -128,9 +131,9 @@ export const useExercises = (currentUserId: string | null) => {
         originalAuthor: exercise.teacherId,
         originalExerciseId: exercise.id,
       };
-      delete copiedExercise.id; // Remove the original ID
+      const { id, ...copiedExerciseWithoutId } = copiedExercise;
 
-      const { key, error } = await pushData('/exercises', copiedExercise);
+      const { key, error } = await pushData('/exercises', copiedExerciseWithoutId);
       if (error) {
         throw new Error('Failed to copy exercise');
       }
@@ -157,13 +160,15 @@ export const useExercises = (currentUserId: string | null) => {
     }
   };
 
-  const assignExercise = async (exerciseId: string, classIds: string[], deadline: string, assignedBy: string) => {
+  const assignExercise = async (exerciseId: string, classIds: string[], deadline: string, assignedBy: string, acceptLateSubmissions: boolean = true, acceptingStatus: 'open' | 'closed' = 'open') => {
     try {
       const assignments = classIds.map(classId => ({
         exerciseId,
         classId,
         deadline,
         assignedBy,
+        acceptLateSubmissions,
+        acceptingStatus,
         createdAt: new Date().toISOString(),
       }));
 
@@ -189,6 +194,32 @@ export const useExercises = (currentUserId: string | null) => {
     }
   };
 
+  const updateAssignmentStatus = async (assignmentId: string, acceptingStatus: 'open' | 'closed') => {
+    try {
+      const { data: currentAssignment } = await readData(`/assignedExercises/${assignmentId}`);
+      if (!currentAssignment) {
+        throw new Error('Assignment not found');
+      }
+
+      const updatedAssignment = {
+        ...currentAssignment,
+        acceptingStatus,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const { success, error } = await writeData(`/assignedExercises/${assignmentId}`, updatedAssignment);
+      if (error) {
+        throw new Error('Failed to update assignment status');
+      }
+
+      await loadAssignedExercises();
+      return { success: true };
+    } catch (err) {
+      setError('Failed to update assignment status');
+      throw err;
+    }
+  };
+
   return {
     myExercises,
     publicExercises,
@@ -202,5 +233,6 @@ export const useExercises = (currentUserId: string | null) => {
     deleteExercise,
     assignExercise,
     deleteAssignment,
+    updateAssignmentStatus,
   };
 };

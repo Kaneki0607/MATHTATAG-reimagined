@@ -6,16 +6,16 @@ import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
-    Alert,
-    Image,
-    Modal,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  Alert,
+  Image,
+  Modal,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
 import { onAuthChange } from '../lib/firebase-auth';
@@ -24,17 +24,17 @@ import { uploadFile } from '../lib/firebase-storage';
 
 // Import ElevenLabs API key management
 import {
-    addApiKey,
-    checkAllApiKeyCredits,
-    cleanupExpiredKeys,
-    debugKeyStatus,
-    getActiveApiKeys,
-    getApiKeyStatus,
-    markApiKeyAsFailed,
-    markApiKeyAsUsed,
-    performMaintenanceCleanup,
-    removeLowCreditKeys,
-    updateApiKeyCredits
+  addApiKey,
+  checkAllApiKeyCredits,
+  cleanupExpiredKeys,
+  debugKeyStatus,
+  getActiveApiKeys,
+  getApiKeyStatus,
+  markApiKeyAsFailed,
+  markApiKeyAsUsed,
+  performMaintenanceCleanup,
+  removeLowCreditKeys,
+  updateApiKeyCredits
 } from '../lib/elevenlabs-keys';
 
 // Helper function to check if API key has low credits and update status
@@ -485,6 +485,7 @@ export default function CreateExercise() {
   const [isPublic, setIsPublic] = useState(false);
   const [exerciseCode, setExerciseCode] = useState('');
   const [exerciseCategory, setExerciseCategory] = useState('');
+  const [timeLimitPerItem, setTimeLimitPerItem] = useState<number | null>(120); // Default 2 minutes (120 seconds)
   const [questions, setQuestions] = useState<Question[]>([]);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [showCustomCategoryModal, setShowCustomCategoryModal] = useState(false);
@@ -722,6 +723,7 @@ export default function CreateExercise() {
         setIsPublic(data.isPublic || false);
         setExerciseCode(data.exerciseCode || '');
         setExerciseCategory(data.category || '');
+        setTimeLimitPerItem(data.timeLimitPerItem || 120);
         // Migrate old order arrays to reorderItems structure
         const migratedQuestions = (data.questions || []).map((q: any) => {
           if (q.type === 're-order' && q.order && !q.reorderItems) {
@@ -2695,6 +2697,7 @@ Enhanced text with emotions:`;
         isPublic: Boolean(isPublic),
         exerciseCode: finalExerciseCode,
         category: exerciseCategory,
+        timeLimitPerItem: timeLimitPerItem,
         createdAt: new Date().toISOString(),
       };
       
@@ -4566,6 +4569,62 @@ Enhanced text with emotions:`;
                 </>
               )}
             </View>
+          </View>
+          
+          {/* Time Limit Per Item */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Time Limit Per Item</Text>
+            <View style={styles.timeLimitContainer}>
+              <TouchableOpacity
+                style={[styles.timeLimitOption, timeLimitPerItem === null && styles.timeLimitOptionActive]}
+                onPress={() => setTimeLimitPerItem(null)}
+              >
+                <MaterialCommunityIcons name="infinity" size={20} color={timeLimitPerItem === null ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.timeLimitText, timeLimitPerItem === null && styles.timeLimitTextActive]}>No Limit</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.timeLimitOption, timeLimitPerItem !== null && styles.timeLimitOptionActive]}
+                onPress={() => setTimeLimitPerItem(120)}
+              >
+                <MaterialCommunityIcons name="clock" size={20} color={timeLimitPerItem !== null ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.timeLimitText, timeLimitPerItem !== null && styles.timeLimitTextActive]}>Set Limit</Text>
+              </TouchableOpacity>
+            </View>
+            
+            {timeLimitPerItem !== null && (
+              <View style={styles.timeLimitInputContainer}>
+                <Text style={styles.timeLimitInputLabel}>Time per item (seconds)</Text>
+                <View style={styles.timeLimitInputRow}>
+                  <TouchableOpacity
+                    style={styles.timeLimitButton}
+                    onPress={() => setTimeLimitPerItem(Math.max(30, timeLimitPerItem - 30))}
+                  >
+                    <AntDesign name="minus" size={16} color="#3b82f6" />
+                  </TouchableOpacity>
+                  <TextInput
+                    style={styles.timeLimitInput}
+                    value={timeLimitPerItem.toString()}
+                    onChangeText={(text) => {
+                      const value = parseInt(text);
+                      if (!isNaN(value) && value >= 30) {
+                        setTimeLimitPerItem(value);
+                      }
+                    }}
+                    keyboardType="numeric"
+                    placeholder="120"
+                  />
+                  <TouchableOpacity
+                    style={styles.timeLimitButton}
+                    onPress={() => setTimeLimitPerItem(Math.min(600, timeLimitPerItem + 30))}
+                  >
+                    <AntDesign name="plus" size={16} color="#3b82f6" />
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.timeLimitHelperText}>
+                  {timeLimitPerItem ? `${Math.floor(timeLimitPerItem / 60)}m ${timeLimitPerItem % 60}s` : 'No time limit'}
+                </Text>
+              </View>
+            )}
           </View>
           
           {/* Public/Private Toggle */}
@@ -6920,6 +6979,84 @@ const styles = StyleSheet.create({
     color: '#ffffff',
   },
   
+  // Time Limit Styles
+  timeLimitContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#f1f5f9',
+    borderRadius: 8,
+    padding: 4,
+    marginBottom: 12,
+  },
+  timeLimitOption: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+  },
+  timeLimitOptionActive: {
+    backgroundColor: '#3b82f6',
+  },
+  timeLimitText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748b',
+    marginLeft: 8,
+  },
+  timeLimitTextActive: {
+    color: '#ffffff',
+  },
+  timeLimitInputContainer: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  timeLimitInputLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  timeLimitInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  timeLimitButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#eff6ff',
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  timeLimitInput: {
+    flex: 1,
+    height: 40,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    marginHorizontal: 12,
+    textAlign: 'center',
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1f2937',
+  },
+  timeLimitHelperText: {
+    fontSize: 12,
+    color: '#6b7280',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
   
   // Code info styles
   codeInfoContainer: {

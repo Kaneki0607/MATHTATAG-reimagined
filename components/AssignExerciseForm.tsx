@@ -25,7 +25,7 @@ interface Class {
 interface AssignExerciseFormProps {
   visible: boolean;
   onClose: () => void;
-  onAssign: (classIds: string[], deadline: string) => void;
+  onAssign: (classIds: string[], deadline: string, acceptLateSubmissions: boolean) => void;
   exerciseTitle: string;
   currentUserId: string | null;
 }
@@ -43,6 +43,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
   const [deadlineDate, setDeadlineDate] = useState('');
   const [deadlineTime, setDeadlineTime] = useState('');
   const [loading, setLoading] = useState(false);
+  const [acceptLateSubmissions, setAcceptLateSubmissions] = useState(true);
 
   useEffect(() => {
     if (visible && currentUserId) {
@@ -135,7 +136,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
       return;
     }
 
-    onAssign(selectedClasses, deadline.toISOString());
+    onAssign(selectedClasses, deadline.toISOString(), acceptLateSubmissions);
     onClose();
   };
 
@@ -272,6 +273,44 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                     <Text style={styles.quickDateText}>Next Week</Text>
                   </TouchableOpacity>
                 </View>
+              </View>
+            </View>
+
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Submission Settings</Text>
+              
+              {/* Accept Late Submissions */}
+              <TouchableOpacity 
+                style={styles.settingItem}
+                onPress={() => setAcceptLateSubmissions(!acceptLateSubmissions)}
+              >
+                <View style={styles.settingInfo}>
+                  <Text style={styles.settingTitle}>Accept Late Submissions</Text>
+                  <Text style={styles.settingDescription}>
+                    Allow students to submit after the deadline
+                  </Text>
+                </View>
+                <View style={[
+                  styles.toggle,
+                  acceptLateSubmissions && styles.toggleActive
+                ]}>
+                  <View style={[
+                    styles.toggleThumb,
+                    acceptLateSubmissions && styles.toggleThumbActive
+                  ]} />
+                </View>
+              </TouchableOpacity>
+
+              {/* Info about status control */}
+              <View style={styles.statusInfo}>
+                <MaterialCommunityIcons 
+                  name="information" 
+                  size={16} 
+                  color="#3b82f6" 
+                />
+                <Text style={styles.statusInfoText}>
+                  Exercises will be open for submissions by default. You can close or reactivate them later from the Assignments tab.
+                </Text>
               </View>
             </View>
           </ScrollView>
@@ -575,5 +614,80 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     color: '#ffffff',
+  },
+  
+  // Submission Settings Styles
+  settingItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  settingInfo: {
+    flex: 1,
+    marginRight: 16,
+  },
+  settingTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  settingDescription: {
+    fontSize: 14,
+    color: '#64748b',
+    lineHeight: 20,
+  },
+  
+  // Toggle Switch Styles
+  toggle: {
+    width: 48,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#d1d5db',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  toggleActive: {
+    backgroundColor: '#3b82f6',
+  },
+  toggleThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  toggleThumbActive: {
+    transform: [{ translateX: 20 }],
+  },
+  
+  // Status Info Styles
+  statusInfo: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 8,
+    gap: 8,
+    backgroundColor: '#eff6ff',
+    borderLeftWidth: 3,
+    borderLeftColor: '#3b82f6',
+  },
+  statusInfoText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    color: '#1e40af',
   },
 });
