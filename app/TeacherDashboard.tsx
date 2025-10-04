@@ -1386,6 +1386,107 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     await loadStudentPerformance(studentId, exerciseId, classId);
   };
 
+  const handleExportToExcel = async (exerciseTitle: string, results: any[], students: any[]) => {
+    try {
+      // Create CSV data
+      const csvHeaders = ['#', 'Student', 'Attempts', 'Time (s)', 'Time (m:s)'];
+      const csvRows = results.map((result: any, idx: number) => {
+        const student = students.find((s: any) => s.studentId === result.studentId);
+        const studentNickname = student?.nickname || 'Unknown Student';
+        
+        const questionResults = result.questionResults || [];
+        const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+        const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
+        
+        const totalTimeSeconds = Math.round((result.totalTimeSpent || 0) / 1000);
+        const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
+        const remainingSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
+        const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${remainingSeconds}s` : `${totalTimeSeconds}s`;
+        
+        return [
+          idx + 1,
+          studentNickname,
+          avgAttempts,
+          totalTimeSeconds,
+          timeDisplay
+        ];
+      });
+      
+      // Create CSV content
+      const csvContent = [csvHeaders, ...csvRows]
+        .map(row => row.map(field => `"${field}"`).join(','))
+        .join('\n');
+      
+      // Create filename
+      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_results.csv`;
+      
+      // Create HTML table for better mobile compatibility
+      const htmlContent = `
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <title>${exerciseTitle} Results</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; }
+              table { border-collapse: collapse; width: 100%; }
+              th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+              th { background-color: #f2f2f2; font-weight: bold; }
+              tr:nth-child(even) { background-color: #f9f9f9; }
+            </style>
+          </head>
+          <body>
+            <h2>${exerciseTitle} - Student Results</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Student</th>
+                  <th>Attempts</th>
+                  <th>Time (s)</th>
+                  <th>Time (m:s)</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${csvRows.map(row => `
+                  <tr>
+                    <td>${row[0]}</td>
+                    <td>${row[1]}</td>
+                    <td>${row[2]}</td>
+                    <td>${row[3]}</td>
+                    <td>${row[4]}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+            <br>
+            <p><strong>CSV Data:</strong></p>
+            <pre style="background-color: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">${csvContent}</pre>
+          </body>
+        </html>
+      `;
+      
+      // Save file
+      const { uri } = await Print.printToFileAsync({
+        html: htmlContent,
+        base64: false,
+      });
+      
+      // Share the file
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, {
+          mimeType: 'text/html',
+          dialogTitle: `Export ${exerciseTitle} Results`,
+          UTI: 'public.html'
+        });
+      } else {
+        Alert.alert('Success', `Results exported to ${filename}`);
+      }
+    } catch (error) {
+      console.error('Export error:', error);
+      Alert.alert('Error', 'Failed to export results');
+    }
+  };
+
   const exportClassListToPdf = async (cls: { id: string; name: string }) => {
     try {
       const students = [...(studentsByClass[cls.id] || [])].sort((a, b) =>
@@ -2446,33 +2547,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
          {activeTab === 'results' && (
            <View style={{ paddingBottom: 100 }}>
              <Text style={styles.sectionTitle}>Exercise Results & Analytics</Text>
-             
-             {/* Overall Statistics */}
-             <View style={styles.resultsOverviewCard}>
-               <Text style={styles.resultsOverviewTitle}>Overall Performance</Text>
-               <View style={styles.resultsOverviewStats}>
-                 <View style={styles.resultsOverviewStat}>
-                   <Text style={styles.resultsOverviewStatValue}>
-                     {Object.values(exerciseResults).flat().length}
-                   </Text>
-                   <Text style={styles.resultsOverviewStatLabel}>Total Submissions</Text>
-                 </View>
-                 <View style={styles.resultsOverviewStat}>
-                   <Text style={styles.resultsOverviewStatValue}>
-                     {activeClasses.length}
-                   </Text>
-                   <Text style={styles.resultsOverviewStatLabel}>Active Classes</Text>
-                 </View>
-                 <View style={styles.resultsOverviewStat}>
-                   <Text style={styles.resultsOverviewStatValue}>
-                     {Object.values(exerciseResults).flat().reduce((sum: number, result: any) => 
-                       sum + (result.scorePercentage || 0), 0) / Math.max(Object.values(exerciseResults).flat().length, 1)
-                     }%
-                   </Text>
-                   <Text style={styles.resultsOverviewStatLabel}>Average Score</Text>
-                 </View>
-               </View>
-             </View>
 
              {/* Class-wise Results */}
              {activeClasses.map((cls) => {
@@ -2484,6 +2558,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                const uniqueStudents = new Set(classResults.map((r: any) => r.studentId)).size;
                const averageScore = totalSubmissions > 0 ? 
                  classResults.reduce((sum: number, result: any) => sum + (result.scorePercentage || 0), 0) / totalSubmissions : 0;
+               
+               // Note: Class-level metrics removed - now calculated per exercise
                
                return (
                  <View key={cls.id} style={styles.classroomCard}>
@@ -2502,54 +2578,66 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                          Results will appear here when students complete assignments
                        </Text>
                      </View>
-                   ) : (() => {
-                     // Sort results by score percentage (descending) and calculate ranks
-                     const sortedResults = [...classResults].sort((a: any, b: any) => 
-                       (b.scorePercentage || 0) - (a.scorePercentage || 0)
-                     );
-                     
-                     // Calculate ranks (handling ties properly)
-                     const rankedResults = sortedResults.map((result: any, idx: number) => {
-                       let rank = idx + 1;
-                       
-                       // Handle ties - if previous result has same score, use same rank
-                       if (idx > 0 && sortedResults[idx - 1].scorePercentage === result.scorePercentage) {
-                         // Find the first result with this score to get its rank
-                         for (let i = idx - 1; i >= 0; i--) {
-                           if (sortedResults[i].scorePercentage === result.scorePercentage) {
-                             rank = i + 1;
-                           } else {
-                             break;
+                   ) : (
+                     <View style={styles.resultsList}>
+                       {(() => {
+                         // Sort results by score percentage (descending) and calculate ranks
+                         const sortedResults = [...classResults].sort((a: any, b: any) => 
+                           (b.scorePercentage || 0) - (a.scorePercentage || 0)
+                         );
+                         
+                         // Calculate ranks (handling ties properly)
+                         const rankedResults = sortedResults.map((result: any, idx: number) => {
+                           let rank = idx + 1;
+                           
+                           // Handle ties - if previous result has same score, use same rank
+                           if (idx > 0 && sortedResults[idx - 1].scorePercentage === result.scorePercentage) {
+                             // Find the first result with this score to get its rank
+                             for (let i = idx - 1; i >= 0; i--) {
+                               if (sortedResults[i].scorePercentage === result.scorePercentage) {
+                                 rank = i + 1;
+                               } else {
+                                 break;
+                               }
+                             }
                            }
-                         }
-                       }
-                       
-                       return { ...result, rank };
-                     });
-                     
-                     // Group results by exercise for better organization
-                     const resultsByExercise = rankedResults.reduce((acc: any, result: any) => {
-                       const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
-                       if (!acc[exerciseTitle]) {
-                         acc[exerciseTitle] = [];
-                       }
-                       acc[exerciseTitle].push(result);
-                       return acc;
-                     }, {});
+                           
+                           return { ...result, rank };
+                         });
+                         
+                         // Group results by exercise for better organization
+                         const resultsByExercise = rankedResults.reduce((acc: any, result: any) => {
+                           const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
+                           if (!acc[exerciseTitle]) {
+                             acc[exerciseTitle] = [];
+                           }
+                           acc[exerciseTitle].push(result);
+                           return acc;
+                         }, {});
 
-                     // Handle sorting function
-                     const handleSort = (newSortBy: 'attempts' | 'time') => {
-                       if (resultsSortBy === newSortBy) {
-                         setResultsSortOrder(resultsSortOrder === 'asc' ? 'desc' : 'asc');
-                       } else {
-                         setResultsSortBy(newSortBy);
-                         setResultsSortOrder('asc');
-                       }
-                     };
+                         // Handle sorting function
+                         const handleSort = (newSortBy: 'attempts' | 'time') => {
+                           if (resultsSortBy === newSortBy) {
+                             setResultsSortOrder(resultsSortOrder === 'asc' ? 'desc' : 'asc');
+                           } else {
+                             setResultsSortBy(newSortBy);
+                             setResultsSortOrder('asc');
+                           }
+                         };
 
-                     return (
-                       <View style={styles.resultsList}>
-                         {Object.entries(resultsByExercise).map(([exerciseTitle, exerciseResults]: [string, any]) => {
+                         return Object.entries(resultsByExercise).map(([exerciseTitle, exerciseResults]: [string, any]) => {
+                           // Find the assignment for this exercise to get status
+                           const exerciseAssignment = assignedExercises.find((assignment: any) => 
+                             assignment.exerciseId === exerciseResults[0]?.exerciseId && 
+                             assignment.classId === cls.id
+                           );
+                           
+                           // Determine if exercise is still accepting results
+                           const isAcceptingResults = exerciseAssignment ? 
+                             exerciseAssignment.acceptingStatus === 'open' && 
+                             (new Date() <= new Date(exerciseAssignment.deadline) || exerciseAssignment.acceptLateSubmissions) : 
+                             false;
+                           
                            // Sort the exercise results based on current sort settings
                            const sortedResults = [...exerciseResults].sort((a: any, b: any) => {
                              const aQuestionResults = a.questionResults || [];
@@ -2570,84 +2658,184 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                              return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
                            });
 
+                           // Calculate exercise-specific metrics
+                           const exerciseTotalTime = exerciseResults.reduce((sum: number, result: any) => sum + (result.totalTimeSpent || 0), 0);
+                           const exerciseAverageTime = exerciseResults.length > 0 ? exerciseTotalTime / exerciseResults.length : 0;
+                           
+                           const exerciseAverageAttempts = exerciseResults.length > 0 ? 
+                             exerciseResults.reduce((sum: number, result: any) => {
+                               const questionResults = result.questionResults || [];
+                               const totalAttempts = questionResults.reduce((qSum: number, q: any) => qSum + (q.attempts || 1), 0);
+                               return sum + (questionResults.length > 0 ? totalAttempts / questionResults.length : 1);
+                             }, 0) / exerciseResults.length : 0;
+                           
+                           const exerciseCompletionRate = classStudents.length > 0 ? 
+                             (exerciseResults.length / classStudents.length) * 100 : 0;
+
                            return (
                              <View key={exerciseTitle} style={styles.exerciseResultsSection}>
-                               {/* Exercise Name Header */}
-                               <View style={styles.exerciseTableHeader}>
-                                 <MaterialCommunityIcons name="book-open-variant" size={18} color="#3b82f6" />
-                                 <Text style={styles.exerciseTableTitle}>{exerciseTitle}</Text>
+                               {/* Exercise Header with Status */}
+                               <View style={styles.exerciseHeader}>
+                                 <View style={styles.exerciseTitleRow}>
+                                   <MaterialCommunityIcons name="book-open-variant" size={20} color="#3b82f6" />
+                                   <Text style={styles.exerciseTitle}>{exerciseTitle}</Text>
+                                   <View style={[
+                                     styles.exerciseStatusBadge,
+                                     { backgroundColor: isAcceptingResults ? '#10b981' : '#ef4444' }
+                                   ]}>
+                                     <MaterialCommunityIcons 
+                                       name={isAcceptingResults ? "check-circle" : "close-circle"} 
+                                       size={12} 
+                                       color="#ffffff" 
+                                     />
+                                     <Text style={styles.exerciseStatusText}>
+                                       {isAcceptingResults ? 'Open' : 'Closed'}
+                                     </Text>
+                                   </View>
+                                 </View>
+                                 
+                                 {/* Performance Summary Card */}
+                                 <View style={styles.performanceSummaryCard}>
+                                   <Text style={styles.performanceSummaryTitle}>Summary of Class Average</Text>
+                                   <View style={styles.performanceMetricsGrid}>
+                                     <View style={styles.performanceMetric}>
+                                       <View style={styles.metricIconContainer}>
+                                         <MaterialCommunityIcons name="clock-outline" size={14} color="#3b82f6" />
+                                       </View>
+                                       <View style={styles.metricContent}>
+                                         <Text style={styles.metricLabel}>Average Time</Text>
+                                         <Text style={styles.metricValue}>
+                                           {exerciseAverageTime > 0 ? 
+                                             (() => {
+                                               const totalMinutes = Math.floor(exerciseAverageTime / 60000);
+                                               const remainingSeconds = Math.floor((exerciseAverageTime % 60000) / 1000);
+                                               return totalMinutes > 0 ? `${totalMinutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
+                                             })() : 
+                                             '—'
+                                           }
+                                         </Text>
+                                       </View>
+                                     </View>
+                                     
+                                     <View style={styles.performanceMetric}>
+                                       <View style={styles.metricIconContainer}>
+                                         <MaterialCommunityIcons name="repeat" size={14} color="#10b981" />
+                                       </View>
+                                       <View style={styles.metricContent}>
+                                         <Text style={styles.metricLabel}>Average Attempts</Text>
+                                         <Text style={styles.metricValue}>
+                                           {exerciseAverageAttempts > 0 ? exerciseAverageAttempts.toFixed(1) : '—'}
+                                         </Text>
+                                       </View>
+                                     </View>
+                                     
+                                     <View style={styles.performanceMetric}>
+                                       <View style={styles.metricIconContainer}>
+                                         <MaterialCommunityIcons name="account-group" size={14} color="#f59e0b" />
+                                       </View>
+                                       <View style={styles.metricContent}>
+                                         <Text style={styles.metricLabel}>Completion</Text>
+                                         <Text style={styles.metricValue}>
+                                           {Math.round(exerciseCompletionRate)}% ({exerciseResults.length}/{classStudents.length})
+                                         </Text>
+                                       </View>
+                                     </View>
+                                   </View>
+                                 </View>
                                </View>
                                
-                               {/* Table Header with Sorting */}
-                               <View style={styles.resultsTableHeader}>
-                                 <Text style={[styles.tableHeaderText, { width: 40 }]}>#</Text>
-                                 <Text style={[styles.tableHeaderText, { flex: 2 }]}>Student</Text>
-                                 <TouchableOpacity 
-                                   style={styles.sortableHeaderCell}
-                                   onPress={() => handleSort('attempts')}
-                                 >
-                                   <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'attempts' && styles.activeSort]}>
-                                     Avg Attempts
-                                   </Text>
-                                   {resultsSortBy === 'attempts' && (
-                                     <MaterialIcons 
-                                       name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
-                                       size={16} 
-                                       color="#3b82f6" 
-                                     />
-                                   )}
-                                 </TouchableOpacity>
-                                 <TouchableOpacity 
-                                   style={styles.sortableHeaderCell}
-                                   onPress={() => handleSort('time')}
-                                 >
-                                   <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'time' && styles.activeSort]}>
-                                     Time
-                                   </Text>
-                                   {resultsSortBy === 'time' && (
-                                     <MaterialIcons 
-                                       name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
-                                       size={16} 
-                                       color="#3b82f6" 
-                                     />
-                                   )}
-                                 </TouchableOpacity>
-                               </View>
-                             
-                               {/* Table Rows */}
-                               {sortedResults.map((result: any, idx: number) => {
-                                 // Find student by studentId from the result (proper database lookup)
-                                 const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
-                                 const studentNickname = student?.nickname || 'Unknown Student';
+                               {/* Student Results Table */}
+                               <View style={styles.studentResultsContainer}>
+                                 <View style={styles.studentResultsHeader}>
+                                   <Text style={styles.studentResultsTitle}>Student Results</Text>
+                                   <TouchableOpacity 
+                                     style={styles.exportButton}
+                                     onPress={() => handleExportToExcel(exerciseTitle, sortedResults, classStudents)}
+                                   >
+                                     <MaterialCommunityIcons name="file-excel" size={14} color="#ffffff" />
+                                     <Text style={styles.exportButtonText}>Export Excel</Text>
+                                   </TouchableOpacity>
+                                 </View>
                                  
-                                 // Calculate average attempts and total time
-                                 const questionResults = result.questionResults || [];
-                                 const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
-                                 const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
-                                 const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
-                                 const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
-                                 const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
-                                 
-                                 return (
-                                   <View key={result.resultId || idx} style={styles.resultsTableRow}>
-                                     <Text style={[styles.tableRowText, { width: 40 }]}>{idx + 1}.</Text>
-                                     <TouchableOpacity 
-                                       style={{ flex: 2 }}
-                                       onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname)}
-                                     >
-                                       <Text style={[styles.tableRowText, styles.studentNameCell, { flex: 2, color: '#3b82f6' }]}>{studentNickname}</Text>
-                                     </TouchableOpacity>
-                                     <Text style={[styles.tableRowText, { flex: 1.5 }]}>{avgAttempts}</Text>
-                                     <Text style={[styles.tableRowText, { flex: 1.5 }]}>{timeDisplay}</Text>
+                                 <ScrollView 
+                                   horizontal={width < 400}
+                                   showsHorizontalScrollIndicator={width < 400}
+                                   style={styles.tableScrollContainer}
+                                 >
+                                   <View style={styles.tableContainer}>
+                                     {/* Table Header */}
+                                     <View style={styles.resultsTableHeader}>
+                                       <Text style={[styles.tableHeaderText, { width: 50 }]}>#</Text>
+                                       <Text style={[styles.tableHeaderText, { flex: 2 }]}>Student</Text>
+                                       <TouchableOpacity 
+                                         style={styles.sortableHeaderCell}
+                                         onPress={() => handleSort('attempts')}
+                                       >
+                                         <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'attempts' && styles.activeSort]}>
+                                           Attempts
+                                         </Text>
+                                         {resultsSortBy === 'attempts' && (
+                                           <MaterialIcons 
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                                             size={16} 
+                                             color="#3b82f6" 
+                                           />
+                                         )}
+                                       </TouchableOpacity>
+                                       <TouchableOpacity 
+                                         style={styles.sortableHeaderCell}
+                                         onPress={() => handleSort('time')}
+                                       >
+                                         <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'time' && styles.activeSort]}>
+                                           Time
+                                         </Text>
+                                         {resultsSortBy === 'time' && (
+                                           <MaterialIcons 
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                                             size={16} 
+                                             color="#3b82f6" 
+                                           />
+                                         )}
+                                       </TouchableOpacity>
+                                     </View>
+                                   
+                                     {/* Table Rows */}
+                                     {sortedResults.map((result: any, idx: number) => {
+                                       // Find student by studentId from the result (proper database lookup)
+                                       const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
+                                       const studentNickname = student?.nickname || 'Unknown Student';
+                                       
+                                       // Calculate average attempts and total time
+                                       const questionResults = result.questionResults || [];
+                                       const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                                       const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
+                                       const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
+                                       const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
+                                       const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
+                                       
+                                       return (
+                                         <View key={result.resultId || idx} style={styles.resultsTableRow}>
+                                           <Text style={[styles.tableRowText, { width: 50 }]}>{idx + 1}</Text>
+                                           <TouchableOpacity 
+                                             style={{ flex: 2 }}
+                                             onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname)}
+                                           >
+                                             <Text style={[styles.tableRowText, styles.studentNameCell, { flex: 2, color: '#3b82f6' }]}>{studentNickname}</Text>
+                                           </TouchableOpacity>
+                                           <Text style={[styles.tableRowText, { flex: 1.5 }]}>{avgAttempts}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1.5 }]}>{timeDisplay}</Text>
+                                         </View>
+                                       );
+                                     })}
                                    </View>
-                                 );
-                               })}
+                                 </ScrollView>
+                               </View>
                              </View>
                            );
-                         })}
-                       </View>
-                     );
-                   })()}
+                         });
+                       })()}
+                     </View>
+                   )}
                  </View>
                );
              })}
@@ -4139,6 +4327,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#ffffff',
+    minHeight: height,
   },
   backgroundPattern: {
     position: 'absolute',
@@ -4151,8 +4340,9 @@ const styles = StyleSheet.create({
   },
   scrollView: {
     flex: 1,
-    paddingHorizontal: 20,
-    paddingTop: 60,
+    paddingHorizontal: Math.min(20, width * 0.05),
+    paddingTop: Math.min(60, height * 0.08),
+    paddingBottom: Math.min(100, height * 0.12),
   },
   
   // Header Styles
@@ -4305,15 +4495,18 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   sectionTitle: {
-    fontSize: 22,
+    fontSize: Math.max(18, Math.min(22, width * 0.055)),
     fontWeight: '700',
     color: '#1e293b',
-    marginBottom: 20,
+    marginBottom: Math.min(20, height * 0.025),
+    paddingHorizontal: Math.min(16, width * 0.04),
   },
   classroomCard: {
     backgroundColor: '#ffffff',
-    borderRadius: 20,
-    padding: 24,
+    borderRadius: Math.min(20, width * 0.05),
+    padding: Math.min(24, width * 0.06),
+    marginHorizontal: Math.min(16, width * 0.04),
+    marginBottom: Math.min(16, height * 0.02),
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.08,
@@ -4321,26 +4514,183 @@ const styles = StyleSheet.create({
     elevation: 4,
     borderWidth: 1,
     borderColor: '#f1f5f9',
+    width: width - Math.min(32, width * 0.08),
+    alignSelf: 'center',
   },
   classroomHeader: {
-    marginBottom: 24,
+    marginBottom: 16,
   },
   classroomTitle: {
-    fontSize: 20,
+    fontSize: Math.max(16, Math.min(20, width * 0.05)),
     fontWeight: '700',
     color: '#1e293b',
-    marginBottom: 6,
+    marginBottom: Math.min(6, height * 0.008),
   },
   classroomSubtitle: {
-    fontSize: 15,
+    fontSize: Math.max(13, Math.min(15, width * 0.037)),
     color: '#64748b',
-    marginBottom: 4,
+    marginBottom: Math.min(4, height * 0.005),
     fontWeight: '500',
   },
   classroomYear: {
-    fontSize: 14,
+    fontSize: Math.max(12, Math.min(14, width * 0.035)),
     color: '#64748b',
     fontWeight: '500',
+  },
+  classMetricsContainer: {
+    marginTop: 6,
+    padding: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  classMetricItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+    gap: 6,
+  },
+  classMetricLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+    minWidth: 80,
+  },
+  classMetricValue: {
+    fontSize: 12,
+    color: '#1e293b',
+    fontWeight: '600',
+    flex: 1,
+  },
+  exerciseStatusContainer: {
+    marginLeft: 'auto',
+  },
+  exerciseStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingVertical: Math.min(6, height * 0.008),
+    borderRadius: Math.min(16, width * 0.04),
+    gap: Math.min(6, width * 0.015),
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 1,
+    },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  exerciseStatusText: {
+    fontSize: Math.max(11, Math.min(13, width * 0.032)),
+    color: '#ffffff',
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  exerciseHeader: {
+    marginBottom: Math.min(16, height * 0.02),
+  },
+  exerciseTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Math.min(12, height * 0.015),
+    paddingHorizontal: Math.min(4, width * 0.01),
+  },
+  exerciseTitle: {
+    fontSize: Math.max(18, Math.min(20, width * 0.05)),
+    fontWeight: '700',
+    color: '#1e293b',
+    flex: 1,
+    marginLeft: Math.min(8, width * 0.02),
+  },
+  performanceSummaryCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: Math.min(8, width * 0.02),
+    padding: Math.min(12, width * 0.03),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 1,
+    },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  performanceSummaryTitle: {
+    fontSize: Math.max(14, Math.min(16, width * 0.04)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: Math.min(8, height * 0.01),
+    textAlign: 'center',
+  },
+  performanceMetricsGrid: {
+    gap: Math.min(8, height * 0.01),
+  },
+  performanceMetric: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: Math.min(6, height * 0.008),
+    paddingHorizontal: Math.min(8, width * 0.02),
+    backgroundColor: '#f8fafc',
+    borderRadius: Math.min(6, width * 0.015),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  metricIconContainer: {
+    width: Math.min(28, width * 0.07),
+    height: Math.min(28, width * 0.07),
+    borderRadius: Math.min(14, width * 0.035),
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: Math.min(8, width * 0.02),
+  },
+  metricContent: {
+    flex: 1,
+  },
+  metricLabel: {
+    fontSize: Math.max(11, Math.min(13, width * 0.032)),
+    color: '#64748b',
+    fontWeight: '600',
+    marginBottom: Math.min(2, height * 0.003),
+  },
+  metricValue: {
+    fontSize: Math.max(13, Math.min(15, width * 0.037)),
+    color: '#1e293b',
+    fontWeight: '700',
+  },
+  studentResultsContainer: {
+    marginTop: Math.min(8, height * 0.01),
+  },
+  studentResultsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: Math.min(6, height * 0.008),
+  },
+  studentResultsTitle: {
+    fontSize: Math.max(14, Math.min(16, width * 0.04)),
+    fontWeight: '600',
+    color: '#374151',
+  },
+  exportButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#10b981',
+    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingVertical: Math.min(6, height * 0.008),
+    borderRadius: Math.min(6, width * 0.015),
+    gap: Math.min(4, width * 0.01),
+  },
+  exportButtonText: {
+    color: '#ffffff',
+    fontSize: Math.max(11, Math.min(12, width * 0.03)),
+    fontWeight: '600',
   },
   moreButton: {
     position: 'absolute',
@@ -5010,12 +5360,6 @@ const styles = StyleSheet.create({
   exerciseContent: {
     flex: 1,
   },
-  exerciseTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1e293b',
-    marginBottom: 4,
-  },
   exerciseDescription: {
     fontSize: 14,
     color: '#64748b',
@@ -5149,21 +5493,6 @@ const styles = StyleSheet.create({
     zIndex: 1,
   },
   // Exercise Title Row Styles (deprecated - keeping for compatibility)
-  exerciseTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  categoryBadge: {
-    backgroundColor: '#7c3aed',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    alignSelf: 'flex-end',
-    flexShrink: 0,
-    marginTop: 4,
-  },
   categoryBadgeText: {
     fontSize: 10,
     fontWeight: '600',
@@ -6242,14 +6571,17 @@ const styles = StyleSheet.create({
   resultsTableHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: Math.min(16, width * 0.04),
+    paddingVertical: Math.min(14, height * 0.018),
+    borderBottomWidth: 2,
     borderBottomColor: '#e2e8f0',
+    minWidth: width < 400 ? width * 0.8 : 'auto',
+    borderRadius: Math.min(8, width * 0.02),
+    marginBottom: Math.min(4, height * 0.005),
   },
   tableHeaderText: {
-    fontSize: 14,
+    fontSize: Math.max(12, Math.min(14, width * 0.035)),
     fontWeight: '700',
     color: '#374151',
     textAlign: 'center',
@@ -6270,19 +6602,29 @@ const styles = StyleSheet.create({
   resultsTableRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingVertical: Math.min(8, height * 0.01),
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
+    minWidth: width < 400 ? width * 0.8 : 'auto',
+    backgroundColor: '#ffffff',
+    marginBottom: Math.min(1, height * 0.001),
+    borderRadius: Math.min(4, width * 0.01),
   },
   tableRowText: {
-    fontSize: 14,
+    fontSize: Math.max(12, Math.min(14, width * 0.035)),
     color: '#1e293b',
     textAlign: 'center',
   },
   studentNameCell: {
     textAlign: 'left',
     fontWeight: '600',
+  },
+  tableScrollContainer: {
+    maxHeight: height * 0.4,
+  },
+  tableContainer: {
+    minWidth: width < 400 ? width * 0.8 : 'auto',
   },
   scoreCell: {
     fontWeight: '700',
