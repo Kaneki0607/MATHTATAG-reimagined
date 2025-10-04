@@ -1563,6 +1563,7 @@ Focus on:
       <Animated.View style={{ flex: 1, opacity: fadeAnim, transform: [{ translateY: translateAnim }] }}>
       <ScrollView 
         style={styles.scrollView} 
+        contentContainerStyle={styles.scrollContentContainer}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
@@ -1583,14 +1584,14 @@ Focus on:
                 />
               ) : (
                 <View style={styles.profileImagePlaceholder}>
-                  <MaterialIcons name="person" size={24} color="#64748b" />
+                  <MaterialIcons name="person" size={20} color="#9ca3af" />
                 </View>
               )}
             </TouchableOpacity>
             <View style={styles.welcomeText}>
               <Text style={styles.welcomeLabel}>Welcome,</Text>
               <Text style={styles.welcomeTitle}>
-                {parentData ? `${parentData.firstName} ${parentData.lastName}` : 'Loading...'}
+                {parentData ? `${parentData.firstName} ${parentData.lastName}` : 'Marie Chan'}
               </Text>
             </View>
           </View>
@@ -1775,9 +1776,7 @@ Focus on:
         {activeSection === 'tasks' && (
           <View style={styles.tasksSection}>
             <View style={styles.tasksHeader}>
-              <View style={styles.tasksTitleContainer}>
-                <Text style={styles.sectionTitle}>Tasks</Text>
-              </View>
+              <Text style={styles.tasksMainTitle}>Tasks</Text>
               <View style={styles.tasksSummary}>
                 <View style={styles.summaryItem}>
                   <View style={[styles.summaryDot, { backgroundColor: '#f59e0b' }]} />
@@ -1801,7 +1800,11 @@ Focus on:
                 <Text style={styles.loadingText}>Loading tasks...</Text>
               </View>
             ) : tasks.filter(t => t.isAssignedExercise).length > 0 ? (
-              <ScrollView style={styles.tasksScrollView} showsVerticalScrollIndicator={false}>
+              <ScrollView 
+                style={styles.tasksScrollView} 
+                contentContainerStyle={styles.tasksScrollContainer}
+                showsVerticalScrollIndicator={false}
+              >
                 {tasks.filter(t => t.isAssignedExercise).map((task, index) => {
                   const isOverdue = new Date(task.dueDate) < new Date() && task.status !== 'completed';
                   const dueDate = new Date(task.dueDate);
@@ -2869,8 +2872,11 @@ const styles = StyleSheet.create({
   },
   scrollView: {
     flex: 1,
+  },
+  scrollContentContainer: {
     paddingHorizontal: 20,
     paddingTop: 60,
+    paddingBottom: 120, // Extra padding to prevent content from being covered by bottom nav
   },
   header: {
     marginBottom: 24,
@@ -2885,34 +2891,34 @@ const styles = StyleSheet.create({
     marginRight: 16,
   },
   profileImage: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
     backgroundColor: '#f1f5f9',
   },
   profileImagePlaceholder: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
     backgroundColor: '#f1f5f9',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#e2e8f0',
+    borderWidth: 1,
+    borderColor: '#d1d5db',
   },
   welcomeText: {
     flex: 1,
   },
   welcomeLabel: {
-    fontSize: 16,
-    color: '#64748b',
-    marginBottom: 4,
-    fontWeight: '500',
+    fontSize: 14,
+    color: '#9ca3af',
+    marginBottom: 2,
+    fontWeight: '400',
   },
   welcomeTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
-    color: '#1e293b',
+    color: '#374151',
   },
   announcementSection: {
     marginBottom: 24,
@@ -3143,31 +3149,28 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     flexDirection: 'row',
-    backgroundColor: '#ffffff',
-    paddingVertical: 16,
+    backgroundColor: '#f1f5f9',
+    paddingVertical: 12,
     paddingHorizontal: 20,
-    borderTopWidth: 1,
-    borderTopColor: '#f1f5f9',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 8,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 12,
   },
   navItem: {
     flex: 1,
     alignItems: 'center',
     paddingVertical: 8,
   },
-  activeNavItem: {},
+  activeNavItem: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#374151',
+  },
   navText: {
     fontSize: 12,
     color: '#9ca3af',
-    marginTop: 6,
+    marginTop: 4,
     fontWeight: '500',
   },
   activeNavText: {
-    color: '#1e293b',
+    color: '#374151',
     fontWeight: '700',
   },
   // Registration Modal Styles
@@ -3493,6 +3496,9 @@ const styles = StyleSheet.create({
   tasksScrollView: {
     flex: 1,
   },
+  tasksScrollContainer: {
+    paddingBottom: 20, // Ensure last task card is fully accessible
+  },
   tasksHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -3502,6 +3508,12 @@ const styles = StyleSheet.create({
   tasksTitleContainer: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  tasksMainTitle: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#374151',
+    marginBottom: 16,
   },
   tasksSummary: {
     flexDirection: 'row',
@@ -3571,13 +3583,13 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 20,
     marginBottom: 16,
+    marginTop: 4, // Add top margin for better spacing
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+    borderWidth: 0,
   },
   taskItem: {
     flexDirection: 'row',
@@ -3634,9 +3646,9 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
   },
   enhancedTaskTitle: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '700',
-    color: '#1e293b',
+    color: '#374151',
     marginBottom: 8,
     lineHeight: 22,
   },
@@ -3665,10 +3677,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderWidth: 1,
-    marginBottom: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 0,
+    gap: 4,
   },
   statusText: {
     fontSize: 11,

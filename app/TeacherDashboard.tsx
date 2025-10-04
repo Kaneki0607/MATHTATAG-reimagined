@@ -2697,6 +2697,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                  {/* Performance Summary Card */}
                                  <View style={styles.performanceSummaryCard}>
                                    <Text style={styles.performanceSummaryTitle}>Summary of Class Average</Text>
+                                   
+                                   {/* Progress Bar for Completion Rate */}
+                                   <View style={styles.completionProgressContainer}>
+                                     <Text style={styles.completionProgressLabel}>Class Completion Progress</Text>
+                                     <View style={styles.completionProgressBar}>
+                                       <View style={[styles.completionProgressFill, { 
+                                         width: `${Math.min(exerciseCompletionRate, 100)}%`,
+                                         backgroundColor: exerciseCompletionRate >= 90 ? '#10b981' : 
+                                                         exerciseCompletionRate >= 70 ? '#f59e0b' : '#ef4444'
+                                       }]} />
+                                     </View>
+                                     <Text style={styles.completionProgressText}>
+                                       {Math.round(exerciseCompletionRate)}% Complete
+                                     </Text>
+                                   </View>
+                                   
                                    <View style={styles.performanceMetricsGrid}>
                                      <View style={styles.performanceMetric}>
                                        <View style={styles.metricIconContainer}>
@@ -2714,6 +2730,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                              '—'
                                            }
                                          </Text>
+                                         <View style={[styles.performanceIndicator, { 
+                                           backgroundColor: exerciseAverageTime > 0 && exerciseAverageTime < 60000 ? '#10b981' : 
+                                                           exerciseAverageTime > 0 && exerciseAverageTime < 120000 ? '#f59e0b' : '#ef4444'
+                                         }]} />
                                        </View>
                                      </View>
                                      
@@ -2726,6 +2746,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                          <Text style={styles.metricValue}>
                                            {exerciseAverageAttempts > 0 ? exerciseAverageAttempts.toFixed(1) : '—'}
                                          </Text>
+                                         <View style={[styles.performanceIndicator, { 
+                                           backgroundColor: exerciseAverageAttempts > 0 && exerciseAverageAttempts <= 1.2 ? '#10b981' : 
+                                                           exerciseAverageAttempts > 0 && exerciseAverageAttempts <= 2.0 ? '#f59e0b' : '#ef4444'
+                                         }]} />
                                        </View>
                                      </View>
                                      
@@ -2738,6 +2762,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                          <Text style={styles.metricValue}>
                                            {Math.round(exerciseCompletionRate)}% ({exerciseResults.length}/{classStudents.length})
                                          </Text>
+                                         <View style={[styles.performanceIndicator, { 
+                                           backgroundColor: exerciseCompletionRate >= 90 ? '#10b981' : 
+                                                           exerciseCompletionRate >= 70 ? '#f59e0b' : '#ef4444'
+                                         }]} />
                                        </View>
                                      </View>
                                    </View>
@@ -2813,14 +2841,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                        const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
                                        const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
                                        
+                                       // Calculate performance level for this student
+                                       const studentPerformanceLevel = (() => {
+                                         const avgAttemptsNum = parseFloat(avgAttempts);
+                                         const timeInSeconds = (result.totalTimeSpent || 0) / 1000;
+                                         
+                                         if (avgAttemptsNum <= 1.2 && timeInSeconds <= 60) return 'excellent';
+                                         if (avgAttemptsNum <= 2.0 && timeInSeconds <= 120) return 'good';
+                                         if (avgAttemptsNum <= 3.0 && timeInSeconds <= 180) return 'fair';
+                                         return 'needs_improvement';
+                                       })();
+                                       
                                        return (
                                          <View key={result.resultId || idx} style={styles.resultsTableRow}>
                                            <Text style={[styles.tableRowText, { width: 50 }]}>{idx + 1}</Text>
                                            <TouchableOpacity 
-                                             style={{ flex: 2 }}
+                                             style={{ flex: 2, flexDirection: 'row', alignItems: 'center' }}
                                              onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname)}
                                            >
-                                             <Text style={[styles.tableRowText, styles.studentNameCell, { flex: 2, color: '#3b82f6' }]}>{studentNickname}</Text>
+                                             <Text style={[styles.tableRowText, styles.studentNameCell, { flex: 1, color: '#3b82f6' }]}>{studentNickname}</Text>
+                                             <View style={[styles.studentPerformanceBadge, { 
+                                               backgroundColor: studentPerformanceLevel === 'excellent' ? '#10b981' : 
+                                                               studentPerformanceLevel === 'good' ? '#3b82f6' : 
+                                                               studentPerformanceLevel === 'fair' ? '#f59e0b' : '#ef4444'
+                                             }]} />
                                            </TouchableOpacity>
                                            <Text style={[styles.tableRowText, { flex: 1.5 }]}>{avgAttempts}</Text>
                                            <Text style={[styles.tableRowText, { flex: 1.5 }]}>{timeDisplay}</Text>
@@ -4569,127 +4613,187 @@ const styles = StyleSheet.create({
   exerciseStatusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Math.min(12, width * 0.03),
-    paddingVertical: Math.min(6, height * 0.008),
-    borderRadius: Math.min(16, width * 0.04),
-    gap: Math.min(6, width * 0.015),
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    gap: 6,
     shadowColor: '#000',
     shadowOffset: {
       width: 0,
-      height: 1,
+      height: 2,
     },
-    shadowOpacity: 0.2,
-    shadowRadius: 2,
-    elevation: 2,
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
   },
   exerciseStatusText: {
-    fontSize: Math.max(11, Math.min(13, width * 0.032)),
+    fontSize: 11,
     color: '#ffffff',
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
   exerciseHeader: {
-    marginBottom: Math.min(16, height * 0.02),
+    backgroundColor: '#ffffff',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
   },
   exerciseTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: Math.min(12, height * 0.015),
-    paddingHorizontal: Math.min(4, width * 0.01),
+    marginBottom: 0,
+    paddingHorizontal: 0,
   },
   exerciseTitle: {
-    fontSize: Math.max(18, Math.min(20, width * 0.05)),
+    fontSize: 20,
     fontWeight: '700',
     color: '#1e293b',
     flex: 1,
-    marginLeft: Math.min(8, width * 0.02),
+    marginLeft: 12,
   },
   performanceSummaryCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: Math.min(8, width * 0.02),
-    padding: Math.min(12, width * 0.03),
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
     borderWidth: 1,
     borderColor: '#e2e8f0',
     shadowColor: '#000',
     shadowOffset: {
       width: 0,
-      height: 1,
+      height: 2,
     },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    elevation: 2,
+    marginTop: 12,
   },
   performanceSummaryTitle: {
-    fontSize: Math.max(14, Math.min(16, width * 0.04)),
+    fontSize: 16,
     fontWeight: '700',
     color: '#1e293b',
-    marginBottom: Math.min(8, height * 0.01),
+    marginBottom: 16,
     textAlign: 'center',
   },
   performanceMetricsGrid: {
-    gap: Math.min(8, height * 0.01),
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
   },
   performanceMetric: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: Math.min(6, height * 0.008),
-    paddingHorizontal: Math.min(8, width * 0.02),
-    backgroundColor: '#f8fafc',
-    borderRadius: Math.min(6, width * 0.015),
+    flex: 1,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
     borderWidth: 1,
     borderColor: '#e2e8f0',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 1,
+    },
+    shadowOpacity: 0.03,
+    shadowRadius: 2,
+    elevation: 1,
   },
   metricIconContainer: {
-    width: Math.min(28, width * 0.07),
-    height: Math.min(28, width * 0.07),
-    borderRadius: Math.min(14, width * 0.035),
-    backgroundColor: '#f1f5f9',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#f0f9ff',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: Math.min(8, width * 0.02),
+    marginBottom: 8,
   },
   metricContent: {
-    flex: 1,
+    alignItems: 'center',
   },
   metricLabel: {
-    fontSize: Math.max(11, Math.min(13, width * 0.032)),
+    fontSize: 12,
     color: '#64748b',
     fontWeight: '600',
-    marginBottom: Math.min(2, height * 0.003),
+    marginBottom: 4,
+    textAlign: 'center',
   },
   metricValue: {
-    fontSize: Math.max(13, Math.min(15, width * 0.037)),
+    fontSize: 18,
     color: '#1e293b',
     fontWeight: '700',
+    textAlign: 'center',
+  },
+  performanceIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginTop: 4,
+  },
+  completionProgressContainer: {
+    marginBottom: 16,
+  },
+  completionProgressLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  completionProgressBar: {
+    height: 8,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 4,
+  },
+  completionProgressFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  completionProgressText: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'right',
   },
   studentResultsContainer: {
-    marginTop: Math.min(8, height * 0.01),
+    marginTop: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   studentResultsHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: Math.min(6, height * 0.008),
+    marginBottom: 12,
   },
   studentResultsTitle: {
-    fontSize: Math.max(14, Math.min(16, width * 0.04)),
-    fontWeight: '600',
-    color: '#374151',
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
   },
   exportButton: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#10b981',
-    paddingHorizontal: Math.min(12, width * 0.03),
-    paddingVertical: Math.min(6, height * 0.008),
-    borderRadius: Math.min(6, width * 0.015),
-    gap: Math.min(4, width * 0.01),
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    gap: 6,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   exportButtonText: {
     color: '#ffffff',
-    fontSize: Math.max(11, Math.min(12, width * 0.03)),
+    fontSize: 13,
     fontWeight: '600',
   },
   moreButton: {
@@ -6540,17 +6644,17 @@ const styles = StyleSheet.create({
   
   // Enhanced Results Table Styles
   exerciseResultsSection: {
-    marginBottom: 12,
+    marginBottom: 16,
     backgroundColor: '#ffffff',
-    borderRadius: 12,
+    borderRadius: 16,
     overflow: 'hidden',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
     borderWidth: 1,
-    borderColor: '#f1f5f9',
+    borderColor: '#e2e8f0',
   },
   exerciseTableHeader: {
     flexDirection: 'row',
@@ -6571,17 +6675,17 @@ const styles = StyleSheet.create({
   resultsTableHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f1f5f9',
-    paddingHorizontal: Math.min(16, width * 0.04),
-    paddingVertical: Math.min(14, height * 0.018),
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: 16,
+    paddingVertical: 16,
     borderBottomWidth: 2,
     borderBottomColor: '#e2e8f0',
     minWidth: width < 400 ? width * 0.8 : 'auto',
-    borderRadius: Math.min(8, width * 0.02),
-    marginBottom: Math.min(4, height * 0.005),
+    borderRadius: 8,
+    marginBottom: 8,
   },
   tableHeaderText: {
-    fontSize: Math.max(12, Math.min(14, width * 0.035)),
+    fontSize: 14,
     fontWeight: '700',
     color: '#374151',
     textAlign: 'center',
@@ -6602,23 +6706,29 @@ const styles = StyleSheet.create({
   resultsTableRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Math.min(12, width * 0.03),
-    paddingVertical: Math.min(8, height * 0.01),
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
     minWidth: width < 400 ? width * 0.8 : 'auto',
     backgroundColor: '#ffffff',
-    marginBottom: Math.min(1, height * 0.001),
-    borderRadius: Math.min(4, width * 0.01),
+    marginBottom: 2,
+    borderRadius: 6,
   },
   tableRowText: {
-    fontSize: Math.max(12, Math.min(14, width * 0.035)),
+    fontSize: 14,
     color: '#1e293b',
     textAlign: 'center',
   },
   studentNameCell: {
     textAlign: 'left',
     fontWeight: '600',
+  },
+  studentPerformanceBadge: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginLeft: 8,
   },
   tableScrollContainer: {
     maxHeight: height * 0.4,

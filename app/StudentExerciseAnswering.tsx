@@ -7,7 +7,6 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { useEffect, useRef, useState } from 'react';
 import {
-  Alert,
   Animated,
   Dimensions,
   Easing,
@@ -20,8 +19,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  UIManager,
-  View,
+  View
 } from 'react-native';
 import { readData, writeData } from '../lib/firebase-database';
 
@@ -328,6 +326,9 @@ export default function StudentExerciseAnswering() {
   const correctAnim = useRef(new Animated.Value(0)).current;
   const [showWrong, setShowWrong] = useState(false);
   const wrongAnim = useRef(new Animated.Value(0)).current;
+  const [showAlertModal, setShowAlertModal] = useState(false);
+  const [alertConfig, setAlertConfig] = useState({title: '', message: '', type: 'warning', onConfirm: () => {}});
+  const alertAnim = useRef(new Animated.Value(0)).current;
   const [attemptLogs, setAttemptLogs] = useState<{[questionId: string]: Array<{answer: string, timeSpent: number, timestamp: number, attemptType: string, hesitationTime: number, isSignificantChange: boolean, questionPhase: string, confidence: string}>}>({});
   
   // Enhanced interaction tracking
@@ -348,10 +349,7 @@ export default function StudentExerciseAnswering() {
   const lastAutoPlayedQuestionIdRef = useRef<string | null>(null);
   const currentTTSRef = useRef<any | null>(null);
 
-  // Enable smooth layout transitions on Android
-  if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-    UIManager.setLayoutAnimationEnabledExperimental(true);
-  }
+  // Layout transitions will be handled by React Native automatically
   
   // Load exercise data
   useEffect(() => {
@@ -396,12 +394,27 @@ export default function StudentExerciseAnswering() {
       if (timerInterval) {
         clearInterval(timerInterval);
       }
-      // Stop any TTS audio on unmount
+      
+      // Stop any TTS audio on unmount - ensure complete cleanup
       try {
+        // Stop expo-speech if running
+        Speech.stop();
+      } catch (error) {
+        console.warn('Error stopping speech on unmount:', error);
+      }
+      
+      try {
+        // Stop and cleanup audio player
+        if (currentTTSRef.current) {
+          currentTTSRef.current.pause();
+          currentTTSRef.current.remove();
+        }
         if (currentAudioPlayer) {
           currentAudioPlayer.remove();
         }
-      } catch {}
+      } catch (error) {
+        console.warn('Error stopping audio player on unmount:', error);
+      }
     };
   }, [timerInterval]);
   
@@ -575,19 +588,17 @@ export default function StudentExerciseAnswering() {
   };
 
   // TTS helpers
-  const playTTS = async (audioUrl?: string | null, attempt: number = 0) => {
+  const playTTS = async (audioUrl?: string | null) => {
     try {
       if (!audioUrl) return;
       
-      // TTS is auto-played, no need to track as user interaction
+      // Always auto-play TTS for all question types and contexts
       
       // CRITICAL: Always stop any existing TTS before starting new one
       stopCurrentTTS();
       
       // Wait for stopping to complete
       await new Promise(resolve => setTimeout(resolve, 200));
-      
-
       
       setIsLoadingTTS(true);
       const source: AudioSource = { uri: audioUrl };
@@ -602,7 +613,7 @@ export default function StudentExerciseAnswering() {
         if ('isLoaded' in status && status.isLoaded) {
           if (status.playing) {
             setIsPlayingTTS(true);
-
+            setIsLoadingTTS(false);
           }
           if (status.didJustFinish) {
             setIsPlayingTTS(false);
@@ -628,7 +639,6 @@ export default function StudentExerciseAnswering() {
       });
       
       player.play();
-      setIsLoadingTTS(false);
     } catch (error) {
       console.error('TTS playback error:', error);
       setIsPlayingTTS(false);
@@ -640,12 +650,9 @@ export default function StudentExerciseAnswering() {
   };
 
   const stopTTS = () => {
-
-  
     try {
       // Stop expo-speech if it's running
       Speech.stop();
-
     } catch (error) {
       console.warn('Error stopping speech:', error);
     }
@@ -655,7 +662,6 @@ export default function StudentExerciseAnswering() {
       try {
         currentTTSRef.current.pause();
         currentTTSRef.current.remove();
-    
       } catch (error) {
         console.warn('Error stopping audio player:', error);
       }
@@ -669,8 +675,6 @@ export default function StudentExerciseAnswering() {
     setCurrentAudioUri(null);
     lastAutoPlayedQuestionIdRef.current = null;
   };
-  
-  
 
   const stopCurrentTTS = () => {
     // small wrapper for clarity
@@ -682,7 +686,7 @@ export default function StudentExerciseAnswering() {
     const isActive = isPlayingTTS && currentAudioUri === audioUrl;
     return (
       <TouchableOpacity
-        onPress={isActive ? stopTTS : () => playTTS(audioUrl)}
+        onPress={isActive ? stopTTS : () => playTTS(audioUrl)} // Simplified - no attempt parameter needed
         style={styles.ttsButton}
         activeOpacity={0.8}
       >
@@ -704,14 +708,14 @@ export default function StudentExerciseAnswering() {
     if (!isFocused) return; // only auto-play when screen is focused
     if (lastAutoPlayedQuestionIdRef.current === q.id) return;
     
+    // Always set the last played question ID regardless of whether TTS exists
+    lastAutoPlayedQuestionIdRef.current = q.id;
+    
     if (q.ttsAudioUrl) {
-      lastAutoPlayedQuestionIdRef.current = q.id;
-      // Longer delay to ensure previous audio is fully stopped
+      // Increased delay to ensure smooth transition between questions
       setTimeout(() => {
         playTTS(q.ttsAudioUrl!);
-      }, 500);
-    } else {
-      lastAutoPlayedQuestionIdRef.current = q.id;
+      }, 800);
     }
   }, [exercise, currentQuestionIndex, isFocused]);
 
@@ -954,6 +958,8 @@ export default function StudentExerciseAnswering() {
       // Set random background
       setBackgroundImage(getRandomBackground());
       
+      // Always enable TTS autoplay for all contexts
+      
       // Get parent ID and find associated student ID
       let parentId: string | null = null;
       let studentId: string | null = null;
@@ -1049,13 +1055,11 @@ export default function StudentExerciseAnswering() {
         setAttemptCounts(initAttempts);
         setCorrectQuestions(initCorrect);
       } else {
-        Alert.alert('Error', 'Exercise not found');
-        router.back();
+        showCustomAlert('Error', 'Exercise not found', () => router.back(), 'error');
       }
     } catch (error) {
       console.error('Failed to load exercise:', error);
-      Alert.alert('Error', 'Failed to load exercise');
-      router.back();
+      showCustomAlert('Error', 'Failed to load exercise', () => router.back(), 'error');
     } finally {
       setLoading(false);
     }
@@ -1115,7 +1119,7 @@ export default function StudentExerciseAnswering() {
         Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
       ]).start();
       triggerWrongFeedback();
-      Alert.alert('Try again', 'That is not correct yet. Please try again.');
+      showCustomAlert('Try again', 'That is not correct yet. Please try again.', undefined, 'warning');
       return;
     }
     
@@ -1184,6 +1188,54 @@ export default function StudentExerciseAnswering() {
           setShowWrong(false);
         });
       }, 500);
+    });
+  };
+
+  // Custom alert function
+  const showCustomAlert = (title: string, message: string, onConfirm?: () => void, type: 'warning' | 'error' | 'success' = 'warning') => {
+    setAlertConfig({
+      title,
+      message,
+      type,
+      onConfirm: onConfirm || (() => {})
+    });
+    setShowAlertModal(true);
+    
+    // Animate modal in
+    alertAnim.setValue(0);
+    Animated.parallel([
+      Animated.timing(alertAnim, {
+        toValue: 1,
+        duration: 200,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(cardScaleAnim, {
+        toValue: 0.98,
+        duration: 200,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  };
+
+  const hideCustomAlert = () => {
+    Animated.parallel([
+      Animated.timing(alertAnim, {
+        toValue: 0,
+        duration: 150,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(cardScaleAnim, {
+        toValue: 1,
+        duration: 150,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setShowAlertModal(false);
+      alertConfig.onConfirm();
     });
   };
   
@@ -1521,7 +1573,7 @@ export default function StudentExerciseAnswering() {
       
     } catch (error: any) {
       console.error('Failed to submit final answers:', error);
-      Alert.alert('Error', `Failed to submit answers: ${error.message || error}. Please try again.`);
+      showCustomAlert('Error', `Failed to submit answers: ${error.message || error}. Please try again.`, undefined, 'error');
     } finally {
       setSubmitting(false);
     }
@@ -1555,9 +1607,9 @@ export default function StudentExerciseAnswering() {
             Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
           ]).start();
           triggerWrongFeedback();
-          Alert.alert('Try again', 'Your current answer is not correct yet. Please try again.');
-          setSubmitting(false);
-          return;
+      showCustomAlert('Try again', 'Your current answer is not correct yet. Please try again.', undefined, 'warning');
+      setSubmitting(false);
+      return;
         } else {
           // Count the final successful attempt
           setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
@@ -1571,7 +1623,7 @@ export default function StudentExerciseAnswering() {
       setShowResults(true);
     } catch (error: any) {
       console.error('Failed to submit answers:', error);
-      Alert.alert('Error', `Failed to submit answers: ${error.message || error}. Please try again.`);
+      showCustomAlert('Error', `Failed to submit answers: ${error.message || error}. Please try again.`, undefined, 'error');
     } finally {
       setSubmitting(false);
     }
@@ -1592,12 +1644,10 @@ export default function StudentExerciseAnswering() {
       // Count the final successful attempt
       setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
       await unlockNextLevel();
-      Alert.alert('Great job!', 'Level cleared!', [
-        { text: 'Back to Map', onPress: () => router.replace({ pathname: '/Homepage', params: { exerciseId: exercise.id, session: String(Date.now()) } } as any) }
-      ]);
+      showCustomAlert('Great job!', 'Level cleared!', () => router.replace({ pathname: '/Homepage', params: { exerciseId: exercise.id, session: String(Date.now()) } } as any), 'success');
     } else {
       setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
-      Alert.alert('Not yet correct', 'Try again!');
+      showCustomAlert('Not yet correct', 'Try again!', undefined, 'warning');
     }
   };
   
@@ -2758,6 +2808,129 @@ export default function StudentExerciseAnswering() {
               </View>
             </View>
           </View>
+        )}
+
+        {/* Custom Alert Modal */}
+        {showAlertModal && (
+          <Animated.View
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0, 0, 0, 0.7)',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 1000,
+              opacity: alertAnim.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0, 1],
+              }),
+            }}
+          >
+            <Animated.View
+              style={{
+                backgroundColor: '#ffffff',
+                borderRadius: 20,
+                padding: 30,
+                margin: 20,
+                maxWidth: screenWidth - 80,
+                width: screenWidth * 0.8,
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 8 },
+                shadowOpacity: 0.3,
+                shadowRadius: 16,
+                elevation: 12,
+                transform: [
+                  {
+                    scale: alertAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.9, 1],
+                    }),
+                  },
+                  {
+                    translateY: alertAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [20, 0],
+                    }),
+                  },
+                ],
+              }}
+            >
+              <View style={{ alignItems: 'center', marginBottom: 20 }}>
+                <View style={{
+                  width: 60,
+                  height: 60,
+                  borderRadius: 30,
+                  backgroundColor: alertConfig.type === 'success' ? '#10b981' : 
+                                 alertConfig.type === 'error' ? '#ef4444' : '#ff6b6b',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginBottom: 15,
+                  shadowColor: alertConfig.type === 'success' ? '#10b981' : 
+                              alertConfig.type === 'error' ? '#ef4444' : '#ff6b6b',
+                  shadowOffset: { width: 0, height: 4 },
+                  shadowOpacity: 0.3,
+                  shadowRadius: 8,
+                  elevation: 6,
+                }}>
+                  <MaterialIcons 
+                    name={alertConfig.type === 'success' ? 'check-circle' : 
+                          alertConfig.type === 'error' ? 'error' : 'warning'} 
+                    size={32} 
+                    color="#ffffff" 
+                  />
+                </View>
+                
+                <Text style={{
+                  fontSize: 20,
+                  fontWeight: '800',
+                  color: '#1e293b',
+                  marginBottom: 10,
+                  textAlign: 'center',
+                }}>
+                  {alertConfig.title}
+                </Text>
+                
+                <Text style={{
+                  fontSize: 16,
+                  color: '#64748b',
+                  textAlign: 'center',
+                  lineHeight: 22,
+                }}>
+                  {alertConfig.message}
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                style={{
+                  backgroundColor: alertConfig.type === 'success' ? '#10b981' : 
+                                 alertConfig.type === 'error' ? '#ef4444' : '#ff6b6b',
+                  borderRadius: 12,
+                  paddingVertical: 14,
+                  paddingHorizontal: 24,
+                  alignItems: 'center',
+                  shadowColor: alertConfig.type === 'success' ? '#10b981' : 
+                              alertConfig.type === 'error' ? '#ef4444' : '#ff6b6b',
+                  shadowOffset: { width: 0, height: 4 },
+                  shadowOpacity: 0.3,
+                  shadowRadius: 8,
+                  elevation: 4,
+                }}
+                onPress={hideCustomAlert}
+                activeOpacity={0.8}
+              >
+                <Text style={{
+                  fontSize: 16,
+                  fontWeight: '700',
+                  color: '#ffffff',
+                }}>
+                  OK
+                </Text>
+              </TouchableOpacity>
+            </Animated.View>
+          </Animated.View>
         )}
       </ImageBackground>
     </View>
