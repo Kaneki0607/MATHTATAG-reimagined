@@ -37,6 +37,9 @@ interface AssignedExercise {
   deadline: string;
   assignedBy: string;
   createdAt: string;
+  acceptLateSubmissions?: boolean;
+  acceptingStatus?: 'open' | 'closed';
+  manuallyUpdated?: boolean;
   status?: 'pending' | 'in-progress' | 'completed' | 'overdue';
   completedAt?: string;
   score?: number;
@@ -723,9 +726,16 @@ export default function ParentDashboard() {
       await handleShowQuestionResult(task);
     } else {
       // For pending tasks, start the exercise
+      const params: any = { exerciseId: task.exerciseId };
+      
+      // If this is an assigned exercise, pass the assignedExerciseId
+      if (task.isAssignedExercise && task.assignedExerciseId) {
+        params.assignedExerciseId = task.assignedExerciseId;
+      }
+      
       router.push({
         pathname: '/StudentExerciseAnswering',
-        params: { exerciseId: task.exerciseId }
+        params
       });
     }
   };
@@ -1058,8 +1068,38 @@ Focus on:
     setClassAverages(null);
   };
 
+  // Helper function to get student class ID
+  const getStudentClassId = async (): Promise<string | null> => {
+    if (!parentData?.parentKey) return null;
+    
+    try {
+      // Resolve parent key to actual parent ID
+      const parentIdResult = await readData(`/parentLoginCodes/${parentData.parentKey}`);
+      if (parentIdResult.data) {
+        const actualParentId = parentIdResult.data;
+        
+        // Find the student associated with this parent
+        const studentsData = await readData('/students');
+        if (studentsData.data) {
+          const student = Object.values(studentsData.data).find((s: any) => s.parentId === actualParentId) as any;
+          if (student && student.classId) {
+            console.log('Found student class ID:', student.classId);
+            return student.classId;
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Could not get student class information:', error);
+    }
+    
+    return null;
+  };
+
   const loadAssignedExercises = async () => {
     try {
+      // Get the student's class information
+      const studentClassId = await getStudentClassId();
+
       const result = await readData('/assignedExercises');
       if (result.data) {
         const assignedExercisesList = Object.entries(result.data).map(([key, value]: [string, any]) => ({
@@ -1067,9 +1107,46 @@ Focus on:
           id: key
         })) as AssignedExercise[];
         
+        // Filter assigned exercises by student's class and update status
+        const filteredAssignedExercises = studentClassId 
+          ? assignedExercisesList
+              .filter(assignedExercise => assignedExercise.classId === studentClassId)
+              .map(assignedExercise => {
+                // Update status based on deadline and acceptLateSubmissions
+                const now = new Date();
+                const deadline = new Date(assignedExercise.deadline);
+                const isOverdue = now > deadline;
+                
+                let newStatus = assignedExercise.acceptingStatus;
+                
+                if (isOverdue) {
+                  // If overdue and not accepting late submissions, should be closed
+                  // But only if it wasn't manually updated (respect manual overrides)
+                  // Default to true (accept late submissions) if undefined
+                  if (!(assignedExercise.acceptLateSubmissions ?? true) && 
+                      assignedExercise.acceptingStatus === 'open' && 
+                      !assignedExercise.manuallyUpdated) {
+                    newStatus = 'closed';
+                  }
+                }
+                
+                return {
+                  ...assignedExercise,
+                  acceptingStatus: newStatus,
+                };
+              })
+          : [];
+        
+        console.log(`Filtered ${filteredAssignedExercises.length} assigned exercises for class ${studentClassId}`);
+        
+        // If no student class found, show warning but don't crash
+        if (!studentClassId) {
+          console.warn('No student class found for parent - no assigned exercises will be shown');
+        }
+        
         // Load exercise and teacher data for each assigned exercise
         const assignedExercisesWithData = await Promise.all(
-          assignedExercisesList.map(async (assignedExercise) => {
+          filteredAssignedExercises.map(async (assignedExercise) => {
             try {
               // Load exercise data
               const exerciseResult = await readData(`/exercises/${assignedExercise.exerciseId}`);
@@ -1117,6 +1194,9 @@ Focus on:
     try {
       setTasksLoading(true);
       
+      // Get student class ID for filtering
+      const studentClassId = await getStudentClassId();
+      
       // Load tasks, assigned exercises, and exercise results
       const [tasksResult, assignedExercises, exerciseResultsResult] = await Promise.all([
         readData('/tasks'),
@@ -1133,9 +1213,16 @@ Focus on:
           id: key
         })) as Task[];
         
-        // Load teacher data for each task
+        // Filter tasks by student's class
+        const filteredTasks = studentClassId 
+          ? tasksList.filter(task => task.classIds && task.classIds.includes(studentClassId))
+          : [];
+        
+        console.log(`Filtered ${filteredTasks.length} regular tasks for class ${studentClassId}`);
+        
+        // Load teacher data for each filtered task
         const tasksWithTeacherData = await Promise.all(
-          tasksList.map(async (task) => {
+          filteredTasks.map(async (task) => {
             try {
               const teacherResult = await readData(`/teachers/${task.teacherId}`);
               if (teacherResult.data) {
@@ -1167,6 +1254,7 @@ Focus on:
               const results = Object.values(exerciseResultsResult.data) as any[];
               completionData = results.find((result: any) => 
                 result.exerciseId === assignedExercise.exerciseId && 
+                result.assignedExerciseId === assignedExercise.id &&
                 result.parentId === parentData?.parentKey
               );
             }

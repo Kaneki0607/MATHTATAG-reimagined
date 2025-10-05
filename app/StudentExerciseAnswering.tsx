@@ -246,6 +246,7 @@ interface Exercise {
   coAuthors?: string[];
   originalAuthor?: string;
   originalExerciseId?: string;
+  timeLimitPerItem?: number; // Time limit in seconds per question
 }
 
 interface StudentAnswer {
@@ -283,11 +284,12 @@ const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
 
 export default function StudentExerciseAnswering() {
   const router = useRouter();
-  const { exerciseId, questionIndex } = useLocalSearchParams();
+  const { exerciseId, questionIndex, assignedExerciseId } = useLocalSearchParams();
   const isFocused = useIsFocused();
   
   // State
   const [exercise, setExercise] = useState<Exercise | null>(null);
+  const [assignedExercise, setAssignedExercise] = useState<any>(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<StudentAnswer[]>([]);
   const [currentAnswer, setCurrentAnswer] = useState<string | string[] | {[key: string]: any}>('');
@@ -298,6 +300,8 @@ export default function StudentExerciseAnswering() {
   const [timerInterval, setTimerInterval] = useState<NodeJS.Timeout | null>(null);
   const [questionStartTime, setQuestionStartTime] = useState<number>(Date.now());
   const [questionElapsed, setQuestionElapsed] = useState<number>(0);
+  const [timeLimitMs, setTimeLimitMs] = useState<number | null>(null);
+  const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
   const rafIdRef = useRef<number | null>(null);
   const questionElapsedRef = useRef<number>(0);
   const frozenElapsedRef = useRef<number | null>(null);
@@ -307,8 +311,8 @@ export default function StudentExerciseAnswering() {
   const [reorderAnswers, setReorderAnswers] = useState<{[key: string]: ReorderItem[]}>({});
   const [shuffledPairsCache, setShuffledPairsCache] = useState<{[key: string]: {left: number[]; right: number[]}}>({});
   const prevQuestionIndexRef = useRef<number>(0);
-  // Map-level play state
-  const levelMode = typeof questionIndex !== 'undefined';
+  // Map-level play state (only for direct exercise access, not assigned exercises)
+  const levelMode = typeof questionIndex !== 'undefined' && !assignedExerciseId;
   const levelIndex = levelMode ? Math.max(0, parseInt(String(questionIndex as any), 10) || 0) : 0;
   // Attempts and correctness tracking for try-again assessment
   const [attemptCounts, setAttemptCounts] = useState<{[questionId: string]: number}>({});
@@ -354,7 +358,7 @@ export default function StudentExerciseAnswering() {
   // Load exercise data
   useEffect(() => {
     loadExercise();
-  }, [exerciseId]);
+  }, [exerciseId, assignedExerciseId]);
   
   // Timer effect (requestAnimationFrame for smoother and accurate updates)
   useEffect(() => {
@@ -369,9 +373,54 @@ export default function StudentExerciseAnswering() {
       }
       return;
     }
+    
+    // Set time limit when exercise loads or question changes
+    const currentTimeLimit = exercise.timeLimitPerItem ? exercise.timeLimitPerItem * 1000 : null;
+    setTimeLimitMs(currentTimeLimit);
+    
     const tick = () => {
-      setElapsedTime(Date.now() - startTime);
-      setQuestionElapsed(Date.now() - questionStartTime);
+      const now = Date.now();
+      setElapsedTime(now - startTime);
+      setQuestionElapsed(now - questionStartTime);
+      
+      // Calculate remaining time if there's a time limit
+      if (currentTimeLimit) {
+        const remaining = Math.max(0, currentTimeLimit - (now - questionStartTime));
+        setTimeRemaining(remaining);
+        
+        // Auto-submit when time runs out
+        if (remaining === 0 && !submitting) {
+          // Mark current question as failed due to timeout
+          const currentQuestion = exercise.questions[currentQuestionIndex];
+          if (currentQuestion) {
+            const timeoutAnswer: StudentAnswer = {
+              questionId: currentQuestion.id,
+              answer: '',
+              isCorrect: false,
+              timeSpent: questionElapsedRef.current,
+            };
+            
+            setAnswers(prev => {
+              const existingIndex = prev.findIndex(a => a.questionId === currentQuestion.id);
+              if (existingIndex >= 0) {
+                const updated = [...prev];
+                updated[existingIndex] = timeoutAnswer;
+                return updated;
+              } else {
+                return [...prev, timeoutAnswer];
+              }
+            });
+          }
+          
+          // Show "Times Up" briefly before advancing
+          setTimeout(() => {
+            handleNext();
+          }, 1500); // Show "Times Up" for 1.5 seconds
+        }
+      } else {
+        setTimeRemaining(null);
+      }
+      
       rafIdRef.current = requestAnimationFrame(tick);
     };
     rafIdRef.current = requestAnimationFrame(tick);
@@ -1000,62 +1049,193 @@ export default function StudentExerciseAnswering() {
         console.warn('Could not get parent key or student ID:', error);
       }
       
-      const result = await readData(`/exercises/${exerciseId}`);
-      if (result.data) {
-        setExercise({
-          ...result.data,
-          id: exerciseId as string,
-        });
-        // Warm cache for first questions (current and next two)
-        try {
-          const questions: Question[] = result.data.questions || [];
-          const batchUrls: string[] = [];
-          const startIdx = levelMode ? levelIndex : 0;
-          for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
-            batchUrls.push(...collectImageUrls(questions[i]));
-          }
-          if (batchUrls.length) prefetchUrls(batchUrls);
-        } catch {}
-        if (levelMode) {
-          setCurrentQuestionIndex(levelIndex);
+      // If assignedExerciseId is provided, load assigned exercise data first
+      if (assignedExerciseId) {
+        console.log('Loading assigned exercise:', assignedExerciseId);
+        const assignedExerciseResult = await readData(`/assignedExercises/${assignedExerciseId}`);
+        
+        if (!assignedExerciseResult.data) {
+          showCustomAlert('Error', 'Assigned exercise not found', () => router.back(), 'error');
+          return;
         }
-        // Initialize answers array (including nested sub-answers for reading-passage)
-        setAnswers(result.data.questions.map((q: Question) => ({
-          questionId: q.id,
-          answer:
-            q.type === 'multiple-choice' ? [] :
-            q.type === 'matching' ? {} :
-            q.type === 're-order' ? [] :
-            q.type === 'reading-passage'
-              ? (q.subQuestions || []).reduce((acc: {[key: string]: any}, sq: Question) => {
-                  acc[sq.id] =
-                    sq.type === 'multiple-choice' ? [] :
-                    sq.type === 'matching' ? {} :
-                    sq.type === 're-order' ? [] :
-                    '';
-                  return acc;
-                }, {})
-              : '',
-          timeSpent: 0,
-        })));
-        // Initialize attempts and correctness maps
-        const initAttempts: {[id: string]: number} = {};
-        const initCorrect: {[id: string]: boolean} = {};
-        (result.data.questions as Question[]).forEach((q: Question) => {
-          initAttempts[q.id] = 0;
-          initCorrect[q.id] = false;
-          // Also initialize for sub-questions in reading-passage
-          if (q.type === 'reading-passage' && q.subQuestions) {
-            q.subQuestions.forEach((sq) => {
-              initAttempts[sq.id] = 0;
-              initCorrect[sq.id] = false;
-            });
+        
+        const assignedData = assignedExerciseResult.data;
+        setAssignedExercise(assignedData);
+        
+        // Validate assigned exercise data structure
+        if (!assignedData.exerciseId) {
+          showCustomAlert('Error', 'Invalid assigned exercise data - missing exercise reference', () => router.back(), 'error');
+          return;
+        }
+        
+        // Check if assignment is still accepting submissions
+        if (assignedData.acceptingStatus !== 'open') {
+          showCustomAlert('Assignment Closed', 'This assignment is no longer accepting submissions.', () => router.back(), 'warning');
+          return;
+        }
+        
+        // Check deadline
+        const now = new Date();
+        let deadline: Date;
+        try {
+          deadline = new Date(assignedData.deadline);
+          if (isNaN(deadline.getTime())) {
+            throw new Error('Invalid deadline date');
           }
-        });
-        setAttemptCounts(initAttempts);
-        setCorrectQuestions(initCorrect);
+        } catch (error) {
+          console.error('Invalid deadline date:', assignedData.deadline);
+          showCustomAlert('Error', 'Invalid assignment deadline date', () => router.back(), 'error');
+          return;
+        }
+        
+        if (now > deadline) {
+          // Check if late submissions are allowed
+          if (!assignedData.acceptLateSubmissions) {
+            showCustomAlert('Deadline Passed', 'The deadline for this assignment has passed and late submissions are not allowed.', () => router.back(), 'warning');
+            return;
+          } else {
+            // Show warning but allow submission
+            showCustomAlert('Late Submission', 'The deadline has passed, but late submissions are allowed for this assignment.', undefined, 'warning');
+          }
+        }
+        
+        // Use the exerciseId from the assigned exercise (override the URL parameter)
+        const actualExerciseId = assignedData.exerciseId;
+        console.log('Loading exercise from assignment:', actualExerciseId);
+        
+        const result = await readData(`/exercises/${actualExerciseId}`);
+        if (result.data) {
+          // Validate exercise data structure
+          if (!result.data.questions || !Array.isArray(result.data.questions) || result.data.questions.length === 0) {
+            showCustomAlert('Error', 'Invalid exercise data - no questions found', () => router.back(), 'error');
+            return;
+          }
+          
+          setExercise({
+            ...result.data,
+            id: actualExerciseId,
+          });
+          // Warm cache for first questions (current and next two)
+          try {
+            const questions: Question[] = result.data.questions || [];
+            const batchUrls: string[] = [];
+            const startIdx = levelMode ? levelIndex : 0;
+            for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
+              batchUrls.push(...collectImageUrls(questions[i]));
+            }
+            if (batchUrls.length) prefetchUrls(batchUrls);
+          } catch {}
+          if (levelMode) {
+            setCurrentQuestionIndex(levelIndex);
+          }
+          // Initialize answers array (including nested sub-answers for reading-passage)
+          setAnswers(result.data.questions.map((q: Question) => ({
+            questionId: q.id,
+            answer:
+              q.type === 'multiple-choice' ? [] :
+              q.type === 'matching' ? {} :
+              q.type === 're-order' ? [] :
+              q.type === 'reading-passage'
+                ? (q.subQuestions || []).reduce((acc: {[key: string]: any}, sq: Question) => {
+                    acc[sq.id] =
+                      sq.type === 'multiple-choice' ? [] :
+                      sq.type === 'matching' ? {} :
+                      sq.type === 're-order' ? [] :
+                      '';
+                    return acc;
+                  }, {})
+                : '',
+            timeSpent: 0,
+          })));
+          // Initialize attempts and correctness maps
+          const initAttempts: {[id: string]: number} = {};
+          const initCorrect: {[id: string]: boolean} = {};
+          (result.data.questions as Question[]).forEach((q: Question) => {
+            initAttempts[q.id] = 0;
+            initCorrect[q.id] = false;
+            // Also initialize for sub-questions in reading-passage
+            if (q.type === 'reading-passage' && q.subQuestions) {
+              q.subQuestions.forEach((sq) => {
+                initAttempts[sq.id] = 0;
+                initCorrect[sq.id] = false;
+              });
+            }
+          });
+          setAttemptCounts(initAttempts);
+          setCorrectQuestions(initCorrect);
+        } else {
+          showCustomAlert('Error', 'Exercise not found', () => router.back(), 'error');
+        }
       } else {
-        showCustomAlert('Error', 'Exercise not found', () => router.back(), 'error');
+        // Fallback to direct exercise loading (existing behavior)
+        if (!exerciseId) {
+          showCustomAlert('Error', 'No exercise ID provided', () => router.back(), 'error');
+          return;
+        }
+        
+        const result = await readData(`/exercises/${exerciseId}`);
+        if (result.data) {
+          // Validate exercise data structure
+          if (!result.data.questions || !Array.isArray(result.data.questions) || result.data.questions.length === 0) {
+            showCustomAlert('Error', 'Invalid exercise data - no questions found', () => router.back(), 'error');
+            return;
+          }
+          
+          setExercise({
+            ...result.data,
+            id: exerciseId as string,
+          });
+          // Warm cache for first questions (current and next two)
+          try {
+            const questions: Question[] = result.data.questions || [];
+            const batchUrls: string[] = [];
+            const startIdx = levelMode ? levelIndex : 0;
+            for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
+              batchUrls.push(...collectImageUrls(questions[i]));
+            }
+            if (batchUrls.length) prefetchUrls(batchUrls);
+          } catch {}
+          if (levelMode) {
+            setCurrentQuestionIndex(levelIndex);
+          }
+          // Initialize answers array (including nested sub-answers for reading-passage)
+          setAnswers(result.data.questions.map((q: Question) => ({
+            questionId: q.id,
+            answer:
+              q.type === 'multiple-choice' ? [] :
+              q.type === 'matching' ? {} :
+              q.type === 're-order' ? [] :
+              q.type === 'reading-passage'
+                ? (q.subQuestions || []).reduce((acc: {[key: string]: any}, sq: Question) => {
+                    acc[sq.id] =
+                      sq.type === 'multiple-choice' ? [] :
+                      sq.type === 'matching' ? {} :
+                      sq.type === 're-order' ? [] :
+                      '';
+                    return acc;
+                  }, {})
+                : '',
+            timeSpent: 0,
+          })));
+          // Initialize attempts and correctness maps
+          const initAttempts: {[id: string]: number} = {};
+          const initCorrect: {[id: string]: boolean} = {};
+          (result.data.questions as Question[]).forEach((q: Question) => {
+            initAttempts[q.id] = 0;
+            initCorrect[q.id] = false;
+            // Also initialize for sub-questions in reading-passage
+            if (q.type === 'reading-passage' && q.subQuestions) {
+              q.subQuestions.forEach((sq) => {
+                initAttempts[sq.id] = 0;
+                initCorrect[sq.id] = false;
+              });
+            }
+          });
+          setAttemptCounts(initAttempts);
+          setCorrectQuestions(initCorrect);
+        } else {
+          showCustomAlert('Error', 'Exercise not found', () => router.back(), 'error');
+        }
       }
     } catch (error) {
       console.error('Failed to load exercise:', error);
@@ -1257,6 +1437,12 @@ export default function StudentExerciseAnswering() {
     const totalSeconds = Math.floor(milliseconds / 1000);
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
+    
+    // Show countdown format when time is running low (under 60 seconds)
+    if (totalSeconds < 60) {
+      return `${seconds}s`;
+    }
+    
     return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
   
@@ -1428,8 +1614,8 @@ export default function StudentExerciseAnswering() {
       const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
       const totalAttempts = Object.values(attemptCounts).reduce((sum, v) => sum + (v || 0), 0);
       
-      // Create normalized result record
-      const resultId = `${exerciseId}_${parentId || 'anonymous'}_${Date.now()}`;
+      // Create normalized result record with unique ID
+      const resultId = `${exercise?.id || exerciseId}_${parentId || 'anonymous'}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       
       // Debug logging
       console.log('Recording exercise result with:', {
@@ -1446,14 +1632,15 @@ export default function StudentExerciseAnswering() {
       const resultData = {
         // Core identifiers
         resultId,
-        exerciseId: exerciseId as string,
+        exerciseId: exercise?.id || exerciseId as string, // Use the actual loaded exercise ID
+        assignedExerciseId: assignedExerciseId as string || null, // Reference to assigned exercise if applicable
         parentId, // Parent ID for linking to parent account
         studentId, // Student ID for tracking individual student performance
         
         // Exercise metadata
         exerciseTitle: exercise?.title || 'Unknown Exercise',
-        classId: (exercise as any)?.classId || null,
-        teacherId: (exercise as any)?.teacherId || null,
+        classId: assignedExercise?.classId || (exercise as any)?.classId || null,
+        teacherId: assignedExercise?.assignedBy || (exercise as any)?.teacherId || null,
         
         // Performance metrics
         scorePercentage,
@@ -1466,6 +1653,23 @@ export default function StudentExerciseAnswering() {
           platform: Platform.OS,
           timestamp: Date.now()
         },
+        
+        // Assignment-specific metadata (if applicable)
+        assignmentMetadata: assignedExercise ? {
+          assignedAt: assignedExercise.createdAt,
+          deadline: assignedExercise.deadline,
+          isLateSubmission: assignedExercise.deadline ? (() => {
+            try {
+              const deadlineDate = new Date(assignedExercise.deadline);
+              return !isNaN(deadlineDate.getTime()) && new Date() > deadlineDate;
+            } catch {
+              return false;
+            }
+          })() : false,
+          acceptingStatus: assignedExercise.acceptingStatus,
+          acceptLateSubmissions: assignedExercise.acceptLateSubmissions || false,
+          assignmentId: assignedExerciseId
+        } : null,
         
         // Student context and exercise metadata
         studentContext: {
@@ -2618,10 +2822,28 @@ export default function StudentExerciseAnswering() {
           </TouchableOpacity>
           
           <View style={styles.headerCenter}>
-            <View style={styles.timerContainer}>
-              <MaterialIcons name="timer" size={20} color="#ffffff" />
-              <Text style={styles.timerText}>{formatTime(questionElapsed)}</Text>
-            </View>
+            {/* Simple Time Limit Badge */}
+            {exercise.timeLimitPerItem && (
+              <View style={[
+                styles.timeLimitBadge,
+                timeRemaining !== null && timeRemaining < 10000 && styles.timeLimitBadgeWarning,
+                timeRemaining === 0 && styles.timeLimitBadgeExpired
+              ]}>
+                <MaterialIcons 
+                  name={timeRemaining === 0 ? "timer-off" : "timer"} 
+                  size={20} 
+                  color="#ffffff" 
+                />
+                <Text style={[
+                  styles.timeLimitBadgeText,
+                  timeRemaining !== null && timeRemaining < 10000 && styles.timeLimitBadgeTextWarning
+                ]}>
+                  {timeRemaining === 0 ? "Times Up!" : 
+                   timeRemaining !== null ? formatTime(timeRemaining) : `${exercise.timeLimitPerItem}s`}
+                </Text>
+              </View>
+            )}
+            
             <Text style={styles.exerciseTitle}>{exercise.title}</Text>
             <Text style={styles.progressText}>
               Question {currentQuestionIndex + 1} of {exercise.questions.length}
@@ -3003,24 +3225,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 20,
   },
-  timerContainer: {
+  timeLimitBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(255, 165, 0, 0.9)',
     borderRadius: 20,
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     paddingVertical: 8,
-    marginBottom: 8,
+    marginBottom: 12,
     shadowColor: '#ffa500',
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
-    borderWidth: 2,
-    borderColor: '#ff8c00',
+    shadowRadius: 4,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: '#ffa500',
     gap: 8,
   },
-  timerText: {
+  timeLimitBadgeWarning: {
+    backgroundColor: 'rgba(239, 68, 68, 0.9)',
+    borderColor: '#ef4444',
+    shadowColor: '#ef4444',
+  },
+  timeLimitBadgeExpired: {
+    backgroundColor: 'rgba(107, 114, 128, 0.9)',
+    borderColor: '#6b7280',
+    shadowColor: '#6b7280',
+  },
+  timeLimitBadgeText: {
     fontSize: 16,
     fontWeight: '700',
     color: '#ffffff',
@@ -3028,6 +3260,11 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0, 0, 0, 0.3)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
+  },
+  timeLimitBadgeTextWarning: {
+    color: '#ffffff',
+    textShadowColor: 'rgba(255, 255, 255, 0.5)',
+    textShadowRadius: 3,
   },
   exerciseTitle: {
     fontSize: getResponsiveFontSize(20),

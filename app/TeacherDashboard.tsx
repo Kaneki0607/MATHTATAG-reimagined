@@ -2324,14 +2324,21 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                      <View style={styles.loadingContainer}>
                        <Text style={styles.loadingText}>Loading assigned exercises...</Text>
                      </View>
-                   ) : assignedExercises.length === 0 ? (
+                   ) : assignedExercises.filter((assignment) => 
+                     activeClasses.some(activeClass => activeClass.id === assignment.classId)
+                   ).length === 0 ? (
                      <View style={styles.emptyState}>
                        <MaterialCommunityIcons name="clipboard-text" size={48} color="#9ca3af" />
-                       <Text style={styles.emptyStateText}>No exercises assigned yet</Text>
+                       <Text style={styles.emptyStateText}>No exercises assigned to selected classes</Text>
                        <Text style={styles.emptyStateSubtext}>Assign exercises to your classes to see them here</Text>
                      </View>
                    ) : (
-                     assignedExercises.map((assignment) => {
+                     assignedExercises
+                       .filter((assignment) => {
+                         // Only show assignments for currently active classes
+                         return activeClasses.some(activeClass => activeClass.id === assignment.classId);
+                       })
+                       .map((assignment) => {
                        const timeRemaining = getTimeRemaining(assignment.deadline);
                        const completionStats = getStudentCompletionStats(assignment);
                        
@@ -2635,7 +2642,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                            // Determine if exercise is still accepting results
                            const isAcceptingResults = exerciseAssignment ? 
                              exerciseAssignment.acceptingStatus === 'open' && 
-                             (new Date() <= new Date(exerciseAssignment.deadline) || exerciseAssignment.acceptLateSubmissions) : 
+                             (new Date() <= new Date(exerciseAssignment.deadline) || (exerciseAssignment.acceptLateSubmissions ?? true)) : 
                              false;
                            
                            // Sort the exercise results based on current sort settings

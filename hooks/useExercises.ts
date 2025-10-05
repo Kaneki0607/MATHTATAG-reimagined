@@ -28,6 +28,7 @@ export interface AssignedExercise {
   createdAt: string;
   acceptLateSubmissions?: boolean;
   acceptingStatus?: 'open' | 'closed';
+  manuallyUpdated?: boolean;
   exercise?: Exercise;
   className?: string;
 }
@@ -91,9 +92,57 @@ export const useExercises = (currentUserId: string | null) => {
         }))
         .filter((assignment: AssignedExercise) => assignment.assignedBy === currentUserId);
       
+      // Update status based on deadline and acceptLateSubmissions
+      const updatedAssignments = await Promise.all(
+        assigned.map(async (assignment) => {
+          const now = new Date();
+          const deadline = new Date(assignment.deadline);
+          const isOverdue = now > deadline;
+          
+          // Determine if status should be updated
+          let shouldUpdateStatus = false;
+          let newStatus = assignment.acceptingStatus;
+          
+          if (isOverdue) {
+            // If overdue and not accepting late submissions, should be closed
+            // But only if it wasn't manually updated (respect manual overrides)
+            // Default to true (accept late submissions) if undefined
+            if (!(assignment.acceptLateSubmissions ?? true) && 
+                assignment.acceptingStatus === 'open' && 
+                !assignment.manuallyUpdated) {
+              newStatus = 'closed';
+              shouldUpdateStatus = true;
+            }
+          } else {
+            // If not overdue and was manually closed, keep it closed (don't auto-reopen)
+            // Only auto-close, don't auto-reopen
+          }
+          
+          // Update status in database if needed
+          if (shouldUpdateStatus) {
+            try {
+              const updatedAssignment = {
+                ...assignment,
+                acceptingStatus: newStatus,
+                updatedAt: new Date().toISOString(),
+              };
+              await writeData(`/assignedExercises/${assignment.id}`, updatedAssignment);
+              console.log(`Auto-updated status for assignment ${assignment.id} to ${newStatus}`);
+            } catch (err) {
+              console.error('Failed to update assignment status:', err);
+            }
+          }
+          
+          return {
+            ...assignment,
+            acceptingStatus: newStatus,
+          };
+        })
+      );
+      
       // Load exercise details for each assignment
       const assignmentsWithExercises = await Promise.all(
-        assigned.map(async (assignment) => {
+        updatedAssignments.map(async (assignment) => {
           try {
             const { data: exerciseData } = await readData(`/exercises/${assignment.exerciseId}`);
             const { data: classData } = await readData(`/sections/${assignment.classId}`);
@@ -204,6 +253,7 @@ export const useExercises = (currentUserId: string | null) => {
       const updatedAssignment = {
         ...currentAssignment,
         acceptingStatus,
+        manuallyUpdated: true, // Flag to indicate manual status change
         updatedAt: new Date().toISOString(),
       };
 
