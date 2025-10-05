@@ -5,10 +5,12 @@ import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Dimensions,
   Image,
   Modal,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -242,6 +244,7 @@ export default function TeacherDashboard() {
   const router = useRouter();
   const [teacherData, setTeacherData] = useState<TeacherData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState<TeacherData | null>(null);
@@ -1802,6 +1805,62 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     }
   };
 
+  // Refresh handler for pull-to-refresh
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try {
+      if (currentUserId) {
+        // Refresh teacher data
+        await fetchTeacherData(currentUserId);
+        
+        // Refresh data based on active tab
+        switch (activeTab) {
+          case 'home':
+            // Refresh announcements and classes for home tab
+            await loadTeacherClasses(currentUserId);
+            break;
+          case 'list':
+            // Refresh student lists
+            if (activeClasses.length > 0) {
+              await loadStudentsAndParents(activeClasses.map(c => c.id));
+            }
+            break;
+          case 'class':
+            // Refresh classes and students
+            await loadTeacherClasses(currentUserId);
+            if (activeClasses.length > 0) {
+              await loadStudentsAndParents(activeClasses.map(c => c.id));
+            }
+            break;
+          case 'results':
+            // Refresh exercise results and assignments
+            if (activeClasses.length > 0) {
+              await loadAssignments(activeClasses.map(c => c.id));
+              await loadClassAnalytics(activeClasses.map(c => c.id));
+            }
+            break;
+          case 'exercises':
+            // Refresh exercises based on current tab
+            if (exercisesTab === 'my') {
+              await loadMyExercises();
+            } else if (exercisesTab === 'public') {
+              await loadPublicExercises();
+            } else if (exercisesTab === 'assigned') {
+              await loadAssignedExercises();
+              if (activeClasses.length > 0) {
+                await loadAssignments(activeClasses.map(c => c.id));
+              }
+            }
+            break;
+        }
+      }
+    } catch (error) {
+      console.error('Error refreshing data:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const handleChangePhoto = async () => {
     try {
       // Request media library permissions
@@ -1868,7 +1927,18 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       {/* Background Pattern */}
       <View style={styles.backgroundPattern} />
       
-      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+      <ScrollView 
+        style={styles.scrollView} 
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={['#3b82f6']} // Android
+            tintColor="#3b82f6" // iOS
+          />
+        }
+      >
          {/* Header Section */}
          <View style={styles.header}>
            <TouchableOpacity style={styles.avatarContainer} onPress={handleProfilePress}>
@@ -1898,25 +1968,41 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                <View style={styles.announcementGradient}>
                  <View style={styles.announcementHeader}>
                    <View style={styles.megaphoneIcon}>
-                     <MaterialCommunityIcons name="bullhorn" size={32} color="#e53e3e" />
+                     <MaterialCommunityIcons name="bullhorn" size={32} color="#3b82f6" />
                    </View>
-                   <Text style={styles.announcementTitle}>Make Announcement</Text>
+                   <View style={styles.announcementTitleContainer}>
+                     <Text style={styles.announcementTitle}>Make Announcement</Text>
+                     <View style={styles.announcementBadge}>
+                       <Text style={styles.announcementBadgeText}>Quick</Text>
+                     </View>
+                   </View>
                  </View>
                  <Text style={styles.announcementText}>
-                   Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nam fermentum vestibulum lectus, eget eleifend...
+                   Share important updates, reminders, and news with your students and their parents instantly.
                  </Text>
+                 <View style={styles.announcementFeatures}>
+                   <View style={styles.featureItem}>
+                     <MaterialCommunityIcons name="account-group" size={16} color="#64748b" />
+                     <Text style={styles.featureText}>Target specific classes</Text>
+                   </View>
+                   <View style={styles.featureItem}>
+                     <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
+                     <Text style={styles.featureText}>Instant delivery</Text>
+                   </View>
+                 </View>
                  <TouchableOpacity
-                   style={styles.editButton}
+                   style={styles.announcementButton}
                    onPress={async () => {
                      setShowAnnModal(true);
                      if (currentUserId) {
                        await loadTeacherClasses(currentUserId);
-                       setAnnSelectedClassIds(teacherClasses.map((c) => c.id));
-                       setAnnAllClasses(true);
+                       setAnnSelectedClassIds([]);
+                       setAnnAllClasses(false);
                      }
                    }}
                  >
-                   <AntDesign name="edit" size={20} color="#ffffff" />
+                   <MaterialCommunityIcons name="plus" size={20} color="#ffffff" />
+                   <Text style={styles.announcementButtonText}>Create Announcement</Text>
                  </TouchableOpacity>
                </View>
              </View>
@@ -3317,71 +3403,93 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       {/* Announcement Modal */}
       <Modal visible={showAnnModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
-          <View style={styles.profileModal}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>New Announcement</Text>
+          <View style={styles.announcementModal}>
+            <View style={styles.announcementModalHeader}>
+              <View style={styles.announcementModalTitleContainer}>
+                <MaterialCommunityIcons name="bullhorn" size={24} color="#3b82f6" />
+                <Text style={styles.announcementModalTitle}>Create New Announcement</Text>
+              </View>
               <TouchableOpacity onPress={() => setShowAnnModal(false)} style={styles.closeButton}>
-                <AntDesign name="close" size={24} color="#1e293b" />
+                <AntDesign name="close" size={24} color="#64748b" />
               </TouchableOpacity>
             </View>
-            <ScrollView style={styles.profileContent}>
-              <View style={styles.infoSection}>
-                <View style={styles.field}>
-                  <Text style={styles.fieldLabel}>Title</Text>
+            <ScrollView style={styles.announcementModalContent} showsVerticalScrollIndicator={false}>
+              <View style={styles.announcementForm}>
+                <View style={styles.announcementField}>
+                  <Text style={styles.announcementFieldLabel}>Title</Text>
                   <TextInput
-                    style={styles.fieldInput}
+                    style={styles.announcementFieldInput}
                     value={annTitle}
                     onChangeText={setAnnTitle}
-                    placeholder="e.g., Exam Schedule"
-                    placeholderTextColor="#6b7280"
+                    placeholder="e.g., Exam Schedule, Important Update"
+                    placeholderTextColor="#94a3b8"
                   />
                 </View>
-                <View style={styles.field}>
-                  <Text style={styles.fieldLabel}>Message</Text>
+                <View style={styles.announcementField}>
+                  <Text style={styles.announcementFieldLabel}>Message</Text>
                   <TextInput
-                    style={[styles.fieldInput, { height: 120, textAlignVertical: 'top' }]}
+                    style={[styles.announcementFieldInput, styles.announcementMessageInput]}
                     value={annMessage}
                     onChangeText={setAnnMessage}
-                    placeholder="Write your announcement..."
-                    placeholderTextColor="#6b7280"
+                    placeholder="Write your announcement message here..."
+                    placeholderTextColor="#94a3b8"
                     multiline
+                    textAlignVertical="top"
                   />
                 </View>
-                <View style={styles.field}>
-                  <Text style={styles.fieldLabel}>Send To</Text>
-                  <View style={styles.segmentWrap}>
+                <View style={styles.announcementField}>
+                  <Text style={styles.announcementFieldLabel}>Send To</Text>
+                  <View style={styles.announcementSegmentWrap}>
                     <TouchableOpacity
-                      style={[styles.segmentButton, annAllClasses && styles.segmentActive]}
+                      style={[styles.announcementSegmentButton, annAllClasses && styles.announcementSegmentActive]}
                       onPress={() => {
                         setAnnAllClasses(true);
                         setAnnSelectedClassIds(teacherClasses.map((c) => c.id));
                       }}
                     >
-                      <Text style={[styles.segmentText, annAllClasses && styles.segmentTextActive]}>All Classes</Text>
+                      <MaterialCommunityIcons 
+                        name="school" 
+                        size={18} 
+                        color={annAllClasses ? "#ffffff" : "#64748b"} 
+                      />
+                      <Text style={[styles.announcementSegmentText, annAllClasses && styles.announcementSegmentTextActive]}>All Classes</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
-                      style={[styles.segmentButton, !annAllClasses && styles.segmentActive]}
+                      style={[styles.announcementSegmentButton, !annAllClasses && styles.announcementSegmentActive]}
                       onPress={() => setAnnAllClasses(false)}
                     >
-                      <Text style={[styles.segmentText, !annAllClasses && styles.segmentTextActive]}>Specific</Text>
+                      <MaterialCommunityIcons 
+                        name="account-group" 
+                        size={18} 
+                        color={!annAllClasses ? "#ffffff" : "#64748b"} 
+                      />
+                      <Text style={[styles.announcementSegmentText, !annAllClasses && styles.announcementSegmentTextActive]}>Specific Classes</Text>
                     </TouchableOpacity>
                   </View>
                   {!annAllClasses && (
-                    <View style={{ marginTop: 10, borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, backgroundColor: '#fff' }}>
+                    <View style={styles.announcementClassList}>
+                      <Text style={styles.announcementClassListTitle}>Select Classes:</Text>
                       {teacherClasses.map((c) => {
                         const checked = annSelectedClassIds.includes(c.id);
                         return (
                           <TouchableOpacity
                             key={c.id}
-                            style={{ paddingHorizontal: 14, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}
+                            style={styles.announcementClassItem}
                             onPress={() => {
                               setAnnSelectedClassIds((prev) => (
                                 checked ? prev.filter((id) => id !== c.id) : [...prev, c.id]
                               ));
                             }}
                           >
-                            <Text style={{ color: '#111827', fontSize: 16 }}>{c.name}</Text>
-                            <MaterialIcons name={checked ? 'check-box' : 'check-box-outline-blank'} size={18} color={checked ? '#2563eb' : '#9ca3af'} />
+                            <View style={styles.announcementClassInfo}>
+                              <Text style={styles.announcementClassName}>{c.name}</Text>
+                              {c.schoolYear && (
+                                <Text style={styles.announcementClassYear}>{c.schoolYear}</Text>
+                              )}
+                            </View>
+                            <View style={[styles.announcementCheckbox, checked && styles.announcementCheckboxActive]}>
+                              {checked && <AntDesign name="check" size={14} color="#ffffff" />}
+                            </View>
                           </TouchableOpacity>
                         );
                       })}
@@ -3390,13 +3498,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 </View>
               </View>
             </ScrollView>
-            <View style={styles.modalActions}>
-              <TouchableOpacity style={styles.cancelButton} onPress={() => setShowAnnModal(false)} disabled={sendingAnn}>
-                <Text style={styles.cancelButtonText}>Cancel</Text>
+            <View style={styles.announcementModalFooter}>
+              <TouchableOpacity
+                style={styles.announcementCancelButton}
+                onPress={() => setShowAnnModal(false)}
+              >
+                <Text style={styles.announcementCancelButtonText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.saveButton}
-                disabled={sendingAnn}
+                style={[styles.announcementSendButton, (!annTitle.trim() || !annMessage.trim() || (!annAllClasses && annSelectedClassIds.length === 0)) && styles.announcementSendButtonDisabled]}
+                disabled={sendingAnn || !annTitle.trim() || !annMessage.trim() || (!annAllClasses && annSelectedClassIds.length === 0)}
                 onPress={async () => {
                   if (!currentUserId) { Alert.alert('Error', 'Not authenticated.'); return; }
                   if (!annTitle.trim() || !annMessage.trim()) { Alert.alert('Error', 'Title and message are required.'); return; }
@@ -3418,19 +3529,31 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                     if (!success) {
                       Alert.alert('Error', error || 'Failed to send');
                     } else {
-                      Alert.alert('Success', 'Announcement sent');
+                      Alert.alert('Success', 'Announcement sent successfully!');
                       setShowAnnModal(false);
                       setAnnTitle('');
                       setAnnMessage('');
+                      setAnnAllClasses(false);
+                      setAnnSelectedClassIds([]);
                     }
                   } catch (e) {
-                    Alert.alert('Error', 'Failed to send');
+                    Alert.alert('Error', 'Failed to send announcement. Please try again.');
                   } finally {
                     setSendingAnn(false);
                   }
                 }}
               >
-                <Text style={styles.saveButtonText}>{sendingAnn ? 'Sending...' : 'Send'}</Text>
+                {sendingAnn ? (
+                  <View style={styles.announcementLoadingContainer}>
+                    <ActivityIndicator size="small" color="#ffffff" />
+                    <Text style={styles.announcementSendButtonText}>Sending...</Text>
+                  </View>
+                ) : (
+                  <View style={styles.announcementSendContainer}>
+                    <MaterialCommunityIcons name="send" size={18} color="#ffffff" />
+                    <Text style={styles.announcementSendButtonText}>Send</Text>
+                  </View>
+                )}
               </TouchableOpacity>
             </View>
           </View>
@@ -4453,54 +4576,305 @@ const styles = StyleSheet.create({
   
   // Announcement Card Styles
   announcementCard: {
-    borderRadius: 20,
+    borderRadius: 24,
     marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 4,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    elevation: 8,
     overflow: 'hidden',
   },
   announcementGradient: {
-    backgroundColor: '#f0f9ff',
-    padding: 24,
+    backgroundColor: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)',
+    padding: 28,
     position: 'relative',
   },
   announcementHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 20,
   },
   megaphoneIcon: {
     marginRight: 16,
+    padding: 12,
+    borderRadius: 16,
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+  },
+  announcementTitleContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   announcementTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#1e293b',
+    flex: 1,
+  },
+  announcementBadge: {
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    marginLeft: 12,
+  },
+  announcementBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  announcementText: {
+    fontSize: 16,
+    color: '#475569',
+    lineHeight: 24,
+    marginBottom: 24,
+    fontWeight: '500',
+  },
+  announcementFeatures: {
+    flexDirection: 'row',
+    marginBottom: 24,
+    gap: 20,
+  },
+  featureItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  featureText: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  announcementButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#3b82f6',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 16,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+    gap: 8,
+  },
+  announcementButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  // Announcement Modal Styles
+  announcementModal: {
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    margin: 20,
+    maxHeight: height * 0.85,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  announcementModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  announcementModalTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  announcementModalTitle: {
     fontSize: 20,
     fontWeight: '700',
     color: '#1e293b',
   },
-  announcementText: {
-    fontSize: 15,
-    color: '#64748b',
-    lineHeight: 22,
-    marginBottom: 20,
+  announcementModalContent: {
+    flex: 1,
+    paddingHorizontal: 24,
   },
-  editButton: {
-    position: 'absolute',
-    bottom: 20,
-    right: 20,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#1e293b',
-    justifyContent: 'center',
+  announcementForm: {
+    paddingVertical: 20,
+  },
+  announcementField: {
+    marginBottom: 24,
+  },
+  announcementFieldLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  announcementFieldInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: '#1f2937',
+    backgroundColor: '#ffffff',
+  },
+  announcementMessageInput: {
+    height: 120,
+    textAlignVertical: 'top',
+  },
+  announcementSegmentWrap: {
+    flexDirection: 'row',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 4,
+    gap: 4,
+  },
+  announcementSegmentButton: {
+    flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: '#000',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    gap: 8,
+  },
+  announcementSegmentActive: {
+    backgroundColor: '#3b82f6',
+    shadowColor: '#3b82f6',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.2,
     shadowRadius: 4,
     elevation: 3,
+  },
+  announcementSegmentText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  announcementSegmentTextActive: {
+    color: '#ffffff',
+  },
+  announcementClassList: {
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    overflow: 'hidden',
+  },
+  announcementClassListTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#6b7280',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#f9fafb',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  announcementClassItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  announcementClassInfo: {
+    flex: 1,
+  },
+  announcementClassName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1f2937',
+    marginBottom: 2,
+  },
+  announcementClassYear: {
+    fontSize: 14,
+    color: '#6b7280',
+  },
+  announcementCheckbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: '#d1d5db',
+    backgroundColor: 'transparent',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  announcementCheckboxActive: {
+    backgroundColor: '#3b82f6',
+    borderColor: '#3b82f6',
+  },
+  announcementModalFooter: {
+    flexDirection: 'row',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    gap: 12,
+  },
+  announcementCancelButton: {
+    flex: 1,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  announcementCancelButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  announcementSendButton: {
+    flex: 2,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  announcementSendButtonDisabled: {
+    backgroundColor: '#9ca3af',
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  announcementLoadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  announcementSendContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  announcementSendButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
   },
   
   // Action Buttons Styles

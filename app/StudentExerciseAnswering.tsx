@@ -7,19 +7,19 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { useEffect, useRef, useState } from 'react';
 import {
-  Animated,
-  Dimensions,
-  Easing,
-  Image,
-  ImageBackground,
-  LayoutAnimation,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    Animated,
+    Dimensions,
+    Easing,
+    Image,
+    ImageBackground,
+    LayoutAnimation,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import { readData, writeData } from '../lib/firebase-database';
 
@@ -211,6 +211,7 @@ interface Question {
   answer: string | string[];
   options?: string[];
   optionImages?: (string | null)[];
+  optionMultipleImages?: (string[] | null)[];
   pairs?: { left: string; right: string; leftImage?: string | null; rightImage?: string | null }[];
   order?: string[];
   reorderItems?: ReorderItem[];
@@ -1975,6 +1976,7 @@ export default function StudentExerciseAnswering() {
             {question.options?.map((option, index) => {
               const isSelected = selectedAnswers.includes(option);
               const hasImage = question.optionImages?.[index];
+              const hasMultipleImages = question.optionMultipleImages?.[index]?.length;
               const optionLabel = String.fromCharCode(65 + index); // A, B, C, D
               
               const optionKey = `mc-${question.id}-${index}`;
@@ -2029,15 +2031,32 @@ export default function StudentExerciseAnswering() {
                       </Text>
                     </View>
                     
+                      {/* Single Image Display (Legacy) */}
                       {hasImage && (
-                      <ExpoImage 
-                        source={{ uri: hasImage }} 
-                        style={styles.optionImage}
-                        contentFit="contain"
-                        transition={120}
-                        cachePolicy="disk"
-                      />
-                    )}
+                        <ExpoImage 
+                          source={{ uri: hasImage }} 
+                          style={styles.optionImage}
+                          contentFit="contain"
+                          transition={120}
+                          cachePolicy="disk"
+                        />
+                      )}
+                      
+                      {/* Multiple Images Display */}
+                      {hasMultipleImages && (
+                        <View style={styles.multipleImagesContainer}>
+                          {question.optionMultipleImages?.[index]?.map((imageUrl, imgIndex) => (
+                            <ExpoImage 
+                              key={imgIndex}
+                              source={{ uri: imageUrl }} 
+                              style={styles.optionImage}
+                              contentFit="contain"
+                              transition={120}
+                              cachePolicy="disk"
+                            />
+                          ))}
+                        </View>
+                      )}
                     
                     <Text style={[
                       styles.optionText,
@@ -3491,6 +3510,12 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: 6,
+    marginRight: 8,
+  },
+  multipleImagesContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
     marginRight: 8,
   },
   optionText: {

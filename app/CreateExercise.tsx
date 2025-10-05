@@ -455,7 +455,8 @@ interface Question {
   question: string;
   answer: string | string[];
   options?: string[];
-  optionImages?: (string | null)[];
+  optionImages?: (string | null)[]; // Legacy single image per option
+  optionMultipleImages?: (string[] | null)[]; // New multiple images per option
   pairs?: { left: string; right: string; leftImage?: string | null; rightImage?: string | null }[];
   order?: string[]; // legacy - will be replaced by reorderItems
   reorderItems?: ReorderItem[]; // new structure for reorder questions
@@ -574,7 +575,7 @@ export default function CreateExercise() {
     pairIndex?: number;
     side?: 'left' | 'right';
     reorderItemIndex?: number;
-    type: 'question' | 'option' | 'pair' | 'reorder' | 'multiple-question';
+    type: 'question' | 'option' | 'pair' | 'reorder' | 'multiple-question' | 'multiple-option';
   } | null>(null);
   const [customCategories, setCustomCategories] = useState<Record<string, string[]>>({});
   const [showAddCategory, setShowAddCategory] = useState(false);
@@ -2903,6 +2904,25 @@ Enhanced text with emotions:`;
     openModal('imageLibrary');
   };
 
+  const pickMultipleOptionImages = async (questionId: string, optionIndex: number) => {
+    setImageLibraryContext({ questionId, optionIndex, type: 'multiple-option' });
+    setShowImageLibrary(true);
+    openModal('imageLibrary');
+  };
+
+  const removeMultipleOptionImage = (questionId: string, optionIndex: number, imageIndex: number) => {
+    const question = questions.find(q => q.id === questionId);
+    if (!question) return;
+    
+    const currentImages = question.optionMultipleImages?.[optionIndex] || [];
+    const newImages = currentImages.filter((_, idx) => idx !== imageIndex);
+    
+    const newOptionMultipleImages = [...(question.optionMultipleImages || [])];
+    newOptionMultipleImages[optionIndex] = newImages.length > 0 ? newImages : null;
+    
+    updateQuestion(questionId, { optionMultipleImages: newOptionMultipleImages });
+  };
+
   const handleImageSelect = (imageUri: string) => {
     if (!imageLibraryContext) return;
     
@@ -2915,6 +2935,14 @@ Enhanced text with emotions:`;
       const next = [...(q.optionImages || [])];
       next[optionIndex] = imageUri;
       updateQuestion(questionId, { optionImages: next });
+    } else if (type === 'multiple-option' && optionIndex !== undefined) {
+      const q = questions.find((q) => q.id === questionId);
+      if (!q) return;
+      const currentImages = q.optionMultipleImages?.[optionIndex] || [];
+      const newImages = [...currentImages, imageUri];
+      const newOptionMultipleImages = [...(q.optionMultipleImages || [])];
+      newOptionMultipleImages[optionIndex] = newImages;
+      updateQuestion(questionId, { optionMultipleImages: newOptionMultipleImages });
     } else if (type === 'pair' && pairIndex !== undefined && side) {
       const q = questions.find((q) => q.id === questionId);
       if (!q || !q.pairs) return;
@@ -3108,6 +3136,59 @@ Enhanced text with emotions:`;
     updateQuestion(questionId, { 
       questionImages: updatedImages.length > 0 ? updatedImages : undefined 
     });
+  };
+
+  const reorderQuestionImages = (questionId: string, newOrder: string[]) => {
+    updateQuestion(questionId, { questionImages: newOrder });
+  };
+
+  // Render function for draggable question image items
+  const renderQuestionImageItem = ({ item, drag, isActive, getIndex }: RenderItemParams<string>) => {
+    const index = getIndex?.() ?? 0;
+    const question = questions.find(q => q.id === editingQuestion?.id);
+    if (!question || !question.questionImages) return null;
+
+    return (
+      <TouchableOpacity
+        style={[
+          styles.questionImageItemContainer,
+          isActive && styles.questionImageItemActive
+        ]}
+        onLongPress={drag}
+        disabled={isActive}
+      >
+        <View style={styles.questionImageItemContent}>
+          <View style={styles.questionImageItemNumber}>
+            <Text style={styles.questionImageItemNumberText}>{index + 1}</Text>
+          </View>
+          
+          <View style={styles.questionImageThumbnailContainer}>
+            <Image 
+              source={{ uri: item }} 
+              style={styles.questionImageThumbnail} 
+              resizeMode="cover"
+              loadingIndicatorSource={require('../assets/images/icon.png')}
+            />
+          </View>
+          
+          <View style={styles.questionImageItemActions}>
+            <TouchableOpacity 
+              onPress={() => removeQuestionImage(editingQuestion!.id, index)}
+              style={styles.questionImageRemoveButton}
+            >
+              <MaterialCommunityIcons name="trash-can" size={16} color="#ef4444" />
+            </TouchableOpacity>
+            
+            <TouchableOpacity 
+              onLongPress={drag}
+              style={styles.questionImageDragHandle}
+            >
+              <MaterialCommunityIcons name="drag" size={16} color="#64748b" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </TouchableOpacity>
+    );
   };
 
   // Helper function to clean undefined values from objects
@@ -3439,8 +3520,8 @@ Enhanced text with emotions:`;
                   <Text style={styles.pickFileButtonText}>{editingQuestion.questionImage ? 'Change image' : 'Add image'}</Text>
                 </TouchableOpacity>
                 
-                {/* Multiple images button for pattern questions */}
-                {(editingQuestion.type === 're-order' || editingQuestion.type === 'identification') && (
+                {/* Multiple images button for pattern questions and multiple choice */}
+                {(editingQuestion.type === 're-order' || editingQuestion.type === 'identification' || editingQuestion.type === 'multiple-choice') && (
                   <TouchableOpacity 
                     onPress={() => pickMultipleQuestionImages(editingQuestion.id)} 
                     style={[styles.pickFileButton, { marginLeft: 8, backgroundColor: '#f97316' }]}
@@ -3466,38 +3547,23 @@ Enhanced text with emotions:`;
                   </View>
                 )}
               
-              {/* Multiple question images */}
+              {/* Multiple question images - Draggable */}
               {editingQuestion.questionImages && editingQuestion.questionImages.length > 0 && (
                 <View style={{ marginTop: 8 }}>
-                  <Text style={[styles.inputLabel, { marginBottom: 8 }]}>Question Images ({editingQuestion.questionImages.length})</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
-                    {editingQuestion.questionImages.map((imageUri, index) => (
-                      <View key={index} style={{ marginRight: 8, position: 'relative' }}>
-                        <Image 
-                          source={{ uri: imageUri }} 
-                          style={{ width: 100, height: 100, borderRadius: 8 }} 
-                          resizeMode="cover"
-                          loadingIndicatorSource={require('../assets/images/icon.png')}
-                        />
-                        <TouchableOpacity 
-                          onPress={() => removeQuestionImage(editingQuestion.id, index)}
-                          style={{
-                            position: 'absolute',
-                            top: -8,
-                            right: -8,
-                            backgroundColor: '#ef4444',
-                            borderRadius: 12,
-                            width: 24,
-                            height: 24,
-                            justifyContent: 'center',
-                            alignItems: 'center'
-                          }}
-                        >
-                          <MaterialCommunityIcons name="close" size={16} color="#ffffff" />
-                        </TouchableOpacity>
-                      </View>
-                    ))}
-                  </ScrollView>
+                  <Text style={[styles.inputLabel, { marginBottom: 8 }]}>
+                    Question Images ({editingQuestion.questionImages.length}) - Drag to reorder
+                  </Text>
+                  <View style={styles.questionImagesContainer}>
+                    <DraggableFlatList
+                      data={editingQuestion.questionImages}
+                      renderItem={renderQuestionImageItem}
+                      keyExtractor={(item, index) => `${editingQuestion.id}-img-${index}`}
+                      onDragEnd={({ data }) => reorderQuestionImages(editingQuestion.id, data)}
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      scrollEnabled={true}
+                    />
+                  </View>
                 </View>
               )}
               </View>
@@ -3639,7 +3705,8 @@ Enhanced text with emotions:`;
                                 ans = '';
                               }
                               const newImages = (editingQuestion.optionImages || []).filter((_, i) => i !== index);
-                              updateQuestion(editingQuestion.id, { options: newOptions, optionImages: newImages, answer: ans });
+                              const newMultipleImages = (editingQuestion.optionMultipleImages || []).filter((_, i) => i !== index);
+                              updateQuestion(editingQuestion.id, { options: newOptions, optionImages: newImages, optionMultipleImages: newMultipleImages, answer: ans });
                             }}
                           >
                             <AntDesign name="delete" size={16} color="#ffffff" />
@@ -3656,13 +3723,15 @@ Enhanced text with emotions:`;
                             newOptions[index] = text;
                             updateQuestion(editingQuestion.id, { options: newOptions });
                           }}
-                          placeholder={editingQuestion.optionImages?.[index] ? "Text (optional)" : "Type answer option here"}
+                          placeholder={(editingQuestion.optionImages?.[index] || editingQuestion.optionMultipleImages?.[index]?.length) ? "Text (optional)" : "Type answer option here"}
                           placeholderTextColor="rgba(255,255,255,0.7)"
                         />
                         <TouchableOpacity onPress={() => pickOptionImage(editingQuestion.id, index)} style={{ marginLeft: 8 }}>
                           <MaterialCommunityIcons name="image-plus" size={22} color="#ffffff" />
                         </TouchableOpacity>
                       </View>
+                      
+                      {/* Single Image Display (Legacy) */}
                       {(editingQuestion.optionImages?.[index]) && (
                         <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center' }}>
                           <Image 
@@ -3678,6 +3747,49 @@ Enhanced text with emotions:`;
                           }}>
                             <MaterialCommunityIcons name="trash-can" size={22} color="#ffffff" />
                           </TouchableOpacity>
+                        </View>
+                      )}
+                      
+                      {/* Multiple Images Display */}
+                      {(editingQuestion.optionMultipleImages?.[index]?.length) && (
+                        <View style={{ marginTop: 8 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                            <Text style={[styles.optionLabel, { color: '#ffffff', fontSize: 12 }]}>Images:</Text>
+                            <TouchableOpacity 
+                              onPress={() => pickMultipleOptionImages(editingQuestion.id, index)}
+                              style={{ marginLeft: 8, padding: 4 }}
+                            >
+                              <MaterialCommunityIcons name="image-plus" size={18} color="#ffffff" />
+                            </TouchableOpacity>
+                          </View>
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                            {editingQuestion.optionMultipleImages[index]?.map((imageUrl, imgIndex) => (
+                              <View key={imgIndex} style={{ position: 'relative' }}>
+                                <Image 
+                                  source={{ uri: imageUrl }} 
+                                  style={{ width: 72, height: 72, borderRadius: 8 }} 
+                                  resizeMode="cover"
+                                  loadingIndicatorSource={require('../assets/images/icon.png')}
+                                />
+                                <TouchableOpacity 
+                                  onPress={() => removeMultipleOptionImage(editingQuestion.id, index, imgIndex)}
+                                  style={{ 
+                                    position: 'absolute', 
+                                    top: -8, 
+                                    right: -8, 
+                                    backgroundColor: '#ef4444', 
+                                    borderRadius: 10, 
+                                    width: 20, 
+                                    height: 20, 
+                                    justifyContent: 'center', 
+                                    alignItems: 'center' 
+                                  }}
+                                >
+                                  <MaterialCommunityIcons name="close" size={12} color="#ffffff" />
+                                </TouchableOpacity>
+                              </View>
+                            ))}
+                          </View>
                         </View>
                       )}
                     </View>
@@ -4679,7 +4791,7 @@ Enhanced text with emotions:`;
                 disabled={!exerciseTitle.trim() || !exerciseDescription.trim() || !exerciseCategory.trim()}
               >
                 <MaterialCommunityIcons name="robot" size={16} color="#ffffff" />
-                <Text style={styles.aiGeneratorButtonText}>AI Generator</Text>
+                <Text style={styles.aiGeneratorButtonText}>AI</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.addQuestionButton}
@@ -7451,5 +7563,87 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 12,
     fontStyle: 'italic',
+  },
+  
+  // Question Images Draggable Styles
+  questionImagesContainer: {
+    height: 120,
+    marginBottom: 8,
+  },
+  questionImageItemContainer: {
+    width: 100,
+    height: 100,
+    marginRight: 8,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  questionImageItemActive: {
+    backgroundColor: '#f0f9ff',
+    borderColor: '#3b82f6',
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 4,
+    transform: [{ scale: 1.05 }],
+  },
+  questionImageItemContent: {
+    flex: 1,
+    position: 'relative',
+  },
+  questionImageItemNumber: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 2,
+  },
+  questionImageItemNumberText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  questionImageThumbnailContainer: {
+    flex: 1,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  questionImageThumbnail: {
+    width: '100%',
+    height: '100%',
+  },
+  questionImageItemActions: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    flexDirection: 'row',
+    gap: 4,
+    zIndex: 2,
+  },
+  questionImageRemoveButton: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(239, 68, 68, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  questionImageDragHandle: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(100, 116, 139, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });
