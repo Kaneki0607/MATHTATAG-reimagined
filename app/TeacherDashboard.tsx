@@ -2545,7 +2545,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
          )}
 
          {activeTab === 'results' && (
-           <View style={{ paddingBottom: 100 }}>
+           <View style={{ paddingBottom: 60 }}>
              <Text style={styles.sectionTitle}>Exercise Results & Analytics</Text>
 
              {/* Class-wise Results */}
@@ -2694,6 +2694,37 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                    </View>
                                  </View>
                                  
+                                 {/* Exercise Details - 2x2 Grid */}
+                                 <View style={styles.exerciseDetailsGrid}>
+                                   <View style={styles.exerciseDetailItem}>
+                                     <MaterialCommunityIcons name="help-circle-outline" size={16} color="#64748b" />
+                                     <Text style={styles.exerciseDetailText}>
+                                       {exerciseResults[0]?.questionResults?.length || 0} Questions
+                                     </Text>
+                                   </View>
+                                   <View style={styles.exerciseDetailItem}>
+                                     <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
+                                     <Text style={styles.exerciseDetailText}>
+                                       {exerciseAssignment?.exercise?.timeLimitPerItem ? 
+                                         `${Math.round(exerciseAssignment.exercise.timeLimitPerItem / 60)} min per item` : 'No time limit'}
+                                     </Text>
+                                   </View>
+                                   <View style={styles.exerciseDetailItem}>
+                                     <MaterialCommunityIcons name="school-outline" size={16} color="#64748b" />
+                                     <Text style={styles.exerciseDetailText}>
+                                       {exerciseAssignment?.exercise?.category || 'General'}
+                                     </Text>
+                                   </View>
+                                   <View style={styles.exerciseDetailItem}>
+                                     <MaterialCommunityIcons name="chart-line" size={16} color="#64748b" />
+                                     <Text style={styles.exerciseDetailText}>
+                                       {exerciseAssignment?.exercise?.questionCount ? 
+                                         (exerciseAssignment.exercise.questionCount <= 5 ? 'Easy' : 
+                                          exerciseAssignment.exercise.questionCount <= 10 ? 'Medium' : 'Hard') : 'Medium'} Level
+                                     </Text>
+                                   </View>
+                                 </View>
+                                 
                                  {/* Performance Summary Card */}
                                  <View style={styles.performanceSummaryCard}>
                                    <Text style={styles.performanceSummaryTitle}>Summary of Class Average</Text>
@@ -2716,7 +2747,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                    <View style={styles.performanceMetricsGrid}>
                                      <View style={styles.performanceMetric}>
                                        <View style={styles.metricIconContainer}>
-                                         <MaterialCommunityIcons name="clock-outline" size={14} color="#3b82f6" />
+                                         <MaterialCommunityIcons name="clock-outline" size={12} color="#3b82f6" />
                                        </View>
                                        <View style={styles.metricContent}>
                                          <Text style={styles.metricLabel}>Average Time</Text>
@@ -2730,42 +2761,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                              '—'
                                            }
                                          </Text>
-                                         <View style={[styles.performanceIndicator, { 
-                                           backgroundColor: exerciseAverageTime > 0 && exerciseAverageTime < 60000 ? '#10b981' : 
-                                                           exerciseAverageTime > 0 && exerciseAverageTime < 120000 ? '#f59e0b' : '#ef4444'
-                                         }]} />
                                        </View>
                                      </View>
                                      
                                      <View style={styles.performanceMetric}>
                                        <View style={styles.metricIconContainer}>
-                                         <MaterialCommunityIcons name="repeat" size={14} color="#10b981" />
+                                         <MaterialCommunityIcons name="repeat" size={12} color="#10b981" />
                                        </View>
                                        <View style={styles.metricContent}>
                                          <Text style={styles.metricLabel}>Average Attempts</Text>
                                          <Text style={styles.metricValue}>
                                            {exerciseAverageAttempts > 0 ? exerciseAverageAttempts.toFixed(1) : '—'}
                                          </Text>
-                                         <View style={[styles.performanceIndicator, { 
-                                           backgroundColor: exerciseAverageAttempts > 0 && exerciseAverageAttempts <= 1.2 ? '#10b981' : 
-                                                           exerciseAverageAttempts > 0 && exerciseAverageAttempts <= 2.0 ? '#f59e0b' : '#ef4444'
-                                         }]} />
                                        </View>
                                      </View>
                                      
                                      <View style={styles.performanceMetric}>
                                        <View style={styles.metricIconContainer}>
-                                         <MaterialCommunityIcons name="account-group" size={14} color="#f59e0b" />
+                                         <MaterialCommunityIcons name="account-group" size={12} color="#f59e0b" />
                                        </View>
                                        <View style={styles.metricContent}>
                                          <Text style={styles.metricLabel}>Completion</Text>
                                          <Text style={styles.metricValue}>
-                                           {Math.round(exerciseCompletionRate)}% ({exerciseResults.length}/{classStudents.length})
+                                           ({exerciseResults.length}/{classStudents.length})
                                          </Text>
-                                         <View style={[styles.performanceIndicator, { 
-                                           backgroundColor: exerciseCompletionRate >= 90 ? '#10b981' : 
-                                                           exerciseCompletionRate >= 70 ? '#f59e0b' : '#ef4444'
-                                         }]} />
                                        </View>
                                      </View>
                                    </View>
@@ -2815,7 +2834,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                          onPress={() => handleSort('time')}
                                        >
                                          <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'time' && styles.activeSort]}>
-                                           Time
+                                           Time Spent
                                          </Text>
                                          {resultsSortBy === 'time' && (
                                            <MaterialIcons 
@@ -2860,11 +2879,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                              onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname)}
                                            >
                                              <Text style={[styles.tableRowText, styles.studentNameCell, { flex: 1, color: '#3b82f6' }]}>{studentNickname}</Text>
-                                             <View style={[styles.studentPerformanceBadge, { 
-                                               backgroundColor: studentPerformanceLevel === 'excellent' ? '#10b981' : 
-                                                               studentPerformanceLevel === 'good' ? '#3b82f6' : 
-                                                               studentPerformanceLevel === 'fair' ? '#f59e0b' : '#ef4444'
-                                             }]} />
                                            </TouchableOpacity>
                                            <Text style={[styles.tableRowText, { flex: 1.5 }]}>{avgAttempts}</Text>
                                            <Text style={[styles.tableRowText, { flex: 1.5 }]}>{timeDisplay}</Text>
@@ -4384,9 +4398,9 @@ const styles = StyleSheet.create({
   },
   scrollView: {
     flex: 1,
-    paddingHorizontal: Math.min(20, width * 0.05),
-    paddingTop: Math.min(60, height * 0.08),
-    paddingBottom: Math.min(100, height * 0.12),
+    paddingHorizontal: Math.min(8, width * 0.02),
+    paddingTop: Math.min(40, height * 0.05),
+    paddingBottom: Math.min(70, height * 0.08),
   },
   
   // Header Styles
@@ -4539,45 +4553,45 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   sectionTitle: {
-    fontSize: Math.max(18, Math.min(22, width * 0.055)),
+    fontSize: Math.max(16, Math.min(20, width * 0.05)),
     fontWeight: '700',
     color: '#1e293b',
-    marginBottom: Math.min(20, height * 0.025),
-    paddingHorizontal: Math.min(16, width * 0.04),
+    marginBottom: Math.min(12, height * 0.015),
+    paddingHorizontal: Math.min(8, width * 0.02),
   },
   classroomCard: {
     backgroundColor: '#ffffff',
-    borderRadius: Math.min(20, width * 0.05),
-    padding: Math.min(24, width * 0.06),
-    marginHorizontal: Math.min(16, width * 0.04),
-    marginBottom: Math.min(16, height * 0.02),
+    borderRadius: Math.min(8, width * 0.02),
+    padding: Math.min(12, width * 0.03),
+    marginHorizontal: Math.min(4, width * 0.01),
+    marginBottom: Math.min(8, height * 0.01),
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 4,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
     borderWidth: 1,
     borderColor: '#f1f5f9',
     width: width - Math.min(32, width * 0.08),
     alignSelf: 'center',
   },
   classroomHeader: {
-    marginBottom: 16,
+    marginBottom: 8,
   },
   classroomTitle: {
-    fontSize: Math.max(16, Math.min(20, width * 0.05)),
+    fontSize: Math.max(14, Math.min(18, width * 0.045)),
     fontWeight: '700',
     color: '#1e293b',
-    marginBottom: Math.min(6, height * 0.008),
+    marginBottom: Math.min(4, height * 0.005),
   },
   classroomSubtitle: {
-    fontSize: Math.max(13, Math.min(15, width * 0.037)),
+    fontSize: Math.max(11, Math.min(13, width * 0.03)),
     color: '#64748b',
-    marginBottom: Math.min(4, height * 0.005),
+    marginBottom: Math.min(2, height * 0.002),
     fontWeight: '500',
   },
   classroomYear: {
-    fontSize: Math.max(12, Math.min(14, width * 0.035)),
+    fontSize: Math.max(10, Math.min(12, width * 0.03)),
     color: '#64748b',
     fontWeight: '500',
   },
@@ -4613,10 +4627,10 @@ const styles = StyleSheet.create({
   exerciseStatusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    gap: 4,
     shadowColor: '#000',
     shadowOffset: {
       width: 0,
@@ -4627,17 +4641,19 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   exerciseStatusText: {
-    fontSize: 11,
+    fontSize: 10,
     color: '#ffffff',
     fontWeight: '700',
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 0.3,
   },
   exerciseHeader: {
     backgroundColor: '#ffffff',
-    padding: 20,
+    padding: Math.min(12, width * 0.03),
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
+    borderTopLeftRadius: 12,
+    borderTopRightRadius: 12,
   },
   exerciseTitleRow: {
     flexDirection: 'row',
@@ -4647,45 +4663,78 @@ const styles = StyleSheet.create({
     paddingHorizontal: 0,
   },
   exerciseTitle: {
-    fontSize: 20,
+    fontSize: Math.max(14, Math.min(18, width * 0.045)),
     fontWeight: '700',
     color: '#1e293b',
     flex: 1,
-    marginLeft: 12,
+    marginLeft: 8,
+  },
+  exerciseDetailsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 8,
+    gap: Math.min(6, width * 0.015),
+  },
+  exerciseDetailsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 8,
+    gap: Math.min(6, width * 0.015),
+  },
+  exerciseDetailItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: Math.min(8, width * 0.02),
+    paddingVertical: Math.min(4, height * 0.005),
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    width: '48%',
+    flex: 0,
+  },
+  exerciseDetailText: {
+    fontSize: Math.max(9, Math.min(11, width * 0.025)),
+    color: '#64748b',
+    fontWeight: '600',
+    marginLeft: 4,
+    flex: 1,
   },
   performanceSummaryCard: {
     backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    padding: 16,
+    borderRadius: 6,
+    padding: Math.min(8, width * 0.02),
     borderWidth: 1,
     borderColor: '#e2e8f0',
     shadowColor: '#000',
     shadowOffset: {
       width: 0,
-      height: 2,
+      height: 1,
     },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
-    marginTop: 12,
+    shadowOpacity: 0.02,
+    shadowRadius: 1,
+    elevation: 1,
+    marginTop: Math.min(4, height * 0.005),
+    marginHorizontal: Math.min(8, width * 0.02),
+    marginBottom: Math.min(4, height * 0.005),
   },
   performanceSummaryTitle: {
-    fontSize: 16,
+    fontSize: Math.max(11, Math.min(13, width * 0.03)),
     fontWeight: '700',
     color: '#1e293b',
-    marginBottom: 16,
+    marginBottom: Math.min(4, height * 0.005),
     textAlign: 'center',
   },
   performanceMetricsGrid: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    gap: 12,
+    gap: Math.min(4, width * 0.01),
   },
   performanceMetric: {
     flex: 1,
     backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 16,
+    borderRadius: 6,
+    padding: Math.min(6, width * 0.015),
     borderWidth: 1,
     borderColor: '#e2e8f0',
     alignItems: 'center',
@@ -4694,83 +4743,78 @@ const styles = StyleSheet.create({
       width: 0,
       height: 1,
     },
-    shadowOpacity: 0.03,
-    shadowRadius: 2,
+    shadowOpacity: 0.01,
+    shadowRadius: 1,
     elevation: 1,
   },
   metricIconContainer: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
     backgroundColor: '#f0f9ff',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 8,
+    marginBottom: 2,
   },
   metricContent: {
     alignItems: 'center',
   },
   metricLabel: {
-    fontSize: 12,
+    fontSize: Math.max(8, Math.min(10, width * 0.02)),
     color: '#64748b',
     fontWeight: '600',
-    marginBottom: 4,
+    marginBottom: 1,
     textAlign: 'center',
   },
   metricValue: {
-    fontSize: 18,
+    fontSize: Math.max(10, Math.min(11, width * 0.035)),
     color: '#1e293b',
     fontWeight: '700',
     textAlign: 'center',
   },
-  performanceIndicator: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginTop: 4,
-  },
   completionProgressContainer: {
-    marginBottom: 16,
+    marginBottom: 4,
   },
   completionProgressLabel: {
-    fontSize: 12,
+    fontSize: 10,
     color: '#64748b',
     fontWeight: '600',
-    marginBottom: 8,
+    marginBottom: 2,
   },
   completionProgressBar: {
-    height: 8,
+    height: 4,
     backgroundColor: '#e2e8f0',
-    borderRadius: 4,
+    borderRadius: 2,
     overflow: 'hidden',
-    marginBottom: 4,
+    marginBottom: 1,
   },
   completionProgressFill: {
     height: '100%',
     borderRadius: 4,
   },
   completionProgressText: {
-    fontSize: 12,
+    fontSize: 10,
     color: '#64748b',
     fontWeight: '600',
     textAlign: 'right',
   },
   studentResultsContainer: {
-    marginTop: 16,
     backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    padding: 16,
+    borderRadius: 6,
+    padding: Math.min(8, width * 0.02),
     borderWidth: 1,
     borderColor: '#e2e8f0',
+    marginHorizontal: Math.min(8, width * 0.02),
+    marginBottom: Math.min(8, height * 0.01),
   },
   studentResultsHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 4,
   },
   studentResultsTitle: {
-    fontSize: 16,
+    fontSize: Math.max(11, Math.min(13, width * 0.03)),
     fontWeight: '700',
     color: '#1e293b',
   },
@@ -4778,8 +4822,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#10b981',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: Math.min(16, width * 0.04),
+    paddingVertical: Math.min(8, height * 0.01),
     borderRadius: 8,
     gap: 6,
     shadowColor: '#000',
@@ -4793,7 +4837,7 @@ const styles = StyleSheet.create({
   },
   exportButtonText: {
     color: '#ffffff',
-    fontSize: 13,
+    fontSize: Math.max(11, Math.min(13, width * 0.032)),
     fontWeight: '600',
   },
   moreButton: {
@@ -6675,17 +6719,25 @@ const styles = StyleSheet.create({
   resultsTableHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-    borderBottomWidth: 2,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingVertical: Math.min(10, height * 0.012),
+    borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
-    minWidth: width < 400 ? width * 0.8 : 'auto',
-    borderRadius: 8,
-    marginBottom: 8,
+    minWidth: width < 400 ? width * 0.9 : 'auto',
+    borderRadius: 6,
+    marginBottom: 4,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 1,
+    },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
   tableHeaderText: {
-    fontSize: 14,
+    fontSize: Math.max(11, Math.min(13, width * 0.03)),
     fontWeight: '700',
     color: '#374151',
     textAlign: 'center',
@@ -6706,17 +6758,25 @@ const styles = StyleSheet.create({
   resultsTableRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingVertical: Math.min(10, height * 0.012),
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
-    minWidth: width < 400 ? width * 0.8 : 'auto',
+    minWidth: width < 400 ? width * 0.9 : 'auto',
     backgroundColor: '#ffffff',
-    marginBottom: 2,
-    borderRadius: 6,
+    marginBottom: 1,
+    borderRadius: 4,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 0.5,
+    },
+    shadowOpacity: 0.02,
+    shadowRadius: 1,
+    elevation: 0.5,
   },
   tableRowText: {
-    fontSize: 14,
+    fontSize: Math.max(11, Math.min(13, width * 0.03)),
     color: '#1e293b',
     textAlign: 'center',
   },
@@ -6731,10 +6791,10 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
   tableScrollContainer: {
-    maxHeight: height * 0.4,
+    maxHeight: height * 0.35,
   },
   tableContainer: {
-    minWidth: width < 400 ? width * 0.8 : 'auto',
+    minWidth: width < 400 ? width * 0.9 : 'auto',
   },
   scoreCell: {
     fontWeight: '700',
