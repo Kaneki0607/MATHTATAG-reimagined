@@ -258,187 +258,642 @@ const performApiKeyMaintenance = async () => {
 
 // Configuration - Now using direct API calls to Gemini and ElevenLabs
 
-// Stock image library data
+// Stock image library data - Complete collection from all Stock-Images folders
 const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
-  'Water Animals': [
-    { name: 'Whale', uri: require('../assets/images/Water Animals/1.png') },
-    { name: 'Fish', uri: require('../assets/images/Water Animals/2.png') },
-    { name: 'Crab', uri: require('../assets/images/Water Animals/4.png') },
-    { name: 'Octopus', uri: require('../assets/images/Water Animals/5.png') },
-    { name: 'Starfish', uri: require('../assets/images/Water Animals/6.png') },
-    { name: 'Coral', uri: require('../assets/images/Water Animals/7.png') },
-    { name: 'Puffer Fish', uri: require('../assets/images/Water Animals/8.png') },
-    { name: 'Dolphin', uri: require('../assets/images/Water Animals/10.png') },
-    { name: 'Turtle', uri: require('../assets/images/Water Animals/11.png') },
-    { name: 'Clam', uri: require('../assets/images/Water Animals/12.png') },
-    { name: 'Shark', uri: require('../assets/images/Water Animals/13.png') },
-    { name: 'Seahorse', uri: require('../assets/images/Water Animals/15.png') },
+  '3D Alphabet': [
+    { name: '3D A', uri: require('../assets/images/Stock-Images/3D Alphabet/A1.png') },
+    { name: '3D B', uri: require('../assets/images/Stock-Images/3D Alphabet/B1.png') },
+    { name: '3D C', uri: require('../assets/images/Stock-Images/3D Alphabet/C1.png') },
+    { name: '3D D', uri: require('../assets/images/Stock-Images/3D Alphabet/D1.png') },
+    { name: '3D E', uri: require('../assets/images/Stock-Images/3D Alphabet/E1.png') },
+    { name: '3D F', uri: require('../assets/images/Stock-Images/3D Alphabet/F1.png') },
+    { name: '3D G', uri: require('../assets/images/Stock-Images/3D Alphabet/G1.png') },
+    { name: '3D H', uri: require('../assets/images/Stock-Images/3D Alphabet/H1.png') },
+    { name: '3D I', uri: require('../assets/images/Stock-Images/3D Alphabet/I1.png') },
+    { name: '3D J', uri: require('../assets/images/Stock-Images/3D Alphabet/J1.png') },
+    { name: '3D K', uri: require('../assets/images/Stock-Images/3D Alphabet/K1.png') },
+    { name: '3D L', uri: require('../assets/images/Stock-Images/3D Alphabet/L1.png') },
+    { name: '3D M', uri: require('../assets/images/Stock-Images/3D Alphabet/M1.png') },
+    { name: '3D N', uri: require('../assets/images/Stock-Images/3D Alphabet/N1.png') },
+    { name: '3D O', uri: require('../assets/images/Stock-Images/3D Alphabet/O1.png') },
+    { name: '3D P', uri: require('../assets/images/Stock-Images/3D Alphabet/P1.png') },
+    { name: '3D Q', uri: require('../assets/images/Stock-Images/3D Alphabet/Q1.png') },
+    { name: '3D R', uri: require('../assets/images/Stock-Images/3D Alphabet/R1.png') },
+    { name: '3D S', uri: require('../assets/images/Stock-Images/3D Alphabet/S1.png') },
+    { name: '3D T', uri: require('../assets/images/Stock-Images/3D Alphabet/T1.png') },
+    { name: '3D U', uri: require('../assets/images/Stock-Images/3D Alphabet/U1.png') },
+    { name: '3D V', uri: require('../assets/images/Stock-Images/3D Alphabet/V1.png') },
+    { name: '3D W', uri: require('../assets/images/Stock-Images/3D Alphabet/W1.png') },
+    { name: '3D X', uri: require('../assets/images/Stock-Images/3D Alphabet/X1.png') },
+    { name: '3D Y', uri: require('../assets/images/Stock-Images/3D Alphabet/Y1.png') },
+    { name: '3D Z', uri: require('../assets/images/Stock-Images/3D Alphabet/Z1.png') },
   ],
   'Alphabet': [
-    { name: 'A', uri: require('../assets/images/Alphabet/a.png') },
-    { name: 'B', uri: require('../assets/images/Alphabet/b.png') },
-    { name: 'C', uri: require('../assets/images/Alphabet/c.png') },
-    { name: 'D', uri: require('../assets/images/Alphabet/d.png') },
-    { name: 'E', uri: require('../assets/images/Alphabet/e.png') },
-    { name: 'F', uri: require('../assets/images/Alphabet/f.png') },
-    { name: 'G', uri: require('../assets/images/Alphabet/g.png') },
-    { name: 'H', uri: require('../assets/images/Alphabet/h.png') },
-    { name: 'I', uri: require('../assets/images/Alphabet/i.png') },
-    { name: 'J', uri: require('../assets/images/Alphabet/j.png') },
-    { name: 'K', uri: require('../assets/images/Alphabet/k.png') },
-    { name: 'M', uri: require('../assets/images/Alphabet/m.png') },
-    { name: 'N', uri: require('../assets/images/Alphabet/n.png') },
-    { name: 'O', uri: require('../assets/images/Alphabet/o.png') },
-    { name: 'P', uri: require('../assets/images/Alphabet/p.png') },
-    { name: 'Q', uri: require('../assets/images/Alphabet/q.png') },
-    { name: 'R', uri: require('../assets/images/Alphabet/r.png') },
-    { name: 'S', uri: require('../assets/images/Alphabet/s.png') },
-    { name: 'T', uri: require('../assets/images/Alphabet/t.png') },
-    { name: 'U', uri: require('../assets/images/Alphabet/u.png') },
-    { name: 'V', uri: require('../assets/images/Alphabet/v.png') },
-    { name: 'W', uri: require('../assets/images/Alphabet/w.png') },
-    { name: 'X', uri: require('../assets/images/Alphabet/x.png') },
-    { name: 'Y', uri: require('../assets/images/Alphabet/y.png') },
-    { name: 'Z', uri: require('../assets/images/Alphabet/z.png') },
+    { name: 'A', uri: require('../assets/images/Stock-Images/Alphabet/A.png') },
+    { name: 'B', uri: require('../assets/images/Stock-Images/Alphabet/B.png') },
+    { name: 'C', uri: require('../assets/images/Stock-Images/Alphabet/C.png') },
+    { name: 'D', uri: require('../assets/images/Stock-Images/Alphabet/D.png') },
+    { name: 'E', uri: require('../assets/images/Stock-Images/Alphabet/E.png') },
+    { name: 'F', uri: require('../assets/images/Stock-Images/Alphabet/F.png') },
+    { name: 'G', uri: require('../assets/images/Stock-Images/Alphabet/G.png') },
+    { name: 'H', uri: require('../assets/images/Stock-Images/Alphabet/H.png') },
+    { name: 'I', uri: require('../assets/images/Stock-Images/Alphabet/I.png') },
+    { name: 'J', uri: require('../assets/images/Stock-Images/Alphabet/J.png') },
+    { name: 'K', uri: require('../assets/images/Stock-Images/Alphabet/K.png') },
+    { name: 'L', uri: require('../assets/images/Stock-Images/Alphabet/L.png') },
+    { name: 'M', uri: require('../assets/images/Stock-Images/Alphabet/M.png') },
+    { name: 'N', uri: require('../assets/images/Stock-Images/Alphabet/N.png') },
+    { name: 'O', uri: require('../assets/images/Stock-Images/Alphabet/O.png') },
+    { name: 'P', uri: require('../assets/images/Stock-Images/Alphabet/P.png') },
+    { name: 'Q', uri: require('../assets/images/Stock-Images/Alphabet/Q.png') },
+    { name: 'R', uri: require('../assets/images/Stock-Images/Alphabet/R.png') },
+    { name: 'S', uri: require('../assets/images/Stock-Images/Alphabet/S.png') },
+    { name: 'T', uri: require('../assets/images/Stock-Images/Alphabet/T.png') },
+    { name: 'U', uri: require('../assets/images/Stock-Images/Alphabet/U.png') },
+    { name: 'V', uri: require('../assets/images/Stock-Images/Alphabet/V.png') },
+    { name: 'W', uri: require('../assets/images/Stock-Images/Alphabet/W.png') },
+    { name: 'X', uri: require('../assets/images/Stock-Images/Alphabet/X.png') },
+    { name: 'Y', uri: require('../assets/images/Stock-Images/Alphabet/Y.png') },
+    { name: 'Z', uri: require('../assets/images/Stock-Images/Alphabet/Z.png') },
   ],
-  'Fruits': [
-    { name: 'Apple', uri: require('../assets/images/Fruits/apple.png') },
-    { name: 'Avocado', uri: require('../assets/images/Fruits/avocado.png') },
-    { name: 'Banana', uri: require('../assets/images/Fruits/banana.png') },
-    { name: 'Blueberry', uri: require('../assets/images/Fruits/blueberry.png') },
-    { name: 'Coco', uri: require('../assets/images/Fruits/coco.png') },
-    { name: 'Corn', uri: require('../assets/images/Fruits/corn.png') },
-    { name: 'Durian', uri: require('../assets/images/Fruits/durian.png') },
-    { name: 'Grapes', uri: require('../assets/images/Fruits/grapes.png') },
-    { name: 'Lemon', uri: require('../assets/images/Fruits/lemon.png') },
-    { name: 'Mango', uri: require('../assets/images/Fruits/mango.png') },
-    { name: 'Orange', uri: require('../assets/images/Fruits/orange.png') },
-    { name: 'Pineapple', uri: require('../assets/images/Fruits/pineapple.png') },
-    { name: 'Rambutan', uri: require('../assets/images/Fruits/rambutan.png') },
-    { name: 'Strawberry', uri: require('../assets/images/Fruits/strawberry.png') },
-    { name: 'Tomato', uri: require('../assets/images/Fruits/tomato.png') },
-    { name: 'Watermelon', uri: require('../assets/images/Fruits/watermelon.png') },
+  'Animals': [
+    // Land Animals
+    { name: 'Bee', uri: require('../assets/images/Stock-Images/Animals/Land Animals/bee.png') },
+    { name: 'Bird', uri: require('../assets/images/Stock-Images/Animals/Land Animals/bird.png') },
+    { name: 'Black Cat', uri: require('../assets/images/Stock-Images/Animals/Land Animals/black cat.png') },
+    { name: 'Bug', uri: require('../assets/images/Stock-Images/Animals/Land Animals/bug.png') },
+    { name: 'Bunny', uri: require('../assets/images/Stock-Images/Animals/Land Animals/bunny.png') },
+    { name: 'Butterfly', uri: require('../assets/images/Stock-Images/Animals/Land Animals/butterfly.png') },
+    { name: 'Cat', uri: require('../assets/images/Stock-Images/Animals/Land Animals/cat.png') },
+    { name: 'Cheetah', uri: require('../assets/images/Stock-Images/Animals/Land Animals/cheetah.png') },
+    { name: 'Chicken', uri: require('../assets/images/Stock-Images/Animals/Land Animals/chicken.png') },
+    { name: 'Cow', uri: require('../assets/images/Stock-Images/Animals/Land Animals/cow.png') },
+    { name: 'Deer', uri: require('../assets/images/Stock-Images/Animals/Land Animals/deer.png') },
+    { name: 'Dog', uri: require('../assets/images/Stock-Images/Animals/Land Animals/dog.png') },
+    { name: 'Elephant', uri: require('../assets/images/Stock-Images/Animals/Land Animals/elephant.png') },
+    { name: 'Fox', uri: require('../assets/images/Stock-Images/Animals/Land Animals/fox.png') },
+    { name: 'Frog', uri: require('../assets/images/Stock-Images/Animals/Land Animals/frog.png') },
+    { name: 'Giraffe', uri: require('../assets/images/Stock-Images/Animals/Land Animals/guraffe.png') },
+    { name: 'Hippo', uri: require('../assets/images/Stock-Images/Animals/Land Animals/hipo.png') },
+    { name: 'Horse', uri: require('../assets/images/Stock-Images/Animals/Land Animals/horse.png') },
+    { name: 'Koala', uri: require('../assets/images/Stock-Images/Animals/Land Animals/koala.png') },
+    { name: 'Lion', uri: require('../assets/images/Stock-Images/Animals/Land Animals/lion.png') },
+    { name: 'Monkey', uri: require('../assets/images/Stock-Images/Animals/Land Animals/monkey.png') },
+    { name: 'Owl', uri: require('../assets/images/Stock-Images/Animals/Land Animals/owl.png') },
+    { name: 'Panda', uri: require('../assets/images/Stock-Images/Animals/Land Animals/panda.png') },
+    { name: 'Penguin', uri: require('../assets/images/Stock-Images/Animals/Land Animals/penguin.png') },
+    { name: 'Pig', uri: require('../assets/images/Stock-Images/Animals/Land Animals/pig.png') },
+    { name: 'Red Panda', uri: require('../assets/images/Stock-Images/Animals/Land Animals/red panda.png') },
+    { name: 'Snail', uri: require('../assets/images/Stock-Images/Animals/Land Animals/snail.png') },
+    { name: 'Snake', uri: require('../assets/images/Stock-Images/Animals/Land Animals/snake.png') },
+    { name: 'Tiger', uri: require('../assets/images/Stock-Images/Animals/Land Animals/tiger.png') },
+    { name: 'Turkey', uri: require('../assets/images/Stock-Images/Animals/Land Animals/turkey.png') },
+    { name: 'Wolf', uri: require('../assets/images/Stock-Images/Animals/Land Animals/wolf.png') },
+    { name: 'Zebra', uri: require('../assets/images/Stock-Images/Animals/Land Animals/zebra.png') },
+    // Sea Animals
+    { name: 'Whale', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/1.png') },
+    { name: 'Fish', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/2.png') },
+    { name: 'Crab', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/4.png') },
+    { name: 'Octopus', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/5.png') },
+    { name: 'Starfish', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/6.png') },
+    { name: 'Coral', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/7.png') },
+    { name: 'Puffer Fish', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/8.png') },
+    { name: 'Dolphin', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/10.png') },
+    { name: 'Turtle', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/11.png') },
+    { name: 'Clam', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/12.png') },
+    { name: 'Shark', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/13.png') },
+    { name: 'Seahorse', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/15.png') },
   ],
-  'Land Animals': [
-    { name: 'Bee', uri: require('../assets/images/Land Animals/bee.png') },
-    { name: 'Bird', uri: require('../assets/images/Land Animals/bird.png') },
-    { name: 'Black Cat', uri: require('../assets/images/Land Animals/black cat.png') },
-    { name: 'Bug', uri: require('../assets/images/Land Animals/bug.png') },
-    { name: 'Bunny', uri: require('../assets/images/Land Animals/bunny.png') },
-    { name: 'Butterfly', uri: require('../assets/images/Land Animals/butterfly.png') },
-    { name: 'Cat', uri: require('../assets/images/Land Animals/cat.png') },
-    { name: 'Cheetah', uri: require('../assets/images/Land Animals/cheetah.png') },
-    { name: 'Chicken', uri: require('../assets/images/Land Animals/chicken.png') },
-    { name: 'Cow', uri: require('../assets/images/Land Animals/cow.png') },
-    { name: 'Deer', uri: require('../assets/images/Land Animals/deer.png') },
-    { name: 'Dog', uri: require('../assets/images/Land Animals/dog.png') },
-    { name: 'Elephant', uri: require('../assets/images/Land Animals/elephant.png') },
-    { name: 'Fox', uri: require('../assets/images/Land Animals/fox.png') },
-    { name: 'Frog', uri: require('../assets/images/Land Animals/frog.png') },
-    { name: 'Giraffe', uri: require('../assets/images/Land Animals/guraffe.png') },
-    { name: 'Hipo', uri: require('../assets/images/Land Animals/hipo.png') },
-    { name: 'Horse', uri: require('../assets/images/Land Animals/horse.png') },
-    { name: 'Koala', uri: require('../assets/images/Land Animals/koala.png') },
-    { name: 'Lion', uri: require('../assets/images/Land Animals/lion.png') },
-    { name: 'Monkey', uri: require('../assets/images/Land Animals/monkey.png') },
-    { name: 'Owl', uri: require('../assets/images/Land Animals/owl.png') },
-    { name: 'Panda', uri: require('../assets/images/Land Animals/panda.png') },
-    { name: 'Penguin', uri: require('../assets/images/Land Animals/penguin.png') },
-    { name: 'Pig', uri: require('../assets/images/Land Animals/pig.png') },
-    { name: 'Red Panda', uri: require('../assets/images/Land Animals/red panda.png') },
-    { name: 'Snail', uri: require('../assets/images/Land Animals/snail.png') },
-    { name: 'Snake', uri: require('../assets/images/Land Animals/snake.png') },
-    { name: 'Tiger', uri: require('../assets/images/Land Animals/tiger.png') },
-    { name: 'Turkey', uri: require('../assets/images/Land Animals/turkey.png') },
-    { name: 'Wolf', uri: require('../assets/images/Land Animals/wolf.png') },
-    { name: 'Zebra', uri: require('../assets/images/Land Animals/zebra.png') },
+  'Boxed Alphabet': [
+    { name: 'Boxed A', uri: require('../assets/images/Stock-Images/Boxed Alphabet/A.png') },
+    { name: 'Boxed B', uri: require('../assets/images/Stock-Images/Boxed Alphabet/B.png') },
+    { name: 'Boxed C', uri: require('../assets/images/Stock-Images/Boxed Alphabet/C.png') },
+    { name: 'Boxed D', uri: require('../assets/images/Stock-Images/Boxed Alphabet/D.png') },
+    { name: 'Boxed E', uri: require('../assets/images/Stock-Images/Boxed Alphabet/E.png') },
+    { name: 'Boxed F', uri: require('../assets/images/Stock-Images/Boxed Alphabet/F.png') },
+    { name: 'Boxed G', uri: require('../assets/images/Stock-Images/Boxed Alphabet/G.png') },
+    { name: 'Boxed H', uri: require('../assets/images/Stock-Images/Boxed Alphabet/H.png') },
+    { name: 'Boxed I', uri: require('../assets/images/Stock-Images/Boxed Alphabet/I.png') },
+    { name: 'Boxed J', uri: require('../assets/images/Stock-Images/Boxed Alphabet/J.png') },
+    { name: 'Boxed K', uri: require('../assets/images/Stock-Images/Boxed Alphabet/K.png') },
+    { name: 'Boxed L', uri: require('../assets/images/Stock-Images/Boxed Alphabet/L.png') },
+    { name: 'Boxed M', uri: require('../assets/images/Stock-Images/Boxed Alphabet/M.png') },
+    { name: 'Boxed N', uri: require('../assets/images/Stock-Images/Boxed Alphabet/N.png') },
+    { name: 'Boxed O', uri: require('../assets/images/Stock-Images/Boxed Alphabet/O.png') },
+    { name: 'Boxed P', uri: require('../assets/images/Stock-Images/Boxed Alphabet/P.png') },
+    { name: 'Boxed Q', uri: require('../assets/images/Stock-Images/Boxed Alphabet/Q.png') },
+    { name: 'Boxed R', uri: require('../assets/images/Stock-Images/Boxed Alphabet/R.png') },
+    { name: 'Boxed S', uri: require('../assets/images/Stock-Images/Boxed Alphabet/S.png') },
+    { name: 'Boxed T', uri: require('../assets/images/Stock-Images/Boxed Alphabet/T.png') },
+    { name: 'Boxed U', uri: require('../assets/images/Stock-Images/Boxed Alphabet/U.png') },
+    { name: 'Boxed V', uri: require('../assets/images/Stock-Images/Boxed Alphabet/V.png') },
+    { name: 'Boxed W', uri: require('../assets/images/Stock-Images/Boxed Alphabet/W.png') },
+    { name: 'Boxed X', uri: require('../assets/images/Stock-Images/Boxed Alphabet/X.png') },
+    { name: 'Boxed Y', uri: require('../assets/images/Stock-Images/Boxed Alphabet/Y.png') },
+    { name: 'Boxed Z', uri: require('../assets/images/Stock-Images/Boxed Alphabet/Z.png') },
+  ],
+  'Boxed Numbers 1-9': [
+    { name: 'Boxed 1', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/1.png') },
+    { name: 'Boxed 2', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/2.png') },
+    { name: 'Boxed 3', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/3.png') },
+    { name: 'Boxed 4', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/4.png') },
+    { name: 'Boxed 5', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/5.png') },
+    { name: 'Boxed 6', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/6.png') },
+    { name: 'Boxed 7', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/7.png') },
+    { name: 'Boxed 8', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/8.png') },
+    { name: 'Boxed 9', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/9.png') },
+  ],
+  'Comparing Quantities': [
+    { name: '1 + 9 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 + 9 (2).png') },
+    { name: '1 + 9', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 + 9.png') },
+    { name: '1 Apple', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 apple.png') },
+    { name: '1 Candy', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 candy.png') },
+    { name: '1 Pencil', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 pencil.png') },
+    { name: '1 Stack Book', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 stack book.png') },
+    { name: '12 Eggs', uri: require('../assets/images/Stock-Images/Comparing Quantities/12 eggs.png') },
+    { name: '13 - One Long and Three Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/13 - one long and three units.png') },
+    { name: '14 Eggs', uri: require('../assets/images/Stock-Images/Comparing Quantities/14 eggs.png') },
+    { name: '15 - One Long and Five Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/15 - one long and five units.png') },
+    { name: '15 Eggs', uri: require('../assets/images/Stock-Images/Comparing Quantities/15 eggs.png') },
+    { name: '17 - One Long and Seven Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/17 - one long and seven units.png') },
+    { name: '19 - One Long and Nine Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/19 - one long and nine units.png') },
+    { name: '2 + 8 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 + 8 (2).png') },
+    { name: '2 + 8', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 + 8.png') },
+    { name: '2 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 apples.png') },
+    { name: '2 Candies', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 candies.png') },
+    { name: '2 Pencils', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 pencil.png') },
+    { name: '2 Stack Books', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 stack book.png') },
+    { name: '22 - Two Longs and Two Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/22 - two longs and two units.png') },
+    { name: '25 - Two Longs and Five Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/25 - two longs and five units.png') },
+    { name: '27 Marbles', uri: require('../assets/images/Stock-Images/Comparing Quantities/27 marbles.png') },
+    { name: '2 Guavas with 1 Banana on Each Plate', uri: require('../assets/images/Stock-Images/Comparing Quantities/2guavas with 1 banana on each plate.png') },
+    { name: '3 + 7 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 + 7 (2).png') },
+    { name: '3 + 7', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 + 7.png') },
+    { name: '3 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 apples.png') },
+    { name: '3 Candies', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 candies.png') },
+    { name: '3 Girls', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 girls.png') },
+    { name: '3 Pencils', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 pencil.png') },
+    { name: '3 Stack Books', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 stack book.png') },
+    { name: '3-1 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/3-1 fish.png') },
+    { name: '30 - Three Longs', uri: require('../assets/images/Stock-Images/Comparing Quantities/30 - three longs.png') },
+    { name: '32 - Three Longs and Two Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/32 - three longs and two units.png') },
+    { name: '35 - Three Longs and Five Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/35 - three longs and five units.png') },
+    { name: '4 + 6 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 + 6 (2).png') },
+    { name: '4 + 6', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 + 6.png') },
+    { name: '4 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 apples.png') },
+    { name: '4 Candies', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 candies.png') },
+    { name: '4 Guavas and 2 Bananas', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 guavas and 2 bananas.png') },
+    { name: '4 Pencils', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 pencil.png') },
+    { name: '4 Stack Books', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 stack book.png') },
+    { name: '4-2 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/4-2 fish.png') },
+    { name: '5 + 5 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 + 5 (2).png') },
+    { name: '5 + 5', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 + 5.png') },
+    { name: '5 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 apples.png') },
+    { name: '5 Boys', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 boys.png') },
+    { name: '5 Candies', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 candies.png') },
+    { name: '5 Pencils (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 pencil (2).png') },
+    { name: '5 Pencils', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 pencil.png') },
+    { name: '5-2 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/5-2 fish.png') },
+    { name: '6 + 4 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/6 + 4 (2).png') },
+    { name: '6 + 4', uri: require('../assets/images/Stock-Images/Comparing Quantities/6 + 4.png') },
+    { name: '6 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/6 apples.png') },
+    { name: '6 Eggs in a Jar', uri: require('../assets/images/Stock-Images/Comparing Quantities/6 eggs in a jar.png') },
+    { name: '7 + 3 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/7 + 3 (2).png') },
+    { name: '7 + 3', uri: require('../assets/images/Stock-Images/Comparing Quantities/7 + 3.png') },
+    { name: '7 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/7 apples.png') },
+    { name: '7 Children Playing and 3 Children Joining', uri: require('../assets/images/Stock-Images/Comparing Quantities/7 children playing and 3 children joining.png') },
+    { name: '7-4 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/7-4 fish.png') },
+    { name: '8 + 2 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/8 + 2 (2).png') },
+    { name: '8 + 2', uri: require('../assets/images/Stock-Images/Comparing Quantities/8 + 2.png') },
+    { name: '8-7 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/8-7 fish.png') },
+    { name: '9 + 1 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/9 + 1 (2).png') },
+    { name: '9 + 1', uri: require('../assets/images/Stock-Images/Comparing Quantities/9 + 1.png') },
+    { name: '9-3 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/9-3 fish.png') },
+    { name: 'Empty Fruits on Plate', uri: require('../assets/images/Stock-Images/Comparing Quantities/empty fruits on plate.png') },
+    { name: 'Zeny 19 Counters, Ernie 14 Counters, Sitti Box, Akmad Box', uri: require('../assets/images/Stock-Images/Comparing Quantities/zeny 19 counters, Ernie 14 counters, sitti box, Akmad box.png') },
+  ],
+  'Dates': [
+    { name: 'Date 1', uri: require('../assets/images/Stock-Images/Dates/1.png') },
+    { name: 'Date 3', uri: require('../assets/images/Stock-Images/Dates/3.png') },
+    { name: 'Date 4', uri: require('../assets/images/Stock-Images/Dates/4.png') },
+    { name: 'Date 5', uri: require('../assets/images/Stock-Images/Dates/5.png') },
+    { name: 'Date 6', uri: require('../assets/images/Stock-Images/Dates/6.png') },
+    { name: 'Date 7', uri: require('../assets/images/Stock-Images/Dates/7.png') },
+    { name: 'Date 8', uri: require('../assets/images/Stock-Images/Dates/8.png') },
+    { name: 'Date 9', uri: require('../assets/images/Stock-Images/Dates/9.png') },
+    { name: 'Date 10', uri: require('../assets/images/Stock-Images/Dates/10.png') },
+    { name: 'Fill Shaded', uri: require('../assets/images/Stock-Images/Dates/fill the shaded.png') },
+  ],
+  'Extra Objects': [
+    { name: '1 Cube', uri: require('../assets/images/Stock-Images/Extra Objects/1 cube.png') },
+    { name: 'Alarm', uri: require('../assets/images/Stock-Images/Extra Objects/Alarm.png') },
+    { name: 'Balloon', uri: require('../assets/images/Stock-Images/Extra Objects/balloon.png') },
+    { name: 'Basketball', uri: require('../assets/images/Stock-Images/Extra Objects/basketball.png') },
+    { name: 'Blue Ball', uri: require('../assets/images/Stock-Images/Extra Objects/blue ball.png') },
+    { name: 'Brown Chair', uri: require('../assets/images/Stock-Images/Extra Objects/Brown Chair.png') },
+    { name: 'Brown Tumbler', uri: require('../assets/images/Stock-Images/Extra Objects/Brown Tumbler.png') },
+    { name: 'Cap', uri: require('../assets/images/Stock-Images/Extra Objects/cap.png') },
+    { name: 'Chair', uri: require('../assets/images/Stock-Images/Extra Objects/Chair.png') },
+    { name: 'Donut', uri: require('../assets/images/Stock-Images/Extra Objects/Donut.png') },
+    { name: 'Duck', uri: require('../assets/images/Stock-Images/Extra Objects/duck.png') },
+    { name: 'Electric Fan', uri: require('../assets/images/Stock-Images/Extra Objects/Electric Fan.png') },
+    { name: 'Green Coat', uri: require('../assets/images/Stock-Images/Extra Objects/Green Coat.png') },
+    { name: 'Key', uri: require('../assets/images/Stock-Images/Extra Objects/Key.png') },
+    { name: 'Kite', uri: require('../assets/images/Stock-Images/Extra Objects/kite.png') },
+    { name: 'Microscope', uri: require('../assets/images/Stock-Images/Extra Objects/Microscope.png') },
+    { name: 'Pink Rose', uri: require('../assets/images/Stock-Images/Extra Objects/pink rose.png') },
+    { name: 'Popsicles', uri: require('../assets/images/Stock-Images/Extra Objects/Popciscles.png') },
+    { name: 'Pot', uri: require('../assets/images/Stock-Images/Extra Objects/pot.png') },
+    { name: 'Racket', uri: require('../assets/images/Stock-Images/Extra Objects/Racket.png') },
+    { name: 'Red Ball', uri: require('../assets/images/Stock-Images/Extra Objects/red ball.png') },
+    { name: 'Red Rose', uri: require('../assets/images/Stock-Images/Extra Objects/red rose.png') },
+    { name: 'Rocket', uri: require('../assets/images/Stock-Images/Extra Objects/Rocket.png') },
+    { name: 'Shuttlecock', uri: require('../assets/images/Stock-Images/Extra Objects/Shuttlecock.png') },
+    { name: 'Soccer Ball', uri: require('../assets/images/Stock-Images/Extra Objects/soccer ball.png') },
+    { name: 'Star', uri: require('../assets/images/Stock-Images/Extra Objects/star.png') },
+    { name: 'Telescope', uri: require('../assets/images/Stock-Images/Extra Objects/Telescope.png') },
+    { name: 'Unicycle', uri: require('../assets/images/Stock-Images/Extra Objects/Unicycle.png') },
+    { name: 'Volleyball', uri: require('../assets/images/Stock-Images/Extra Objects/Volleyball.png') },
+    { name: 'Watering Can', uri: require('../assets/images/Stock-Images/Extra Objects/Watering Can.png') },
+  ],
+  'Fractions': [
+    { name: 'Half Blue', uri: require('../assets/images/Stock-Images/Fractions/1_2 blue.png') },
+    { name: 'Half Circle', uri: require('../assets/images/Stock-Images/Fractions/1_2 Circle.png') },
+    { name: 'Half Hexagon', uri: require('../assets/images/Stock-Images/Fractions/1_2 Hexagon.png') },
+    { name: 'Half Octagon', uri: require('../assets/images/Stock-Images/Fractions/1_2 Octagon.png') },
+    { name: 'Half Orange', uri: require('../assets/images/Stock-Images/Fractions/1_2 orange.png') },
+    { name: 'Half Pentagon', uri: require('../assets/images/Stock-Images/Fractions/1_2 Pentagon.png') },
+    { name: 'Half Square', uri: require('../assets/images/Stock-Images/Fractions/1_2 Square.png') },
+    { name: 'Half Triangle', uri: require('../assets/images/Stock-Images/Fractions/1_2 Triangle.png') },
+    { name: 'Quarter Circle Right', uri: require('../assets/images/Stock-Images/Fractions/1_4 Circle Right.png') },
+    { name: 'Quarter Circle', uri: require('../assets/images/Stock-Images/Fractions/1_4 Circle.png') },
+    { name: 'Quarter Green', uri: require('../assets/images/Stock-Images/Fractions/1_4 green.png') },
+    { name: 'Quarter Hexagon', uri: require('../assets/images/Stock-Images/Fractions/1_4 Hexagon.png') },
+    { name: 'Quarter Orange', uri: require('../assets/images/Stock-Images/Fractions/1_4 orange.png') },
+    { name: 'Quarter Rectangle', uri: require('../assets/images/Stock-Images/Fractions/1_4 Rectangle.png') },
+    { name: 'Quarter Square', uri: require('../assets/images/Stock-Images/Fractions/1_4 Square.png') },
+  ],
+  'Fruits and Vegetables': [
+    { name: 'Carrot', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/20.png') },
+    { name: 'Cabbage', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/21.png') },
+    { name: 'Corn', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/22.png') },
+    { name: 'Atis', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Atis.png') },
+    { name: 'Avocado', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Avocado.png') },
+    { name: 'Bayabas', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Bayabas.png') },
+    { name: 'Blueberry', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Blueberry.png') },
+    { name: 'Buko', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Buko.png') },
+    { name: 'Dragon Fruit', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Dragon Fruit.png') },
+    { name: 'Kalabasa', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Kalabasa.png') },
+    { name: 'Kamatis', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Kamatis.png') },
+    { name: 'Mangga', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Mangga.png') },
+    { name: 'Niyog', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Niyog.png') },
+    { name: 'Orange', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Orange.png') },
+    { name: 'Pinya', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Pinya.png') },
+    { name: 'Potato', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Potato.png') },
+    { name: 'Red Apple', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Red Apple.png') },
+    { name: 'Saging', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Saging.png') },
+    { name: 'Sibuyas', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Sibuyas.png') },
+    { name: 'Strawberry', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Strawberry.png') },
+    { name: 'Talong', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Talong.png') },
+    { name: 'Ubas', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Ubas.png') },
+    { name: 'Watermelon', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Watermelon.png') },
+  ],
+  'Length and Distance': [
+    { name: 'Arm Span', uri: require('../assets/images/Stock-Images/Length and Distance/arm span.png') },
+    { name: 'Bungi Bunging Pagsukat Gamit Ang Clips', uri: require('../assets/images/Stock-Images/Length and Distance/bungi bunging pagsukat gamit ang clips.png') },
+    { name: 'Foot Span', uri: require('../assets/images/Stock-Images/Length and Distance/foot span.png') },
+    { name: 'Hand Span', uri: require('../assets/images/Stock-Images/Length and Distance/hand span.png') },
+    { name: 'Kulang Na Pagsukat Gamit Ang Clips', uri: require('../assets/images/Stock-Images/Length and Distance/kulang na pagsukat gamit ang clips.png') },
+    { name: 'Longest', uri: require('../assets/images/Stock-Images/Length and Distance/longest.png') },
+    { name: 'Makapal Na Libro', uri: require('../assets/images/Stock-Images/Length and Distance/makapal na libro.png') },
+    { name: 'Malaking Papaya', uri: require('../assets/images/Stock-Images/Length and Distance/malaking papaya.png') },
+    { name: 'Maliit Na Saging', uri: require('../assets/images/Stock-Images/Length and Distance/maliit na saging.png') },
+    { name: 'Manipis Na Libro', uri: require('../assets/images/Stock-Images/Length and Distance/manipis na libro.png') },
+    { name: 'Medium', uri: require('../assets/images/Stock-Images/Length and Distance/medium.png') },
+    { name: 'Medyo Makapal Na Libro', uri: require('../assets/images/Stock-Images/Length and Distance/medyo makapal na libro.png') },
+    { name: 'Medyo Malapit', uri: require('../assets/images/Stock-Images/Length and Distance/medyo malapit.png') },
+    { name: 'Pinaka Malapit Sa Apple', uri: require('../assets/images/Stock-Images/Length and Distance/pinaka malapit sa apple.png') },
+    { name: 'Pinaka Malayo Sa Apple', uri: require('../assets/images/Stock-Images/Length and Distance/pinaka malayo sa apple.png') },
+    { name: 'Short Box', uri: require('../assets/images/Stock-Images/Length and Distance/Short Box.png') },
+    { name: 'Shortest', uri: require('../assets/images/Stock-Images/Length and Distance/Shortest.png') },
+    { name: 'Sobrang Ang Pagsukat Gamit Ang Clips', uri: require('../assets/images/Stock-Images/Length and Distance/sobrang ang pagsukat gamit ang clips.png') },
+    { name: 'Tall Cylinder', uri: require('../assets/images/Stock-Images/Length and Distance/Tall Cylinder.png') },
+    { name: 'Taller', uri: require('../assets/images/Stock-Images/Length and Distance/Taller.png') },
+    { name: 'Tallest', uri: require('../assets/images/Stock-Images/Length and Distance/Tallest.png') },
+    { name: 'Tama At Saktong Pagsukat Gamit Ang Clips', uri: require('../assets/images/Stock-Images/Length and Distance/tama at saktong pagsukat gamit ang clips.png') },
+    { name: 'Wide', uri: require('../assets/images/Stock-Images/Length and Distance/wide.png') },
+    { name: 'Wider', uri: require('../assets/images/Stock-Images/Length and Distance/wider.png') },
+    { name: 'Widest', uri: require('../assets/images/Stock-Images/Length and Distance/widest.png') },
   ],
   'Math Symbols': [
-    { name: 'Equal', uri: require('../assets/images/Math Symbols/equal.png') },
-    { name: 'Greater Than', uri: require('../assets/images/Math Symbols/greater than.png') },
-    { name: 'Less Than', uri: require('../assets/images/Math Symbols/less than.png') },
-    { name: 'Minus', uri: require('../assets/images/Math Symbols/minus.png') },
-    { name: 'Not Equal To', uri: require('../assets/images/Math Symbols/not equal to.png') },
-    { name: 'Plus', uri: require('../assets/images/Math Symbols/plus.png') },
+    { name: 'Plus', uri: require('../assets/images/Stock-Images/Math Symbols/plus.png') },
+    { name: 'Minus', uri: require('../assets/images/Stock-Images/Math Symbols/minus.png') },
+    { name: 'Equal', uri: require('../assets/images/Stock-Images/Math Symbols/equal.png') },
+    { name: 'Greater Than', uri: require('../assets/images/Stock-Images/Math Symbols/greater than.png') },
+    { name: 'Less Than', uri: require('../assets/images/Stock-Images/Math Symbols/less than.png') },
+    { name: 'Not Equal To', uri: require('../assets/images/Stock-Images/Math Symbols/not equal to.png') },
+  ],
+  'Money': [
+    { name: '100 (20 coins)', uri: require('../assets/images/Stock-Images/Money/100 (20 coins).png') },
+    { name: '100 (two 50 bills)', uri: require('../assets/images/Stock-Images/Money/100 (two 50 bills).png') },
+    { name: '16 Pesos', uri: require('../assets/images/Stock-Images/Money/16.png') },
+    { name: '23 Pesos', uri: require('../assets/images/Stock-Images/Money/23.png') },
+    { name: '27 pesos', uri: require('../assets/images/Stock-Images/Money/27.png') },
+    { name: 'Piso (1 peso coin)', uri: require('../assets/images/Stock-Images/Money/28.png') },
+    { name: 'Limampiso (5 peso coin)', uri: require('../assets/images/Stock-Images/Money/29.png') },
+    { name: 'Sampung  (10 peso coin)', uri: require('../assets/images/Stock-Images/Money/30.png') },
+    { name: 'Bentepesos (20 peso coin)', uri: require('../assets/images/Stock-Images/Money/31.png') },
+    { name: 'Beynte (20 Peso bill)', uri: require('../assets/images/Stock-Images/Money/32.png') },
+    { name: 'Singkwenta (50 peso bill)', uri: require('../assets/images/Stock-Images/Money/33.png') },
+    { name: 'Isandaan (100 peso bill)', uri: require('../assets/images/Stock-Images/Money/34.png') },
+    { name: '40 pesos', uri: require('../assets/images/Stock-Images/Money/40.png') },
+    { name: '72 pesos', uri: require('../assets/images/Stock-Images/Money/72.png') },
+    { name: '84 pesos', uri: require('../assets/images/Stock-Images/Money/84.png') },
+    { name: '85 pesos', uri: require('../assets/images/Stock-Images/Money/85.png') },
+    { name: '90 pesos', uri: require('../assets/images/Stock-Images/Money/90.png') },
   ],
   'Numbers': [
-    { name: '1', uri: require('../assets/images/Numbers/1.png') },
-    { name: '2', uri: require('../assets/images/Numbers/2.png') },
-    { name: '3', uri: require('../assets/images/Numbers/3.png') },
-    { name: '4', uri: require('../assets/images/Numbers/4.png') },
-    { name: '5', uri: require('../assets/images/Numbers/5.png') },
-    { name: '6', uri: require('../assets/images/Numbers/6.png') },
-    { name: '7', uri: require('../assets/images/Numbers/7.png') },
-    { name: '8', uri: require('../assets/images/Numbers/8.png') },
-    { name: '9', uri: require('../assets/images/Numbers/9.png') },
+    // Numbers 0-9 (blue)
+    { name: '1', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/1.png') },
+    { name: '2', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/2.png') },
+    { name: '3', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/3.png') },
+    { name: '4', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/4.png') },
+    { name: '5', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/5.png') },
+    { name: '6', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/6.png') },
+    { name: '7', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/7.png') },
+    { name: '8', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/8.png') },
+    { name: '9', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/9.png') },
+    { name: '10', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/10.png') },
+    // Numbers 1-100
+    { name: '1', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/1.png') },
+    { name: '2', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/2.png') },
+    { name: '3', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/3.png') },
+    { name: '4', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/4.png') },
+    { name: '5', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/5.png') },
+    { name: '6', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/6.png') },
+    { name: '7', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/7.png') },
+    { name: '8', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/8.png') },
+    { name: '9', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/9.png') },
+    { name: '10', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/10.png') },
+    { name: '11', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/11.png') },
+    { name: '12', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/12.png') },
+    { name: '13', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/13.png') },
+    { name: '14', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/14.png') },
+    { name: '15', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/15.png') },
+    { name: '16', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/16.png') },
+    { name: '17', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/17.png') },
+    { name: '18', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/18.png') },
+    { name: '19', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/19.png') },
+    { name: '20', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/20.png') },
+    { name: '21', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/21.png') },
+    { name: '22', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/22.png') },
+    { name: '23', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/23.png') },
+    { name: '24', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/24.png') },
+    { name: '25', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/25.png') },
+    { name: '26', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/26.png') },
+    { name: '27', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/27.png') },
+    { name: '28', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/28.png') },
+    { name: '29', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/29.png') },
+    { name: '30', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/30.png') },
+    { name: '31', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/31.png') },
+    { name: '32', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/32.png') },
+    { name: '33', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/33.png') },
+    { name: '34', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/34.png') },
+    { name: '35', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/35.png') },
+    { name: '36', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/36.png') },
+    { name: '37', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/37.png') },
+    { name: '38', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/38.png') },
+    { name: '39', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/39.png') },
+    { name: '40', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/40.png') },
+    { name: '41', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/41.png') },
+    { name: '42', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/42.png') },
+    { name: '43', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/43.png') },
+    { name: '44', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/44.png') },
+    { name: '45', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/45.png') },
+    { name: '46', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/46.png') },
+    { name: '47', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/47.png') },
+    { name: '48', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/48.png') },
+    { name: '49', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/49.png') },
+    { name: '50', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/50.png') },
+    { name: '51', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/51.png') },
+    { name: '52', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/52.png') },
+    { name: '53', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/53.png') },
+    { name: '54', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/54.png') },
+    { name: '55', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/55.png') },
+    { name: '56', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/56.png') },
+    { name: '57', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/57.png') },
+    { name: '58', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/58.png') },
+    { name: '59', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/59.png') },
+    { name: '60', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/60.png') },
+    { name: '61', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/61.png') },
+    { name: '62', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/62.png') },
+    { name: '63', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/63.png') },
+    { name: '64', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/64.png') },
+    { name: '65', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/65.png') },
+    { name: '66', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/66.png') },
+    { name: '67', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/67.png') },
+    { name: '68', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/68.png') },
+    { name: '69', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/69.png') },
+    { name: '70', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/70.png') },
+    { name: '71', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/71.png') },
+    { name: '72', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/72.png') },
+    { name: '73', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/73.png') },
+    { name: '74', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/74.png') },
+    { name: '75', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/75.png') },
+    { name: '76', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/76.png') },
+    { name: '77', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/77.png') },
+    { name: '78', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/78.png') },
+    { name: '79', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/79.png') },
+    { name: '80', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/80.png') },
+    { name: '81', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/81.png') },
+    { name: '82', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/82.png') },
+    { name: '83', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/83.png') },
+    { name: '84', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/84.png') },
+    { name: '85', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/85.png') },
+    { name: '86', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/86.png') },
+    { name: '87', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/87.png') },
+    { name: '88', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/88.png') },
+    { name: '89', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/89.png') },
+    { name: '90', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/90.png') },
+    { name: '91', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/91.png') },
+    { name: '92', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/92.png') },
+    { name: '93', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/93.png') },
+    { name: '94', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/94.png') },
+    { name: '95', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/95.png') },
+    { name: '96', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/96.png') },
+    { name: '97', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/97.png') },
+    { name: '98', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/98.png') },
+    { name: '99', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/99.png') },
+    { name: '100', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/100.png') },
+  ],
+  'Patterns': [
+    { name: '1 Purple 3 Blue', uri: require('../assets/images/Stock-Images/Patterns/1 purple 3 blue.png') },
+    { name: '2 Boy 2 Girl', uri: require('../assets/images/Stock-Images/Patterns/2 boy 2 girl.png') },
+    { name: '2 Yellow 1 Orange', uri: require('../assets/images/Stock-Images/Patterns/2 yellow 1 orange.png') },
+    { name: '3 Boy 3 Girl', uri: require('../assets/images/Stock-Images/Patterns/3 boy 3 girl.png') },
+    { name: '3 Shapes', uri: require('../assets/images/Stock-Images/Patterns/3 shapes.png') },
+    { name: '647', uri: require('../assets/images/Stock-Images/Patterns/647.png') },
+    { name: 'Blue Pink', uri: require('../assets/images/Stock-Images/Patterns/blue pink.png') },
+    { name: 'Boy Girl', uri: require('../assets/images/Stock-Images/Patterns/boy girl.png') },
+    { name: 'Girl Boy', uri: require('../assets/images/Stock-Images/Patterns/girl boy.png') },
+    { name: 'Heart Star', uri: require('../assets/images/Stock-Images/Patterns/heart star.png') },
+    { name: 'Star Card Smile', uri: require('../assets/images/Stock-Images/Patterns/star card smile.png') },
+    { name: 'Up Down', uri: require('../assets/images/Stock-Images/Patterns/up down.png') },
   ],
   'School Supplies': [
-    { name: 'Abacus', uri: require('../assets/images/School Supplies/abacus.png') },
-    { name: 'Bag', uri: require('../assets/images/School Supplies/bag.png') },
-    { name: 'Blue Scissors', uri: require('../assets/images/School Supplies/blue scissors.png') },
-    { name: 'Board', uri: require('../assets/images/School Supplies/board.png') },
-    { name: 'Brushes', uri: require('../assets/images/School Supplies/brushes.png') },
-    { name: 'Clip', uri: require('../assets/images/School Supplies/clip.png') },
-    { name: 'Crayon', uri: require('../assets/images/School Supplies/crayon.png') },
-    { name: 'Crayons', uri: require('../assets/images/School Supplies/crayons.png') },
-    { name: 'Eraser', uri: require('../assets/images/School Supplies/eraser.png') },
-    { name: 'Globe', uri: require('../assets/images/School Supplies/globe.png') },
-    { name: 'Glue', uri: require('../assets/images/School Supplies/glue.png') },
-    { name: 'Mid Thick Book', uri: require('../assets/images/School Supplies/mid thick book.png') },
-    { name: 'Notebook 1', uri: require('../assets/images/School Supplies/notebook 1.png') },
-    { name: 'Notebook 2', uri: require('../assets/images/School Supplies/notebook 2.png') },
-    { name: 'Paint Brush', uri: require('../assets/images/School Supplies/paint brush.png') },
-    { name: 'Paper', uri: require('../assets/images/School Supplies/paper.png') },
-    { name: 'Pencil Case', uri: require('../assets/images/School Supplies/pencil case.png') },
-    { name: 'Pencil', uri: require('../assets/images/School Supplies/pencil.png') },
-    { name: 'Red Scissors', uri: require('../assets/images/School Supplies/red scissors.png') },
-    { name: 'Ruler 1', uri: require('../assets/images/School Supplies/ruler 1.png') },
-    { name: 'Ruler 2', uri: require('../assets/images/School Supplies/ruler 2.png') },
-    { name: 'Sharpener', uri: require('../assets/images/School Supplies/sharpener.png') },
-    { name: 'Stack Books', uri: require('../assets/images/School Supplies/stack books.png') },
-    { name: 'Stapler', uri: require('../assets/images/School Supplies/stapler.png') },
-    { name: 'Thickest Book', uri: require('../assets/images/School Supplies/thickest book.png') },
-    { name: 'Thin Book', uri: require('../assets/images/School Supplies/thin book.png') },
+    { name: '4 Brushes', uri: require('../assets/images/Stock-Images/School Supplies/4 brushes.png') },
+    { name: 'Abacus', uri: require('../assets/images/Stock-Images/School Supplies/abacus.png') },
+    { name: 'Bag', uri: require('../assets/images/Stock-Images/School Supplies/bag.png') },
+    { name: 'Board', uri: require('../assets/images/Stock-Images/School Supplies/board.png') },
+    { name: 'Dilaw Na Ruler', uri: require('../assets/images/Stock-Images/School Supplies/dilaw na ruler.png') },
+    { name: 'Globe', uri: require('../assets/images/Stock-Images/School Supplies/globe.png') },
+    { name: 'Glue', uri: require('../assets/images/Stock-Images/School Supplies/glue.png') },
+    { name: 'Gunting', uri: require('../assets/images/Stock-Images/School Supplies/gunting.png') },
+    { name: 'Isang Crayola', uri: require('../assets/images/Stock-Images/School Supplies/Isang crayola.png') },
+    { name: 'Lapis', uri: require('../assets/images/Stock-Images/School Supplies/Lapis.png') },
+    { name: 'Mid Thick Book', uri: require('../assets/images/Stock-Images/School Supplies/mid thick book.png') },
+    { name: 'Notebook', uri: require('../assets/images/Stock-Images/School Supplies/Notebook.png') },
+    { name: 'Paint Brush', uri: require('../assets/images/Stock-Images/School Supplies/paint brush.png') },
+    { name: 'Pambura', uri: require('../assets/images/Stock-Images/School Supplies/Pambura.png') },
+    { name: 'Pantasa', uri: require('../assets/images/Stock-Images/School Supplies/Pantasa.png') },
+    { name: 'Paper', uri: require('../assets/images/Stock-Images/School Supplies/papel.png') },
+    { name: 'Paper Clip', uri: require('../assets/images/Stock-Images/School Supplies/paper clip.png') },
+    { name: 'Pencil Case', uri: require('../assets/images/Stock-Images/School Supplies/pencil case.png') },
+    { name: 'Ruler', uri: require('../assets/images/Stock-Images/School Supplies/ruler.png') },
+    { name: 'Stapler', uri: require('../assets/images/Stock-Images/School Supplies/stapler.png') },
+    { name: 'Tatlong Crayola', uri: require('../assets/images/Stock-Images/School Supplies/Tatlong Crayola.png') },
+    { name: 'Tatlong Patong Na Libro', uri: require('../assets/images/Stock-Images/School Supplies/tatlong patong na libro.png') },
+    { name: 'Thickest Book', uri: require('../assets/images/Stock-Images/School Supplies/thickest book.png') },
+    { name: 'Thin Book', uri: require('../assets/images/Stock-Images/School Supplies/thin book.png') },
+    { name: 'Yellow Notebook', uri: require('../assets/images/Stock-Images/School Supplies/yellow notebook.png') },
   ],
   'Shapes': [
-    { name: 'Circle', uri: require('../assets/images/Shapes/circle.png') },
-    { name: 'Decagon', uri: require('../assets/images/Shapes/decagon.png') },
-    { name: 'Heptagon', uri: require('../assets/images/Shapes/heptagon.png') },
-    { name: 'Hexagon', uri: require('../assets/images/Shapes/hexagon.png') },
-    { name: 'Nonagon', uri: require('../assets/images/Shapes/nonagon.png') },
-    { name: 'Octagon', uri: require('../assets/images/Shapes/octagon.png') },
-    { name: 'Oval', uri: require('../assets/images/Shapes/oval.png') },
-    { name: 'Pentagon', uri: require('../assets/images/Shapes/pentagon.png') },
-    { name: 'Rectangle', uri: require('../assets/images/Shapes/rectangle.png') },
-    { name: 'Square', uri: require('../assets/images/Shapes/square.png') },
-    { name: 'Triangle', uri: require('../assets/images/Shapes/triangle.png') },
+    { name: '2 Right Angle with Rectangle', uri: require('../assets/images/Stock-Images/Shapes/2 right angle with rectangle.png') },
+    { name: '2 Right Angles with Tall Rectangle', uri: require('../assets/images/Stock-Images/Shapes/2 right angles with tall rectangle.png') },
+    { name: 'Circle', uri: require('../assets/images/Stock-Images/Shapes/circle.png') },
+    { name: 'Decagon', uri: require('../assets/images/Stock-Images/Shapes/decagon.png') },
+    { name: 'Diagonal Bar', uri: require('../assets/images/Stock-Images/Shapes/diagonal bar.png') },
+    { name: 'Diamond', uri: require('../assets/images/Stock-Images/Shapes/diamond.png') },
+    { name: 'Heart', uri: require('../assets/images/Stock-Images/Shapes/heart.png') },
+    { name: 'Heptagon', uri: require('../assets/images/Stock-Images/Shapes/heptagon.png') },
+    { name: 'Hexagon', uri: require('../assets/images/Stock-Images/Shapes/hexagon.png') },
+    { name: 'Inverted Triangle', uri: require('../assets/images/Stock-Images/Shapes/inverted triangle.png') },
+    { name: 'Medium Rectangle', uri: require('../assets/images/Stock-Images/Shapes/medium rectangle.png') },
+    { name: 'Medium Square', uri: require('../assets/images/Stock-Images/Shapes/medium square.png') },
+    { name: 'Nonagon', uri: require('../assets/images/Stock-Images/Shapes/nonagon.png') },
+    { name: 'Octagon', uri: require('../assets/images/Stock-Images/Shapes/octagon.png') },
+    { name: 'Oval', uri: require('../assets/images/Stock-Images/Shapes/oval.png') },
+    { name: 'Pentagon', uri: require('../assets/images/Stock-Images/Shapes/pentagon.png') },
+    { name: 'Rectangle', uri: require('../assets/images/Stock-Images/Shapes/rectangle.png') },
+    { name: 'Rectangle Door', uri: require('../assets/images/Stock-Images/Shapes/rectangle door.png') },
+    { name: 'Rectangle Flag', uri: require('../assets/images/Stock-Images/Shapes/rectangle flag.png') },
+    { name: 'Rectangle Picture Frame', uri: require('../assets/images/Stock-Images/Shapes/rectangle picture frame.png') },
+    { name: 'Rectangle Shoe Box', uri: require('../assets/images/Stock-Images/Shapes/rectangle shoe box.png') },
+    { name: 'Right Angle Triangle', uri: require('../assets/images/Stock-Images/Shapes/right angle triangle.png') },
+    { name: 'Right Angles', uri: require('../assets/images/Stock-Images/Shapes/right angles.png') },
+    { name: 'Small', uri: require('../assets/images/Stock-Images/Shapes/small.png') },
+    { name: 'Small Inverted Triangle', uri: require('../assets/images/Stock-Images/Shapes/small inverted triangle.png') },
+    { name: 'Small Square', uri: require('../assets/images/Stock-Images/Shapes/small square.png') },
+    { name: 'Small Triangle', uri: require('../assets/images/Stock-Images/Shapes/small triangle.png') },
+    { name: 'Square', uri: require('../assets/images/Stock-Images/Shapes/square.png') },
+    { name: 'Square Gift Box', uri: require('../assets/images/Stock-Images/Shapes/square gift box.png') },
+    { name: 'Star Shaped Lantern', uri: require('../assets/images/Stock-Images/Shapes/star shaped lantern.png') },
+    { name: 'Tall Rectangle', uri: require('../assets/images/Stock-Images/Shapes/tall rectangle.png') },
+    { name: 'Thin Rectangle', uri: require('../assets/images/Stock-Images/Shapes/thin rectangle.png') },
+    { name: 'Triangle', uri: require('../assets/images/Stock-Images/Shapes/triangle.png') },
+    { name: 'Triangle and 2 Squares', uri: require('../assets/images/Stock-Images/Shapes/triangle and 2 squares.png') },
+    { name: 'Triangle Banderitas', uri: require('../assets/images/Stock-Images/Shapes/triangle banderitas.png') },
+    { name: 'Triangle Flag', uri: require('../assets/images/Stock-Images/Shapes/triangle flag.png') },
+    { name: 'Triangle Road Sign', uri: require('../assets/images/Stock-Images/Shapes/triangle road sign.png') },
+    { name: 'Trapezoid', uri: require('../assets/images/Stock-Images/Shapes/trapezoid.png') },
+  ],
+  'Time and Position': [
+    { name: '00:00', uri: require('../assets/images/Stock-Images/Time and Position/00_00.png') },
+    { name: '1:00', uri: require('../assets/images/Stock-Images/Time and Position/1_00.png') },
+    { name: '1:15', uri: require('../assets/images/Stock-Images/Time and Position/1_15.png') },
+    { name: '1:30', uri: require('../assets/images/Stock-Images/Time and Position/1_30.png') },
+    { name: '1:45', uri: require('../assets/images/Stock-Images/Time and Position/1_45.png') },
+    { name: '10:00', uri: require('../assets/images/Stock-Images/Time and Position/10_00.png') },
+    { name: '10:15', uri: require('../assets/images/Stock-Images/Time and Position/10_15.png') },
+    { name: '10:30', uri: require('../assets/images/Stock-Images/Time and Position/10_30.png') },
+    { name: '10:45', uri: require('../assets/images/Stock-Images/Time and Position/10_45.png') },
+    { name: '11:00', uri: require('../assets/images/Stock-Images/Time and Position/11_00.png') },
+    { name: '11:15', uri: require('../assets/images/Stock-Images/Time and Position/11_15.png') },
+    { name: '11:30', uri: require('../assets/images/Stock-Images/Time and Position/11_30.png') },
+    { name: '11:45', uri: require('../assets/images/Stock-Images/Time and Position/11_45.png') },
+    { name: '12:00', uri: require('../assets/images/Stock-Images/Time and Position/12_00.png') },
+    { name: '12:15', uri: require('../assets/images/Stock-Images/Time and Position/12_15.png') },
+    { name: '12:30', uri: require('../assets/images/Stock-Images/Time and Position/12_30.png') },
+    { name: '12:45', uri: require('../assets/images/Stock-Images/Time and Position/12_45.png') },
+    { name: '2:00', uri: require('../assets/images/Stock-Images/Time and Position/2_00.png') },
+    { name: '2:15', uri: require('../assets/images/Stock-Images/Time and Position/2_15.png') },
+    { name: '2:30', uri: require('../assets/images/Stock-Images/Time and Position/2_30.png') },
+    { name: '2:45', uri: require('../assets/images/Stock-Images/Time and Position/2_45.png') },
+    { name: '27', uri: require('../assets/images/Stock-Images/Time and Position/27.png') },
+    { name: '3:00', uri: require('../assets/images/Stock-Images/Time and Position/3_00.png') },
+    { name: '3:30', uri: require('../assets/images/Stock-Images/Time and Position/3_30.png') },
+    { name: '3:45', uri: require('../assets/images/Stock-Images/Time and Position/3_45.png') },
+    { name: '4:00', uri: require('../assets/images/Stock-Images/Time and Position/4_00.png') },
+    { name: '4:15', uri: require('../assets/images/Stock-Images/Time and Position/4_15.png') },
+    { name: '4:30', uri: require('../assets/images/Stock-Images/Time and Position/4_30.png') },
+    { name: '4:45', uri: require('../assets/images/Stock-Images/Time and Position/4_45.png') },
+    { name: '5:00', uri: require('../assets/images/Stock-Images/Time and Position/5_00.png') },
+    { name: '5:15', uri: require('../assets/images/Stock-Images/Time and Position/5_15.png') },
+    { name: '5:30', uri: require('../assets/images/Stock-Images/Time and Position/5_30.png') },
+    { name: '52', uri: require('../assets/images/Stock-Images/Time and Position/52.png') },
+    { name: '6:00 (2)', uri: require('../assets/images/Stock-Images/Time and Position/6_00 (2).png') },
+    { name: '6:00', uri: require('../assets/images/Stock-Images/Time and Position/6_00.png') },
+    { name: '6:15', uri: require('../assets/images/Stock-Images/Time and Position/6_15.png') },
+    { name: '6:30', uri: require('../assets/images/Stock-Images/Time and Position/6_30.png') },
+    { name: '6:45', uri: require('../assets/images/Stock-Images/Time and Position/6_45.png') },
+    { name: '7:00', uri: require('../assets/images/Stock-Images/Time and Position/7_00.png') },
+    { name: '7:15', uri: require('../assets/images/Stock-Images/Time and Position/7_15.png') },
+    { name: '7:30', uri: require('../assets/images/Stock-Images/Time and Position/7_30.png') },
+    { name: '7:45', uri: require('../assets/images/Stock-Images/Time and Position/7_45.png') },
+    { name: '8:00', uri: require('../assets/images/Stock-Images/Time and Position/8_00.png') },
+    { name: '8:15', uri: require('../assets/images/Stock-Images/Time and Position/8_15.png') },
+    { name: '8:30', uri: require('../assets/images/Stock-Images/Time and Position/8_30.png') },
+    { name: '8:45', uri: require('../assets/images/Stock-Images/Time and Position/8_45.png') },
+    { name: '9:00', uri: require('../assets/images/Stock-Images/Time and Position/9_00.png') },
+    { name: '9:15', uri: require('../assets/images/Stock-Images/Time and Position/9_15.png') },
+    { name: '9:30', uri: require('../assets/images/Stock-Images/Time and Position/9_30.png') },
+    { name: '9:45', uri: require('../assets/images/Stock-Images/Time and Position/9_45.png') },
+    { name: 'Arm Circle Clockwise', uri: require('../assets/images/Stock-Images/Time and Position/arm circle clockwise.png') },
+    { name: 'Clockwise', uri: require('../assets/images/Stock-Images/Time and Position/clockwise.png') },
+    { name: 'Half Turn', uri: require('../assets/images/Stock-Images/Time and Position/half-turn.png') },
+    { name: 'Hip Clockwise Exercise', uri: require('../assets/images/Stock-Images/Time and Position/hip clockwise exercise.png') },
+    { name: 'Home', uri: require('../assets/images/Stock-Images/Time and Position/home.png') },
+    { name: 'Kid', uri: require('../assets/images/Stock-Images/Time and Position/kid.png') },
+    { name: 'Knee Clockwise Exercise', uri: require('../assets/images/Stock-Images/Time and Position/knee clockwise exercise.png') },
+    { name: 'Park', uri: require('../assets/images/Stock-Images/Time and Position/park.png') },
+    { name: 'Quarter Turn', uri: require('../assets/images/Stock-Images/Time and Position/quarter-turn.png') },
   ],
   'Toys': [
-    { name: 'Airplane', uri: require('../assets/images/Toys/airplane.png') },
-    { name: 'Ball', uri: require('../assets/images/Toys/ball.png') },
-    { name: 'Beach Ball', uri: require('../assets/images/Toys/beach ball.png') },
-    { name: 'Bear', uri: require('../assets/images/Toys/bear.png') },
-    { name: 'Bike', uri: require('../assets/images/Toys/bike.png') },
-    { name: 'Boat', uri: require('../assets/images/Toys/boat.png') },
-    { name: 'Car', uri: require('../assets/images/Toys/car.png') },
-    { name: 'Dice', uri: require('../assets/images/Toys/dice.png') },
-    { name: 'Dino', uri: require('../assets/images/Toys/dino.png') },
-    { name: 'Drums', uri: require('../assets/images/Toys/drums.png') },
-    { name: 'Excavator', uri: require('../assets/images/Toys/excavator.png') },
-    { name: 'House', uri: require('../assets/images/Toys/house.png') },
-    { name: 'Joystick', uri: require('../assets/images/Toys/joystick.png') },
-    { name: 'Kite', uri: require('../assets/images/Toys/kite.png') },
-    { name: 'Lego', uri: require('../assets/images/Toys/lego.png') },
-    { name: 'Magnet', uri: require('../assets/images/Toys/magnet.png') },
-    { name: 'Paper Boat', uri: require('../assets/images/Toys/paper boat.png') },
-    { name: 'Puzzle', uri: require('../assets/images/Toys/puzzle.png') },
-    { name: 'Racket', uri: require('../assets/images/Toys/racket.png') },
-    { name: 'Robot', uri: require('../assets/images/Toys/robot.png') },
-    { name: 'Rubik', uri: require('../assets/images/Toys/rubik.png') },
-    { name: 'Stack Ring', uri: require('../assets/images/Toys/stack ring.png') },
-    { name: 'Train', uri: require('../assets/images/Toys/train.png') },
-    { name: 'Xylophone', uri: require('../assets/images/Toys/xylophone.png') },
-    { name: 'Yoyo', uri: require('../assets/images/Toys/yoyo.png') },
+    { name: 'Airplane', uri: require('../assets/images/Stock-Images/Toys/airplane.png') },
+    { name: 'Ball', uri: require('../assets/images/Stock-Images/Toys/ball.png') },
+    { name: 'Beach Ball', uri: require('../assets/images/Stock-Images/Toys/beach ball.png') },
+    { name: 'Bear', uri: require('../assets/images/Stock-Images/Toys/bear.png') },
+    { name: 'Bike', uri: require('../assets/images/Stock-Images/Toys/bike.png') },
+    { name: 'Boat', uri: require('../assets/images/Stock-Images/Toys/boat.png') },
+    { name: 'Car', uri: require('../assets/images/Stock-Images/Toys/car.png') },
+    { name: 'Dice', uri: require('../assets/images/Stock-Images/Toys/dice.png') },
+    { name: 'Dino', uri: require('../assets/images/Stock-Images/Toys/dino.png') },
+    { name: 'Drums', uri: require('../assets/images/Stock-Images/Toys/drums.png') },
+    { name: 'Excavator', uri: require('../assets/images/Stock-Images/Toys/excavator.png') },
+    { name: 'House', uri: require('../assets/images/Stock-Images/Toys/house.png') },
+    { name: 'Joystick', uri: require('../assets/images/Stock-Images/Toys/joystick.png') },
+    { name: 'Kite', uri: require('../assets/images/Stock-Images/Toys/kite.png') },
+    { name: 'Lego', uri: require('../assets/images/Stock-Images/Toys/lego.png') },
+    { name: 'Magnet', uri: require('../assets/images/Stock-Images/Toys/magnet.png') },
+    { name: 'Paper Boat', uri: require('../assets/images/Stock-Images/Toys/paper boat.png') },
+    { name: 'Puzzle', uri: require('../assets/images/Stock-Images/Toys/puzzle.png') },
+    { name: 'Racket', uri: require('../assets/images/Stock-Images/Toys/racket.png') },
+    { name: 'Robot', uri: require('../assets/images/Stock-Images/Toys/robot.png') },
+    { name: 'Rubik', uri: require('../assets/images/Stock-Images/Toys/rubik.png') },
+    { name: 'Stack Ring', uri: require('../assets/images/Stock-Images/Toys/stack ring.png') },
+    { name: 'Train', uri: require('../assets/images/Stock-Images/Toys/train.png') },
+    { name: 'Xylophone', uri: require('../assets/images/Stock-Images/Toys/xylophone.png') },
+    { name: 'Yo-yo', uri: require('../assets/images/Stock-Images/Toys/yoyo.png') },
   ],
 };
 
@@ -549,6 +1004,7 @@ export default function CreateExercise() {
   const [numberOfQuestions, setNumberOfQuestions] = useState(5);
   const [selectedQuestionType, setSelectedQuestionType] = useState('multiple-choice');
   const [ttsProgress, setTtsProgress] = useState({ current: 0, total: 0 });
+  const [ttsUploadProgress, setTtsUploadProgress] = useState({ current: 0, total: 0 });
   
   // User state
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -948,73 +1404,163 @@ export default function CreateExercise() {
     },
   ];
 
-  // Dynamic stock image categories - easily extensible for new folders
+  // Dynamic stock image categories - Updated with new Stock-Images categories
   const stockImageCategories = [
     {
-      id: 'water-animals',
-      name: 'Water Animals',
-      icon: 'fish',
-      color: '#0ea5e9',
-      images: stockImages['Water Animals'].map(animal => ({
-        name: animal.name,
-        source: animal.uri
+      id: '3d-alphabet',
+      name: '3D Alphabet',
+      icon: 'cube-outline',
+      color: '#8b5cf6',
+      images: stockImages['3D Alphabet'].map(letter => ({
+        name: letter.name,
+        source: letter.uri
       }))
     },
     {
       id: 'alphabet',
       name: 'Alphabet',
       icon: 'alphabetical',
-      color: '#8b5cf6',
+      color: '#3b82f6',
       images: stockImages['Alphabet'].map(letter => ({
         name: letter.name,
         source: letter.uri
       }))
     },
     {
-      id: 'fruits',
-      name: 'Fruits',
-      icon: 'food-apple',
-      color: '#10b981',
-      images: stockImages['Fruits'].map(fruit => ({
-        name: fruit.name,
-        source: fruit.uri
+      id: 'animals',
+      name: 'Animals',
+      icon: 'paw',
+      color: '#f59e0b',
+      images: stockImages['Animals'].map(animal => ({
+        name: animal.name,
+        source: animal.uri
       }))
     },
     {
-      id: 'land-animals',
-      name: 'Land Animals',
-      icon: 'paw',
-      color: '#f59e0b',
-      images: stockImages['Land Animals'].map(animal => ({
-        name: animal.name,
-        source: animal.uri
+      id: 'boxed-alphabet',
+      name: 'Boxed Alphabet',
+      icon: 'square-outline',
+      color: '#10b981',
+      images: stockImages['Boxed Alphabet'].map(letter => ({
+        name: letter.name,
+        source: letter.uri
+      }))
+    },
+    {
+      id: 'boxed-numbers',
+      name: 'Boxed Numbers 1-9',
+      icon: 'numeric-1-box',
+      color: '#ef4444',
+      images: stockImages['Boxed Numbers 1-9'].map(number => ({
+        name: number.name,
+        source: number.uri
+      }))
+    },
+    {
+      id: 'comparing-quantities',
+      name: 'Comparing Quantities',
+      icon: 'scale-balance',
+      color: '#f97316',
+      images: stockImages['Comparing Quantities'].map(item => ({
+        name: item.name,
+        source: item.uri
+      }))
+    },
+    {
+      id: 'dates',
+      name: 'Dates',
+      icon: 'calendar',
+      color: '#06b6d4',
+      images: stockImages['Dates'].map(date => ({
+        name: date.name,
+        source: date.uri
+      }))
+    },
+    {
+      id: 'extra-objects',
+      name: 'Extra Objects',
+      icon: 'shape',
+      color: '#84cc16',
+      images: stockImages['Extra Objects'].map(obj => ({
+        name: obj.name,
+        source: obj.uri
+      }))
+    },
+    {
+      id: 'fractions',
+      name: 'Fractions',
+      icon: 'fraction',
+      color: '#ec4899',
+      images: stockImages['Fractions'].map(fraction => ({
+        name: fraction.name,
+        source: fraction.uri
+      }))
+    },
+    {
+      id: 'fruits-vegetables',
+      name: 'Fruits and Vegetables',
+      icon: 'food-apple',
+      color: '#22c55e',
+      images: stockImages['Fruits and Vegetables'].map(item => ({
+        name: item.name,
+        source: item.uri
+      }))
+    },
+    {
+      id: 'length-distance',
+      name: 'Length and Distance',
+      icon: 'ruler',
+      color: '#6366f1',
+      images: stockImages['Length and Distance'].map(item => ({
+        name: item.name,
+        source: item.uri
       }))
     },
     {
       id: 'math-symbols',
       name: 'Math Symbols',
       icon: 'calculator',
-      color: '#ef4444',
+      color: '#dc2626',
       images: stockImages['Math Symbols'].map(symbol => ({
         name: symbol.name,
         source: symbol.uri
       }))
     },
     {
+      id: 'money',
+      name: 'Money',
+      icon: 'currency-usd',
+      color: '#16a34a',
+      images: stockImages['Money'].map(item => ({
+        name: item.name,
+        source: item.uri
+      }))
+    },
+    {
       id: 'numbers',
       name: 'Numbers',
       icon: 'numeric',
-      color: '#3b82f6',
+      color: '#2563eb',
       images: stockImages['Numbers'].map(number => ({
         name: number.name,
         source: number.uri
       }))
     },
     {
+      id: 'patterns',
+      name: 'Patterns',
+      icon: 'pattern',
+      color: '#7c3aed',
+      images: stockImages['Patterns'].map(pattern => ({
+        name: pattern.name,
+        source: pattern.uri
+      }))
+    },
+    {
       id: 'school-supplies',
       name: 'School Supplies',
       icon: 'school',
-      color: '#06b6d4',
+      color: '#0891b2',
       images: stockImages['School Supplies'].map(supply => ({
         name: supply.name,
         source: supply.uri
@@ -1024,17 +1570,27 @@ export default function CreateExercise() {
       id: 'shapes',
       name: 'Shapes',
       icon: 'shape',
-      color: '#84cc16',
+      color: '#ea580c',
       images: stockImages['Shapes'].map(shape => ({
         name: shape.name,
         source: shape.uri
       }))
     },
     {
+      id: 'time-position',
+      name: 'Time and Position',
+      icon: 'clock',
+      color: '#be185d',
+      images: stockImages['Time and Position'].map(item => ({
+        name: item.name,
+        source: item.uri
+      }))
+    },
+    {
       id: 'toys',
       name: 'Toys',
       icon: 'toy-brick',
-      color: '#ec4899',
+      color: '#db2777',
       images: stockImages['Toys'].map(toy => ({
         name: toy.name,
         source: toy.uri
@@ -1188,11 +1744,18 @@ export default function CreateExercise() {
     const uploadStart = Date.now();
     console.log(`🎵 Uploading ${pendingTTSUploads.length} pending TTS audio files as MP3...`);
     
+    // Initialize progress
+    setTtsUploadProgress({ current: 0, total: pendingTTSUploads.length });
+    
     let updatedQuestions = [...currentQuestions];
     const successfulUploads: string[] = [];
     const failedUploads: any[] = [];
     
-    for (const ttsAudio of pendingTTSUploads) {
+    for (let i = 0; i < pendingTTSUploads.length; i++) {
+      const ttsAudio = pendingTTSUploads[i];
+      
+      // Update progress
+      setTtsUploadProgress({ current: i + 1, total: pendingTTSUploads.length });
       try {
         const fileStart = Date.now();
         console.log(`🎵 Uploading TTS for question ${ttsAudio.questionId} from: ${ttsAudio.localUri}`);
@@ -1238,6 +1801,9 @@ export default function CreateExercise() {
     
     const totalTime = Date.now() - uploadStart;
     console.log(`🎵 TTS Upload Complete: ${successfulUploads.length} successful, ${failedUploads.length} failed in ${totalTime}ms`);
+    
+    // Reset progress
+    setTtsUploadProgress({ current: 0, total: 0 });
     
     // Only clear successful uploads from pending list
     if (successfulUploads.length > 0) {
@@ -2506,6 +3072,26 @@ Enhanced text with emotions:`;
       return;
     }
     
+    // Check for pending TTS uploads
+    if (pendingTTSUploads.length > 0) {
+      Alert.alert(
+        'Pending TTS Audio', 
+        `You have ${pendingTTSUploads.length} text-to-speech audio file(s) that need to be uploaded. Please wait for the upload to complete before saving the exercise.`,
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+    
+    // Check if currently generating TTS
+    if (isGeneratingTTS) {
+      Alert.alert(
+        'TTS Generation In Progress', 
+        'Please wait for text-to-speech generation to complete before saving the exercise.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+    
     // Validate that all questions have content
     const incompleteQuestions = questions.filter(q => !q.question.trim());
     if (incompleteQuestions.length > 0) {
@@ -2765,24 +3351,6 @@ Enhanced text with emotions:`;
       }
       
       console.log(`Exercise ${isEditing ? 'updated' : 'saved'} successfully with key:`, key);
-      
-      // If exercise is public, also save to public exercises collection
-      if (isPublic) {
-        try {
-          const publicExercisePayload = {
-            ...finalCleanPayload,
-            id: key, // Use the same ID as the main exercise
-            creatorName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
-            creatorId: currentUserId,
-          };
-          
-          await pushData('/publicExercises', publicExercisePayload);
-          console.log('Exercise also saved to public exercises');
-        } catch (publicError) {
-          console.error('Error saving to public exercises:', publicError);
-          // Don't fail the whole operation if public save fails
-        }
-      }
       
       Alert.alert('Success', `Exercise ${isEditing ? 'updated' : 'created'} successfully!`, [
         { text: 'OK', onPress: () => router.push('/TeacherDashboard') }
@@ -4850,7 +5418,36 @@ Enhanced text with emotions:`;
 
         {/* Save Button */}
         <View style={styles.saveSection}>
-          <TouchableOpacity style={styles.saveExerciseButton} onPress={saveExercise}>
+          {ttsUploadProgress.total > 0 && (
+            <View style={styles.ttsUploadProgressContainer}>
+              <View style={styles.ttsUploadProgressHeader}>
+                <MaterialCommunityIcons name="upload" size={20} color="#3b82f6" />
+                <Text style={styles.ttsUploadProgressText}>
+                  Uploading TTS Audio: {ttsUploadProgress.current} / {ttsUploadProgress.total}
+                </Text>
+              </View>
+              <View style={styles.progressBarBackground}>
+                <View 
+                  style={[
+                    styles.progressBarFill, 
+                    { width: `${(ttsUploadProgress.current / ttsUploadProgress.total) * 100}%` }
+                  ]} 
+                />
+              </View>
+              <Text style={styles.ttsUploadProgressSubtext}>
+                Please wait while audio files are being uploaded...
+              </Text>
+            </View>
+          )}
+          
+          <TouchableOpacity 
+            style={[
+              styles.saveExerciseButton,
+              (uploading || pendingTTSUploads.length > 0 || isGeneratingTTS || ttsUploadProgress.total > 0) && styles.saveExerciseButtonDisabled
+            ]} 
+            onPress={saveExercise}
+            disabled={uploading || pendingTTSUploads.length > 0 || isGeneratingTTS || ttsUploadProgress.total > 0}
+          >
             <Text style={styles.saveExerciseButtonText}>
               {uploading ? 'Uploading...' : (isEditing ? 'Update Exercise' : 'Create Exercise')}
               {pendingTTSUploads.length > 0 && ` (${pendingTTSUploads.length} TTS pending)`}
@@ -5199,9 +5796,9 @@ Enhanced text with emotions:`;
             </View>
             
             <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
-            {/* Water Animals Section */}
+            {/* Animals Section */}
             <View style={styles.imageCategory}>
-              <Text style={styles.categoryTitle}>Water Animals</Text>
+              <Text style={styles.categoryTitle}>Animals</Text>
               <ScrollView 
                 horizontal 
                 showsHorizontalScrollIndicator={false}
@@ -5210,14 +5807,14 @@ Enhanced text with emotions:`;
               >
                 <TouchableOpacity
                   style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Water Animals')}
+                  onPress={() => handleImageUpload('Animals')}
                 >
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages['Water Animals'].slice(0, 8).map((image, index) => (
+                {(stockImages['Animals'] || []).map((image, index) => (
                   <TouchableOpacity
-                    key={`water-animal-${index}`}
+                    key={`animal-${index}`}
                     style={styles.horizontalImageItem}
                     onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
                   >
@@ -5248,7 +5845,7 @@ Enhanced text with emotions:`;
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages['Alphabet'].slice(0, 8).map((image, index) => (
+                {(stockImages['Alphabet'] || []).map((image, index) => (
                   <TouchableOpacity
                     key={`alphabet-${index}`}
                     style={styles.horizontalImageItem}
@@ -5281,9 +5878,372 @@ Enhanced text with emotions:`;
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages['Fruits'].slice(0, 8).map((image, index) => (
+                {(stockImages['Fruits and Vegetables'] || []).map((image, index) => (
                   <TouchableOpacity
                     key={`fruit-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* 3D Alphabet Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>3D Alphabet</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('3D Alphabet')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['3D Alphabet'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`3d-alphabet-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Boxed Alphabet Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Boxed Alphabet</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Boxed Alphabet')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Boxed Alphabet'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`boxed-alphabet-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Boxed Numbers Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Boxed Numbers 1-9</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Boxed Numbers 1-9')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Boxed Numbers 1-9'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`boxed-number-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Comparing Quantities Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Comparing Quantities</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Comparing Quantities')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Comparing Quantities'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`comparing-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Dates Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Dates</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Dates')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Dates'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`date-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Extra Objects Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Extra Objects</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Extra Objects')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Extra Objects'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`extra-object-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Fractions Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Fractions</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Fractions')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Fractions'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`fraction-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Length and Distance Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Length and Distance</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Length and Distance')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Length and Distance'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`length-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Money Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Money</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Money')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Money'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`money-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Patterns Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Patterns</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Patterns')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Patterns'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`pattern-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Time and Position Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Time and Position</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Time and Position')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Time and Position'] || []).map((image, index) => (
+                  <TouchableOpacity
+                    key={`time-${index}`}
                     style={styles.horizontalImageItem}
                     onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
                   >
@@ -5314,9 +6274,42 @@ Enhanced text with emotions:`;
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages['Land Animals'].slice(0, 8).map((image, index) => (
+                {(stockImages['Animals'] || []).filter((_, index) => index < 32).map((image, index) => (
                   <TouchableOpacity
                     key={`land-animal-${index}`}
+                    style={styles.horizontalImageItem}
+                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
+                  >
+                    <Image 
+                      source={image.uri} 
+                      style={styles.horizontalImageThumbnail} 
+                      resizeMode="cover"
+                      loadingIndicatorSource={require('../assets/images/icon.png')}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Sea Animals Section */}
+            <View style={styles.imageCategory}>
+              <Text style={styles.categoryTitle}>Sea Animals</Text>
+              <ScrollView 
+                horizontal 
+                showsHorizontalScrollIndicator={false}
+                style={styles.horizontalImageScroll}
+                contentContainerStyle={styles.horizontalImageContainer}
+              >
+                <TouchableOpacity
+                  style={styles.addImageButton}
+                  onPress={() => handleImageUpload('Sea Animals')}
+                >
+                  <AntDesign name="plus" size={24} color="#3b82f6" />
+                </TouchableOpacity>
+                
+                {(stockImages['Animals'] || []).filter((_, index) => index >= 32).map((image, index) => (
+                  <TouchableOpacity
+                    key={`sea-animal-${index}`}
                     style={styles.horizontalImageItem}
                     onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
                   >
@@ -5347,7 +6340,7 @@ Enhanced text with emotions:`;
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages['Math Symbols'].slice(0, 8).map((image, index) => (
+                {(stockImages['Math Symbols'] || []).map((image, index) => (
                   <TouchableOpacity
                     key={`math-symbol-${index}`}
                     style={styles.horizontalImageItem}
@@ -5413,7 +6406,7 @@ Enhanced text with emotions:`;
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages['School Supplies'].slice(0, 8).map((image, index) => (
+                {(stockImages['School Supplies'] || []).map((image, index) => (
                   <TouchableOpacity
                     key={`school-supply-${index}`}
                     style={styles.horizontalImageItem}
@@ -5446,7 +6439,7 @@ Enhanced text with emotions:`;
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages['Shapes'].slice(0, 8).map((image, index) => (
+                {(stockImages['Shapes'] || []).map((image, index) => (
                   <TouchableOpacity
                     key={`shape-${index}`}
                     style={styles.horizontalImageItem}
@@ -5479,7 +6472,7 @@ Enhanced text with emotions:`;
                   <AntDesign name="plus" size={24} color="#3b82f6" />
                 </TouchableOpacity>
                 
-                {stockImages['Toys'].slice(0, 8).map((image, index) => (
+                {(stockImages['Toys'] || []).map((image, index) => (
                   <TouchableOpacity
                     key={`toy-${index}`}
                     style={styles.horizontalImageItem}
@@ -6067,10 +7060,50 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
   },
+  saveExerciseButtonDisabled: {
+    backgroundColor: '#9ca3af',
+    opacity: 0.6,
+  },
   saveExerciseButtonText: {
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '700',
+  },
+  ttsUploadProgressContainer: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+  },
+  ttsUploadProgressHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+    gap: 8,
+  },
+  ttsUploadProgressText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1e40af',
+  },
+  progressBarBackground: {
+    height: 8,
+    backgroundColor: '#e0e7ff',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#3b82f6',
+    borderRadius: 4,
+  },
+  ttsUploadProgressSubtext: {
+    fontSize: 13,
+    color: '#64748b',
+    fontStyle: 'italic',
   },
   
   // Modal Styles

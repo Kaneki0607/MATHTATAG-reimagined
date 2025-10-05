@@ -34,14 +34,16 @@ export interface AssignedExercise {
 }
 
 export const useExercises = (currentUserId: string | null) => {
-  const [myExercises, setMyExercises] = useState<Exercise[]>([]);
-  const [publicExercises, setPublicExercises] = useState<Exercise[]>([]);
+  const [allExercises, setAllExercises] = useState<Exercise[]>([]);
   const [assignedExercises, setAssignedExercises] = useState<AssignedExercise[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadMyExercises = async () => {
-    if (!currentUserId) return;
+  // Computed values based on allExercises
+  const myExercises = allExercises.filter(exercise => exercise.teacherId === currentUserId);
+  const publicExercises = allExercises.filter(exercise => exercise.isPublic);
+
+  const loadAllExercises = async () => {
     try {
       setLoading(true);
       setError(null);
@@ -50,34 +52,19 @@ export const useExercises = (currentUserId: string | null) => {
         .map(([id, exercise]: any) => ({
           id,
           ...exercise,
-        }))
-        .filter((exercise: Exercise) => exercise.teacherId === currentUserId);
-      setMyExercises(exercises);
+        }));
+      setAllExercises(exercises);
     } catch (err) {
-      setError('Failed to load your exercises');
-      console.error('Error loading my exercises:', err);
+      setError('Failed to load exercises');
+      console.error('Error loading exercises:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  const loadPublicExercises = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const { data } = await readData('/publicExercises');
-      const exercises = Object.entries(data || {}).map(([id, exercise]: any) => ({
-        id,
-        ...exercise,
-      }));
-      setPublicExercises(exercises);
-    } catch (err) {
-      setError('Failed to load public exercises');
-      console.error('Error loading public exercises:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Keep these for backward compatibility but they now use loadAllExercises
+  const loadMyExercises = loadAllExercises;
+  const loadPublicExercises = loadAllExercises;
 
   const loadAssignedExercises = async () => {
     if (!currentUserId) return;
@@ -273,11 +260,13 @@ export const useExercises = (currentUserId: string | null) => {
   return {
     myExercises,
     publicExercises,
+    allExercises,
     assignedExercises,
     loading,
     error,
     loadMyExercises,
     loadPublicExercises,
+    loadAllExercises,
     loadAssignedExercises,
     copyExercise,
     deleteExercise,

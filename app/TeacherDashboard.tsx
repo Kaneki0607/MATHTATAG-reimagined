@@ -1,12 +1,12 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import * as Print from 'expo-print';
 import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Dimensions,
   Image,
   Modal,
@@ -19,6 +19,7 @@ import {
   TouchableWithoutFeedback,
   View
 } from 'react-native';
+import * as XLSX from 'xlsx';
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
 import { AssignedExercise, useExercises } from '../hooks/useExercises';
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
@@ -27,187 +28,755 @@ import { uploadFile } from '../lib/firebase-storage';
 
 const { width, height } = Dimensions.get('window');
 
+// Custom Alert Component
+interface CustomAlertProps {
+  visible: boolean;
+  title: string;
+  message: string;
+  buttons?: Array<{
+    text: string;
+    onPress?: () => void;
+    style?: 'default' | 'cancel' | 'destructive';
+  }>;
+  onClose: () => void;
+  icon?: 'success' | 'error' | 'warning' | 'info';
+}
+
+const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, buttons = [], onClose, icon }) => {
+  if (!visible) return null;
+
+  const defaultButtons = buttons.length > 0 ? buttons : [{ text: 'OK', onPress: onClose }];
+  const isThreeButtons = defaultButtons.length === 3;
+  const isFourButtons = defaultButtons.length === 4;
+
+  const renderIcon = () => {
+    if (!icon) return null;
+    
+    const iconSize = 48;
+    const iconContainerStyle = {
+      marginBottom: 16,
+      alignItems: 'center' as const,
+    };
+
+    switch (icon) {
+      case 'success':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="check" size={iconSize} color="#10b981" />
+          </View>
+        );
+      case 'error':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="close" size={iconSize} color="#ef4444" />
+          </View>
+        );
+      case 'warning':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="warning" size={iconSize} color="#f59e0b" />
+          </View>
+        );
+      case 'info':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="info" size={iconSize} color="#3b82f6" />
+          </View>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <Modal
+      transparent
+      visible={visible}
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <View style={styles.alertOverlay}>
+        <View style={styles.alertContainer}>
+          <View style={styles.alertContent}>
+            {renderIcon()}
+            <Text style={styles.alertTitle}>{title}</Text>
+            <Text style={styles.alertMessage}>{message}</Text>
+            <View style={[
+              styles.alertButtons,
+              isThreeButtons && styles.alertButtonsThree,
+              isFourButtons && styles.alertButtonsFour
+            ]}>
+              {defaultButtons.map((button, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={[
+                    styles.alertButton,
+                    button.style === 'destructive' && styles.alertButtonDestructive,
+                    button.style === 'cancel' && styles.alertButtonCancel,
+                    defaultButtons.length === 1 && styles.alertButtonSingle,
+                    isThreeButtons && styles.alertButtonThree,
+                    isFourButtons && styles.alertButtonFour
+                  ]}
+                  onPress={() => {
+                    if (button.onPress) {
+                      button.onPress();
+                    }
+                    onClose();
+                  }}
+                >
+                  <Text style={[
+                    styles.alertButtonText,
+                    button.style === 'destructive' && styles.alertButtonTextDestructive,
+                    button.style === 'cancel' && styles.alertButtonTextCancel
+                  ]}>
+                    {button.text}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
 // Stock image library data
 const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
-  'Water Animals': [
-    { name: 'Water Animal 1', uri: require('../assets/images/Water Animals/1.png') },
-    { name: 'Water Animal 2', uri: require('../assets/images/Water Animals/2.png') },
-    { name: 'Water Animal 4', uri: require('../assets/images/Water Animals/4.png') },
-    { name: 'Water Animal 5', uri: require('../assets/images/Water Animals/5.png') },
-    { name: 'Water Animal 6', uri: require('../assets/images/Water Animals/6.png') },
-    { name: 'Water Animal 7', uri: require('../assets/images/Water Animals/7.png') },
-    { name: 'Water Animal 8', uri: require('../assets/images/Water Animals/8.png') },
-    { name: 'Water Animal 10', uri: require('../assets/images/Water Animals/10.png') },
-    { name: 'Water Animal 11', uri: require('../assets/images/Water Animals/11.png') },
-    { name: 'Water Animal 12', uri: require('../assets/images/Water Animals/12.png') },
-    { name: 'Water Animal 13', uri: require('../assets/images/Water Animals/13.png') },
-    { name: 'Water Animal 15', uri: require('../assets/images/Water Animals/15.png') },
+  '3D Alphabet': [
+    { name: '3D A', uri: require('../assets/images/Stock-Images/3D Alphabet/A1.png') },
+    { name: '3D B', uri: require('../assets/images/Stock-Images/3D Alphabet/B1.png') },
+    { name: '3D C', uri: require('../assets/images/Stock-Images/3D Alphabet/C1.png') },
+    { name: '3D D', uri: require('../assets/images/Stock-Images/3D Alphabet/D1.png') },
+    { name: '3D E', uri: require('../assets/images/Stock-Images/3D Alphabet/E1.png') },
+    { name: '3D F', uri: require('../assets/images/Stock-Images/3D Alphabet/F1.png') },
+    { name: '3D G', uri: require('../assets/images/Stock-Images/3D Alphabet/G1.png') },
+    { name: '3D H', uri: require('../assets/images/Stock-Images/3D Alphabet/H1.png') },
+    { name: '3D I', uri: require('../assets/images/Stock-Images/3D Alphabet/I1.png') },
+    { name: '3D J', uri: require('../assets/images/Stock-Images/3D Alphabet/J1.png') },
+    { name: '3D K', uri: require('../assets/images/Stock-Images/3D Alphabet/K1.png') },
+    { name: '3D L', uri: require('../assets/images/Stock-Images/3D Alphabet/L1.png') },
+    { name: '3D M', uri: require('../assets/images/Stock-Images/3D Alphabet/M1.png') },
+    { name: '3D N', uri: require('../assets/images/Stock-Images/3D Alphabet/N1.png') },
+    { name: '3D O', uri: require('../assets/images/Stock-Images/3D Alphabet/O1.png') },
+    { name: '3D P', uri: require('../assets/images/Stock-Images/3D Alphabet/P1.png') },
+    { name: '3D Q', uri: require('../assets/images/Stock-Images/3D Alphabet/Q1.png') },
+    { name: '3D R', uri: require('../assets/images/Stock-Images/3D Alphabet/R1.png') },
+    { name: '3D S', uri: require('../assets/images/Stock-Images/3D Alphabet/S1.png') },
+    { name: '3D T', uri: require('../assets/images/Stock-Images/3D Alphabet/T1.png') },
+    { name: '3D U', uri: require('../assets/images/Stock-Images/3D Alphabet/U1.png') },
+    { name: '3D V', uri: require('../assets/images/Stock-Images/3D Alphabet/V1.png') },
+    { name: '3D W', uri: require('../assets/images/Stock-Images/3D Alphabet/W1.png') },
+    { name: '3D X', uri: require('../assets/images/Stock-Images/3D Alphabet/X1.png') },
+    { name: '3D Y', uri: require('../assets/images/Stock-Images/3D Alphabet/Y1.png') },
+    { name: '3D Z', uri: require('../assets/images/Stock-Images/3D Alphabet/Z1.png') },
   ],
   'Alphabet': [
-    { name: 'A', uri: require('../assets/images/Alphabet/a.png') },
-    { name: 'B', uri: require('../assets/images/Alphabet/b.png') },
-    { name: 'C', uri: require('../assets/images/Alphabet/c.png') },
-    { name: 'D', uri: require('../assets/images/Alphabet/d.png') },
-    { name: 'E', uri: require('../assets/images/Alphabet/e.png') },
-    { name: 'F', uri: require('../assets/images/Alphabet/f.png') },
-    { name: 'G', uri: require('../assets/images/Alphabet/g.png') },
-    { name: 'H', uri: require('../assets/images/Alphabet/h.png') },
-    { name: 'I', uri: require('../assets/images/Alphabet/i.png') },
-    { name: 'J', uri: require('../assets/images/Alphabet/j.png') },
-    { name: 'K', uri: require('../assets/images/Alphabet/k.png') },
-    { name: 'M', uri: require('../assets/images/Alphabet/m.png') },
-    { name: 'N', uri: require('../assets/images/Alphabet/n.png') },
-    { name: 'O', uri: require('../assets/images/Alphabet/o.png') },
-    { name: 'P', uri: require('../assets/images/Alphabet/p.png') },
-    { name: 'Q', uri: require('../assets/images/Alphabet/q.png') },
-    { name: 'R', uri: require('../assets/images/Alphabet/r.png') },
-    { name: 'S', uri: require('../assets/images/Alphabet/s.png') },
-    { name: 'T', uri: require('../assets/images/Alphabet/t.png') },
-    { name: 'U', uri: require('../assets/images/Alphabet/u.png') },
-    { name: 'V', uri: require('../assets/images/Alphabet/v.png') },
-    { name: 'W', uri: require('../assets/images/Alphabet/w.png') },
-    { name: 'X', uri: require('../assets/images/Alphabet/x.png') },
-    { name: 'Y', uri: require('../assets/images/Alphabet/y.png') },
-    { name: 'Z', uri: require('../assets/images/Alphabet/z.png') },
+    { name: 'A', uri: require('../assets/images/Stock-Images/Alphabet/A.png') },
+    { name: 'B', uri: require('../assets/images/Stock-Images/Alphabet/B.png') },
+    { name: 'C', uri: require('../assets/images/Stock-Images/Alphabet/C.png') },
+    { name: 'D', uri: require('../assets/images/Stock-Images/Alphabet/D.png') },
+    { name: 'E', uri: require('../assets/images/Stock-Images/Alphabet/E.png') },
+    { name: 'F', uri: require('../assets/images/Stock-Images/Alphabet/F.png') },
+    { name: 'G', uri: require('../assets/images/Stock-Images/Alphabet/G.png') },
+    { name: 'H', uri: require('../assets/images/Stock-Images/Alphabet/H.png') },
+    { name: 'I', uri: require('../assets/images/Stock-Images/Alphabet/I.png') },
+    { name: 'J', uri: require('../assets/images/Stock-Images/Alphabet/J.png') },
+    { name: 'K', uri: require('../assets/images/Stock-Images/Alphabet/K.png') },
+    { name: 'L', uri: require('../assets/images/Stock-Images/Alphabet/L.png') },
+    { name: 'M', uri: require('../assets/images/Stock-Images/Alphabet/M.png') },
+    { name: 'N', uri: require('../assets/images/Stock-Images/Alphabet/N.png') },
+    { name: 'O', uri: require('../assets/images/Stock-Images/Alphabet/O.png') },
+    { name: 'P', uri: require('../assets/images/Stock-Images/Alphabet/P.png') },
+    { name: 'Q', uri: require('../assets/images/Stock-Images/Alphabet/Q.png') },
+    { name: 'R', uri: require('../assets/images/Stock-Images/Alphabet/R.png') },
+    { name: 'S', uri: require('../assets/images/Stock-Images/Alphabet/S.png') },
+    { name: 'T', uri: require('../assets/images/Stock-Images/Alphabet/T.png') },
+    { name: 'U', uri: require('../assets/images/Stock-Images/Alphabet/U.png') },
+    { name: 'V', uri: require('../assets/images/Stock-Images/Alphabet/V.png') },
+    { name: 'W', uri: require('../assets/images/Stock-Images/Alphabet/W.png') },
+    { name: 'X', uri: require('../assets/images/Stock-Images/Alphabet/X.png') },
+    { name: 'Y', uri: require('../assets/images/Stock-Images/Alphabet/Y.png') },
+    { name: 'Z', uri: require('../assets/images/Stock-Images/Alphabet/Z.png') },
   ],
-  'Fruits': [
-    { name: 'Apple', uri: require('../assets/images/Fruits/apple.png') },
-    { name: 'Avocado', uri: require('../assets/images/Fruits/avocado.png') },
-    { name: 'Banana', uri: require('../assets/images/Fruits/banana.png') },
-    { name: 'Blueberry', uri: require('../assets/images/Fruits/blueberry.png') },
-    { name: 'Coco', uri: require('../assets/images/Fruits/coco.png') },
-    { name: 'Corn', uri: require('../assets/images/Fruits/corn.png') },
-    { name: 'Durian', uri: require('../assets/images/Fruits/durian.png') },
-    { name: 'Grapes', uri: require('../assets/images/Fruits/grapes.png') },
-    { name: 'Lemon', uri: require('../assets/images/Fruits/lemon.png') },
-    { name: 'Mango', uri: require('../assets/images/Fruits/mango.png') },
-    { name: 'Orange', uri: require('../assets/images/Fruits/orange.png') },
-    { name: 'Pineapple', uri: require('../assets/images/Fruits/pineapple.png') },
-    { name: 'Rambutan', uri: require('../assets/images/Fruits/rambutan.png') },
-    { name: 'Strawberry', uri: require('../assets/images/Fruits/strawberry.png') },
-    { name: 'Tomato', uri: require('../assets/images/Fruits/tomato.png') },
-    { name: 'Watermelon', uri: require('../assets/images/Fruits/watermelon.png') },
+  'Animals': [
+    // Land Animals
+    { name: 'Bee', uri: require('../assets/images/Stock-Images/Animals/Land Animals/bee.png') },
+    { name: 'Bird', uri: require('../assets/images/Stock-Images/Animals/Land Animals/bird.png') },
+    { name: 'Black Cat', uri: require('../assets/images/Stock-Images/Animals/Land Animals/black cat.png') },
+    { name: 'Bug', uri: require('../assets/images/Stock-Images/Animals/Land Animals/bug.png') },
+    { name: 'Bunny', uri: require('../assets/images/Stock-Images/Animals/Land Animals/bunny.png') },
+    { name: 'Butterfly', uri: require('../assets/images/Stock-Images/Animals/Land Animals/butterfly.png') },
+    { name: 'Cat', uri: require('../assets/images/Stock-Images/Animals/Land Animals/cat.png') },
+    { name: 'Cheetah', uri: require('../assets/images/Stock-Images/Animals/Land Animals/cheetah.png') },
+    { name: 'Chicken', uri: require('../assets/images/Stock-Images/Animals/Land Animals/chicken.png') },
+    { name: 'Cow', uri: require('../assets/images/Stock-Images/Animals/Land Animals/cow.png') },
+    { name: 'Deer', uri: require('../assets/images/Stock-Images/Animals/Land Animals/deer.png') },
+    { name: 'Dog', uri: require('../assets/images/Stock-Images/Animals/Land Animals/dog.png') },
+    { name: 'Elephant', uri: require('../assets/images/Stock-Images/Animals/Land Animals/elephant.png') },
+    { name: 'Fox', uri: require('../assets/images/Stock-Images/Animals/Land Animals/fox.png') },
+    { name: 'Frog', uri: require('../assets/images/Stock-Images/Animals/Land Animals/frog.png') },
+    { name: 'Giraffe', uri: require('../assets/images/Stock-Images/Animals/Land Animals/guraffe.png') },
+    { name: 'Hippo', uri: require('../assets/images/Stock-Images/Animals/Land Animals/hipo.png') },
+    { name: 'Horse', uri: require('../assets/images/Stock-Images/Animals/Land Animals/horse.png') },
+    { name: 'Koala', uri: require('../assets/images/Stock-Images/Animals/Land Animals/koala.png') },
+    { name: 'Lion', uri: require('../assets/images/Stock-Images/Animals/Land Animals/lion.png') },
+    { name: 'Monkey', uri: require('../assets/images/Stock-Images/Animals/Land Animals/monkey.png') },
+    { name: 'Owl', uri: require('../assets/images/Stock-Images/Animals/Land Animals/owl.png') },
+    { name: 'Panda', uri: require('../assets/images/Stock-Images/Animals/Land Animals/panda.png') },
+    { name: 'Penguin', uri: require('../assets/images/Stock-Images/Animals/Land Animals/penguin.png') },
+    { name: 'Pig', uri: require('../assets/images/Stock-Images/Animals/Land Animals/pig.png') },
+    { name: 'Red Panda', uri: require('../assets/images/Stock-Images/Animals/Land Animals/red panda.png') },
+    { name: 'Snail', uri: require('../assets/images/Stock-Images/Animals/Land Animals/snail.png') },
+    { name: 'Snake', uri: require('../assets/images/Stock-Images/Animals/Land Animals/snake.png') },
+    { name: 'Tiger', uri: require('../assets/images/Stock-Images/Animals/Land Animals/tiger.png') },
+    { name: 'Turkey', uri: require('../assets/images/Stock-Images/Animals/Land Animals/turkey.png') },
+    { name: 'Wolf', uri: require('../assets/images/Stock-Images/Animals/Land Animals/wolf.png') },
+    { name: 'Zebra', uri: require('../assets/images/Stock-Images/Animals/Land Animals/zebra.png') },
+    // Sea Animals
+    { name: 'Whale', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/1.png') },
+    { name: 'Fish', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/2.png') },
+    { name: 'Crab', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/4.png') },
+    { name: 'Octopus', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/5.png') },
+    { name: 'Starfish', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/6.png') },
+    { name: 'Coral', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/7.png') },
+    { name: 'Puffer Fish', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/8.png') },
+    { name: 'Dolphin', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/10.png') },
+    { name: 'Turtle', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/11.png') },
+    { name: 'Clam', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/12.png') },
+    { name: 'Shark', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/13.png') },
+    { name: 'Seahorse', uri: require('../assets/images/Stock-Images/Animals/Sea Animals/15.png') },
   ],
-  'Land Animals': [
-    { name: 'Bee', uri: require('../assets/images/Land Animals/bee.png') },
-    { name: 'Bird', uri: require('../assets/images/Land Animals/bird.png') },
-    { name: 'Black Cat', uri: require('../assets/images/Land Animals/black cat.png') },
-    { name: 'Bug', uri: require('../assets/images/Land Animals/bug.png') },
-    { name: 'Bunny', uri: require('../assets/images/Land Animals/bunny.png') },
-    { name: 'Butterfly', uri: require('../assets/images/Land Animals/butterfly.png') },
-    { name: 'Cat', uri: require('../assets/images/Land Animals/cat.png') },
-    { name: 'Cheetah', uri: require('../assets/images/Land Animals/cheetah.png') },
-    { name: 'Chicken', uri: require('../assets/images/Land Animals/chicken.png') },
-    { name: 'Cow', uri: require('../assets/images/Land Animals/cow.png') },
-    { name: 'Deer', uri: require('../assets/images/Land Animals/deer.png') },
-    { name: 'Dog', uri: require('../assets/images/Land Animals/dog.png') },
-    { name: 'Elephant', uri: require('../assets/images/Land Animals/elephant.png') },
-    { name: 'Fox', uri: require('../assets/images/Land Animals/fox.png') },
-    { name: 'Frog', uri: require('../assets/images/Land Animals/frog.png') },
-    { name: 'Giraffe', uri: require('../assets/images/Land Animals/guraffe.png') },
-    { name: 'Hipo', uri: require('../assets/images/Land Animals/hipo.png') },
-    { name: 'Horse', uri: require('../assets/images/Land Animals/horse.png') },
-    { name: 'Koala', uri: require('../assets/images/Land Animals/koala.png') },
-    { name: 'Lion', uri: require('../assets/images/Land Animals/lion.png') },
-    { name: 'Monkey', uri: require('../assets/images/Land Animals/monkey.png') },
-    { name: 'Owl', uri: require('../assets/images/Land Animals/owl.png') },
-    { name: 'Panda', uri: require('../assets/images/Land Animals/panda.png') },
-    { name: 'Penguin', uri: require('../assets/images/Land Animals/penguin.png') },
-    { name: 'Pig', uri: require('../assets/images/Land Animals/pig.png') },
-    { name: 'Red Panda', uri: require('../assets/images/Land Animals/red panda.png') },
-    { name: 'Snail', uri: require('../assets/images/Land Animals/snail.png') },
-    { name: 'Snake', uri: require('../assets/images/Land Animals/snake.png') },
-    { name: 'Tiger', uri: require('../assets/images/Land Animals/tiger.png') },
-    { name: 'Turkey', uri: require('../assets/images/Land Animals/turkey.png') },
-    { name: 'Wolf', uri: require('../assets/images/Land Animals/wolf.png') },
-    { name: 'Zebra', uri: require('../assets/images/Land Animals/zebra.png') },
+  'Boxed Alphabet': [
+    { name: 'Boxed A', uri: require('../assets/images/Stock-Images/Boxed Alphabet/A.png') },
+    { name: 'Boxed B', uri: require('../assets/images/Stock-Images/Boxed Alphabet/B.png') },
+    { name: 'Boxed C', uri: require('../assets/images/Stock-Images/Boxed Alphabet/C.png') },
+    { name: 'Boxed D', uri: require('../assets/images/Stock-Images/Boxed Alphabet/D.png') },
+    { name: 'Boxed E', uri: require('../assets/images/Stock-Images/Boxed Alphabet/E.png') },
+    { name: 'Boxed F', uri: require('../assets/images/Stock-Images/Boxed Alphabet/F.png') },
+    { name: 'Boxed G', uri: require('../assets/images/Stock-Images/Boxed Alphabet/G.png') },
+    { name: 'Boxed H', uri: require('../assets/images/Stock-Images/Boxed Alphabet/H.png') },
+    { name: 'Boxed I', uri: require('../assets/images/Stock-Images/Boxed Alphabet/I.png') },
+    { name: 'Boxed J', uri: require('../assets/images/Stock-Images/Boxed Alphabet/J.png') },
+    { name: 'Boxed K', uri: require('../assets/images/Stock-Images/Boxed Alphabet/K.png') },
+    { name: 'Boxed L', uri: require('../assets/images/Stock-Images/Boxed Alphabet/L.png') },
+    { name: 'Boxed M', uri: require('../assets/images/Stock-Images/Boxed Alphabet/M.png') },
+    { name: 'Boxed N', uri: require('../assets/images/Stock-Images/Boxed Alphabet/N.png') },
+    { name: 'Boxed O', uri: require('../assets/images/Stock-Images/Boxed Alphabet/O.png') },
+    { name: 'Boxed P', uri: require('../assets/images/Stock-Images/Boxed Alphabet/P.png') },
+    { name: 'Boxed Q', uri: require('../assets/images/Stock-Images/Boxed Alphabet/Q.png') },
+    { name: 'Boxed R', uri: require('../assets/images/Stock-Images/Boxed Alphabet/R.png') },
+    { name: 'Boxed S', uri: require('../assets/images/Stock-Images/Boxed Alphabet/S.png') },
+    { name: 'Boxed T', uri: require('../assets/images/Stock-Images/Boxed Alphabet/T.png') },
+    { name: 'Boxed U', uri: require('../assets/images/Stock-Images/Boxed Alphabet/U.png') },
+    { name: 'Boxed V', uri: require('../assets/images/Stock-Images/Boxed Alphabet/V.png') },
+    { name: 'Boxed W', uri: require('../assets/images/Stock-Images/Boxed Alphabet/W.png') },
+    { name: 'Boxed X', uri: require('../assets/images/Stock-Images/Boxed Alphabet/X.png') },
+    { name: 'Boxed Y', uri: require('../assets/images/Stock-Images/Boxed Alphabet/Y.png') },
+    { name: 'Boxed Z', uri: require('../assets/images/Stock-Images/Boxed Alphabet/Z.png') },
+  ],
+  'Boxed Numbers 1-9': [
+    { name: 'Boxed 1', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/1.png') },
+    { name: 'Boxed 2', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/2.png') },
+    { name: 'Boxed 3', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/3.png') },
+    { name: 'Boxed 4', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/4.png') },
+    { name: 'Boxed 5', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/5.png') },
+    { name: 'Boxed 6', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/6.png') },
+    { name: 'Boxed 7', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/7.png') },
+    { name: 'Boxed 8', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/8.png') },
+    { name: 'Boxed 9', uri: require('../assets/images/Stock-Images/Boxed Numbers 1-9/9.png') },
+  ],
+  'Comparing Quantities': [
+    { name: '1 + 9 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 + 9 (2).png') },
+    { name: '1 + 9', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 + 9.png') },
+    { name: '1 Apple', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 apple.png') },
+    { name: '1 Candy', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 candy.png') },
+    { name: '1 Pencil', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 pencil.png') },
+    { name: '1 Stack Book', uri: require('../assets/images/Stock-Images/Comparing Quantities/1 stack book.png') },
+    { name: '12 Eggs', uri: require('../assets/images/Stock-Images/Comparing Quantities/12 eggs.png') },
+    { name: '13 - One Long and Three Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/13 - one long and three units.png') },
+    { name: '14 Eggs', uri: require('../assets/images/Stock-Images/Comparing Quantities/14 eggs.png') },
+    { name: '15 - One Long and Five Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/15 - one long and five units.png') },
+    { name: '15 Eggs', uri: require('../assets/images/Stock-Images/Comparing Quantities/15 eggs.png') },
+    { name: '17 - One Long and Seven Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/17 - one long and seven units.png') },
+    { name: '19 - One Long and Nine Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/19 - one long and nine units.png') },
+    { name: '2 + 8 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 + 8 (2).png') },
+    { name: '2 + 8', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 + 8.png') },
+    { name: '2 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 apples.png') },
+    { name: '2 Candies', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 candies.png') },
+    { name: '2 Pencils', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 pencil.png') },
+    { name: '2 Stack Books', uri: require('../assets/images/Stock-Images/Comparing Quantities/2 stack book.png') },
+    { name: '22 - Two Longs and Two Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/22 - two longs and two units.png') },
+    { name: '25 - Two Longs and Five Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/25 - two longs and five units.png') },
+    { name: '27 Marbles', uri: require('../assets/images/Stock-Images/Comparing Quantities/27 marbles.png') },
+    { name: '2 Guavas with 1 Banana on Each Plate', uri: require('../assets/images/Stock-Images/Comparing Quantities/2guavas with 1 banana on each plate.png') },
+    { name: '3 + 7 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 + 7 (2).png') },
+    { name: '3 + 7', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 + 7.png') },
+    { name: '3 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 apples.png') },
+    { name: '3 Candies', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 candies.png') },
+    { name: '3 Girls', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 girls.png') },
+    { name: '3 Pencils', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 pencil.png') },
+    { name: '3 Stack Books', uri: require('../assets/images/Stock-Images/Comparing Quantities/3 stack book.png') },
+    { name: '3-1 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/3-1 fish.png') },
+    { name: '30 - Three Longs', uri: require('../assets/images/Stock-Images/Comparing Quantities/30 - three longs.png') },
+    { name: '32 - Three Longs and Two Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/32 - three longs and two units.png') },
+    { name: '35 - Three Longs and Five Units', uri: require('../assets/images/Stock-Images/Comparing Quantities/35 - three longs and five units.png') },
+    { name: '4 + 6 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 + 6 (2).png') },
+    { name: '4 + 6', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 + 6.png') },
+    { name: '4 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 apples.png') },
+    { name: '4 Candies', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 candies.png') },
+    { name: '4 Guavas and 2 Bananas', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 guavas and 2 bananas.png') },
+    { name: '4 Pencils', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 pencil.png') },
+    { name: '4 Stack Books', uri: require('../assets/images/Stock-Images/Comparing Quantities/4 stack book.png') },
+    { name: '4-2 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/4-2 fish.png') },
+    { name: '5 + 5 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 + 5 (2).png') },
+    { name: '5 + 5', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 + 5.png') },
+    { name: '5 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 apples.png') },
+    { name: '5 Boys', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 boys.png') },
+    { name: '5 Candies', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 candies.png') },
+    { name: '5 Pencils (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 pencil (2).png') },
+    { name: '5 Pencils', uri: require('../assets/images/Stock-Images/Comparing Quantities/5 pencil.png') },
+    { name: '5-2 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/5-2 fish.png') },
+    { name: '6 + 4 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/6 + 4 (2).png') },
+    { name: '6 + 4', uri: require('../assets/images/Stock-Images/Comparing Quantities/6 + 4.png') },
+    { name: '6 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/6 apples.png') },
+    { name: '6 Eggs in a Jar', uri: require('../assets/images/Stock-Images/Comparing Quantities/6 eggs in a jar.png') },
+    { name: '7 + 3 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/7 + 3 (2).png') },
+    { name: '7 + 3', uri: require('../assets/images/Stock-Images/Comparing Quantities/7 + 3.png') },
+    { name: '7 Apples', uri: require('../assets/images/Stock-Images/Comparing Quantities/7 apples.png') },
+    { name: '7 Children Playing and 3 Children Joining', uri: require('../assets/images/Stock-Images/Comparing Quantities/7 children playing and 3 children joining.png') },
+    { name: '7-4 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/7-4 fish.png') },
+    { name: '8 + 2 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/8 + 2 (2).png') },
+    { name: '8 + 2', uri: require('../assets/images/Stock-Images/Comparing Quantities/8 + 2.png') },
+    { name: '8-7 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/8-7 fish.png') },
+    { name: '9 + 1 (2)', uri: require('../assets/images/Stock-Images/Comparing Quantities/9 + 1 (2).png') },
+    { name: '9 + 1', uri: require('../assets/images/Stock-Images/Comparing Quantities/9 + 1.png') },
+    { name: '9-3 Fish', uri: require('../assets/images/Stock-Images/Comparing Quantities/9-3 fish.png') },
+    { name: 'Empty Fruits on Plate', uri: require('../assets/images/Stock-Images/Comparing Quantities/empty fruits on plate.png') },
+    { name: 'Zeny 19 Counters, Ernie 14 Counters, Sitti Box, Akmad Box', uri: require('../assets/images/Stock-Images/Comparing Quantities/zeny 19 counters, Ernie 14 counters, sitti box, Akmad box.png') },
+  ],
+  'Dates': [
+    { name: 'Date 1', uri: require('../assets/images/Stock-Images/Dates/1.png') },
+    { name: 'Date 3', uri: require('../assets/images/Stock-Images/Dates/3.png') },
+    { name: 'Date 4', uri: require('../assets/images/Stock-Images/Dates/4.png') },
+    { name: 'Date 5', uri: require('../assets/images/Stock-Images/Dates/5.png') },
+    { name: 'Date 6', uri: require('../assets/images/Stock-Images/Dates/6.png') },
+    { name: 'Date 7', uri: require('../assets/images/Stock-Images/Dates/7.png') },
+    { name: 'Date 8', uri: require('../assets/images/Stock-Images/Dates/8.png') },
+    { name: 'Date 9', uri: require('../assets/images/Stock-Images/Dates/9.png') },
+    { name: 'Date 10', uri: require('../assets/images/Stock-Images/Dates/10.png') },
+    { name: 'Fill Shaded', uri: require('../assets/images/Stock-Images/Dates/fill the shaded.png') },
+  ],
+  'Extra Objects': [
+    { name: '1 Cube', uri: require('../assets/images/Stock-Images/Extra Objects/1 cube.png') },
+    { name: 'Alarm', uri: require('../assets/images/Stock-Images/Extra Objects/Alarm.png') },
+    { name: 'Balloon', uri: require('../assets/images/Stock-Images/Extra Objects/balloon.png') },
+    { name: 'Basketball', uri: require('../assets/images/Stock-Images/Extra Objects/basketball.png') },
+    { name: 'Blue Ball', uri: require('../assets/images/Stock-Images/Extra Objects/blue ball.png') },
+    { name: 'Brown Chair', uri: require('../assets/images/Stock-Images/Extra Objects/Brown Chair.png') },
+    { name: 'Brown Tumbler', uri: require('../assets/images/Stock-Images/Extra Objects/Brown Tumbler.png') },
+    { name: 'Cap', uri: require('../assets/images/Stock-Images/Extra Objects/cap.png') },
+    { name: 'Chair', uri: require('../assets/images/Stock-Images/Extra Objects/Chair.png') },
+    { name: 'Donut', uri: require('../assets/images/Stock-Images/Extra Objects/Donut.png') },
+    { name: 'Duck', uri: require('../assets/images/Stock-Images/Extra Objects/duck.png') },
+    { name: 'Electric Fan', uri: require('../assets/images/Stock-Images/Extra Objects/Electric Fan.png') },
+    { name: 'Green Coat', uri: require('../assets/images/Stock-Images/Extra Objects/Green Coat.png') },
+    { name: 'Key', uri: require('../assets/images/Stock-Images/Extra Objects/Key.png') },
+    { name: 'Kite', uri: require('../assets/images/Stock-Images/Extra Objects/kite.png') },
+    { name: 'Microscope', uri: require('../assets/images/Stock-Images/Extra Objects/Microscope.png') },
+    { name: 'Pink Rose', uri: require('../assets/images/Stock-Images/Extra Objects/pink rose.png') },
+    { name: 'Popsicles', uri: require('../assets/images/Stock-Images/Extra Objects/Popciscles.png') },
+    { name: 'Pot', uri: require('../assets/images/Stock-Images/Extra Objects/pot.png') },
+    { name: 'Racket', uri: require('../assets/images/Stock-Images/Extra Objects/Racket.png') },
+    { name: 'Red Ball', uri: require('../assets/images/Stock-Images/Extra Objects/red ball.png') },
+    { name: 'Red Rose', uri: require('../assets/images/Stock-Images/Extra Objects/red rose.png') },
+    { name: 'Rocket', uri: require('../assets/images/Stock-Images/Extra Objects/Rocket.png') },
+    { name: 'Shuttlecock', uri: require('../assets/images/Stock-Images/Extra Objects/Shuttlecock.png') },
+    { name: 'Soccer Ball', uri: require('../assets/images/Stock-Images/Extra Objects/soccer ball.png') },
+    { name: 'Star', uri: require('../assets/images/Stock-Images/Extra Objects/star.png') },
+    { name: 'Telescope', uri: require('../assets/images/Stock-Images/Extra Objects/Telescope.png') },
+    { name: 'Unicycle', uri: require('../assets/images/Stock-Images/Extra Objects/Unicycle.png') },
+    { name: 'Volleyball', uri: require('../assets/images/Stock-Images/Extra Objects/Volleyball.png') },
+    { name: 'Watering Can', uri: require('../assets/images/Stock-Images/Extra Objects/Watering Can.png') },
+  ],
+  'Fractions': [
+    { name: 'Half Blue', uri: require('../assets/images/Stock-Images/Fractions/1_2 blue.png') },
+    { name: 'Half Circle', uri: require('../assets/images/Stock-Images/Fractions/1_2 Circle.png') },
+    { name: 'Half Hexagon', uri: require('../assets/images/Stock-Images/Fractions/1_2 Hexagon.png') },
+    { name: 'Half Octagon', uri: require('../assets/images/Stock-Images/Fractions/1_2 Octagon.png') },
+    { name: 'Half Orange', uri: require('../assets/images/Stock-Images/Fractions/1_2 orange.png') },
+    { name: 'Half Pentagon', uri: require('../assets/images/Stock-Images/Fractions/1_2 Pentagon.png') },
+    { name: 'Half Square', uri: require('../assets/images/Stock-Images/Fractions/1_2 Square.png') },
+    { name: 'Half Triangle', uri: require('../assets/images/Stock-Images/Fractions/1_2 Triangle.png') },
+    { name: 'Quarter Circle Right', uri: require('../assets/images/Stock-Images/Fractions/1_4 Circle Right.png') },
+    { name: 'Quarter Circle', uri: require('../assets/images/Stock-Images/Fractions/1_4 Circle.png') },
+    { name: 'Quarter Green', uri: require('../assets/images/Stock-Images/Fractions/1_4 green.png') },
+    { name: 'Quarter Hexagon', uri: require('../assets/images/Stock-Images/Fractions/1_4 Hexagon.png') },
+    { name: 'Quarter Orange', uri: require('../assets/images/Stock-Images/Fractions/1_4 orange.png') },
+    { name: 'Quarter Rectangle', uri: require('../assets/images/Stock-Images/Fractions/1_4 Rectangle.png') },
+    { name: 'Quarter Square', uri: require('../assets/images/Stock-Images/Fractions/1_4 Square.png') },
+  ],
+  'Fruits and Vegetables': [
+    { name: 'Carrot', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/20.png') },
+    { name: 'Cabbage', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/21.png') },
+    { name: 'Corn', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/22.png') },
+    { name: 'Atis', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Atis.png') },
+    { name: 'Avocado', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Avocado.png') },
+    { name: 'Bayabas', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Bayabas.png') },
+    { name: 'Blueberry', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Blueberry.png') },
+    { name: 'Buko', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Buko.png') },
+    { name: 'Dragon Fruit', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Dragon Fruit.png') },
+    { name: 'Kalabasa', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Kalabasa.png') },
+    { name: 'Kamatis', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Kamatis.png') },
+    { name: 'Mangga', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Mangga.png') },
+    { name: 'Niyog', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Niyog.png') },
+    { name: 'Orange', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Orange.png') },
+    { name: 'Pinya', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Pinya.png') },
+    { name: 'Potato', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Potato.png') },
+    { name: 'Red Apple', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Red Apple.png') },
+    { name: 'Saging', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Saging.png') },
+    { name: 'Sibuyas', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Sibuyas.png') },
+    { name: 'Strawberry', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Strawberry.png') },
+    { name: 'Talong', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Talong.png') },
+    { name: 'Ubas', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Ubas.png') },
+    { name: 'Watermelon', uri: require('../assets/images/Stock-Images/Fruits and Vegetables/Watermelon.png') },
+  ],
+  'Length and Distance': [
+    { name: 'Arm Span', uri: require('../assets/images/Stock-Images/Length and Distance/arm span.png') },
+    { name: 'Bungi Bunging Pagsukat Gamit Ang Clips', uri: require('../assets/images/Stock-Images/Length and Distance/bungi bunging pagsukat gamit ang clips.png') },
+    { name: 'Foot Span', uri: require('../assets/images/Stock-Images/Length and Distance/foot span.png') },
+    { name: 'Hand Span', uri: require('../assets/images/Stock-Images/Length and Distance/hand span.png') },
+    { name: 'Kulang Na Pagsukat Gamit Ang Clips', uri: require('../assets/images/Stock-Images/Length and Distance/kulang na pagsukat gamit ang clips.png') },
+    { name: 'Longest', uri: require('../assets/images/Stock-Images/Length and Distance/longest.png') },
+    { name: 'Makapal Na Libro', uri: require('../assets/images/Stock-Images/Length and Distance/makapal na libro.png') },
+    { name: 'Malaking Papaya', uri: require('../assets/images/Stock-Images/Length and Distance/malaking papaya.png') },
+    { name: 'Maliit Na Saging', uri: require('../assets/images/Stock-Images/Length and Distance/maliit na saging.png') },
+    { name: 'Manipis Na Libro', uri: require('../assets/images/Stock-Images/Length and Distance/manipis na libro.png') },
+    { name: 'Medium', uri: require('../assets/images/Stock-Images/Length and Distance/medium.png') },
+    { name: 'Medyo Makapal Na Libro', uri: require('../assets/images/Stock-Images/Length and Distance/medyo makapal na libro.png') },
+    { name: 'Medyo Malapit', uri: require('../assets/images/Stock-Images/Length and Distance/medyo malapit.png') },
+    { name: 'Pinaka Malapit Sa Apple', uri: require('../assets/images/Stock-Images/Length and Distance/pinaka malapit sa apple.png') },
+    { name: 'Pinaka Malayo Sa Apple', uri: require('../assets/images/Stock-Images/Length and Distance/pinaka malayo sa apple.png') },
+    { name: 'Short Box', uri: require('../assets/images/Stock-Images/Length and Distance/Short Box.png') },
+    { name: 'Shortest', uri: require('../assets/images/Stock-Images/Length and Distance/Shortest.png') },
+    { name: 'Sobrang Ang Pagsukat Gamit Ang Clips', uri: require('../assets/images/Stock-Images/Length and Distance/sobrang ang pagsukat gamit ang clips.png') },
+    { name: 'Tall Cylinder', uri: require('../assets/images/Stock-Images/Length and Distance/Tall Cylinder.png') },
+    { name: 'Taller', uri: require('../assets/images/Stock-Images/Length and Distance/Taller.png') },
+    { name: 'Tallest', uri: require('../assets/images/Stock-Images/Length and Distance/Tallest.png') },
+    { name: 'Tama At Saktong Pagsukat Gamit Ang Clips', uri: require('../assets/images/Stock-Images/Length and Distance/tama at saktong pagsukat gamit ang clips.png') },
+    { name: 'Wide', uri: require('../assets/images/Stock-Images/Length and Distance/wide.png') },
+    { name: 'Wider', uri: require('../assets/images/Stock-Images/Length and Distance/wider.png') },
+    { name: 'Widest', uri: require('../assets/images/Stock-Images/Length and Distance/widest.png') },
   ],
   'Math Symbols': [
-    { name: 'Equal', uri: require('../assets/images/Math Symbols/equal.png') },
-    { name: 'Greater Than', uri: require('../assets/images/Math Symbols/greater than.png') },
-    { name: 'Less Than', uri: require('../assets/images/Math Symbols/less than.png') },
-    { name: 'Minus', uri: require('../assets/images/Math Symbols/minus.png') },
-    { name: 'Not Equal To', uri: require('../assets/images/Math Symbols/not equal to.png') },
-    { name: 'Plus', uri: require('../assets/images/Math Symbols/plus.png') },
+    { name: 'Plus', uri: require('../assets/images/Stock-Images/Math Symbols/plus.png') },
+    { name: 'Minus', uri: require('../assets/images/Stock-Images/Math Symbols/minus.png') },
+    { name: 'Equal', uri: require('../assets/images/Stock-Images/Math Symbols/equal.png') },
+    { name: 'Greater Than', uri: require('../assets/images/Stock-Images/Math Symbols/greater than.png') },
+    { name: 'Less Than', uri: require('../assets/images/Stock-Images/Math Symbols/less than.png') },
+    { name: 'Not Equal To', uri: require('../assets/images/Stock-Images/Math Symbols/not equal to.png') },
+  ],
+  'Money': [
+    { name: '100 (20 coins)', uri: require('../assets/images/Stock-Images/Money/100 (20 coins).png') },
+    { name: '100 (two 50 bills)', uri: require('../assets/images/Stock-Images/Money/100 (two 50 bills).png') },
+    { name: '16 Pesos', uri: require('../assets/images/Stock-Images/Money/16.png') },
+    { name: '23 Pesos', uri: require('../assets/images/Stock-Images/Money/23.png') },
+    { name: '27 pesos', uri: require('../assets/images/Stock-Images/Money/27.png') },
+    { name: 'Piso (1 peso coin)', uri: require('../assets/images/Stock-Images/Money/28.png') },
+    { name: 'Limampiso (5 peso coin)', uri: require('../assets/images/Stock-Images/Money/29.png') },
+    { name: 'Sampung  (10 peso coin)', uri: require('../assets/images/Stock-Images/Money/30.png') },
+    { name: 'Bentepesos (20 peso coin)', uri: require('../assets/images/Stock-Images/Money/31.png') },
+    { name: 'Beynte (20 Peso bill)', uri: require('../assets/images/Stock-Images/Money/32.png') },
+    { name: 'Singkwenta (50 peso bill)', uri: require('../assets/images/Stock-Images/Money/33.png') },
+    { name: 'Isandaan (100 peso bill)', uri: require('../assets/images/Stock-Images/Money/34.png') },
+    { name: '40 pesos', uri: require('../assets/images/Stock-Images/Money/40.png') },
+    { name: '72 pesos', uri: require('../assets/images/Stock-Images/Money/72.png') },
+    { name: '84 pesos', uri: require('../assets/images/Stock-Images/Money/84.png') },
+    { name: '85 pesos', uri: require('../assets/images/Stock-Images/Money/85.png') },
+    { name: '90 pesos', uri: require('../assets/images/Stock-Images/Money/90.png') },
   ],
   'Numbers': [
-    { name: '1', uri: require('../assets/images/Numbers/1.png') },
-    { name: '2', uri: require('../assets/images/Numbers/2.png') },
-    { name: '3', uri: require('../assets/images/Numbers/3.png') },
-    { name: '4', uri: require('../assets/images/Numbers/4.png') },
-    { name: '5', uri: require('../assets/images/Numbers/5.png') },
-    { name: '6', uri: require('../assets/images/Numbers/6.png') },
-    { name: '7', uri: require('../assets/images/Numbers/7.png') },
-    { name: '8', uri: require('../assets/images/Numbers/8.png') },
-    { name: '9', uri: require('../assets/images/Numbers/9.png') },
+    // Numbers 0-9 (blue)
+    { name: '1', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/1.png') },
+    { name: '2', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/2.png') },
+    { name: '3', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/3.png') },
+    { name: '4', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/4.png') },
+    { name: '5', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/5.png') },
+    { name: '6', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/6.png') },
+    { name: '7', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/7.png') },
+    { name: '8', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/8.png') },
+    { name: '9', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/9.png') },
+    { name: '10', uri: require('../assets/images/Stock-Images/Numbers/Numbers 0-9 (blue)/10.png') },
+    // Numbers 1-100
+    { name: '1', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/1.png') },
+    { name: '2', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/2.png') },
+    { name: '3', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/3.png') },
+    { name: '4', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/4.png') },
+    { name: '5', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/5.png') },
+    { name: '6', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/6.png') },
+    { name: '7', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/7.png') },
+    { name: '8', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/8.png') },
+    { name: '9', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/9.png') },
+    { name: '10', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/10.png') },
+    { name: '11', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/11.png') },
+    { name: '12', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/12.png') },
+    { name: '13', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/13.png') },
+    { name: '14', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/14.png') },
+    { name: '15', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/15.png') },
+    { name: '16', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/16.png') },
+    { name: '17', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/17.png') },
+    { name: '18', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/18.png') },
+    { name: '19', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/19.png') },
+    { name: '20', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/20.png') },
+    { name: '21', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/21.png') },
+    { name: '22', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/22.png') },
+    { name: '23', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/23.png') },
+    { name: '24', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/24.png') },
+    { name: '25', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/25.png') },
+    { name: '26', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/26.png') },
+    { name: '27', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/27.png') },
+    { name: '28', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/28.png') },
+    { name: '29', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/29.png') },
+    { name: '30', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/30.png') },
+    { name: '31', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/31.png') },
+    { name: '32', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/32.png') },
+    { name: '33', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/33.png') },
+    { name: '34', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/34.png') },
+    { name: '35', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/35.png') },
+    { name: '36', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/36.png') },
+    { name: '37', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/37.png') },
+    { name: '38', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/38.png') },
+    { name: '39', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/39.png') },
+    { name: '40', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/40.png') },
+    { name: '41', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/41.png') },
+    { name: '42', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/42.png') },
+    { name: '43', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/43.png') },
+    { name: '44', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/44.png') },
+    { name: '45', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/45.png') },
+    { name: '46', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/46.png') },
+    { name: '47', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/47.png') },
+    { name: '48', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/48.png') },
+    { name: '49', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/49.png') },
+    { name: '50', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/50.png') },
+    { name: '51', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/51.png') },
+    { name: '52', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/52.png') },
+    { name: '53', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/53.png') },
+    { name: '54', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/54.png') },
+    { name: '55', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/55.png') },
+    { name: '56', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/56.png') },
+    { name: '57', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/57.png') },
+    { name: '58', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/58.png') },
+    { name: '59', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/59.png') },
+    { name: '60', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/60.png') },
+    { name: '61', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/61.png') },
+    { name: '62', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/62.png') },
+    { name: '63', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/63.png') },
+    { name: '64', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/64.png') },
+    { name: '65', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/65.png') },
+    { name: '66', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/66.png') },
+    { name: '67', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/67.png') },
+    { name: '68', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/68.png') },
+    { name: '69', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/69.png') },
+    { name: '70', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/70.png') },
+    { name: '71', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/71.png') },
+    { name: '72', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/72.png') },
+    { name: '73', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/73.png') },
+    { name: '74', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/74.png') },
+    { name: '75', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/75.png') },
+    { name: '76', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/76.png') },
+    { name: '77', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/77.png') },
+    { name: '78', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/78.png') },
+    { name: '79', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/79.png') },
+    { name: '80', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/80.png') },
+    { name: '81', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/81.png') },
+    { name: '82', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/82.png') },
+    { name: '83', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/83.png') },
+    { name: '84', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/84.png') },
+    { name: '85', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/85.png') },
+    { name: '86', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/86.png') },
+    { name: '87', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/87.png') },
+    { name: '88', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/88.png') },
+    { name: '89', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/89.png') },
+    { name: '90', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/90.png') },
+    { name: '91', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/91.png') },
+    { name: '92', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/92.png') },
+    { name: '93', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/93.png') },
+    { name: '94', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/94.png') },
+    { name: '95', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/95.png') },
+    { name: '96', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/96.png') },
+    { name: '97', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/97.png') },
+    { name: '98', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/98.png') },
+    { name: '99', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/99.png') },
+    { name: '100', uri: require('../assets/images/Stock-Images/Numbers/Numbers 1-100/100.png') },
+  ],
+  'Patterns': [
+    { name: '1 Purple 3 Blue', uri: require('../assets/images/Stock-Images/Patterns/1 purple 3 blue.png') },
+    { name: '2 Boy 2 Girl', uri: require('../assets/images/Stock-Images/Patterns/2 boy 2 girl.png') },
+    { name: '2 Yellow 1 Orange', uri: require('../assets/images/Stock-Images/Patterns/2 yellow 1 orange.png') },
+    { name: '3 Boy 3 Girl', uri: require('../assets/images/Stock-Images/Patterns/3 boy 3 girl.png') },
+    { name: '3 Shapes', uri: require('../assets/images/Stock-Images/Patterns/3 shapes.png') },
+    { name: '647', uri: require('../assets/images/Stock-Images/Patterns/647.png') },
+    { name: 'Blue Pink', uri: require('../assets/images/Stock-Images/Patterns/blue pink.png') },
+    { name: 'Boy Girl', uri: require('../assets/images/Stock-Images/Patterns/boy girl.png') },
+    { name: 'Girl Boy', uri: require('../assets/images/Stock-Images/Patterns/girl boy.png') },
+    { name: 'Heart Star', uri: require('../assets/images/Stock-Images/Patterns/heart star.png') },
+    { name: 'Star Card Smile', uri: require('../assets/images/Stock-Images/Patterns/star card smile.png') },
+    { name: 'Up Down', uri: require('../assets/images/Stock-Images/Patterns/up down.png') },
   ],
   'School Supplies': [
-    { name: 'Abacus', uri: require('../assets/images/School Supplies/abacus.png') },
-    { name: 'Bag', uri: require('../assets/images/School Supplies/bag.png') },
-    { name: 'Blue Scissors', uri: require('../assets/images/School Supplies/blue scissors.png') },
-    { name: 'Board', uri: require('../assets/images/School Supplies/board.png') },
-    { name: 'Brushes', uri: require('../assets/images/School Supplies/brushes.png') },
-    { name: 'Clip', uri: require('../assets/images/School Supplies/clip.png') },
-    { name: 'Crayon', uri: require('../assets/images/School Supplies/crayon.png') },
-    { name: 'Crayons', uri: require('../assets/images/School Supplies/crayons.png') },
-    { name: 'Eraser', uri: require('../assets/images/School Supplies/eraser.png') },
-    { name: 'Globe', uri: require('../assets/images/School Supplies/globe.png') },
-    { name: 'Glue', uri: require('../assets/images/School Supplies/glue.png') },
-    { name: 'Mid Thick Book', uri: require('../assets/images/School Supplies/mid thick book.png') },
-    { name: 'Notebook 1', uri: require('../assets/images/School Supplies/notebook 1.png') },
-    { name: 'Notebook 2', uri: require('../assets/images/School Supplies/notebook 2.png') },
-    { name: 'Paint Brush', uri: require('../assets/images/School Supplies/paint brush.png') },
-    { name: 'Paper', uri: require('../assets/images/School Supplies/paper.png') },
-    { name: 'Pencil Case', uri: require('../assets/images/School Supplies/pencil case.png') },
-    { name: 'Pencil', uri: require('../assets/images/School Supplies/pencil.png') },
-    { name: 'Red Scissors', uri: require('../assets/images/School Supplies/red scissors.png') },
-    { name: 'Ruler 1', uri: require('../assets/images/School Supplies/ruler 1.png') },
-    { name: 'Ruler 2', uri: require('../assets/images/School Supplies/ruler 2.png') },
-    { name: 'Sharpener', uri: require('../assets/images/School Supplies/sharpener.png') },
-    { name: 'Stack Books', uri: require('../assets/images/School Supplies/stack books.png') },
-    { name: 'Stapler', uri: require('../assets/images/School Supplies/stapler.png') },
-    { name: 'Thickest Book', uri: require('../assets/images/School Supplies/thickest book.png') },
-    { name: 'Thin Book', uri: require('../assets/images/School Supplies/thin book.png') },
+    { name: '4 Brushes', uri: require('../assets/images/Stock-Images/School Supplies/4 brushes.png') },
+    { name: 'Abacus', uri: require('../assets/images/Stock-Images/School Supplies/abacus.png') },
+    { name: 'Bag', uri: require('../assets/images/Stock-Images/School Supplies/bag.png') },
+    { name: 'Board', uri: require('../assets/images/Stock-Images/School Supplies/board.png') },
+    { name: 'Dilaw Na Ruler', uri: require('../assets/images/Stock-Images/School Supplies/dilaw na ruler.png') },
+    { name: 'Globe', uri: require('../assets/images/Stock-Images/School Supplies/globe.png') },
+    { name: 'Glue', uri: require('../assets/images/Stock-Images/School Supplies/glue.png') },
+    { name: 'Gunting', uri: require('../assets/images/Stock-Images/School Supplies/gunting.png') },
+    { name: 'Isang Crayola', uri: require('../assets/images/Stock-Images/School Supplies/Isang crayola.png') },
+    { name: 'Lapis', uri: require('../assets/images/Stock-Images/School Supplies/Lapis.png') },
+    { name: 'Mid Thick Book', uri: require('../assets/images/Stock-Images/School Supplies/mid thick book.png') },
+    { name: 'Notebook', uri: require('../assets/images/Stock-Images/School Supplies/Notebook.png') },
+    { name: 'Paint Brush', uri: require('../assets/images/Stock-Images/School Supplies/paint brush.png') },
+    { name: 'Pambura', uri: require('../assets/images/Stock-Images/School Supplies/Pambura.png') },
+    { name: 'Pantasa', uri: require('../assets/images/Stock-Images/School Supplies/Pantasa.png') },
+    { name: 'Paper', uri: require('../assets/images/Stock-Images/School Supplies/papel.png') },
+    { name: 'Paper Clip', uri: require('../assets/images/Stock-Images/School Supplies/paper clip.png') },
+    { name: 'Pencil Case', uri: require('../assets/images/Stock-Images/School Supplies/pencil case.png') },
+    { name: 'Ruler', uri: require('../assets/images/Stock-Images/School Supplies/ruler.png') },
+    { name: 'Stapler', uri: require('../assets/images/Stock-Images/School Supplies/stapler.png') },
+    { name: 'Tatlong Crayola', uri: require('../assets/images/Stock-Images/School Supplies/Tatlong Crayola.png') },
+    { name: 'Tatlong Patong Na Libro', uri: require('../assets/images/Stock-Images/School Supplies/tatlong patong na libro.png') },
+    { name: 'Thickest Book', uri: require('../assets/images/Stock-Images/School Supplies/thickest book.png') },
+    { name: 'Thin Book', uri: require('../assets/images/Stock-Images/School Supplies/thin book.png') },
+    { name: 'Yellow Notebook', uri: require('../assets/images/Stock-Images/School Supplies/yellow notebook.png') },
   ],
   'Shapes': [
-    { name: 'Circle', uri: require('../assets/images/Shapes/circle.png') },
-    { name: 'Decagon', uri: require('../assets/images/Shapes/decagon.png') },
-    { name: 'Heptagon', uri: require('../assets/images/Shapes/heptagon.png') },
-    { name: 'Hexagon', uri: require('../assets/images/Shapes/hexagon.png') },
-    { name: 'Nonagon', uri: require('../assets/images/Shapes/nonagon.png') },
-    { name: 'Octagon', uri: require('../assets/images/Shapes/octagon.png') },
-    { name: 'Oval', uri: require('../assets/images/Shapes/oval.png') },
-    { name: 'Pentagon', uri: require('../assets/images/Shapes/pentagon.png') },
-    { name: 'Rectangle', uri: require('../assets/images/Shapes/rectangle.png') },
-    { name: 'Square', uri: require('../assets/images/Shapes/square.png') },
-    { name: 'Triangle', uri: require('../assets/images/Shapes/triangle.png') },
+    { name: '2 Right Angle with Rectangle', uri: require('../assets/images/Stock-Images/Shapes/2 right angle with rectangle.png') },
+    { name: '2 Right Angles with Tall Rectangle', uri: require('../assets/images/Stock-Images/Shapes/2 right angles with tall rectangle.png') },
+    { name: 'Circle', uri: require('../assets/images/Stock-Images/Shapes/circle.png') },
+    { name: 'Decagon', uri: require('../assets/images/Stock-Images/Shapes/decagon.png') },
+    { name: 'Diagonal Bar', uri: require('../assets/images/Stock-Images/Shapes/diagonal bar.png') },
+    { name: 'Diamond', uri: require('../assets/images/Stock-Images/Shapes/diamond.png') },
+    { name: 'Heart', uri: require('../assets/images/Stock-Images/Shapes/heart.png') },
+    { name: 'Heptagon', uri: require('../assets/images/Stock-Images/Shapes/heptagon.png') },
+    { name: 'Hexagon', uri: require('../assets/images/Stock-Images/Shapes/hexagon.png') },
+    { name: 'Inverted Triangle', uri: require('../assets/images/Stock-Images/Shapes/inverted triangle.png') },
+    { name: 'Medium Rectangle', uri: require('../assets/images/Stock-Images/Shapes/medium rectangle.png') },
+    { name: 'Medium Square', uri: require('../assets/images/Stock-Images/Shapes/medium square.png') },
+    { name: 'Nonagon', uri: require('../assets/images/Stock-Images/Shapes/nonagon.png') },
+    { name: 'Octagon', uri: require('../assets/images/Stock-Images/Shapes/octagon.png') },
+    { name: 'Oval', uri: require('../assets/images/Stock-Images/Shapes/oval.png') },
+    { name: 'Pentagon', uri: require('../assets/images/Stock-Images/Shapes/pentagon.png') },
+    { name: 'Rectangle', uri: require('../assets/images/Stock-Images/Shapes/rectangle.png') },
+    { name: 'Rectangle Door', uri: require('../assets/images/Stock-Images/Shapes/rectangle door.png') },
+    { name: 'Rectangle Flag', uri: require('../assets/images/Stock-Images/Shapes/rectangle flag.png') },
+    { name: 'Rectangle Picture Frame', uri: require('../assets/images/Stock-Images/Shapes/rectangle picture frame.png') },
+    { name: 'Rectangle Shoe Box', uri: require('../assets/images/Stock-Images/Shapes/rectangle shoe box.png') },
+    { name: 'Right Angle Triangle', uri: require('../assets/images/Stock-Images/Shapes/right angle triangle.png') },
+    { name: 'Right Angles', uri: require('../assets/images/Stock-Images/Shapes/right angles.png') },
+    { name: 'Small', uri: require('../assets/images/Stock-Images/Shapes/small.png') },
+    { name: 'Small Inverted Triangle', uri: require('../assets/images/Stock-Images/Shapes/small inverted triangle.png') },
+    { name: 'Small Square', uri: require('../assets/images/Stock-Images/Shapes/small square.png') },
+    { name: 'Small Triangle', uri: require('../assets/images/Stock-Images/Shapes/small triangle.png') },
+    { name: 'Square', uri: require('../assets/images/Stock-Images/Shapes/square.png') },
+    { name: 'Square Gift Box', uri: require('../assets/images/Stock-Images/Shapes/square gift box.png') },
+    { name: 'Star Shaped Lantern', uri: require('../assets/images/Stock-Images/Shapes/star shaped lantern.png') },
+    { name: 'Tall Rectangle', uri: require('../assets/images/Stock-Images/Shapes/tall rectangle.png') },
+    { name: 'Thin Rectangle', uri: require('../assets/images/Stock-Images/Shapes/thin rectangle.png') },
+    { name: 'Triangle', uri: require('../assets/images/Stock-Images/Shapes/triangle.png') },
+    { name: 'Triangle and 2 Squares', uri: require('../assets/images/Stock-Images/Shapes/triangle and 2 squares.png') },
+    { name: 'Triangle Banderitas', uri: require('../assets/images/Stock-Images/Shapes/triangle banderitas.png') },
+    { name: 'Triangle Flag', uri: require('../assets/images/Stock-Images/Shapes/triangle flag.png') },
+    { name: 'Triangle Road Sign', uri: require('../assets/images/Stock-Images/Shapes/triangle road sign.png') },
+    { name: 'Trapezoid', uri: require('../assets/images/Stock-Images/Shapes/trapezoid.png') },
+  ],
+  'Time and Position': [
+    { name: '00:00', uri: require('../assets/images/Stock-Images/Time and Position/00_00.png') },
+    { name: '1:00', uri: require('../assets/images/Stock-Images/Time and Position/1_00.png') },
+    { name: '1:15', uri: require('../assets/images/Stock-Images/Time and Position/1_15.png') },
+    { name: '1:30', uri: require('../assets/images/Stock-Images/Time and Position/1_30.png') },
+    { name: '1:45', uri: require('../assets/images/Stock-Images/Time and Position/1_45.png') },
+    { name: '10:00', uri: require('../assets/images/Stock-Images/Time and Position/10_00.png') },
+    { name: '10:15', uri: require('../assets/images/Stock-Images/Time and Position/10_15.png') },
+    { name: '10:30', uri: require('../assets/images/Stock-Images/Time and Position/10_30.png') },
+    { name: '10:45', uri: require('../assets/images/Stock-Images/Time and Position/10_45.png') },
+    { name: '11:00', uri: require('../assets/images/Stock-Images/Time and Position/11_00.png') },
+    { name: '11:15', uri: require('../assets/images/Stock-Images/Time and Position/11_15.png') },
+    { name: '11:30', uri: require('../assets/images/Stock-Images/Time and Position/11_30.png') },
+    { name: '11:45', uri: require('../assets/images/Stock-Images/Time and Position/11_45.png') },
+    { name: '12:00', uri: require('../assets/images/Stock-Images/Time and Position/12_00.png') },
+    { name: '12:15', uri: require('../assets/images/Stock-Images/Time and Position/12_15.png') },
+    { name: '12:30', uri: require('../assets/images/Stock-Images/Time and Position/12_30.png') },
+    { name: '12:45', uri: require('../assets/images/Stock-Images/Time and Position/12_45.png') },
+    { name: '2:00', uri: require('../assets/images/Stock-Images/Time and Position/2_00.png') },
+    { name: '2:15', uri: require('../assets/images/Stock-Images/Time and Position/2_15.png') },
+    { name: '2:30', uri: require('../assets/images/Stock-Images/Time and Position/2_30.png') },
+    { name: '2:45', uri: require('../assets/images/Stock-Images/Time and Position/2_45.png') },
+    { name: '27', uri: require('../assets/images/Stock-Images/Time and Position/27.png') },
+    { name: '3:00', uri: require('../assets/images/Stock-Images/Time and Position/3_00.png') },
+    { name: '3:30', uri: require('../assets/images/Stock-Images/Time and Position/3_30.png') },
+    { name: '3:45', uri: require('../assets/images/Stock-Images/Time and Position/3_45.png') },
+    { name: '4:00', uri: require('../assets/images/Stock-Images/Time and Position/4_00.png') },
+    { name: '4:15', uri: require('../assets/images/Stock-Images/Time and Position/4_15.png') },
+    { name: '4:30', uri: require('../assets/images/Stock-Images/Time and Position/4_30.png') },
+    { name: '4:45', uri: require('../assets/images/Stock-Images/Time and Position/4_45.png') },
+    { name: '5:00', uri: require('../assets/images/Stock-Images/Time and Position/5_00.png') },
+    { name: '5:15', uri: require('../assets/images/Stock-Images/Time and Position/5_15.png') },
+    { name: '5:30', uri: require('../assets/images/Stock-Images/Time and Position/5_30.png') },
+    { name: '52', uri: require('../assets/images/Stock-Images/Time and Position/52.png') },
+    { name: '6:00 (2)', uri: require('../assets/images/Stock-Images/Time and Position/6_00 (2).png') },
+    { name: '6:00', uri: require('../assets/images/Stock-Images/Time and Position/6_00.png') },
+    { name: '6:15', uri: require('../assets/images/Stock-Images/Time and Position/6_15.png') },
+    { name: '6:30', uri: require('../assets/images/Stock-Images/Time and Position/6_30.png') },
+    { name: '6:45', uri: require('../assets/images/Stock-Images/Time and Position/6_45.png') },
+    { name: '7:00', uri: require('../assets/images/Stock-Images/Time and Position/7_00.png') },
+    { name: '7:15', uri: require('../assets/images/Stock-Images/Time and Position/7_15.png') },
+    { name: '7:30', uri: require('../assets/images/Stock-Images/Time and Position/7_30.png') },
+    { name: '7:45', uri: require('../assets/images/Stock-Images/Time and Position/7_45.png') },
+    { name: '8:00', uri: require('../assets/images/Stock-Images/Time and Position/8_00.png') },
+    { name: '8:15', uri: require('../assets/images/Stock-Images/Time and Position/8_15.png') },
+    { name: '8:30', uri: require('../assets/images/Stock-Images/Time and Position/8_30.png') },
+    { name: '8:45', uri: require('../assets/images/Stock-Images/Time and Position/8_45.png') },
+    { name: '9:00', uri: require('../assets/images/Stock-Images/Time and Position/9_00.png') },
+    { name: '9:15', uri: require('../assets/images/Stock-Images/Time and Position/9_15.png') },
+    { name: '9:30', uri: require('../assets/images/Stock-Images/Time and Position/9_30.png') },
+    { name: '9:45', uri: require('../assets/images/Stock-Images/Time and Position/9_45.png') },
+    { name: 'Arm Circle Clockwise', uri: require('../assets/images/Stock-Images/Time and Position/arm circle clockwise.png') },
+    { name: 'Clockwise', uri: require('../assets/images/Stock-Images/Time and Position/clockwise.png') },
+    { name: 'Half Turn', uri: require('../assets/images/Stock-Images/Time and Position/half-turn.png') },
+    { name: 'Hip Clockwise Exercise', uri: require('../assets/images/Stock-Images/Time and Position/hip clockwise exercise.png') },
+    { name: 'Home', uri: require('../assets/images/Stock-Images/Time and Position/home.png') },
+    { name: 'Kid', uri: require('../assets/images/Stock-Images/Time and Position/kid.png') },
+    { name: 'Knee Clockwise Exercise', uri: require('../assets/images/Stock-Images/Time and Position/knee clockwise exercise.png') },
+    { name: 'Park', uri: require('../assets/images/Stock-Images/Time and Position/park.png') },
+    { name: 'Quarter Turn', uri: require('../assets/images/Stock-Images/Time and Position/quarter-turn.png') },
   ],
   'Toys': [
-    { name: 'Airplane', uri: require('../assets/images/Toys/airplane.png') },
-    { name: 'Ball', uri: require('../assets/images/Toys/ball.png') },
-    { name: 'Beach Ball', uri: require('../assets/images/Toys/beach ball.png') },
-    { name: 'Bear', uri: require('../assets/images/Toys/bear.png') },
-    { name: 'Bike', uri: require('../assets/images/Toys/bike.png') },
-    { name: 'Boat', uri: require('../assets/images/Toys/boat.png') },
-    { name: 'Car', uri: require('../assets/images/Toys/car.png') },
-    { name: 'Dice', uri: require('../assets/images/Toys/dice.png') },
-    { name: 'Dino', uri: require('../assets/images/Toys/dino.png') },
-    { name: 'Drums', uri: require('../assets/images/Toys/drums.png') },
-    { name: 'Excavator', uri: require('../assets/images/Toys/excavator.png') },
-    { name: 'House', uri: require('../assets/images/Toys/house.png') },
-    { name: 'Joystick', uri: require('../assets/images/Toys/joystick.png') },
-    { name: 'Kite', uri: require('../assets/images/Toys/kite.png') },
-    { name: 'Lego', uri: require('../assets/images/Toys/lego.png') },
-    { name: 'Magnet', uri: require('../assets/images/Toys/magnet.png') },
-    { name: 'Paper Boat', uri: require('../assets/images/Toys/paper boat.png') },
-    { name: 'Puzzle', uri: require('../assets/images/Toys/puzzle.png') },
-    { name: 'Racket', uri: require('../assets/images/Toys/racket.png') },
-    { name: 'Robot', uri: require('../assets/images/Toys/robot.png') },
-    { name: 'Rubik', uri: require('../assets/images/Toys/rubik.png') },
-    { name: 'Stack Ring', uri: require('../assets/images/Toys/stack ring.png') },
-    { name: 'Train', uri: require('../assets/images/Toys/train.png') },
-    { name: 'Xylophone', uri: require('../assets/images/Toys/xylophone.png') },
-    { name: 'Yoyo', uri: require('../assets/images/Toys/yoyo.png') },
+    { name: 'Airplane', uri: require('../assets/images/Stock-Images/Toys/airplane.png') },
+    { name: 'Ball', uri: require('../assets/images/Stock-Images/Toys/ball.png') },
+    { name: 'Beach Ball', uri: require('../assets/images/Stock-Images/Toys/beach ball.png') },
+    { name: 'Bear', uri: require('../assets/images/Stock-Images/Toys/bear.png') },
+    { name: 'Bike', uri: require('../assets/images/Stock-Images/Toys/bike.png') },
+    { name: 'Boat', uri: require('../assets/images/Stock-Images/Toys/boat.png') },
+    { name: 'Car', uri: require('../assets/images/Stock-Images/Toys/car.png') },
+    { name: 'Dice', uri: require('../assets/images/Stock-Images/Toys/dice.png') },
+    { name: 'Dino', uri: require('../assets/images/Stock-Images/Toys/dino.png') },
+    { name: 'Drums', uri: require('../assets/images/Stock-Images/Toys/drums.png') },
+    { name: 'Excavator', uri: require('../assets/images/Stock-Images/Toys/excavator.png') },
+    { name: 'House', uri: require('../assets/images/Stock-Images/Toys/house.png') },
+    { name: 'Joystick', uri: require('../assets/images/Stock-Images/Toys/joystick.png') },
+    { name: 'Kite', uri: require('../assets/images/Stock-Images/Toys/kite.png') },
+    { name: 'Lego', uri: require('../assets/images/Stock-Images/Toys/lego.png') },
+    { name: 'Magnet', uri: require('../assets/images/Stock-Images/Toys/magnet.png') },
+    { name: 'Paper Boat', uri: require('../assets/images/Stock-Images/Toys/paper boat.png') },
+    { name: 'Puzzle', uri: require('../assets/images/Stock-Images/Toys/puzzle.png') },
+    { name: 'Racket', uri: require('../assets/images/Stock-Images/Toys/racket.png') },
+    { name: 'Robot', uri: require('../assets/images/Stock-Images/Toys/robot.png') },
+    { name: 'Rubik', uri: require('../assets/images/Stock-Images/Toys/rubik.png') },
+    { name: 'Stack Ring', uri: require('../assets/images/Stock-Images/Toys/stack ring.png') },
+    { name: 'Train', uri: require('../assets/images/Stock-Images/Toys/train.png') },
+    { name: 'Xylophone', uri: require('../assets/images/Stock-Images/Toys/xylophone.png') },
+    { name: 'Yo-yo', uri: require('../assets/images/Stock-Images/Toys/yoyo.png') },
   ],
 };
 
@@ -261,6 +830,72 @@ export default function TeacherDashboard() {
   const [showAnnModal, setShowAnnModal] = useState(false);
   const [annTitle, setAnnTitle] = useState('');
   const [annMessage, setAnnMessage] = useState('');
+
+  // Custom Alert state
+  const [alertVisible, setAlertVisible] = useState(false);
+  const [alertTitle, setAlertTitle] = useState('');
+  const [alertMessage, setAlertMessage] = useState('');
+  const [alertIcon, setAlertIcon] = useState<'success' | 'error' | 'warning' | 'info' | undefined>(undefined);
+  const [alertButtons, setAlertButtons] = useState<Array<{
+    text: string;
+    onPress?: () => void;
+    style?: 'default' | 'cancel' | 'destructive';
+  }>>([]);
+  const alertQueueRef = useRef<Array<{
+    title: string;
+    message: string;
+    icon?: 'success' | 'error' | 'warning' | 'info';
+    buttons?: Array<{
+      text: string;
+      onPress?: () => void;
+      style?: 'default' | 'cancel' | 'destructive';
+    }>;
+  }>>([]);
+  const isShowingAlertRef = useRef(false);
+
+  // Custom Alert helper function
+  const showAlert = (
+    title: string, 
+    message: string, 
+    buttons?: Array<{
+      text: string;
+      onPress?: () => void;
+      style?: 'default' | 'cancel' | 'destructive';
+    }>,
+    icon?: 'success' | 'error' | 'warning' | 'info'
+  ) => {
+    const alertData = { title, message, buttons, icon };
+    
+    if (isShowingAlertRef.current) {
+      // If an alert is already showing, add to queue
+      alertQueueRef.current.push(alertData);
+      return;
+    }
+    
+    // Show the alert immediately
+    isShowingAlertRef.current = true;
+    setAlertTitle(title);
+    setAlertMessage(message);
+    setAlertButtons(buttons || []);
+    setAlertIcon(icon);
+    setAlertVisible(true);
+  };
+
+  // Function to process the next alert in queue
+  const processNextAlert = () => {
+    if (alertQueueRef.current.length > 0) {
+      const nextAlert = alertQueueRef.current.shift();
+      if (nextAlert) {
+        setAlertTitle(nextAlert.title);
+        setAlertMessage(nextAlert.message);
+        setAlertButtons(nextAlert.buttons || []);
+        setAlertIcon(nextAlert.icon);
+        setAlertVisible(true);
+      }
+    } else {
+      isShowingAlertRef.current = false;
+    }
+  };
   const [annAllClasses, setAnnAllClasses] = useState(true);
   const [annSelectedClassIds, setAnnSelectedClassIds] = useState<string[]>([]);
   const [teacherClasses, setTeacherClasses] = useState<{
@@ -295,7 +930,12 @@ export default function TeacherDashboard() {
   const [studentsByClass, setStudentsByClass] = useState<Record<string, any[]>>({});
   const [parentsById, setParentsById] = useState<Record<string, any>>({});
   const [assignmentsByClass, setAssignmentsByClass] = useState<Record<string, { total: number; completed: number; pending: number }>>({});
-  const [classAnalytics, setClassAnalytics] = useState<Record<string, { performance?: number; change?: number }>>({});
+  const [classAnalytics, setClassAnalytics] = useState<Record<string, { 
+    performance?: number; 
+    change?: number; 
+    averageAttempts?: number; 
+    averageTime?: number; 
+  }>>({});
   const [exerciseResults, setExerciseResults] = useState<Record<string, any[]>>({});
 
   // Auth state
@@ -343,15 +983,25 @@ export default function TeacherDashboard() {
   // Category options
   const categoryOptions = [
     'All',
+    'Whole Numbers',
+    'Ordinal Numbers',
     'Addition',
     'Subtraction', 
-    'Multiplication',
-    'Division',
+    'Place Value',
+    'Counting',
+    'Patterns',
+    'Fractions',
+    'Money',
     'Word Problems',
     'Geometry',
-    'Fractions',
-    'Measurement',
-    'Time & Money'
+    'Length & Distance',
+    'Movement & Turns',
+    'Time',
+    'Days, Weeks, Months, Years',
+    'Data & Pictographs',
+    'Data Collection',
+    'Data Interpretation',
+    'Custom'
   ];
 
   // Helper function to calculate time remaining until deadline
@@ -526,11 +1176,13 @@ export default function TeacherDashboard() {
   const {
     myExercises,
     publicExercises,
+    allExercises,
     assignedExercises,
     loading: exercisesLoading,
     error: exercisesError,
     loadMyExercises,
     loadPublicExercises,
+    loadAllExercises,
     loadAssignedExercises,
     copyExercise,
     deleteExercise,
@@ -556,11 +1208,10 @@ export default function TeacherDashboard() {
   // Load exercises when exercises tab becomes active
   useEffect(() => {
     if (activeTab === 'exercises' && currentUserId) {
-      if (exercisesTab === 'my') {
-        loadMyExercises();
-      } else if (exercisesTab === 'public') {
-        loadPublicExercises();
-      } else if (exercisesTab === 'assigned') {
+      // Load all exercises once, then filter as needed
+      loadAllExercises();
+      
+      if (exercisesTab === 'assigned') {
         loadAssignedExercises();
         // Also load assignments to get exercise results
         if (activeClasses.length > 0) {
@@ -756,19 +1407,56 @@ export default function TeacherDashboard() {
 
   const loadClassAnalytics = async (classIds: string[]) => {
     try {
-      const { data } = await readData('/classAnalytics');
+      // Get class analytics data
+      const { data: analyticsData } = await readData('/classAnalytics');
+      const { data: exerciseResults } = await readData('/exerciseResults');
+      
       const map: Record<string, any> = {};
-      Object.entries(data || {}).forEach(([cid, v]: any) => {
-        if (classIds.includes(cid)) map[cid] = v || {};
-      });
+      
+      // Process each class
+      for (const classId of classIds) {
+        const classAnalytics = analyticsData?.[classId] || {};
+        
+        // Calculate average attempts and time from exercise results
+        if (exerciseResults) {
+          const classResults = Object.values(exerciseResults).filter((result: any) => 
+            result.classId === classId
+          );
+          
+          if (classResults.length > 0) {
+            let totalAttempts = 0;
+            let totalTime = 0;
+            let totalQuestions = 0;
+            
+            classResults.forEach((result: any) => {
+              if (result.questionResults) {
+                result.questionResults.forEach((q: any) => {
+                  totalAttempts += q.attempts || 1;
+                  totalTime += q.timeSpent || 0;
+                  totalQuestions++;
+                });
+              }
+            });
+            
+            if (totalQuestions > 0) {
+              classAnalytics.averageAttempts = totalAttempts / totalQuestions;
+              classAnalytics.averageTime = totalTime / classResults.length; // Average time per exercise
+            }
+          }
+        }
+        
+        map[classId] = classAnalytics;
+      }
+      
       setClassAnalytics(map);
-    } catch {
+    } catch (error) {
+      console.error('Error loading class analytics:', error);
       setClassAnalytics({});
     }
   };
 
   const handleDeleteExercise = async (exerciseId: string) => {
-    Alert.alert(
+    showAlert(
       'Delete Exercise',
       'Are you sure you want to delete this exercise? This action cannot be undone.',
       [
@@ -779,13 +1467,14 @@ export default function TeacherDashboard() {
           onPress: async () => {
             try {
               await deleteExercise(exerciseId);
-              Alert.alert('Success', 'Exercise deleted successfully');
+              showAlert('Success', 'Exercise deleted successfully', undefined, 'success');
             } catch (error) {
-              Alert.alert('Error', 'Failed to delete exercise');
+              showAlert('Error', 'Failed to delete exercise', undefined, 'error');
             }
           },
         },
-      ]
+      ],
+      'warning'
     );
   };
 
@@ -793,9 +1482,54 @@ export default function TeacherDashboard() {
     try {
       const teacherName = teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher';
       await copyExercise(exercise, currentUserId!, teacherName);
-      Alert.alert('Success', 'Exercise copied to My Exercises');
+      showAlert('Success', 'Exercise copied to My Exercises', undefined, 'success');
     } catch (error) {
-      Alert.alert('Error', 'Failed to copy exercise');
+      showAlert('Error', 'Failed to copy exercise', undefined, 'error');
+    }
+  };
+
+  const handleEditPublicExercise = async (exercise: any) => {
+    try {
+      // Navigate to CreateExercise with the exercise ID for editing
+      router.push({
+        pathname: '../CreateExercise',
+        params: {
+          edit: exercise.id
+        }
+      });
+    } catch (error) {
+      showAlert('Error', 'Failed to open exercise for editing', undefined, 'error');
+    }
+  };
+
+  const handleDeletePublicExercise = async (exercise: any) => {
+    try {
+      // Delete the exercise from the main exercises collection
+      const { error } = await deleteData(`/exercises/${exercise.id}`);
+      if (error) {
+        showAlert('Error', 'Failed to delete exercise', undefined, 'error');
+        return;
+      }
+      
+      // Find and delete all private copies that reference this exercise
+      const { data: allExercisesData } = await readData('/exercises');
+      if (allExercisesData) {
+        const exercisesToDelete = Object.entries(allExercisesData)
+          .filter(([_, ex]: [string, any]) => ex.originalExerciseId === exercise.id)
+          .map(([id, _]) => id);
+        
+        // Delete all private copies
+        for (const exerciseId of exercisesToDelete) {
+          await deleteData(`/exercises/${exerciseId}`);
+        }
+      }
+      
+      showAlert('Success', 'Exercise and all copies deleted successfully', undefined, 'success');
+      
+      // Refresh all exercises
+      loadAllExercises();
+    } catch (error) {
+      showAlert('Error', 'Failed to delete exercise', undefined, 'error');
     }
   };
 
@@ -809,9 +1543,9 @@ export default function TeacherDashboard() {
         acceptLateSubmissions, 
         'open' // Default to open status
       );
-      Alert.alert('Success', 'Exercise assigned successfully');
+      showAlert('Success', 'Exercise assigned successfully', undefined, 'success');
     } catch (error) {
-      Alert.alert('Error', 'Failed to assign exercise');
+      showAlert('Error', 'Failed to assign exercise', undefined, 'error');
     }
   };
 
@@ -844,7 +1578,7 @@ export default function TeacherDashboard() {
       const newStatus = assignment.acceptingStatus === 'closed' ? 'open' : 'closed';
       const statusText = newStatus === 'closed' ? 'close' : 'reopen';
       
-      Alert.alert(
+      showAlert(
         `${statusText.charAt(0).toUpperCase() + statusText.slice(1)} Assignment`,
         `Are you sure you want to ${statusText} "${assignment.exercise?.title}" for ${assignment.className}?`,
         [
@@ -853,16 +1587,18 @@ export default function TeacherDashboard() {
             text: statusText.charAt(0).toUpperCase() + statusText.slice(1), 
             onPress: async () => {
               await updateAssignmentStatus(assignment.id, newStatus);
-              Alert.alert(
+              showAlert(
                 'Success', 
-                `Assignment ${newStatus === 'closed' ? 'closed' : 'reopened'} successfully`
+                `Assignment ${newStatus === 'closed' ? 'closed' : 'reopened'} successfully`,
+                undefined,
+                'success'
               );
             }
           }
         ]
       );
     } catch (error) {
-      Alert.alert('Error', 'Failed to update assignment status');
+      showAlert('Error', 'Failed to update assignment status', undefined, 'error');
     }
   };
 
@@ -876,7 +1612,7 @@ export default function TeacherDashboard() {
       setDeletingAssignment(null);
       // The useExercises hook will automatically refresh the list
     } catch (error) {
-      Alert.alert('Error', 'Failed to delete assignment');
+      showAlert('Error', 'Failed to delete assignment', undefined, 'error');
     } finally {
       setDeleteAssignmentLoading(false);
     }
@@ -917,12 +1653,12 @@ export default function TeacherDashboard() {
         setEditAcceptLateSubmissions(true);
         // Refresh the assigned exercises list
         await loadAssignedExercises();
-        Alert.alert('Success', 'Assignment updated successfully');
+        showAlert('Success', 'Assignment updated successfully', undefined, 'success');
       } else {
-        Alert.alert('Error', error || 'Failed to update assignment');
+        showAlert('Error', error || 'Failed to update assignment', undefined, 'error');
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to update assignment');
+      showAlert('Error', 'Failed to update assignment', undefined, 'error');
     } finally {
       setEditAssignmentLoading(false);
     }
@@ -1043,14 +1779,14 @@ export default function TeacherDashboard() {
       );
 
       if (!studentResult) {
-        Alert.alert('No Data', 'No performance data found for this student.');
+        showAlert('No Data', 'No performance data found for this student.', undefined, 'warning');
         return;
       }
 
       // Get exercise data
       const { data: exerciseData } = await readData(`/exercises/${exerciseId}`);
       if (!exerciseData) {
-        Alert.alert('Error', 'Exercise data not found.');
+        showAlert('Error', 'Exercise data not found.', undefined, 'error');
         return;
       }
 
@@ -1143,7 +1879,7 @@ export default function TeacherDashboard() {
 
     } catch (error) {
       console.error('Error loading student performance:', error);
-      Alert.alert('Error', 'Failed to load student performance data.');
+      showAlert('Error', 'Failed to load student performance data.', undefined, 'error');
     } finally {
       setLoadingStudentPerformance(false);
     }
@@ -1391,9 +2127,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
   const handleExportToExcel = async (exerciseTitle: string, results: any[], students: any[]) => {
     try {
-      // Create CSV data
-      const csvHeaders = ['#', 'Student', 'Attempts', 'Time (s)', 'Time (m:s)'];
-      const csvRows = results.map((result: any, idx: number) => {
+      // Prepare data for Excel
+      const excelData = results.map((result: any, idx: number) => {
         const student = students.find((s: any) => s.studentId === result.studentId);
         const studentNickname = student?.nickname || 'Unknown Student';
         
@@ -1406,87 +2141,75 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         const remainingSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
         const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${remainingSeconds}s` : `${totalTimeSeconds}s`;
         
-        return [
-          idx + 1,
-          studentNickname,
-          avgAttempts,
-          totalTimeSeconds,
-          timeDisplay
-        ];
+        return {
+          '#': idx + 1,
+          'Student': studentNickname,
+          'Avg Attempts': avgAttempts,
+          'Time (seconds)': totalTimeSeconds,
+          'Time (formatted)': timeDisplay,
+          'Completed At': result.completedAt ? new Date(result.completedAt).toLocaleString() : 'N/A'
+        };
       });
+
+      // Create a workbook
+      const wb = XLSX.utils.book_new();
       
-      // Create CSV content
-      const csvContent = [csvHeaders, ...csvRows]
-        .map(row => row.map(field => `"${field}"`).join(','))
-        .join('\n');
+      // Convert data to worksheet
+      const ws = XLSX.utils.json_to_sheet(excelData);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 5 },   // #
+        { wch: 20 },  // Student
+        { wch: 15 },  // Avg Attempts
+        { wch: 15 },  // Time (seconds)
+        { wch: 18 },  // Time (formatted)
+        { wch: 20 }   // Completed At
+      ];
+      
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(wb, ws, 'Results');
+      
+      // Generate Excel file as base64
+      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
       
       // Create filename
-      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_results.csv`;
+      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_results.xlsx`;
+      const fileUri = `${FileSystem.cacheDirectory}${filename}`;
       
-      // Create HTML table for better mobile compatibility
-      const htmlContent = `
-        <html>
-          <head>
-            <meta charset="utf-8">
-            <title>${exerciseTitle} Results</title>
-            <style>
-              body { font-family: Arial, sans-serif; margin: 20px; }
-              table { border-collapse: collapse; width: 100%; }
-              th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-              th { background-color: #f2f2f2; font-weight: bold; }
-              tr:nth-child(even) { background-color: #f9f9f9; }
-            </style>
-          </head>
-          <body>
-            <h2>${exerciseTitle} - Student Results</h2>
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Student</th>
-                  <th>Attempts</th>
-                  <th>Time (s)</th>
-                  <th>Time (m:s)</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${csvRows.map(row => `
-                  <tr>
-                    <td>${row[0]}</td>
-                    <td>${row[1]}</td>
-                    <td>${row[2]}</td>
-                    <td>${row[3]}</td>
-                    <td>${row[4]}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-            <br>
-            <p><strong>CSV Data:</strong></p>
-            <pre style="background-color: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">${csvContent}</pre>
-          </body>
-        </html>
-      `;
-      
-      // Save file
-      const { uri } = await Print.printToFileAsync({
-        html: htmlContent,
-        base64: false,
+      // Write file to device
+      await FileSystem.writeAsStringAsync(fileUri, wbout, {
+        encoding: 'base64',
       });
       
       // Share the file
       if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(uri, {
-          mimeType: 'text/html',
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
           dialogTitle: `Export ${exerciseTitle} Results`,
-          UTI: 'public.html'
+          UTI: 'com.microsoft.excel.xlsx'
         });
+        showAlert('Success', 'Excel file exported successfully!', undefined, 'success');
       } else {
-        Alert.alert('Success', `Results exported to ${filename}`);
+        showAlert('Success', `Results exported to ${filename}`, undefined, 'success');
       }
+      
+      // Clean up the file after a delay to allow sharing to complete
+      setTimeout(async () => {
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(fileUri);
+          if (fileInfo.exists) {
+            await FileSystem.deleteAsync(fileUri);
+            console.log('Temporary Excel file cleaned up');
+          }
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temporary Excel file:', cleanupError);
+        }
+      }, 5000);
+      
     } catch (error) {
       console.error('Export error:', error);
-      Alert.alert('Error', 'Failed to export results');
+      showAlert('Error', 'Failed to export results to Excel. Please try again.', undefined, 'error');
     }
   };
 
@@ -1535,10 +2258,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       if (sharingAvailable) {
         await Sharing.shareAsync(file.uri, { dialogTitle: `Export ${cls.name} Student List` });
       } else {
-        Alert.alert('Export Complete', `PDF saved to: ${file.uri}`);
+        showAlert('Export Complete', `PDF saved to: ${file.uri}`, undefined, 'success');
       }
     } catch (e) {
-      Alert.alert('Export Failed', 'Unable to export PDF.');
+      showAlert('Export Failed', 'Unable to export PDF.', undefined, 'error');
     }
   };
 
@@ -1556,7 +2279,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   };
 
   const handleCloseClass = (cls: { id: string; name: string }) => {
-    Alert.alert(
+    showAlert(
       'Close Class',
       `Are you sure you want to close "${cls.name}"? This will mark the class as inactive and lock all class files from being edited. You can still view it from the Class panel.`,
       [
@@ -1572,21 +2295,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 closedAt: new Date().toISOString(),
               });
               if (error) {
-                Alert.alert('Error', error || 'Failed to close class.');
+                showAlert('Error', error || 'Failed to close class.', undefined, 'error');
                 return;
               }
-              Alert.alert('Class Closed', 'The class has been marked as inactive.');
+              showAlert('Class Closed', 'The class has been marked as inactive.', undefined, 'success');
               if (currentUserId) {
                 await loadTeacherClasses(currentUserId);
               }
             } catch (e) {
-              Alert.alert('Error', 'Failed to close class.');
+              showAlert('Error', 'Failed to close class.', undefined, 'error');
             } finally {
               setClosingClassId(null);
             }
           },
         },
-      ]
+      ],
+      'warning'
     );
   };
 
@@ -1611,7 +2335,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
   const handleCreateStudent = async () => {
     if (!selectedClassForStudent) return;
-    if (!studentNickname.trim()) { Alert.alert('Error', 'Please enter a student nickname.'); return; }
+    if (!studentNickname.trim()) { showAlert('Error', 'Please enter a student nickname.', undefined, 'error'); return; }
     try {
       setSavingStudent(true);
       const loginCode = await generateUniqueLoginCode();
@@ -1622,7 +2346,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         createdAt: new Date().toISOString(),
       };
       const { key: parentId, error: parentErr } = await pushData('/parents', parentPayload);
-      if (parentErr || !parentId) { Alert.alert('Error', parentErr || 'Failed to create parent.'); return; }
+      if (parentErr || !parentId) { showAlert('Error', parentErr || 'Failed to create parent.', undefined, 'error'); return; }
       await writeData(`/parentLoginCodes/${loginCode}`, parentId);
       // Create student
       const studentPayload = {
@@ -1633,31 +2357,39 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         createdAt: new Date().toISOString(),
       };
       const { key: studentId, error: studentErr } = await pushData('/students', studentPayload);
-      if (studentErr || !studentId) { Alert.alert('Error', studentErr || 'Failed to create student.'); return; }
+      if (studentErr || !studentId) { showAlert('Error', studentErr || 'Failed to create student.', undefined, 'error'); return; }
       await updateData(`/students/${studentId}`, { studentId });
       await updateData(`/parents/${parentId}`, { parentId });
       // Refresh lists
       await loadStudentsAndParents(activeClasses.map((c) => c.id));
-      Alert.alert(
-        'Student Created',
-        `Share this Parent Login Code with the guardian: ${loginCode}`,
-        [
-          {
-            text: 'Create Another',
-            onPress: () => {
-              setStudentNickname('');
+      
+      // Close modal first
+      setShowAddStudentModal(false);
+      setSavingStudent(false);
+      
+      // Show alert after modal is closed
+      setTimeout(() => {
+        showAlert(
+          'Student Created',
+          `Share this Parent Login Code with the guardian: ${loginCode}`,
+          [
+            {
+              text: 'Create Another',
+              onPress: () => {
+                setStudentNickname('');
+                setShowAddStudentModal(true);
+              },
             },
-          },
-          {
-            text: 'Done',
-            style: 'default',
-            onPress: () => setShowAddStudentModal(false),
-          },
-        ]
-      );
+            {
+              text: 'Done',
+              style: 'default',
+            },
+          ],
+          'success'
+        );
+      }, 300);
     } catch (e) {
-      Alert.alert('Error', 'Failed to create student.');
-    } finally {
+      showAlert('Error', 'Failed to create student.', undefined, 'error');
       setSavingStudent(false);
     }
   };
@@ -1672,7 +2404,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   };
 
   const handleDeleteStudent = (student: any, classId: string) => {
-    Alert.alert(
+    showAlert(
       'Delete Student',
       `Remove "${student.nickname}" from this class? This cannot be undone.`,
       [
@@ -1684,13 +2416,14 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
             try {
               await deleteData(`/students/${student.studentId}`);
               await loadStudentsAndParents([classId]);
-              Alert.alert('Removed', 'Student deleted.');
+              showAlert('Removed', 'Student deleted.', undefined, 'success');
             } catch (e) {
-              Alert.alert('Error', 'Failed to delete student.');
+              showAlert('Error', 'Failed to delete student.', undefined, 'error');
             }
           },
         },
-      ]
+      ],
+      'warning'
     );
     setStudentMenuVisible(null);
   };
@@ -1705,7 +2438,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       });
       setShowParentInfoModal(true);
     } else {
-      Alert.alert('Info', 'Parent information not available.');
+      showAlert('Info', 'Parent information not available.', undefined, 'info');
     }
     setStudentMenuVisible(null);
   };
@@ -1769,17 +2502,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       const { success, error } = await updateData(`/teachers/${currentUserId}`, updatedData);
       
+      setUploading(false);
+      
       if (success) {
         setTeacherData(updatedData);
         setEditing(false);
-        Alert.alert('Success', 'Profile updated successfully!');
+        setShowProfileModal(false);
+        // Show alert after modal is closed
+        setTimeout(() => {
+          showAlert('Success', 'Profile updated successfully!', undefined, 'success');
+        }, 300);
       } else {
-        Alert.alert('Error', `Failed to update profile: ${error}`);
+        showAlert('Error', `Failed to update profile: ${error}`, undefined, 'error');
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to update profile');
-    } finally {
       setUploading(false);
+      showAlert('Error', 'Failed to update profile', undefined, 'error');
     }
   };
 
@@ -1867,7 +2605,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       
       if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Media library permission is required to select photos.');
+        showAlert('Permission Required', 'Media library permission is required to select photos.', undefined, 'warning');
         return;
       }
 
@@ -1890,16 +2628,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         });
         
         if (uploadError) {
-          Alert.alert('Error', 'Failed to upload photo');
+          showAlert('Error', 'Failed to upload photo', undefined, 'error');
           return;
         }
         
         // Update editData with new photo URL
         setEditData({ ...editData, profilePictureUrl: downloadURL || '' });
-        Alert.alert('Success', 'Photo updated successfully!');
+        // Don't show alert here - user will see success when they save the profile
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to change photo');
+      showAlert('Error', 'Failed to change photo', undefined, 'error');
       console.error('Photo change error:', error);
     }
   };
@@ -1930,6 +2668,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       <ScrollView 
         style={styles.scrollView} 
         showsVerticalScrollIndicator={false}
+        nestedScrollEnabled={true}
+        keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -2077,8 +2817,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                     {/* Analytics Section (placeholder/demo) */}
                     <View style={styles.analyticsContainer}>
                        <View style={styles.analyticsHeader}>
-                         <Text style={styles.analyticsTitle}>Performance Analytics</Text>
-                         <TouchableOpacity style={styles.viewAllButton}>
+                         <Text style={styles.analyticsTitle}>Results</Text>
+                         <TouchableOpacity 
+                           style={styles.viewAllButton}
+                           onPress={() => setActiveTab('results')}
+                         >
                            <Text style={styles.viewAllText}>View All</Text>
                            <AntDesign name="arrow-right" size={14} color="#3b82f6" />
                          </TouchableOpacity>
@@ -2086,30 +2829,36 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                        <View style={styles.analyticsCards}>
                          <View style={styles.analyticsCard}>
                            <View style={styles.analyticsIcon}>
-                             <MaterialCommunityIcons name="chart-line" size={24} color="#10b981" />
+                             <MaterialCommunityIcons name="repeat" size={24} color="#10b981" />
                            </View>
                            <View style={styles.analyticsContent}>
-                             <Text style={styles.analyticsLabel}>Overall Performance</Text>
+                             <Text style={styles.analyticsLabel}>Avg Attempts per Item</Text>
                              <Text style={styles.analyticsValue}>{
-                               classAnalytics[cls.id]?.performance != null ? `${classAnalytics[cls.id].performance}%` : '—'
-                             }</Text>
-                             <Text style={styles.analyticsChange}>{
                                (() => {
-                                 const ca = classAnalytics[cls.id];
-                                 if (!ca || ca.change == null) return '—';
-                                 return `${ca.change > 0 ? '+' : ''}${ca.change}% from last week`;
+                                 const ca = classAnalytics[cls.id] as any;
+                                 if (!ca || !ca.averageAttempts) return '—';
+                                 return ca.averageAttempts.toFixed(1);
                                })()
                              }</Text>
+                             <Text style={styles.analyticsChange}>Per question average</Text>
                            </View>
                          </View>
                          <View style={styles.analyticsCard}>
                            <View style={styles.analyticsIcon}>
-                             <MaterialCommunityIcons name="account-group" size={24} color="#3b82f6" />
+                             <MaterialCommunityIcons name="clock-outline" size={24} color="#3b82f6" />
                            </View>
                            <View style={styles.analyticsContent}>
-                             <Text style={styles.analyticsLabel}>Active Students</Text>
-                             <Text style={styles.analyticsValue}>{studentsByClass[cls.id]?.length ?? 0}</Text>
-                             <Text style={styles.analyticsChange}>All students listed</Text>
+                             <Text style={styles.analyticsLabel}>Average Time</Text>
+                             <Text style={styles.analyticsValue}>{
+                               (() => {
+                                 const ca = classAnalytics[cls.id] as any;
+                                 if (!ca || !ca.averageTime) return '—';
+                                 const minutes = Math.floor(ca.averageTime / 60000);
+                                 const seconds = Math.floor((ca.averageTime % 60000) / 1000);
+                                 return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                               })()
+                             }</Text>
+                             <Text style={styles.analyticsChange}>Per exercise average</Text>
                            </View>
                          </View>
                        </View>
@@ -2143,24 +2892,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
              <View style={styles.exercisesHeader}>
                <Text style={styles.exercisesTitle}>Exercises Library</Text>
                <View style={styles.exercisesActions}>
-                 <TouchableOpacity 
-                   style={styles.refreshButton}
-                   onPress={() => {
-                     if (exercisesTab === 'my') {
-                       loadMyExercises();
-                     } else {
-                       loadPublicExercises();
-                     }
-                   }}
-                 >
-                   <MaterialCommunityIcons name="refresh" size={20} color="#64748b" />
-                 </TouchableOpacity>
-                 <TouchableOpacity style={styles.searchButton}>
-                   <AntDesign name="search" size={20} color="#64748b" />
-                 </TouchableOpacity>
-                 <TouchableOpacity style={styles.moreOptionsButton}>
-                   <MaterialIcons name="more-vert" size={20} color="#64748b" />
-                 </TouchableOpacity>
+                <TouchableOpacity 
+                  style={styles.createExerciseButton}
+                  onPress={() => router.push('/CreateExercise')}
+                >
+                  <View style={styles.createExerciseIcon}>
+                    <AntDesign name="plus" size={12} color="#ffffff" />
+                  </View>
+                  <Text style={styles.createExerciseText}>Create Exercise</Text>
+                </TouchableOpacity>
                </View>
              </View>
 
@@ -2200,7 +2940,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
              </View>
 
              {/* Exercise Cards */}
-             <View style={styles.exerciseCardsContainer}>
+             <ScrollView 
+               style={styles.exerciseCardsContainer}
+               nestedScrollEnabled={true}
+               keyboardShouldPersistTaps="handled"
+               showsVerticalScrollIndicator={false}
+             >
                {exercisesTab === 'my' ? (
                  <>
                    {exercisesLoading ? (
@@ -2236,9 +2981,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                              <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
                            </View>
                            <View style={styles.exerciseMeta}>
-                             <Text style={styles.exerciseCreator}>
-                               {exercise.isPublic ? 'Public' : 'Private'}
-                             </Text>
+                             <Text style={styles.exerciseCreator}>By You</Text>
                              <Text style={styles.exerciseDate}>
                                {exercise.createdAt ? new Date(exercise.createdAt).toLocaleDateString() : 'Unknown date'}
                              </Text>
@@ -2248,14 +2991,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                            <TouchableOpacity 
                              style={styles.exerciseOptions}
                              onPress={() => {
-                               Alert.alert(
+                               showAlert(
                                  'Exercise Options',
-                                 'What would you like to do with this exercise?',
+                                 'You own this exercise. What would you like to do?',
                                  [
                                  { text: 'Edit', onPress: () => router.push(`/CreateExercise?edit=${exercise.id}`) },
                                  { text: 'Delete', style: 'destructive', onPress: () => handleDeleteExercise(exercise.id) },
-                                   { text: 'Cancel', style: 'cancel' }
-                                 ]
+                                 { text: 'Make a Copy', onPress: () => handleCopyExercise(exercise) },
+                                 { text: 'Cancel', style: 'cancel' }
+                                 ],
+                                 'info'
                                );
                              }}
                            >
@@ -2301,6 +3046,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                          bounces={false}
                          decelerationRate="fast"
                          scrollEventThrottle={16}
+                         nestedScrollEnabled={true}
+                         keyboardShouldPersistTaps="handled"
                        >
                          {categoryOptions.map((category) => (
                            <TouchableOpacity
@@ -2328,6 +3075,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                        <Text style={styles.loadingText}>Loading public exercises...</Text>
                      </View>
                    ) : (() => {
+                     // Show all public exercises (including ones created by current user)
                      const groupedExercises = getFilteredAndGroupedExercises(publicExercises);
                      const categories = Object.keys(groupedExercises).sort();
                      
@@ -2356,11 +3104,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                  <Text style={styles.categoryBadgeText}>{exercise.category}</Text>
                                </View>
                              )}
-                             <View style={styles.exerciseIcon}>
-                               <View style={styles.exerciseIconBackground}>
-                                 <MaterialCommunityIcons name="book-open-variant" size={24} color="#8b5cf6" />
-                               </View>
-                             </View>
+                        
+              
                              <View style={styles.exerciseContent}>
                                <Text style={styles.exerciseTitle}>{exercise.title || 'Untitled Exercise'}</Text>
                                <Text 
@@ -2376,7 +3121,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                  <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
                                </View>
                                <View style={styles.exerciseMeta}>
-                                 <Text style={styles.exerciseCreator}>By {exercise.teacherName || 'Unknown Teacher'}</Text>
+                                 <Text style={styles.exerciseCreator}>
+                                   By {exercise.teacherId === currentUserId ? 'You' : (exercise.teacherName || 'Unknown Teacher')}
+                                 </Text>
                                  <Text style={styles.exerciseDate}>
                                    {exercise.createdAt ? new Date(exercise.createdAt).toLocaleDateString() : 'Unknown date'}
                                  </Text>
@@ -2385,14 +3132,32 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                              <TouchableOpacity 
                                style={styles.exerciseOptions}
                                onPress={() => {
-                                 Alert.alert(
-                                   'Exercise Options',
-                                   'What would you like to do with this exercise?',
-                                   [
-                                     { text: 'Make a Copy', onPress: () => handleCopyExercise(exercise) },
-                                     { text: 'Cancel', style: 'cancel' }
-                                   ]
-                                 );
+                                 const isOwner = exercise.teacherId === currentUserId;
+                                 
+                                 if (isOwner) {
+                                   // For owners, show a more focused alert with primary actions
+                                   showAlert(
+                                     'Your Exercise',
+                                     'What would you like to do with this exercise?',
+                                     [
+                                       { text: 'Edit Exercise', onPress: () => handleEditPublicExercise(exercise) },
+                                       { text: 'Delete Exercise', onPress: () => handleDeletePublicExercise(exercise), style: 'destructive' },
+                                       { text: 'Cancel', style: 'cancel' }
+                                     ],
+                                     'info'
+                                   );
+                                 } else {
+                                   // For non-owners, show copy option
+                                   showAlert(
+                                     'Exercise Options',
+                                     'What would you like to do with this exercise?',
+                                     [
+                                       { text: 'Make a Copy', onPress: () => handleCopyExercise(exercise) },
+                                       { text: 'Cancel', style: 'cancel' }
+                                     ],
+                                     'info'
+                                   );
+                                 }
                                }}
                              >
                                <MaterialIcons name="more-vert" size={20} color="#64748b" />
@@ -2539,15 +3304,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                    )}
                  </>
                )}
-             </View>
-
-             {/* Add Exercise Button */}
-             <TouchableOpacity style={styles.addExerciseButton} onPress={() => router.push('../CreateExercise')}>
-               <View style={styles.addExerciseIcon}>
-                 <AntDesign name="plus" size={20} color="#ffffff" />
-               </View>
-               <Text style={styles.addExerciseText}>Add Exercise</Text>
-             </TouchableOpacity>
+             </ScrollView>
            </View>
          )}
 
@@ -2901,6 +3658,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                    horizontal={width < 400}
                                    showsHorizontalScrollIndicator={width < 400}
                                    style={styles.tableScrollContainer}
+                                   nestedScrollEnabled={true}
+                                   keyboardShouldPersistTaps="handled"
                                  >
                                    <View style={styles.tableContainer}>
                                      {/* Table Header */}
@@ -3107,7 +3866,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               </TouchableOpacity>
             </View>
             
-            <ScrollView style={styles.profileContent}>
+            <ScrollView 
+              style={styles.profileContent}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
               {/* Profile Picture Section */}
               <View style={styles.profilePictureSection}>
                 {editData?.profilePictureUrl ? (
@@ -3254,7 +4018,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 <AntDesign name="close" size={24} color="#1e293b" />
               </TouchableOpacity>
             </View>
-            <ScrollView style={styles.profileContent}>
+            <ScrollView 
+              style={styles.profileContent}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
               <View style={styles.infoSection}>
                 {/* Name field */}
                 <View style={styles.field}>
@@ -3309,7 +4078,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                   </TouchableOpacity>
                   {showYearPicker && (
                     <View style={styles.yearMenu}>
-                      <ScrollView>
+                      <ScrollView
+                        nestedScrollEnabled={true}
+                        showsVerticalScrollIndicator={true}
+                        keyboardShouldPersistTaps="handled"
+                        bounces={false}
+                      >
                         {generateYearOptions().map((opt) => (
                           <TouchableOpacity
                             key={opt.value}
@@ -3343,20 +4117,20 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 style={styles.saveButton} 
                 onPress={async () => {
                   if (!currentUserId) {
-                    Alert.alert('Error', 'Not authenticated.');
+                    showAlert('Error', 'Not authenticated.', undefined, 'error');
                     return;
                   }
                   if (!className.trim()) {
-                    Alert.alert('Error', 'Please enter class/section name.');
+                    showAlert('Error', 'Please enter class/section name.', undefined, 'error');
                     return;
                   }
                   const resolvedSchool = schoolOption === 'other' ? schoolOther.trim() : (teacherData?.school || '').trim();
                   if (!resolvedSchool) {
-                    Alert.alert('Error', 'Please select or enter a school name.');
+                    showAlert('Error', 'Please select or enter a school name.', undefined, 'error');
                     return;
                   }
                   if (!schoolYear.trim()) {
-                    Alert.alert('Error', 'Please enter school year (e.g., 2025-2026).');
+                    showAlert('Error', 'Please enter school year (e.g., 2025-2026).', undefined, 'error');
                     return;
                   }
                   try {
@@ -3372,10 +4146,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                     };
                     const { key, error } = await pushData('/sections', section);
                     if (error || !key) {
-                      Alert.alert('Error', error || 'Failed to create section.');
+                      showAlert('Error', error || 'Failed to create section.', undefined, 'error');
                     } else {
                       await updateData(`/sections/${key}`, { id: key });
-                      Alert.alert('Success', 'Class/Section created successfully.');
                       if (currentUserId) {
                         await loadTeacherClasses(currentUserId);
                       }
@@ -3384,9 +4157,14 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                       setSchoolOption('profile');
                       setSchoolOther('');
                       setSchoolYear('');
+                      
+                      // Show alert after modal is closed
+                      setTimeout(() => {
+                        showAlert('Success', 'Class/Section created successfully.', undefined, 'success');
+                      }, 300);
                     }
                   } catch (e) {
-                    Alert.alert('Error', 'Failed to create section.');
+                    showAlert('Error', 'Failed to create section.', undefined, 'error');
                   } finally {
                     setSavingClass(false);
                   }
@@ -3413,7 +4191,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 <AntDesign name="close" size={24} color="#64748b" />
               </TouchableOpacity>
             </View>
-            <ScrollView style={styles.announcementModalContent} showsVerticalScrollIndicator={false}>
+            <ScrollView 
+              style={styles.announcementModalContent} 
+              showsVerticalScrollIndicator={false}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+            >
               <View style={styles.announcementForm}>
                 <View style={styles.announcementField}>
                   <Text style={styles.announcementFieldLabel}>Title</Text>
@@ -3509,10 +4292,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 style={[styles.announcementSendButton, (!annTitle.trim() || !annMessage.trim() || (!annAllClasses && annSelectedClassIds.length === 0)) && styles.announcementSendButtonDisabled]}
                 disabled={sendingAnn || !annTitle.trim() || !annMessage.trim() || (!annAllClasses && annSelectedClassIds.length === 0)}
                 onPress={async () => {
-                  if (!currentUserId) { Alert.alert('Error', 'Not authenticated.'); return; }
-                  if (!annTitle.trim() || !annMessage.trim()) { Alert.alert('Error', 'Title and message are required.'); return; }
+                  if (!currentUserId) { showAlert('Error', 'Not authenticated.', undefined, 'error'); return; }
+                  if (!annTitle.trim() || !annMessage.trim()) { showAlert('Error', 'Title and message are required.', undefined, 'error'); return; }
                   const targetIds = annAllClasses ? teacherClasses.map((c) => c.id) : annSelectedClassIds;
-                  if (!targetIds.length) { Alert.alert('Error', 'Select at least one class.'); return; }
+                  if (!targetIds.length) { showAlert('Error', 'Select at least one class.', undefined, 'error'); return; }
                   try {
                     setSendingAnn(true);
                     const now = new Date();
@@ -3527,17 +4310,21 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                     };
                     const { success, error } = await writeData(`/announcements/${id}`, payload);
                     if (!success) {
-                      Alert.alert('Error', error || 'Failed to send');
+                      showAlert('Error', error || 'Failed to send', undefined, 'error');
                     } else {
-                      Alert.alert('Success', 'Announcement sent successfully!');
                       setShowAnnModal(false);
                       setAnnTitle('');
                       setAnnMessage('');
                       setAnnAllClasses(false);
                       setAnnSelectedClassIds([]);
+                      
+                      // Show alert after modal is closed
+                      setTimeout(() => {
+                        showAlert('Success', 'Announcement sent successfully!', undefined, 'success');
+                      }, 300);
                     }
                   } catch (e) {
-                    Alert.alert('Error', 'Failed to send announcement. Please try again.');
+                    showAlert('Error', 'Failed to send announcement. Please try again.', undefined, 'error');
                   } finally {
                     setSendingAnn(false);
                   }
@@ -3570,7 +4357,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 <AntDesign name="close" size={24} color="#1e293b" />
               </TouchableOpacity>
             </View>
-            <ScrollView style={styles.profileContent}>
+            <ScrollView 
+              style={styles.profileContent}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
               <View style={styles.infoSection}>
                 <View style={styles.field}>
                   <Text style={styles.fieldLabel}>Student Nickname</Text>
@@ -3626,7 +4418,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 <AntDesign name="close" size={24} color="#1e293b" />
               </TouchableOpacity>
             </View>
-            <ScrollView style={styles.profileContent}>
+            <ScrollView 
+              style={styles.profileContent}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
               {activeClasses.map((cls) => (
                 <View key={cls.id} style={{ marginBottom: 18 }}>
                   <Text style={{ fontSize: 16, fontWeight: '700', color: '#1e293b', marginBottom: 8 }}>{cls.name}</Text>
@@ -3687,7 +4484,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           </View>
 
           {editingAssignment && (
-            <ScrollView style={styles.assignmentModalContent} showsVerticalScrollIndicator={false}>
+            <ScrollView 
+              style={styles.assignmentModalContent} 
+              showsVerticalScrollIndicator={false}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+            >
               <View style={styles.editAssignmentForm}>
                 <Text style={styles.editAssignmentTitle}>
                   {editingAssignment.exercise?.title || 'Unknown Exercise'}
@@ -3922,7 +4724,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           </View>
 
           {selectedAssignmentForStatus && (
-            <ScrollView style={styles.studentStatusModalContent} showsVerticalScrollIndicator={false}>
+            <ScrollView 
+              style={styles.studentStatusModalContent} 
+              showsVerticalScrollIndicator={false}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+            >
               <View style={styles.studentStatusHeader}>
                 <Text style={styles.studentStatusAssignmentTitle}>
                   {selectedAssignmentForStatus.exercise?.title || 'Unknown Exercise'}
@@ -4019,7 +4826,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
             </View>
 
             {selectedParentInfo && (
-              <ScrollView style={styles.parentInfoContent} showsVerticalScrollIndicator={false}>
+              <ScrollView 
+                style={styles.parentInfoContent} 
+                showsVerticalScrollIndicator={false}
+                nestedScrollEnabled={true}
+                keyboardShouldPersistTaps="handled"
+              >
                 <View style={styles.parentInfoSection}>
                   <Text style={styles.parentInfoSectionTitle}>Student Information</Text>
                   <View style={styles.parentInfoRow}>
@@ -4130,7 +4942,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               <Text style={styles.studentPerformanceLoadingText}>Loading performance data...</Text>
             </View>
           ) : studentPerformanceData ? (
-            <ScrollView style={styles.studentPerformanceFullScreenContent} showsVerticalScrollIndicator={true}>
+            <ScrollView 
+              style={styles.studentPerformanceFullScreenContent} 
+              showsVerticalScrollIndicator={true}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+            >
                 {/* Student Info */}
                 <View style={styles.studentPerformanceSection}>
                   <Text style={styles.studentPerformanceSectionTitle}>Student Information</Text>
@@ -4221,8 +5038,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                studentPerformanceData.performanceLevel === 'good' ? '#3b82f6' :
                                studentPerformanceData.performanceLevel === 'fair' ? '#f59e0b' : '#ef4444'
                       }]}>
-                        {studentPerformanceData.performanceLevel.charAt(0).toUpperCase() + 
-                         studentPerformanceData.performanceLevel.slice(1).replace('_', ' ')}
+                        {studentPerformanceData.performanceLevel ? 
+                          studentPerformanceData.performanceLevel.charAt(0).toUpperCase() + 
+                          studentPerformanceData.performanceLevel.slice(1).replace('_', ' ') : 
+                          'Unknown'
+                        }
                       </Text>
                     </View>
                   </View>
@@ -4507,6 +5327,21 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         </View>
       </Modal>
 
+      {/* Custom Alert */}
+      <CustomAlert
+        visible={alertVisible}
+        title={alertTitle}
+        message={alertMessage}
+        buttons={alertButtons}
+        icon={alertIcon}
+        onClose={() => {
+          setAlertVisible(false);
+          // Process next alert in queue after a short delay
+          setTimeout(() => {
+            processNextAlert();
+          }, 200);
+        }}
+      />
     </View>
   );
 }
@@ -5048,7 +5883,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1e293b',
     flex: 1,
-    marginLeft: 8,
+    marginLeft: 0,
   },
   exerciseDetailsContainer: {
     flexDirection: 'row',
@@ -5819,7 +6654,30 @@ const styles = StyleSheet.create({
   exercisesActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 8,
+  },
+  createExerciseButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3b82f6',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginRight: 4,
+  },
+  createExerciseIcon: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 6,
+  },
+  createExerciseText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#ffffff',
   },
   refreshButton: {
     padding: 8,
@@ -5836,28 +6694,37 @@ const styles = StyleSheet.create({
   exercisesTabs: {
     flexDirection: 'row',
     marginBottom: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 4,
   },
   exercisesTab: {
-    paddingBottom: 12,
-    marginRight: 24,
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignItems: 'center',
   },
   exercisesTabActive: {
-    borderBottomWidth: 2,
-    borderBottomColor: '#1e293b',
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
   },
   exercisesTabText: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#64748b',
     fontWeight: '500',
   },
   exercisesTabTextActive: {
     color: '#1e293b',
-    fontWeight: '700',
+    fontWeight: '600',
   },
   exerciseCardsContainer: {
-    marginBottom: 24,
+    flex: 1,
+    paddingBottom: 20,
   },
   exerciseCard: {
     position: 'relative',
@@ -5869,9 +6736,9 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 3,
     borderWidth: 1,
     borderColor: '#f1f5f9',
   },
@@ -5911,30 +6778,6 @@ const styles = StyleSheet.create({
   exerciseOptions: {
     padding: 8,
     borderRadius: 8,
-  },
-  addExerciseButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#f1f5f9',
-    borderRadius: 16,
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    marginTop: 20,
-  },
-  addExerciseIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#3b82f6',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  addExerciseText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1e293b',
   },
   
   // Filter and Search Styles
@@ -6024,6 +6867,21 @@ const styles = StyleSheet.create({
   // Exercise Title Row Styles (deprecated - keeping for compatibility)
   categoryBadgeText: {
     fontSize: 10,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  ownerBadge: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    backgroundColor: '#10b981',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    zIndex: 1,
+  },
+  ownerBadgeText: {
+    fontSize: 11,
     fontWeight: '600',
     color: '#ffffff',
   },
@@ -7794,5 +8652,96 @@ const styles = StyleSheet.create({
     color: '#374151',
     fontWeight: '500',
   },
-  
+  // Custom Alert Styles
+  alertOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  alertContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 0,
+    minWidth: 280,
+    maxWidth: 350,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  alertContent: {
+    padding: 20,
+  },
+  alertTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#1f2937',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  alertMessage: {
+    fontSize: 15,
+    color: '#6b7280',
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  alertButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  alertButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    minWidth: 0,
+  },
+  alertButtonSingle: {
+    width: '100%',
+    flex: 1,
+  },
+  alertButtonsThree: {
+    flexDirection: 'column',
+    gap: 8,
+  },
+  alertButtonThree: {
+    flex: 0,
+    width: '100%',
+  },
+  alertButtonsFour: {
+    flexDirection: 'column',
+    gap: 8,
+  },
+  alertButtonFour: {
+    flex: 0,
+    width: '100%',
+  },
+  alertButtonCancel: {
+    backgroundColor: '#f3f4f6',
+  },
+  alertButtonDestructive: {
+    backgroundColor: '#ef4444',
+  },
+  alertButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  alertButtonTextCancel: {
+    color: '#374151',
+  },
+  alertButtonTextDestructive: {
+    color: '#ffffff',
+  },
 });
