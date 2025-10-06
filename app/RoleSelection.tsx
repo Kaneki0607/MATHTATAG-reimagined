@@ -75,6 +75,10 @@ export default function RoleSelection() {
               <MaterialCommunityIcons name="account-group" size={26} color="#fff" style={styles.roleIcon} />
               <Text style={styles.roleButtonText}>Parent</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={styles.roleButton} onPress={() => router.push('/AdminLogin')}>
+              <MaterialCommunityIcons name="account-circle" size={26} color="#fff" style={styles.roleIcon} />
+              <Text style={styles.roleButtonText}>Admin</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </View>
@@ -176,6 +180,9 @@ const styles = StyleSheet.create({
   },
   roleIcon: {
     marginRight: 16,
+    width: 26,
+    height: 26,
+    textAlign: 'center',
   },
   roleButtonText: {
     color: '#ffffff',

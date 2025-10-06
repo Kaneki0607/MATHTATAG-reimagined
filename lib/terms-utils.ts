@@ -4,6 +4,7 @@ import { readData, writeData } from './firebase-database';
 // Storage keys for terms agreement
 const PARENT_TERMS_KEY = 'parentAgreedToTerms';
 const TEACHER_TERMS_KEY = 'teacherAgreedToTerms';
+const ADMIN_TERMS_KEY = 'adminAgreedToTerms';
 
 export interface TermsAgreement {
   hasAgreed: boolean;
@@ -125,6 +126,57 @@ export async function clearParentTermsAgreement(): Promise<void> {
 }
 
 /**
+ * Check if admin has agreed to terms
+ */
+export async function hasAdminAgreedToTerms(adminId?: string): Promise<boolean> {
+  try {
+    // First check AsyncStorage for quick access
+    const localAgreement = await AsyncStorage.getItem(ADMIN_TERMS_KEY);
+    if (localAgreement === 'true') {
+      return true;
+    }
+
+    // If we have an adminId, check Firebase for persistent storage
+    if (adminId) {
+      const { data } = await readData(`/admins/${adminId}/termsAgreement`);
+      if (data && data.hasAgreed) {
+        // Update local storage for faster future checks
+        await AsyncStorage.setItem(ADMIN_TERMS_KEY, 'true');
+        return true;
+      }
+    }
+
+    return false;
+  } catch (error) {
+    console.error('Error checking admin terms agreement:', error);
+    return false;
+  }
+}
+
+/**
+ * Record admin terms agreement
+ */
+export async function recordAdminTermsAgreement(adminId?: string): Promise<void> {
+  try {
+    const agreement: TermsAgreement = {
+      hasAgreed: true,
+      agreedAt: new Date().toISOString(),
+      version: '1.0'
+    };
+
+    // Save to AsyncStorage for quick access
+    await AsyncStorage.setItem(ADMIN_TERMS_KEY, 'true');
+
+    // If we have an adminId, also save to Firebase for persistence
+    if (adminId) {
+      await writeData(`/admins/${adminId}/termsAgreement`, agreement);
+    }
+  } catch (error) {
+    console.error('Error recording admin terms agreement:', error);
+  }
+}
+
+/**
  * Clear teacher terms agreement (useful for testing or logout)
  */
 export async function clearTeacherTermsAgreement(): Promise<void> {
@@ -132,6 +184,17 @@ export async function clearTeacherTermsAgreement(): Promise<void> {
     await AsyncStorage.removeItem(TEACHER_TERMS_KEY);
   } catch (error) {
     console.error('Error clearing teacher terms agreement:', error);
+  }
+}
+
+/**
+ * Clear admin terms agreement (useful for testing or logout)
+ */
+export async function clearAdminTermsAgreement(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(ADMIN_TERMS_KEY);
+  } catch (error) {
+    console.error('Error clearing admin terms agreement:', error);
   }
 }
 

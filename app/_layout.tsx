@@ -22,7 +22,9 @@ export default function RootLayout() {
           <Stack.Screen name="RoleSelection" />
           <Stack.Screen name="ParentLogin" />
           <Stack.Screen name="TeacherLogin" />
+          <Stack.Screen name="AdminLogin" />
           <Stack.Screen name="TeacherDashboard" />
+          <Stack.Screen name="AdminDashboard" />
         </Stack>
         <StatusBar style="light" hidden={false} translucent={true} />
       </ThemeProvider>

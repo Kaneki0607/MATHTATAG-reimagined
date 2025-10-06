@@ -2446,6 +2446,107 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
           }
         }
 
+        // Quantity-based multi-visualization (e.g., "There are 5 apples")
+        // If the question implies multiple instances of the same object, create multiple images to visualize quantity
+        if (!questionImages) {
+          const numberWords: Record<string, number> = {
+            'zero': 0, 'none': 0,
+            'one': 1, 'isa': 1,
+            'two': 2, 'dalawa': 2,
+            'three': 3, 'tatlo': 3,
+            'four': 4, 'apat': 4,
+            'five': 5, 'lima': 5,
+            'six': 6, 'anim': 6,
+            'seven': 7, 'pito': 7,
+            'eight': 8, 'walo': 8,
+            'nine': 9, 'siyam': 9,
+            'ten': 10, 'sampu': 10
+          };
+
+          const translations: Record<string, string> = {
+            // Filipino to English common classroom nouns present in stock images
+            'mansanas': 'Apple',
+            'saging': 'Banana',
+            'ubas': 'Grapes',
+            'pakwan': 'Watermelon',
+            'peras': 'Pear',
+            'pusa': 'Cat',
+            'aso': 'Dog',
+            'isda': 'Fish',
+            'ibon': 'Bird',
+            'bituin': 'Star',
+            'bola': 'Ball',
+          };
+
+          const rawText = q.question.trim();
+          const lowerText = rawText.toLowerCase();
+
+          // Try to extract a quantity (digit or word) and a noun near it
+          let qty: number | null = null;
+          // 1) digits pattern e.g., "5 apples" or "apples 5"
+          const digitMatch = lowerText.match(/(\b\d{1,2}\b)\s+([a-zñáéíóúü]+)|([a-zñáéíóúü]+)\s+(\b\d{1,2}\b)/i);
+          if (digitMatch) {
+            qty = parseInt(digitMatch[1] || digitMatch[4], 10);
+          }
+          // 2) number words pattern e.g., "five apples" or "lima na mansanas"
+          if (qty == null) {
+            const words = lowerText.split(/[^a-zñáéíóúü]+/i).filter(Boolean);
+            const idx = words.findIndex((w: string) => w in numberWords);
+            if (idx !== -1) {
+              qty = numberWords[words[idx]];
+            }
+          }
+
+          // Only proceed for small quantities where visual repetition makes sense
+          if (qty != null && qty > 1 && qty <= 12) {
+            // Heuristically pick a noun token near the number
+            let nounCandidate = '';
+            if (digitMatch) {
+              nounCandidate = (digitMatch[2] || digitMatch[3] || '').trim();
+            } else {
+              // fallback: next token after the number word
+              const words = lowerText.split(/[^a-zñáéíóúü]+/i).filter(Boolean);
+              const idx = words.findIndex((w: string) => w in numberWords);
+              nounCandidate = idx !== -1 && idx + 1 < words.length ? words[idx + 1] : '';
+            }
+
+            // Normalize plural/singular
+            const normalize = (w: string) => {
+              if (!w) return w;
+              if (w.endsWith('es')) return w.slice(0, -2);
+              if (w.endsWith('s')) return w.slice(0, -1);
+              return w;
+            };
+
+            const englishCandidate = translations[nounCandidate] || nounCandidate;
+            const normalized = normalize(englishCandidate);
+
+            // Try several name variants to find a stock image
+            const candidates = [
+              normalized,
+              englishCandidate,
+              normalized.charAt(0).toUpperCase() + normalized.slice(1),
+              englishCandidate.charAt(0).toUpperCase() + englishCandidate.slice(1)
+            ].filter(Boolean);
+
+            let baseImageUri: string | null = null;
+            for (const name of candidates) {
+              const uri = findStockImageByName(name);
+              if (uri) {
+                baseImageUri = uri;
+                break;
+              }
+            }
+
+            if (baseImageUri) {
+              // Build repeated images to visualize the quantity
+              const maxRepeat = Math.min(qty, 12);
+              questionImages = Array.from({ length: maxRepeat }, () => baseImageUri);
+              console.log(`📊 Auto-generated multi-visualization: ${maxRepeat} x "${normalized}" for question: ${q.question.substring(0, 50)}...`);
+            }
+          }
+        }
+
         const finalQuestion = {
           ...processedQuestion,
           questionImage: questionImage,

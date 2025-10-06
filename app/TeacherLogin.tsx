@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import TermsAndConditions from '../components/TermsAndConditions';
 import { signInUser, signUpUser } from '../lib/firebase-auth';
-import { writeData } from '../lib/firebase-database';
+import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 import { hasTeacherAgreedToTerms, recordTeacherTermsAgreement } from '../lib/terms-utils';
 
@@ -26,6 +26,10 @@ export default function TeacherLogin() {
   const [showTermsModal, setShowTermsModal] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  
+  // Verification and blocking modal states
+  const [showVerificationModal, setShowVerificationModal] = useState(false);
+  const [showBlockedModal, setShowBlockedModal] = useState(false);
   
   // Remember me keys
   const STORAGE_EMAIL_KEY = 'teacher_email';
@@ -93,8 +97,38 @@ export default function TeacherLogin() {
       }
       
       if (user) {
-        setCurrentUserId(user.uid);
-        router.replace('/TeacherDashboard');
+        // Check teacher verification and blocking status
+        const { data: teacherData, error: teacherError } = await readData(`/teachers/${user.uid}`);
+        
+        if (teacherError) {
+          console.error('Error fetching teacher data:', teacherError);
+          Alert.alert('Error', 'Failed to verify account status. Please try again.');
+          setLoading(false);
+          return;
+        }
+        
+        if (teacherData) {
+          // Check if account is blocked
+          if (teacherData.isBlocked) {
+            setShowBlockedModal(true);
+            setLoading(false);
+            return;
+          }
+          
+          // Check if account is verified
+          if (!teacherData.isVerified) {
+            setShowVerificationModal(true);
+            setLoading(false);
+            return;
+          }
+          
+          // Account is verified and not blocked, proceed to dashboard
+          setCurrentUserId(user.uid);
+          router.replace('/TeacherDashboard');
+        } else {
+          Alert.alert('Error', 'Teacher account not found. Please contact support.');
+          setLoading(false);
+        }
       }
     } catch (error) {
       Alert.alert('Error', 'An unexpected error occurred during login.');
@@ -396,6 +430,48 @@ export default function TeacherLogin() {
         onAgree={handleTermsAgree}
         title="Terms and Conditions"
       />
+
+      {/* Verification Pending Modal */}
+      <Modal visible={showVerificationModal} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.statusModalContent}>
+            <View style={styles.statusIconContainer}>
+              <AntDesign name="clockcircleo" size={48} color="#f59e0b" />
+            </View>
+            <Text style={styles.statusModalTitle}>Account Pending Verification</Text>
+            <Text style={styles.statusModalMessage}>
+              Your account is currently pending verification. Please wait for an administrator to verify your account before you can access the teacher dashboard.
+            </Text>
+            <TouchableOpacity 
+              style={styles.statusModalButton}
+              onPress={() => setShowVerificationModal(false)}
+            >
+              <Text style={styles.statusModalButtonText}>OK</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Account Blocked Modal */}
+      <Modal visible={showBlockedModal} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.statusModalContent}>
+            <View style={styles.statusIconContainer}>
+              <AntDesign name="stop" size={48} color="#ef4444" />
+            </View>
+            <Text style={styles.statusModalTitle}>Account Blocked</Text>
+            <Text style={styles.statusModalMessage}>
+              Your account has been blocked by an administrator. Please contact the admin to resolve this issue.
+            </Text>
+            <TouchableOpacity 
+              style={styles.statusModalButton}
+              onPress={() => setShowBlockedModal(false)}
+            >
+              <Text style={styles.statusModalButtonText}>OK</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
       
       {/* Sign Up Modal */}
       <Modal visible={showSignUpModal} animationType="slide" transparent>
@@ -1074,5 +1150,53 @@ const styles = StyleSheet.create({
   genderOptionTextSelected: {
     color: 'rgb(40, 127, 214)',
     fontWeight: '600',
+  },
+  // Status Modal Styles
+  statusModalContent: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 32,
+    marginHorizontal: 32,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    elevation: 16,
+  },
+  statusIconContainer: {
+    marginBottom: 20,
+  },
+  statusModalTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 16,
+    textAlign: 'center',
+    letterSpacing: -0.5,
+  },
+  statusModalMessage: {
+    fontSize: 16,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 24,
+    marginBottom: 24,
+  },
+  statusModalButton: {
+    backgroundColor: '#0ea5e9',
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: 12,
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  statusModalButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
 }); 

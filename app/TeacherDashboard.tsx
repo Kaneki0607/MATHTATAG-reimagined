@@ -6,18 +6,18 @@ import { useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  Dimensions,
-  Image,
-  Modal,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
-  View
+    ActivityIndicator,
+    Dimensions,
+    Image,
+    Modal,
+    RefreshControl,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    TouchableWithoutFeedback,
+    View
 } from 'react-native';
 import * as XLSX from 'xlsx';
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
@@ -789,6 +789,8 @@ interface TeacherData {
   profilePictureUrl: string;
   uid: string;
   createdAt: string;
+  // Whether the teacher account is verified by admin
+  isVerified?: boolean;
 }
 
 // Generate two-digit school year options like 22-23, returning { label, value }
@@ -2695,9 +2697,14 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
            </TouchableOpacity>
            <View style={styles.welcomeText}>
              <Text style={styles.welcomeLabel}>Welcome,</Text>
-             <Text style={styles.welcomeTitle}>
-               {teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Teacher'}
-             </Text>
+             <View style={styles.nameRow}>
+               <Text style={styles.welcomeTitle}>
+                 {teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Teacher'}
+               </Text>
+               {teacherData?.isVerified ? (
+                 <MaterialCommunityIcons name="check-decagram" size={20} color="#10b981" style={{ marginLeft: 8 }} />
+               ) : null}
+             </View>
            </View>
          </View>
 
@@ -5407,6 +5414,10 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '700',
     color: '#1e293b',
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   
   // Announcement Card Styles
