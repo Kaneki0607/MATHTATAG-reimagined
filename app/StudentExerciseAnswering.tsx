@@ -7,19 +7,19 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { useEffect, useRef, useState } from 'react';
 import {
-    Animated,
-    Dimensions,
-    Easing,
-    Image,
-    ImageBackground,
-    LayoutAnimation,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  Animated,
+  Dimensions,
+  Easing,
+  Image,
+  ImageBackground,
+  LayoutAnimation,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import { readData, writeData } from '../lib/firebase-database';
 
@@ -359,7 +359,7 @@ export default function StudentExerciseAnswering() {
   // Load exercise data
   useEffect(() => {
     loadExercise();
-  }, [exerciseId, assignedExerciseId]);
+  }, [exerciseId, assignedExerciseId, questionIndex]);
   
   // Timer effect (requestAnimationFrame for smoother and accurate updates)
   useEffect(() => {
@@ -543,7 +543,10 @@ export default function StudentExerciseAnswering() {
     if (exercise && exercise.questions[currentQuestionIndex]) {
       const currentQuestion = exercise.questions[currentQuestionIndex];
       const existingAnswer = answers.find(a => a.questionId === currentQuestion.id);
-      logAttempt(currentQuestion, existingAnswer?.answer || '', 'initial');
+      // Only log initial attempt if there's an actual answer
+      if (existingAnswer?.answer && existingAnswer.answer !== '' && existingAnswer.answer !== null) {
+        logAttempt(currentQuestion, existingAnswer.answer, 'initial');
+      }
     }
   }, [currentQuestionIndex]);
   
@@ -629,12 +632,183 @@ export default function StudentExerciseAnswering() {
     }
   };
 
+  // Enhanced image preloading with priority and caching
+  const prefetchUrlsWithPriority = async (urls: string[], priority: 'high' | 'normal' | 'low' = 'normal') => {
+    if (!urls.length) return;
+    
+    try {
+      const uniqueUrls = [...new Set(urls.filter(Boolean))]; // Remove duplicates and null/undefined
+      
+      // Cache source objects immediately for faster access
+      uniqueUrls.forEach(url => {
+        if (!imageCache.has(url)) {
+          imageCache.set(url, { uri: url });
+        }
+      });
+      
+      // Prioritize critical images
+      const criticalCount = priority === 'high' ? 5 : priority === 'normal' ? 3 : 1;
+      const criticalImages = uniqueUrls.slice(0, criticalCount);
+      const remainingImages = uniqueUrls.slice(criticalCount);
+      
+      // Load critical images first with higher concurrency
+      if (criticalImages.length > 0) {
+        const criticalPromises = criticalImages.map(url => {
+          return ExpoImage.prefetch(url, {
+            cachePolicy: 'disk'
+          }).catch(error => {
+            console.warn(`Failed to prefetch critical image: ${url}`, error);
+          });
+        });
+        await Promise.allSettled(criticalPromises);
+      }
+      
+      // Load remaining images in smaller chunks to prevent memory issues
+      if (remainingImages.length > 0) {
+        const batchSize = priority === 'high' ? 3 : priority === 'normal' ? 2 : 1;
+        
+        for (let i = 0; i < remainingImages.length; i += batchSize) {
+          const batch = remainingImages.slice(i, i + batchSize);
+          const batchPromises = batch.map(url => {
+            return ExpoImage.prefetch(url, {
+              cachePolicy: 'disk'
+            }).catch(error => {
+              console.warn(`Failed to prefetch image: ${url}`, error);
+            });
+          });
+          
+          await Promise.allSettled(batchPromises);
+          
+          // Small delay between batches to prevent overwhelming the system
+          if (i + batchSize < remainingImages.length) {
+            await new Promise(resolve => setTimeout(resolve, priority === 'low' ? 150 : 100));
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Error in prefetchUrlsWithPriority:', error);
+    }
+  };
+
+  // Image caches for optimization
+  const imageCache = new Map<string, any>();
+  const backgroundCache = new Map<string, string>();
+  const getOptimizedBackground = (imageName: string): string => {
+    if (backgroundCache.has(imageName)) {
+      return backgroundCache.get(imageName)!;
+    }
+    const source = getBackgroundSource(imageName);
+    backgroundCache.set(imageName, source);
+    return source;
+  };
+
+  // Optimized Image Component with lazy loading and error handling
+  const OptimizedImage = ({ source, style, contentFit = "contain", priority = "normal", lazy = false, ...props }: any) => {
+    const [isLoaded, setIsLoaded] = useState(false);
+    const [hasError, setHasError] = useState(false);
+    const [shouldLoad, setShouldLoad] = useState(!lazy);
+    const [retryCount, setRetryCount] = useState(0);
+
+    // For lazy loading, start loading when component mounts
+    useEffect(() => {
+      if (lazy && !shouldLoad) {
+        const timer = setTimeout(() => setShouldLoad(true), 100);
+        return () => clearTimeout(timer);
+      }
+    }, [lazy, shouldLoad]);
+
+    // Reset state when source changes
+    useEffect(() => {
+      setIsLoaded(false);
+      setHasError(false);
+      setRetryCount(0);
+    }, [source?.uri]);
+
+    const handleError = () => {
+      if (retryCount < 2) {
+        // Retry loading the image up to 2 times
+        setTimeout(() => {
+          setRetryCount(prev => prev + 1);
+          setHasError(false);
+        }, 1000 * (retryCount + 1)); // Exponential backoff
+      } else {
+        setHasError(true);
+        setIsLoaded(true);
+        console.warn(`Image failed to load after ${retryCount + 1} attempts:`, source?.uri);
+      }
+    };
+
+    if (lazy && !shouldLoad) {
+      return (
+        <View style={[style, { backgroundColor: '#f0f0f0', opacity: 0.3, justifyContent: 'center', alignItems: 'center' }]}>
+          {/* Placeholder while loading */}
+        </View>
+      );
+    }
+
+    if (hasError && retryCount >= 2) {
+      return (
+        <View style={[style, { backgroundColor: '#f8f9fa', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#dee2e6' }]}>
+          <Text style={{ color: '#6c757d', fontSize: 12 }}>Image unavailable</Text>
+        </View>
+      );
+    }
+
+    return (
+      <ExpoImage
+        key={`${source?.uri}-${retryCount}`} // Force re-render on retry
+        source={source}
+        style={[
+          style,
+          !isLoaded && { opacity: 0.3 }, // Show loading state
+          hasError && retryCount < 2 && { opacity: 0.1 }   // Show retry state
+        ]}
+        contentFit={contentFit}
+        transition={isLoaded ? 120 : 0} // Only animate on successful load
+        cachePolicy="memory-disk"
+        priority={priority}
+        onLoad={() => {
+          setIsLoaded(true);
+          setHasError(false);
+        }}
+        onError={handleError}
+        {...props}
+      />
+    );
+  };
+
   // Helpers to present correct answers for all question types
   const subQuestionsLabel = (index: number): string => String(index + 1);
   const getReorderItemLabel = (item?: ReorderItem | null) => {
     if (!item) return '';
     if (item.type === 'image') return item.content || '[image]';
     return item.content;
+  };
+
+  // TTS cache and optimization
+  const ttsCache = new Map<string, any>();
+  const ttsLoadingPromises = new Map<string, Promise<any>>();
+
+  // Preload TTS audio
+  const preloadTTS = async (audioUrl: string) => {
+    if (!audioUrl || ttsCache.has(audioUrl) || ttsLoadingPromises.has(audioUrl)) {
+      return;
+    }
+
+    try {
+      const loadingPromise = Promise.resolve(createAudioPlayer({ uri: audioUrl }));
+      
+      ttsLoadingPromises.set(audioUrl, loadingPromise);
+      const player = await loadingPromise;
+      
+      // Cache the player object without playing
+      ttsCache.set(audioUrl, player);
+      ttsLoadingPromises.delete(audioUrl);
+      
+    } catch (error) {
+      console.warn('Failed to preload TTS:', audioUrl, error);
+      ttsLoadingPromises.delete(audioUrl);
+    }
   };
 
   // TTS helpers
@@ -791,8 +965,24 @@ export default function StudentExerciseAnswering() {
       return letter ? `${letter}. ${v}` : v;
     }
     if (question.type === 'identification') {
-      if (Array.isArray(question.answer)) return (question.answer as string[]).join(', ');
-      return String(question.answer ?? '');
+      // Include alternative answers in the formatted display
+      const allAnswers: string[] = [];
+      
+      // Add main answer(s)
+      if (Array.isArray(question.answer)) {
+        allAnswers.push(...(question.answer as string[]));
+      } else {
+        allAnswers.push(String(question.answer ?? ''));
+      }
+      
+      // Add alternative answers if they exist
+      if (question.fillSettings?.altAnswers && question.fillSettings.altAnswers.length > 0) {
+        allAnswers.push(...question.fillSettings.altAnswers);
+      }
+      
+      // Remove duplicates and return formatted string
+      const uniqueAnswers = Array.from(new Set(allAnswers.filter(Boolean)));
+      return uniqueAnswers.length > 1 ? uniqueAnswers.join(' OR ') : uniqueAnswers[0] || '';
     }
     if (question.type === 'matching') {
       const pairs = question.pairs || [];
@@ -831,8 +1021,12 @@ export default function StudentExerciseAnswering() {
         return labeled.join(', ');
       }
       if (question.type === 'identification') {
-        if (Array.isArray(ans)) return ans.map((x) => String(x)).join(', ');
-        return String(ans ?? '');
+        if (Array.isArray(ans)) {
+          const nonEmpty = ans.filter(x => x !== '' && x !== null && x !== undefined);
+          return nonEmpty.length > 0 ? nonEmpty.map((x) => String(x)).join(', ') : 'No answer';
+        }
+        const answer = String(ans ?? '');
+        return answer.trim() === '' ? 'No answer' : answer;
       }
       if (question.type === 're-order') {
         const ids = Array.isArray(ans) ? ans as string[] : [];
@@ -1005,8 +1199,17 @@ export default function StudentExerciseAnswering() {
     try {
       setLoading(true);
       
-      // Set random background
-      setBackgroundImage(getRandomBackground());
+      // Set random background with optimization
+      const bgImage = getRandomBackground();
+      setBackgroundImage(bgImage);
+      
+      // Preload background image
+      try {
+        const bgUrl = getOptimizedBackground(bgImage);
+        prefetchUrlsWithPriority([bgUrl], 'high');
+      } catch (error) {
+        console.warn('Failed to preload background:', error);
+      }
       
       // Always enable TTS autoplay for all contexts
       
@@ -1069,6 +1272,21 @@ export default function StudentExerciseAnswering() {
           return;
         }
         
+        // Validate assigned exercise has required fields
+        // Note: assigned exercises may not have title/teacherId directly - they reference the exercise
+        if (!assignedData.createdAt) {
+          console.error('Invalid assigned exercise data structure:', assignedData);
+          showCustomAlert('Error', 'Invalid assigned exercise data - missing required fields', () => router.back(), 'error');
+          return;
+        }
+        
+        // Validate that the assignment is properly linked to a student or class
+        if (!assignedData.studentId && !assignedData.parentId && !assignedData.classId) {
+          console.error('Assigned exercise not linked to any student or class:', assignedData);
+          showCustomAlert('Error', 'This assignment is not properly linked to a student or class', () => router.back(), 'error');
+          return;
+        }
+        
         // Check if assignment is still accepting submissions
         if (assignedData.acceptingStatus !== 'open') {
           showCustomAlert('Assignment Closed', 'This assignment is no longer accepting submissions.', () => router.back(), 'warning');
@@ -1112,6 +1330,61 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
+          // Validate exercise matches assignment metadata
+          // Note: Assigned exercises reference exercises by ID, so we validate the reference exists
+          if (result.data.id !== actualExerciseId) {
+            console.warn('Exercise ID mismatch:', { expectedId: actualExerciseId, actualId: result.data.id });
+          }
+          
+          // Log exercise metadata for debugging
+          console.log('Loaded exercise metadata:', {
+            title: result.data.title,
+            teacherId: result.data.teacherId,
+            questionCount: result.data.questions?.length || 0
+          });
+          
+          // Validate question structure and data integrity
+          const questions: Question[] = result.data.questions;
+          for (let i = 0; i < questions.length; i++) {
+            const q = questions[i];
+            if (!q.id || !q.type || !q.question || q.answer === undefined) {
+              console.error(`Invalid question structure at index ${i}:`, q);
+              showCustomAlert('Error', `Invalid question data found in exercise`, () => router.back(), 'error');
+              return;
+            }
+            
+            // Validate question-specific data
+            if (q.type === 'multiple-choice' && (!q.options || q.options.length === 0)) {
+              console.error(`Multiple choice question missing options at index ${i}:`, q);
+              showCustomAlert('Error', `Multiple choice question missing options`, () => router.back(), 'error');
+              return;
+            }
+            
+            if (q.type === 'matching' && (!q.pairs || q.pairs.length === 0)) {
+              console.error(`Matching question missing pairs at index ${i}:`, q);
+              showCustomAlert('Error', `Matching question missing pairs`, () => router.back(), 'error');
+              return;
+            }
+            
+            if (q.type === 're-order' && (!q.reorderItems || q.reorderItems.length === 0)) {
+              console.error(`Reorder question missing items at index ${i}:`, q);
+              showCustomAlert('Error', `Reorder question missing items`, () => router.back(), 'error');
+              return;
+            }
+            
+            // Validate sub-questions for reading passages
+            if (q.type === 'reading-passage' && q.subQuestions) {
+              for (let j = 0; j < q.subQuestions.length; j++) {
+                const sq = q.subQuestions[j];
+                if (!sq.id || !sq.type || !sq.question || sq.answer === undefined) {
+                  console.error(`Invalid sub-question structure at index ${i}-${j}:`, sq);
+                  showCustomAlert('Error', `Invalid sub-question data found`, () => router.back(), 'error');
+                  return;
+                }
+              }
+            }
+          }
+          
           setExercise({
             ...result.data,
             id: actualExerciseId,
@@ -1124,7 +1397,19 @@ export default function StudentExerciseAnswering() {
             for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
               batchUrls.push(...collectImageUrls(questions[i]));
             }
-            if (batchUrls.length) prefetchUrls(batchUrls);
+            if (batchUrls.length) {
+              // Prefetch current and next questions with high priority
+              const currentAndNext = batchUrls.slice(0, Math.min(batchUrls.length, 10));
+              const remaining = batchUrls.slice(10);
+              
+              // High priority for current and next questions
+              prefetchUrlsWithPriority(currentAndNext, 'high');
+              
+              // Low priority for remaining questions
+              if (remaining.length) {
+                prefetchUrlsWithPriority(remaining, 'low');
+              }
+            }
           } catch {}
           if (levelMode) {
             setCurrentQuestionIndex(levelIndex);
@@ -1194,7 +1479,19 @@ export default function StudentExerciseAnswering() {
             for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
               batchUrls.push(...collectImageUrls(questions[i]));
             }
-            if (batchUrls.length) prefetchUrls(batchUrls);
+            if (batchUrls.length) {
+              // Prefetch current and next questions with high priority
+              const currentAndNext = batchUrls.slice(0, Math.min(batchUrls.length, 10));
+              const remaining = batchUrls.slice(10);
+              
+              // High priority for current and next questions
+              prefetchUrlsWithPriority(currentAndNext, 'high');
+              
+              // Low priority for remaining questions
+              if (remaining.length) {
+                prefetchUrlsWithPriority(remaining, 'low');
+              }
+            }
           } catch {}
           if (levelMode) {
             setCurrentQuestionIndex(levelIndex);
@@ -1253,14 +1550,19 @@ export default function StudentExerciseAnswering() {
     if (exercise && exercise.questions[currentQuestionIndex]) {
       const currentQuestion = exercise.questions[currentQuestionIndex];
       logInteraction(currentQuestion.id, 'answer_change', 'user_input', 0);
+      
+      // Calculate correctness and update answers array
+      const isCorrect = isAnswerCorrect(currentQuestion, answer);
+      
+      setAnswers(prev => prev.map(a => 
+        a.questionId === currentQuestion.id 
+          ? { ...a, answer, isCorrect }
+          : a
+      ));
+      
+      // Update correct questions tracking
+      setCorrectQuestions(prev => ({ ...prev, [currentQuestion.id]: isCorrect }));
     }
-    
-    // Update answers array
-    setAnswers(prev => prev.map(a => 
-      a.questionId === exercise?.questions[currentQuestionIndex].id 
-        ? { ...a, answer }
-        : a
-    ));
   };
 
   // Helpers for reading-passage sub-answers
@@ -1279,6 +1581,20 @@ export default function StudentExerciseAnswering() {
       if (a.questionId !== parentId) return a;
       const base = (a.answer && typeof a.answer === 'object' && !Array.isArray(a.answer)) ? { ...(a.answer as {[key: string]: any}) } : {};
       base[subId] = value;
+      
+      // Calculate correctness for sub-questions if we have the exercise data
+      if (exercise) {
+        const parentQuestion = exercise.questions.find(q => q.id === parentId);
+        if (parentQuestion && parentQuestion.type === 'reading-passage' && parentQuestion.subQuestions) {
+          const subQuestion = parentQuestion.subQuestions.find(sq => sq.id === subId);
+          if (subQuestion) {
+            const isSubCorrect = isAnswerCorrect(subQuestion, value);
+            // Update correct questions tracking for sub-questions
+            setCorrectQuestions(prev => ({ ...prev, [subId]: isSubCorrect }));
+          }
+        }
+      }
+      
       return { ...a, answer: base };
     }));
   };
@@ -1488,9 +1804,51 @@ export default function StudentExerciseAnswering() {
   };
   const mapAnswerTokenToOptionValue = (question: Question, token: string) => {
     if (!question.options || !question.options.length) return token;
+    
+    // First, check if the token is already an option value
+    const normalizedToken = normalize(token);
+    const matchingOption = question.options.find(opt => normalize(opt) === normalizedToken);
+    if (matchingOption) {
+      return matchingOption;
+    }
+    
+    // If not found, try to map as a letter (A, B, C, D)
     const idx = letterToIndex(token);
     if (idx >= 0 && idx < question.options.length) return question.options[idx];
+    
+    // Return the original token if no mapping found
     return token;
+  };
+
+  // Robust helper: compute expected correct option indices from saved answer
+  const getExpectedOptionIndices = (question: Question): number[] => {
+    try {
+      const options = question.options || [];
+      const expectedRaw = question.answer;
+      const toIndex = (token: string): number => {
+        // 1) Letter like 'A','B','C','D'
+        const li = letterToIndex(token);
+        if (li >= 0 && li < options.length) return li;
+        // 2) Numeric string index "0".."n" or 1-based "1".."n"
+        const n = Number(token);
+        if (!Number.isNaN(n)) {
+          if (n >= 0 && n < options.length) return n; // zero-based
+          if (n > 0 && n-1 < options.length) return n-1; // one-based
+        }
+        // 3) Match option text directly
+        const norm = normalize(token);
+        const idx = options.findIndex(opt => normalize(opt) === norm);
+        return idx; // -1 if not found
+      };
+      if (Array.isArray(expectedRaw)) {
+        const arr = (expectedRaw as string[]).map(x => toIndex(String(x))).filter(i => i >= 0);
+        return arr;
+      }
+      const single = toIndex(String(expectedRaw));
+      return single >= 0 ? [single] : [];
+    } catch {
+      return [];
+    }
   };
 
   const indexToLetter = (index: number) => String.fromCharCode(65 + index);
@@ -1501,14 +1859,10 @@ export default function StudentExerciseAnswering() {
     return idx >= 0 ? indexToLetter(idx) : '';
   };
 
-  const isOptionCorrect = (question: Question, optionValue: string): boolean => {
-    const expectedRaw = question.answer;
-    if (Array.isArray(expectedRaw)) {
-      const expectedValues = (expectedRaw as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
-      return expectedValues.map(v => normalize(v)).includes(normalize(optionValue));
-    }
-    const expectedValue = mapAnswerTokenToOptionValue(question, String(expectedRaw));
-    return normalize(optionValue) === normalize(expectedValue);
+  const isOptionIndexCorrect = (question: Question, optionIndex: number): boolean => {
+    const expected = getExpectedOptionIndices(question);
+    if (!expected.length) return false;
+    return expected.includes(optionIndex);
   };
 
   const isAnswerCorrect = (question: Question, ans: any): boolean => {
@@ -1531,11 +1885,51 @@ export default function StudentExerciseAnswering() {
       }
       if (question.type === 'identification') {
         const norm = (s: any) => normalizeWithSettings(s, question.fillSettings);
+        
+        // Get all possible correct answers (main answer + alternative answers)
+        const getAllCorrectAnswers = () => {
+          const correctAnswers: string[] = [];
+          
+          // Add main answer
+          if (Array.isArray(question.answer)) {
+            correctAnswers.push(...(question.answer as string[]));
+          } else {
+            correctAnswers.push(String(question.answer || ''));
+          }
+          
+          // Add alternative answers from fillSettings
+          if (question.fillSettings?.altAnswers && question.fillSettings.altAnswers.length > 0) {
+            correctAnswers.push(...question.fillSettings.altAnswers);
+          }
+          
+          return correctAnswers;
+        };
+        
         if (Array.isArray(question.answer)) {
           const arr = Array.isArray(ans) ? ans : [];
-          return (question.answer as string[]).every((v, i) => norm(String(arr[i] || '')) === norm(String(v || '')));
+          const allCorrectAnswers = getAllCorrectAnswers();
+          
+          // For array answers, check each position
+          return (question.answer as string[]).every((expectedAnswer, i) => {
+            const studentAnswer = String(arr[i] || '');
+            const normalizedStudentAnswer = norm(studentAnswer);
+            
+            // Check against main answer and all alternatives
+            return allCorrectAnswers.some(correctAnswer => {
+              const normalizedCorrectAnswer = norm(String(correctAnswer || ''));
+              return normalizedStudentAnswer === normalizedCorrectAnswer;
+            });
+          });
         }
-        return norm(String(ans || '')) === norm(String(question.answer || ''));
+        
+        // For single answer, check against main answer and all alternatives
+        const studentAnswer = norm(String(ans || ''));
+        const allCorrectAnswers = getAllCorrectAnswers();
+        
+        return allCorrectAnswers.some(correctAnswer => {
+          const normalizedCorrectAnswer = norm(String(correctAnswer || ''));
+          return studentAnswer === normalizedCorrectAnswer;
+        });
       }
       if (question.type === 're-order') {
         const expected: string[] = (question.order && question.order.length)
@@ -1558,7 +1952,22 @@ export default function StudentExerciseAnswering() {
         // With current UI, we cannot map which left matches which right; treat completion as correctness for now
         return complete && pairs.length > 0;
       }
-      return true;
+      // Multiple-choice explicit check using indices (single or multi answer)
+      if ((question as any).type === 'multiple-choice') {
+        const expected = getExpectedOptionIndices(question);
+        if (!expected.length) return false;
+        if (Array.isArray(ans)) {
+          const givenIdxs = (ans as string[]).map(v => {
+            const idx = (question.options || []).findIndex(opt => normalize(opt) === normalize(String(v)));
+            return idx;
+          }).filter(i => i >= 0).sort();
+          const expectedSorted = [...expected].sort();
+          return givenIdxs.length === expectedSorted.length && expectedSorted.every((v,i)=>v===givenIdxs[i]);
+        }
+        const singleIdx = (question.options || []).findIndex(opt => normalize(opt) === normalize(String(ans)));
+        return expected.includes(singleIdx);
+      }
+      return false;
     } catch {
       return false;
     }
@@ -1712,7 +2121,7 @@ export default function StudentExerciseAnswering() {
             questionText: q.question || '',
             questionImage: q.questionImage || null,
             options: q.options || [],
-            isCorrect: true, // All questions are correct since student completed the exercise
+            isCorrect: finalAnswers.find(a => a.questionId === q.id)?.isCorrect || false,
             timeSpent: getTimeMsForQuestion(q),
             attempts: attemptCounts[q.id] || 1,
             studentAnswer: finalAnswers.find(a => a.questionId === q.id)?.answer || '',
@@ -1770,7 +2179,26 @@ export default function StudentExerciseAnswering() {
         throw new Error(`Failed to save exercise result: ${exerciseResult.error}`);
       }
       
-      // No need to update assignedExercises - completion status is determined by ExerciseResults existence
+      // Mark assigned exercise as completed if it exists
+      if (assignedExerciseId && parentId) {
+        try {
+          const assignedExerciseData = await readData(`/assignedExercises/${assignedExerciseId}`);
+          if (assignedExerciseData.data) {
+            const updatedAssignedExercise = {
+              ...assignedExerciseData.data,
+              completedAt: new Date().toISOString(),
+              status: 'completed',
+              resultId: resultId,
+              scorePercentage: scorePercentage,
+              totalTimeSpent: elapsedTime
+            };
+            await writeData(`/assignedExercises/${assignedExerciseId}`, updatedAssignedExercise);
+            console.log('Marked assigned exercise as completed:', assignedExerciseId);
+          }
+        } catch (error) {
+          console.warn('Could not update assigned exercise completion status:', error);
+        }
+      }
       
       // Close results panel and navigate back
       setShowResults(false);
@@ -1796,13 +2224,16 @@ export default function StudentExerciseAnswering() {
       // Stop any TTS during submit
       stopCurrentTTS();
       
-      // Validate last question on submit (try-again basis)
+      // Validate last question on submit and show feedback
       if (exercise) {
         const q = exercise.questions[currentQuestionIndex];
         const currentAns = answers.find(a => a.questionId === q.id)?.answer;
         const correct = isAnswerCorrect(q, currentAns);
+        
         if (!correct) {
           setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+          // Log the incorrect attempt for the last question
+          logAttempt(q, currentAns, 'change');
           // Shake on submit when wrong
           Animated.sequence([
             Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
@@ -1812,14 +2243,39 @@ export default function StudentExerciseAnswering() {
             Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
           ]).start();
           triggerWrongFeedback();
-      showCustomAlert('Try again', 'Your current answer is not correct yet. Please try again.', undefined, 'warning');
-      setSubmitting(false);
-      return;
+          showCustomAlert('Incorrect Answer', 'Your current answer is not correct yet. Please try again.', undefined, 'warning');
+          setSubmitting(false);
+          return;
         } else {
           // Count the final successful attempt
           setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+          setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
+          
+          // Update the answer in the answers array to mark it as correct
+          setAnswers(prev => prev.map(a => 
+            a.questionId === q.id 
+              ? { ...a, answer: currentAns || '', isCorrect: true }
+              : a
+          ));
+          
+          // Log the final successful attempt for the last question
+          logAttempt(q, currentAns, 'final');
+          
+          // Show success feedback for last question before proceeding to results
+          triggerCorrectFeedback(() => {
+            showCustomAlert(
+              'Correct!', 
+              'Great job! Your answer is correct. Proceeding to assessment summary...', 
+              () => {
+                // Show results panel after user acknowledges correct answer
+                setShowResults(true);
+              }, 
+              'success'
+            );
+          });
+          setSubmitting(false);
+          return;
         }
-        setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
       }
 
       // No need to update assignedExercises - completion status is determined by ExerciseResults existence
@@ -1876,11 +2332,92 @@ export default function StudentExerciseAnswering() {
               <ExpoImage source={{ uri: question.questionImage }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
             ) : null}
             {question.questionImages && question.questionImages.length ? (
-              <View style={styles.questionImagesGrid}>
-                {question.questionImages.map((img, idx) => (
-                  <ExpoImage key={`qis-${idx}`} source={{ uri: img }} style={styles.questionImageThumb} contentFit="cover" transition={120} cachePolicy="disk" />
-                ))}
-              </View>
+              (() => {
+                const layout = getQuestionImageLayout(question);
+                
+                // Special layout for pattern recognition
+                if (layout.layout === 'pattern-blocks') {
+                  return (
+                    <View style={[styles.patternBlocksContainer, { 
+                      maxHeight: layout.maxHeight, 
+                      maxWidth: layout.maxWidth
+                    }]}>
+                      {/* Top row - 4 items in blue container */}
+                      <View style={styles.patternTopRow}>
+                        {question.questionImages.slice(0, 4).map((img, idx) => (
+                          <View key={`top-${idx}`} style={styles.patternTopItem}>
+                            <ExpoImage 
+                              source={{ uri: img }} 
+                              style={styles.patternTopImage}
+                              contentFit={layout.contentFit} 
+                              transition={120} 
+                              cachePolicy="disk" 
+                            />
+                          </View>
+                        ))}
+                      </View>
+                      
+                      {/* Middle section - single large item */}
+                      {question.questionImages[4] && (
+                        <View style={styles.patternMiddleRow}>
+                          <ExpoImage 
+                            source={{ uri: question.questionImages[4] }} 
+                            style={styles.patternMiddleImage}
+                            contentFit={layout.contentFit} 
+                            transition={120} 
+                            cachePolicy="disk" 
+                          />
+                        </View>
+                      )}
+                      
+                      {/* Bottom section - 2x2 grid */}
+                      <View style={styles.patternBottomGrid}>
+                        {question.questionImages.slice(5, 9).map((img, idx) => (
+                          <View key={`bottom-${idx}`} style={styles.patternBottomItem}>
+                            <ExpoImage 
+                              source={{ uri: img }} 
+                              style={styles.patternBottomImage}
+                              contentFit={layout.contentFit} 
+                              transition={120} 
+                              cachePolicy="disk" 
+                            />
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  );
+                }
+                
+                // Default layout for other question types
+                return (
+                  <View style={[styles.questionImagesContainer, { 
+                    maxHeight: layout.maxHeight, 
+                    maxWidth: layout.maxWidth,
+                    justifyContent: layout.alignment
+                  }]}>
+                    <View style={[styles.questionImagesGrid, { 
+                      flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
+                      flexWrap: 'wrap',
+                      justifyContent: layout.alignment
+                    }]}>
+                      {question.questionImages.map((img, idx) => (
+                        <ExpoImage 
+                          key={`qis-${idx}`} 
+                          source={{ uri: img }} 
+                          style={[styles.questionImageThumb, { 
+                            width: layout.imageSize, 
+                            height: layout.imageSize,
+                            margin: 4
+                          }]} 
+                          contentFit={layout.contentFit} 
+                          transition={120} 
+                          cachePolicy="disk" 
+                        />
+                      ))}
+                    </View>
+                  </View>
+                );
+              })()
             ) : null}
           </View>
         )}
@@ -1898,7 +2435,7 @@ export default function StudentExerciseAnswering() {
               const optionLabel = String.fromCharCode(65 + index); // A, B, C, D
               
               const optionKey = `mc-${question.id}-${index}`;
-              const isCorrect = isOptionCorrect(question, option);
+              const isCorrect = isOptionIndexCorrect(question, index);
               const shakeStyle = lastShakeKey === optionKey ? { transform: [{ translateX: shakeAnim }] } : undefined;
               return (
                 <AnimatedTouchable
@@ -1911,6 +2448,15 @@ export default function StudentExerciseAnswering() {
                   onPress={() => {
                     // Single answer immediate validation and feedback
                     if (!question.multiAnswer) {
+                      // Debug logging
+                      console.log('Multiple Choice Click Debug:', {
+                        questionId: question.id,
+                        selectedOption: option,
+                        questionAnswer: question.answer,
+                        isCorrect,
+                        options: question.options
+                      });
+                      
                       if (!isCorrect) {
                         setLastShakeKey(optionKey);
                         setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
@@ -1980,7 +2526,7 @@ export default function StudentExerciseAnswering() {
               const optionLabel = String.fromCharCode(65 + index); // A, B, C, D
               
               const optionKey = `mc-${question.id}-${index}`;
-              const isCorrect = isOptionCorrect(question, option);
+              const isCorrect = isOptionIndexCorrect(question, index);
               const shakeStyle = lastShakeKey === optionKey ? { transform: [{ translateX: shakeAnim }] } : undefined;
               return (
                 <AnimatedTouchable
@@ -1992,6 +2538,15 @@ export default function StudentExerciseAnswering() {
                   ]}
                   onPress={() => {
                     if (!question.multiAnswer) {
+                      // Debug logging
+                      console.log('Multiple Choice Click Debug (Non-Grid):', {
+                        questionId: question.id,
+                        selectedOption: option,
+                        questionAnswer: question.answer,
+                        isCorrect,
+                        options: question.options
+                      });
+                      
                       if (!isCorrect) {
                         setLastShakeKey(optionKey);
                         setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
@@ -2093,6 +2648,87 @@ export default function StudentExerciseAnswering() {
     return 14;                             // Extremely long questions - small font
   };
 
+  // Question type detection for image layout
+  const getQuestionImageLayout = (question: Question) => {
+    const questionText = question.question.toLowerCase();
+    const title = exercise?.title.toLowerCase() || '';
+    
+    // Pattern recognition detection
+    const isPatternRecognition = questionText.includes('pattern') || 
+                                questionText.includes('kasunod') || 
+                                questionText.includes('susunod') ||
+                                title.includes('pattern');
+    
+    // Multiple choice with images
+    const isMultipleChoice = question.type === 'multiple-choice';
+    
+    // Identification questions
+    const isIdentification = question.type === 'identification';
+    
+    // Matching questions
+    const isMatching = question.type === 'matching';
+    
+    if (isPatternRecognition) {
+      return {
+        type: 'pattern',
+        gridColumns: 2,
+        maxHeight: 280,
+        maxWidth: 400,
+        imageSize: 60,
+        contentFit: 'contain' as const,
+        alignment: 'center' as const,
+        layout: 'pattern-blocks' as const
+      };
+    }
+    
+    if (isMultipleChoice && question.questionImages?.length) {
+      return {
+        type: 'multiple-choice',
+        gridColumns: Math.min(3, question.questionImages.length),
+        maxHeight: 150,
+        maxWidth: 350,
+        imageSize: 70,
+        contentFit: 'contain' as const,
+        alignment: 'center' as const
+      };
+    }
+    
+    if (isIdentification && question.questionImages?.length) {
+      return {
+        type: 'identification',
+        gridColumns: Math.min(4, question.questionImages.length),
+        maxHeight: 120,
+        maxWidth: 400,
+        imageSize: 60,
+        contentFit: 'contain' as const,
+        alignment: 'flex-start' as const
+      };
+    }
+    
+    if (isMatching && question.questionImages?.length) {
+      return {
+        type: 'matching',
+        gridColumns: Math.min(2, question.questionImages.length),
+        maxHeight: 180,
+        maxWidth: 300,
+        imageSize: 90,
+        contentFit: 'contain' as const,
+        alignment: 'center' as const
+      };
+    }
+    
+    // Default layout
+    return {
+      type: 'default',
+      gridColumns: Math.min(3, question.questionImages?.length || 3),
+      maxHeight: 150,
+      maxWidth: 350,
+      imageSize: 80,
+      contentFit: 'contain' as const,
+      alignment: 'center' as const
+    };
+  };
+
   const renderIdentification = (question: Question) => {
     // Check if question has separate boxes (blanks) or single input field
     const hasBlanks = question.fillSettings?.showBoxes;
@@ -2113,11 +2749,37 @@ export default function StudentExerciseAnswering() {
                 <ExpoImage source={{ uri: question.questionImage }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
               ) : null}
             {question.questionImages && question.questionImages.length ? (
-              <View style={styles.questionImagesGrid}>
-                {question.questionImages.map((img, idx) => (
-                  <Image key={`qis-${idx}`} source={{ uri: img }} style={styles.questionImageThumb} resizeMode="cover" />
-                ))}
-              </View>
+              (() => {
+                const layout = getQuestionImageLayout(question);
+                return (
+                  <View style={[styles.questionImagesContainer, { 
+                    maxHeight: layout.maxHeight, 
+                    maxWidth: layout.maxWidth,
+                    justifyContent: layout.alignment
+                  }]}>
+                    <View style={[styles.questionImagesGrid, { 
+                      flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
+                      flexWrap: 'wrap',
+                      justifyContent: layout.alignment
+                    }]}>
+                      {question.questionImages.map((img, idx) => (
+                        <ExpoImage 
+                          key={`qis-${idx}`} 
+                          source={{ uri: img }} 
+                          style={[styles.questionImageThumb, { 
+                            width: layout.imageSize, 
+                            height: layout.imageSize,
+                            margin: 4
+                          }]} 
+                          contentFit={layout.contentFit} 
+                          transition={120} 
+                          cachePolicy="disk" 
+                        />
+                      ))}
+                    </View>
+                  </View>
+                );
+              })()
             ) : null}
             </View>
           )}
@@ -2186,11 +2848,37 @@ export default function StudentExerciseAnswering() {
                 <Image source={{ uri: question.questionImage }} style={styles.questionImage} resizeMode="contain" />
               ) : null}
               {question.questionImages && question.questionImages.length ? (
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
-                  {question.questionImages.map((img, idx) => (
-                    <ExpoImage key={`qis-${idx}`} source={{ uri: img }} style={{ width: 100, height: 100, borderRadius: 8, marginRight: 8 }} contentFit="cover" transition={120} cachePolicy="disk" />
-                  ))}
-                </ScrollView>
+                (() => {
+                  const layout = getQuestionImageLayout(question);
+                  return (
+                    <View style={[styles.questionImagesContainer, { 
+                      maxHeight: layout.maxHeight, 
+                      maxWidth: layout.maxWidth,
+                      justifyContent: layout.alignment
+                    }]}>
+                      <View style={[styles.questionImagesGrid, { 
+                        flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
+                        flexWrap: 'wrap',
+                        justifyContent: layout.alignment
+                      }]}>
+                        {question.questionImages.map((img, idx) => (
+                          <ExpoImage 
+                            key={`qis-${idx}`} 
+                            source={{ uri: img }} 
+                            style={[styles.questionImageThumb, { 
+                              width: layout.imageSize, 
+                              height: layout.imageSize,
+                              margin: 4
+                            }]} 
+                            contentFit={layout.contentFit} 
+                            transition={120} 
+                            cachePolicy="disk" 
+                          />
+                        ))}
+                      </View>
+                    </View>
+                  );
+                })()
               ) : null}
             </View>
           )}
@@ -2243,11 +2931,37 @@ export default function StudentExerciseAnswering() {
               <Image source={{ uri: question.questionImage }} style={styles.questionImage} resizeMode="contain" />
             ) : null}
             {question.questionImages && question.questionImages.length ? (
-              <View style={styles.questionImagesGrid}>
-                {question.questionImages.map((img, idx) => (
-                  <Image key={`qis-${idx}`} source={{ uri: img }} style={styles.questionImageThumb} resizeMode="cover" />
-                ))}
-              </View>
+              (() => {
+                const layout = getQuestionImageLayout(question);
+                return (
+                  <View style={[styles.questionImagesContainer, { 
+                    maxHeight: layout.maxHeight, 
+                    maxWidth: layout.maxWidth,
+                    justifyContent: layout.alignment
+                  }]}>
+                    <View style={[styles.questionImagesGrid, { 
+                      flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
+                      flexWrap: 'wrap',
+                      justifyContent: layout.alignment
+                    }]}>
+                      {question.questionImages.map((img, idx) => (
+                        <ExpoImage 
+                          key={`qis-${idx}`} 
+                          source={{ uri: img }} 
+                          style={[styles.questionImageThumb, { 
+                            width: layout.imageSize, 
+                            height: layout.imageSize,
+                            margin: 4
+                          }]} 
+                          contentFit={layout.contentFit} 
+                          transition={120} 
+                          cachePolicy="disk" 
+                        />
+                      ))}
+                    </View>
+                  </View>
+                );
+              })()
             ) : null}
           </View>
         )}
@@ -2391,11 +3105,37 @@ export default function StudentExerciseAnswering() {
                 <Image source={{ uri: question.questionImage }} style={styles.questionImage} resizeMode="contain" />
               ) : null}
               {question.questionImages && question.questionImages.length ? (
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
-                  {question.questionImages.map((img, idx) => (
-                    <Image key={`qis-${idx}`} source={{ uri: img }} style={{ width: 100, height: 100, borderRadius: 8, marginRight: 8 }} resizeMode="cover" />
-                  ))}
-                </ScrollView>
+                (() => {
+                  const layout = getQuestionImageLayout(question);
+                  return (
+                    <View style={[styles.questionImagesContainer, { 
+                      maxHeight: layout.maxHeight, 
+                      maxWidth: layout.maxWidth,
+                      justifyContent: layout.alignment
+                    }]}>
+                      <View style={[styles.questionImagesGrid, { 
+                        flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
+                        flexWrap: 'wrap',
+                        justifyContent: layout.alignment
+                      }]}>
+                        {question.questionImages.map((img, idx) => (
+                          <ExpoImage 
+                            key={`qis-${idx}`} 
+                            source={{ uri: img }} 
+                            style={[styles.questionImageThumb, { 
+                              width: layout.imageSize, 
+                              height: layout.imageSize,
+                              margin: 4
+                            }]} 
+                            contentFit={layout.contentFit} 
+                            transition={120} 
+                            cachePolicy="disk" 
+                          />
+                        ))}
+                      </View>
+                    </View>
+                  );
+                })()
               ) : null}
             </View>
           )}
@@ -2979,7 +3719,48 @@ export default function StudentExerciseAnswering() {
               <Text style={{ fontSize: 20, fontWeight: '800', color: '#1e293b', marginBottom: 12 }}>Assessment Summary</Text>
               {(() => {
                 const totalMs = (answers || []).reduce((sum, a) => sum + (a.timeSpent || 0), 0);
-                return <Text style={{ fontSize: 16, color: '#334155', marginBottom: 8 }}>Total time: {formatTime(totalMs)}</Text>;
+                
+                // Calculate total questions including sub-questions
+                let totalQuestions = 0;
+                let correctAnswers = 0;
+                
+                if (exercise?.questions) {
+                  exercise.questions.forEach(q => {
+                    if (q.type === 'reading-passage' && q.subQuestions) {
+                      // For reading passages, count each sub-question
+                      totalQuestions += q.subQuestions.length;
+                      q.subQuestions.forEach(sq => {
+                        if (correctQuestions[sq.id]) {
+                          correctAnswers++;
+                        }
+                      });
+                    } else {
+                      // For regular questions
+                      totalQuestions++;
+                      const questionAnswer = answers.find(a => a.questionId === q.id);
+                      if (questionAnswer?.isCorrect) {
+                        correctAnswers++;
+                      }
+                    }
+                  });
+                }
+                
+                const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
+                
+                return (
+                  <>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+                      <Text style={{ fontSize: 16, color: '#334155' }}>Score: {correctAnswers}/{totalQuestions}</Text>
+                      <Text style={{ fontSize: 16, fontWeight: '700', color: scorePercentage >= 80 ? '#10b981' : scorePercentage >= 60 ? '#f59e0b' : '#ef4444' }}>
+                        {scorePercentage}%
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 16, color: '#334155', marginBottom: 8 }}>Total time: {formatTime(totalMs)}</Text>
+                    <Text style={{ fontSize: 14, color: '#64748b', marginBottom: 8 }}>
+                      Questions: {exercise?.questions.length || 0} • Total items: {totalQuestions}
+                    </Text>
+                  </>
+                );
               })()}
               <View style={{ maxHeight: 320 }}>
                 <ScrollView>
@@ -2987,41 +3768,105 @@ export default function StudentExerciseAnswering() {
                     if (q.type === 'reading-passage' && q.subQuestions && q.subQuestions.length) {
                       return (
                         <View key={q.id} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                          <Text style={{ fontSize: 15, fontWeight: '700', color: '#0f172a' }}>Question {idx + 1} (Reading Passage)</Text>
-                          {q.subQuestions.map((sq, sidx) => (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                            <Text style={{ fontSize: 15, fontWeight: '700', color: '#0f172a' }}>Question {idx + 1} (Reading Passage)</Text>
+                            {(() => {
+                              // Calculate overall status for reading passage (all sub-questions correct = green, some correct = orange, none correct = red)
+                              const subQuestionCount = q.subQuestions?.length || 0;
+                              const correctSubQuestions = q.subQuestions?.filter(sq => correctQuestions[sq.id]).length || 0;
+                              let statusColor = '#ef4444'; // red
+                              if (correctSubQuestions === subQuestionCount && subQuestionCount > 0) {
+                                statusColor = '#10b981'; // green
+                              } else if (correctSubQuestions > 0) {
+                                statusColor = '#f59e0b'; // orange
+                              }
+                              return (
+                                <View style={{ marginLeft: 8, width: 12, height: 12, borderRadius: 6, backgroundColor: statusColor }} />
+                              );
+                            })()}
+                          </View>
+                          {q.subQuestions.map((sq, sidx) => {
+                            // Get the parent answer and extract sub-question data
+                            const parentAnswer = answers.find(a => a.questionId === q.id);
+                            const subAnswerData = parentAnswer?.answer && typeof parentAnswer.answer === 'object' ? (parentAnswer.answer as {[key: string]: any})[sq.id] : '';
+                            const isSubCorrect = correctQuestions[sq.id] || false;
+                            const subAttempts = attemptCounts[sq.id] || 0;
+                            
+                            return (
                             <View key={sq.id} style={{ marginTop: 6 }}>
-                              <Text style={{ fontSize: 14, fontWeight: '700', color: '#0f172a' }}>Q{subQuestionsLabel(sidx)}</Text>
-                              <Text style={{ fontSize: 14, color: '#334155' }}>Tries: {attemptCounts[sq.id] || 0}</Text>
+                              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                <Text style={{ fontSize: 14, fontWeight: '700', color: '#0f172a' }}>Q{subQuestionsLabel(sidx)}</Text>
+                                <View style={{ 
+                                  marginLeft: 8, 
+                                  width: 10, 
+                                  height: 10, 
+                                  borderRadius: 5, 
+                                  backgroundColor: isSubCorrect ? '#10b981' : '#ef4444' 
+                                }} />
+                              </View>
+                              <Text style={{ fontSize: 13, color: '#64748b', marginBottom: 2 }}>Type: {sq.type}</Text>
+                              <Text style={{ fontSize: 14, color: '#334155' }}>Tries: {attemptLogs[sq.id]?.length || 0}</Text>
+                              <Text style={{ fontSize: 13, color: '#64748b' }}>Your answer: {serializeAnswer(sq, subAnswerData)}</Text>
+                              <Text style={{ fontSize: 14, color: '#475569' }}>Correct answer: {Array.isArray(formatCorrectAnswer(sq)) ? (formatCorrectAnswer(sq) as string[]).join(', ') : (formatCorrectAnswer(sq) as string)}</Text>
                               {(() => {
                                 const ms = getTimeMsForSubQuestion(q, sq);
-                                return <Text style={{ fontSize: 13, color: '#64748b' }}>Time: {formatTime(ms)}</Text>;
+                                const limitMs = exercise?.timeLimitPerItem ? exercise.timeLimitPerItem * 1000 : null;
+                                return (
+                                  <>
+                                    <Text style={{ fontSize: 13, color: '#64748b' }}>Time Limit: {limitMs ? formatTime(limitMs) : '—'}</Text>
+                                    <Text style={{ fontSize: 13, color: '#64748b' }}>Time Taken: {formatTime(ms)}</Text>
+                                  </>
+                                );
                               })()}
-                              <Text style={{ fontSize: 14, color: '#475569' }}>Correct answer: {Array.isArray(formatCorrectAnswer(sq)) ? (formatCorrectAnswer(sq) as string[]).join(', ') : (formatCorrectAnswer(sq) as string)}</Text>
                               {(attemptLogs[sq.id] && attemptLogs[sq.id].length > 0) && (
                                 <View style={{ marginTop: 4 }}>
                                   {attemptLogs[sq.id].map((log, li) => (
-                                    <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || '(blank)'} ({Math.round(log.timeSpent / 1000)}s)</Text>
+                                    <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || 'No answer'} ({Math.round(log.timeSpent / 1000)}s)</Text>
                                   ))}
                                 </View>
                               )}
                             </View>
-                          ))}
+                            );
+                          })}
                         </View>
                       );
                     }
                     return (
                       <View key={q.id} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: '#0f172a' }}>Question {idx + 1}</Text>
-                        <Text style={{ fontSize: 14, color: '#334155' }}>Tries: {attemptCounts[q.id] || 0}</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                          <Text style={{ fontSize: 15, fontWeight: '700', color: '#0f172a' }}>Question {idx + 1}</Text>
+                          {(() => {
+                            const questionAnswer = answers.find(a => a.questionId === q.id);
+                            const isCorrect = questionAnswer?.isCorrect || false;
+                            return (
+                              <View style={{ 
+                                marginLeft: 8, 
+                                width: 12, 
+                                height: 12, 
+                                borderRadius: 6, 
+                                backgroundColor: isCorrect ? '#10b981' : '#ef4444' 
+                              }} />
+                            );
+                          })()}
+                        </View>
+                        <Text style={{ fontSize: 13, color: '#64748b', marginBottom: 2 }}>Type: {q.type}</Text>
+                        <Text style={{ fontSize: 14, color: '#334155' }}>Tries: {attemptLogs[q.id]?.length || 0}</Text>
+                        <Text style={{ fontSize: 13, color: '#64748b' }}>Your answer: {serializeAnswer(q, answers.find(a => a.questionId === q.id)?.answer || '')}</Text>
+                        <Text style={{ fontSize: 14, color: '#475569' }}>Correct answer: {Array.isArray(formatCorrectAnswer(q)) ? (formatCorrectAnswer(q) as string[]).join(', ') : (formatCorrectAnswer(q) as string)}</Text>
                         {(() => {
                           const ms = getTimeMsForQuestion(q);
-                          return <Text style={{ fontSize: 13, color: '#64748b' }}>Time: {formatTime(ms)}</Text>;
+                          const limitMs = exercise?.timeLimitPerItem ? exercise.timeLimitPerItem * 1000 : null;
+                          return (
+                            <>
+                              <Text style={{ fontSize: 13, color: '#64748b' }}>Time Limit: {limitMs ? formatTime(limitMs) : '—'}</Text>
+                              <Text style={{ fontSize: 13, color: '#64748b' }}>Time Taken: {formatTime(ms)}</Text>
+                            </>
+                          );
                         })()}
-                        <Text style={{ fontSize: 14, color: '#475569' }}>Correct answer: {Array.isArray(formatCorrectAnswer(q)) ? (formatCorrectAnswer(q) as string[]).join(', ') : (formatCorrectAnswer(q) as string)}</Text>
                         {(attemptLogs[q.id] && attemptLogs[q.id].length > 0) && (
                           <View style={{ marginTop: 4 }}>
                             {attemptLogs[q.id].map((log, li) => (
-                              <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || '(blank)'} ({Math.round(log.timeSpent / 1000)}s)</Text>
+                              <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || 'No answer'} ({Math.round(log.timeSpent / 1000)}s)</Text>
                             ))}
                           </View>
                         )}
@@ -3370,21 +4215,94 @@ const styles = StyleSheet.create({
     paddingHorizontal: getResponsivePadding(20),
     paddingVertical: getResponsiveSize(20),
   },
+  questionImagesContainer: {
+    alignItems: 'center',
+    marginTop: 8,
+    overflow: 'hidden',
+  },
   questionImagesGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'center',
-    marginTop: 8,
+    alignItems: 'center',
   },
   questionImageThumb: {
-    width: 88,
-    height: 88,
     borderRadius: 8,
-    marginRight: 8,
-    marginBottom: 8,
     borderWidth: 2,
     borderColor: '#ffa500',
     backgroundColor: '#ffffff',
+  },
+  // Pattern blocks layout styles
+  patternBlocksContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+  },
+  patternTopRow: {
+    flexDirection: 'row',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    marginBottom: 16,
+    justifyContent: 'space-evenly',
+    alignItems: 'center',
+    minHeight: 70,
+  },
+  patternTopItem: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+    backgroundColor: '#f8fafc',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+  patternTopImage: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+  },
+  patternMiddleRow: {
+    marginBottom: 16,
+    padding: 16,
+    minHeight: 80,
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: '100%',
+    backgroundColor: '#f8fafc',
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+  patternMiddleImage: {
+    width: '100%',
+    height: 60,
+    borderRadius: 12,
+  },
+  patternBottomGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
+  patternBottomItem: {
+    width: '48%',
+    aspectRatio: 1,
+    borderRadius: 16,
+    marginBottom: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+    backgroundColor: '#f8fafc',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+  patternBottomImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 16,
   },
   questionContainer: {
     marginBottom: 20,
