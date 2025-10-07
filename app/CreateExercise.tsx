@@ -22,23 +22,49 @@ import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
 // Import ElevenLabs API key management
-import {
-    addApiKey,
-    checkAllApiKeyCredits,
-    cleanupExpiredKeys,
-    debugKeyStatus,
-    getActiveApiKeys,
-    getApiKeyStatus,
-    getRandomApiKey,
-    markApiKeyAsFailed,
-    markApiKeyAsUsed,
-    performMaintenanceCleanup,
-    removeLowCreditKeys,
-    updateApiKeyCredits
-} from '../lib/elevenlabs-keys';
+// Firebase-backed ElevenLabs keys helpers (dynamic keys from DB)
+type DbElevenKey = { key: string; status?: 'active'|'low_credits'|'expired'|'failed'; creditsRemaining?: number; lastUsed?: string; addedAt?: string };
+const ELEVEN_KEYS_PATH = '/elevenlabsKeys';
+
+const fetchActiveElevenKeys = async (): Promise<Array<{id: string} & DbElevenKey>> => {
+  const { data } = await readData(ELEVEN_KEYS_PATH);
+  const obj = (data || {}) as Record<string, DbElevenKey>;
+  return Object.keys(obj)
+    .map(id => ({ id, ...obj[id] }))
+    .filter(k => (k.status ?? 'active') === 'active' && typeof k.key === 'string' && k.key.startsWith('sk_'));
+};
+
+const getRandomApiKeyFromDb = async (): Promise<{ id: string; key: string } | null> => {
+  const keys = await fetchActiveElevenKeys();
+  if (keys.length === 0) return null;
+  const idx = Math.floor(Math.random() * keys.length);
+  return { id: keys[idx].id, key: keys[idx].key };
+};
+
+const markApiKeyAsUsedInDb = async (id: string): Promise<void> => {
+  await updateData(`${ELEVEN_KEYS_PATH}/${id}/lastUsed`, new Date().toISOString());
+};
+
+const markApiKeyAsFailedInDb = async (id: string): Promise<void> => {
+  await updateData(`${ELEVEN_KEYS_PATH}/${id}/status`, 'failed');
+};
+
+const updateApiKeyCreditsInDb = async (id: string, creditsRemaining: number): Promise<void> => {
+  await updateData(`${ELEVEN_KEYS_PATH}/${id}`, {
+    creditsRemaining,
+    status: creditsRemaining <= 0 ? 'expired' : creditsRemaining < 300 ? 'low_credits' : 'active',
+    lastUsed: new Date().toISOString(),
+  });
+};
+
+// Maintenance placeholder (kept to minimize code churn)
+const performApiKeyMaintenance = async () => {
+  // Optionally: remove or mark failed/expired keys; for now no-op using Firebase list
+  return;
+};
 
 // Helper function to check if API key has low credits and update status
-const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, errorText: string): Promise<boolean> => {
+const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, errorText: string, keyId?: string): Promise<boolean> => {
   try {
     console.log('🔍 Raw error text:', errorText);
     
@@ -52,24 +78,12 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
       
       console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
       
-      // Debug: Check key status before update
-      console.log('🔍 Key status before update:');
-      debugKeyStatus(apiKey);
-      
       // Update the API key credits and status
-      updateApiKeyCredits(apiKey, creditsRemaining);
-      
-      // Debug: Check key status after update
-      console.log('🔍 Key status after update:');
-      debugKeyStatus(apiKey);
-      
-      // If credits are below 300, immediately remove this key
-      if (creditsRemaining < 300) {
-        console.log(`🗑️ API key marked as low credits (${creditsRemaining} < 300) - removing immediately`);
-        // Immediately remove low credit keys instead of waiting for periodic cleanup
-        removeLowCreditKeys();
-        return true; // Key has low credits
+      if (keyId) {
+        await updateApiKeyCreditsInDb(keyId, creditsRemaining);
       }
+      // If credits are below 300, flag as low credits in DB
+      if (creditsRemaining < 300) return true;
     } else {
       // Fallback to JSON parsing
       const errorData = JSON.parse(errorText);
@@ -83,15 +97,10 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
         console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
         
         // Update the API key credits and status
-        updateApiKeyCredits(apiKey, creditsRemaining);
+        if (keyId) await updateApiKeyCreditsInDb(keyId, creditsRemaining);
         
         // If credits are below 300, immediately remove this key
-        if (creditsRemaining < 300) {
-          console.log(`🗑️ API key marked as low credits (${creditsRemaining} < 300) - removing immediately`);
-          // Immediately remove low credit keys instead of waiting for periodic cleanup
-          removeLowCreditKeys();
-          return true; // Key has low credits
-        }
+        if (creditsRemaining < 300) return true;
       }
     }
   } catch (parseError) {
@@ -111,22 +120,18 @@ const callElevenLabsWithFallback = async (
 ): Promise<{ audioBlob: Blob; usedApiKey: string; performanceLog: any } | null> => {
   const performanceLog: any = {};
   
-  // Clean up expired keys first
-  cleanupExpiredKeys();
-  
-  // Get active API keys
-  const activeKeys = getActiveApiKeys();
-  
-  if (activeKeys.length === 0) {
+  // Load active API keys from Firebase
+  const dbKeys = await fetchActiveElevenKeys();
+  if (dbKeys.length === 0) {
     throw new Error('No active ElevenLabs API keys available');
   }
   
-  for (let i = 0; i < activeKeys.length; i++) {
-    const apiKey = activeKeys[i];
+  for (let i = 0; i < dbKeys.length; i++) {
+    const { id: keyId, key: apiKey } = dbKeys[i];
     const attemptStart = Date.now();
     
     try {
-      console.log(`🔄 Trying ElevenLabs API key ${i + 1}/${activeKeys.length} (${apiKey.substring(0, 10)}...)`);
+      console.log(`🔄 Trying ElevenLabs API key ${i + 1}/${dbKeys.length} (${apiKey.substring(0, 10)}...)`);
       
       // Prepare request payload based on version
       const requestPayload = useV3 ? {
@@ -166,8 +171,8 @@ const callElevenLabsWithFallback = async (
         performanceLog[`apiKey${i + 1}`] = Date.now() - attemptStart;
         console.log(`✅ ElevenLabs API key ${i + 1} succeeded`);
         
-        // Mark this key as used
-        markApiKeyAsUsed(apiKey);
+        // Mark this key as used in DB
+        await markApiKeyAsUsedInDb(keyId);
         
         return {
           audioBlob,
@@ -192,27 +197,27 @@ const callElevenLabsWithFallback = async (
         if (response.status === 401) {
           // Unauthorized - invalid API key
           console.log(`🔑 API key ${i + 1} is invalid/unauthorized - marking as failed`);
-          markApiKeyAsFailed(apiKey);
+          await markApiKeyAsFailedInDb(keyId);
         } else if (response.status === 429) {
           // Rate limit or quota exceeded
           console.log(`⏰ API key ${i + 1} hit rate limit or quota - checking credits`);
-          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
+          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText, keyId);
           if (!hasLowCredits) {
             // If not a credit issue, might be temporary rate limit
             console.log(`⏰ API key ${i + 1} hit temporary rate limit`);
           }
         } else {
           // Check if this key has low credits and update status
-          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
+          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText, keyId);
           
           // Mark key as failed if it's not a credit issue and not a temporary error
           if (!hasLowCredits && response.status >= 400 && response.status < 500) {
-            markApiKeyAsFailed(apiKey);
+            await markApiKeyAsFailedInDb(keyId);
           }
         }
         
         // If this is the last key, throw the error
-        if (i === activeKeys.length - 1) {
+        if (i === dbKeys.length - 1) {
           throw new Error(`All ElevenLabs API keys failed. Last error: ${response.status} - ${errorText}`);
         }
       }
@@ -220,10 +225,10 @@ const callElevenLabsWithFallback = async (
       console.warn(`⚠️ ElevenLabs API key ${i + 1} error:`, error);
       
       // Mark key as failed
-      markApiKeyAsFailed(apiKey);
+      await markApiKeyAsFailedInDb(keyId);
       
       // If this is the last key, throw the error
-      if (i === activeKeys.length - 1) {
+      if (i === dbKeys.length - 1) {
         throw error;
       }
     }
@@ -232,39 +237,7 @@ const callElevenLabsWithFallback = async (
   throw new Error('No ElevenLabs API keys available');
 };
 
-// Utility functions for API key management
-const addElevenLabsApiKey = (newApiKey: string) => {
-  return addApiKey(newApiKey);
-};
-
-const getElevenLabsApiKeyStatus = () => {
-  return getApiKeyStatus();
-};
-
-const cleanupLowCreditKeys = () => {
-  return removeLowCreditKeys();
-};
-
-// Periodic cleanup of low credit keys (call this periodically)
-const performApiKeyMaintenance = async () => {
-  console.log('🔧 Starting API key maintenance...');
-  
-  // Use the enhanced maintenance function from elevenlabs-keys
-  performMaintenanceCleanup();
-  
-  // Optionally check credits for all keys every 10th maintenance cycle (50 minutes)
-  const shouldCheckCredits = Math.random() < 0.1; // 10% chance
-  if (shouldCheckCredits) {
-    console.log('🔍 Performing proactive credit check...');
-    try {
-      await checkAllApiKeyCredits();
-    } catch (error) {
-      console.warn('⚠️ Proactive credit check failed:', error);
-    }
-  }
-  
-  console.log('✅ API key maintenance completed');
-};
+// Utility placeholders removed (DB-driven now)
 
 // Configuration - Now using direct API calls to Gemini and ElevenLabs
 
@@ -1233,13 +1206,8 @@ export default function CreateExercise() {
       }
     });
 
-    // Perform API key maintenance on component mount
-    performApiKeyMaintenance();
-
-    // Set up periodic cleanup every 5 minutes
-    const maintenanceInterval = setInterval(() => {
-      performApiKeyMaintenance();
-    }, 5 * 60 * 1000); // 5 minutes
+  // Optionally, we could refresh key cache here in future (DB-driven now)
+  const maintenanceInterval = setInterval(() => {}, 5 * 60 * 1000); // noop
 
     return () => {
       unsubscribe();
@@ -2737,7 +2705,8 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
         setTtsProgress({ current: 0, total: newQuestions.length });
 
         // Get initial random API key
-        let currentApiKey = getRandomApiKey();
+        const firstKey = await getRandomApiKeyFromDb();
+        let currentApiKey = firstKey?.key || null;
         if (!currentApiKey) {
           throw new Error('No active API keys available for TTS processing');
         }
@@ -2792,7 +2761,8 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             // Check if we need to switch to a new API key
             if (requestsWithCurrentKey >= REQUESTS_PER_KEY && i < newQuestions.length - 1) {
               // Get a new random API key
-              const newApiKey = getRandomApiKey();
+              const newKeyObj = await getRandomApiKeyFromDb();
+              const newApiKey = newKeyObj?.key;
               if (newApiKey && newApiKey !== currentApiKey) {
                 currentApiKey = newApiKey;
                 requestsWithCurrentKey = 0;
@@ -2808,7 +2778,8 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             console.error(`❌ Error processing TTS for question ${question.id}:`, error);
             
             // If current key fails, try to switch to another key
-            const newApiKey = getRandomApiKey();
+            const newKeyObj = await getRandomApiKeyFromDb();
+            const newApiKey = newKeyObj?.key;
             if (newApiKey && newApiKey !== currentApiKey) {
               currentApiKey = newApiKey;
               requestsWithCurrentKey = 0;
