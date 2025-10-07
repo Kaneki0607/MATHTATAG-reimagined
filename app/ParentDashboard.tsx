@@ -3,7 +3,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Easing, Image, KeyboardAvoidingView, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Animated, Dimensions, Easing, Image, KeyboardAvoidingView, Modal, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { logError, logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
@@ -88,10 +89,17 @@ interface Task {
   resultId?: string;
 }
 
+const { width, height } = Dimensions.get('window');
+
 export default function ParentDashboard() {
   const router = useRouter();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const translateAnim = useRef(new Animated.Value(16)).current;
+  
+  // Floating button position state
+  const pan = useRef(new Animated.ValueXY({ x: width - 80, y: height - 170 })).current;
+  const floatingOpacity = useRef(new Animated.Value(1)).current;
+  const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // Parent data state
   const [parentData, setParentData] = useState<ParentData | null>(null);
@@ -149,6 +157,12 @@ export default function ParentDashboard() {
   // Announcement expansion state
   const [expandedAnnouncementId, setExpandedAnnouncementId] = useState<string | null>(null);
 
+  // Technical Report state
+  const [showTechReportModal, setShowTechReportModal] = useState(false);
+  const [reportDescription, setReportDescription] = useState('');
+  const [reportScreenshots, setReportScreenshots] = useState<string[]>([]);
+  const [submittingReport, setSubmittingReport] = useState(false);
+
   // Load parent data on component mount
   useEffect(() => {
     loadParentData();
@@ -195,6 +209,11 @@ export default function ParentDashboard() {
       }
     } catch (error) {
       console.error('Failed to load parent data:', error);
+      if (error instanceof Error) {
+        logErrorWithStack(error, 'error', 'ParentDashboard', 'Failed to load parent data');
+      } else {
+        logError('Failed to load parent data: ' + String(error), 'error', 'ParentDashboard');
+      }
     } finally {
       setLoading(false);
     }
@@ -241,6 +260,11 @@ export default function ParentDashboard() {
               }
             } catch (error) {
               console.error('Failed to load teacher data:', error);
+              if (error instanceof Error) {
+                logErrorWithStack(error, 'warning', 'ParentDashboard', 'Failed to load teacher data for announcement');
+              } else {
+                logError('Failed to load teacher data: ' + String(error), 'warning', 'ParentDashboard');
+              }
             }
             return announcement;
           })
@@ -265,6 +289,11 @@ export default function ParentDashboard() {
       }
     } catch (error) {
       console.error('Failed to load announcements:', error);
+      if (error instanceof Error) {
+        logErrorWithStack(error, 'error', 'ParentDashboard', 'Failed to load announcements');
+      } else {
+        logError('Failed to load announcements: ' + String(error), 'error', 'ParentDashboard');
+      }
     }
   };
 
@@ -310,6 +339,11 @@ export default function ParentDashboard() {
       }
     } catch (error) {
       console.error('Failed to mark announcement as read:', error);
+      if (error instanceof Error) {
+        logErrorWithStack(error, 'warning', 'ParentDashboard', 'Failed to mark announcement as read');
+      } else {
+        logError('Failed to mark announcement as read: ' + String(error), 'warning', 'ParentDashboard');
+      }
     }
   };
 
@@ -1571,6 +1605,16 @@ Focus on:
         return;
       }
 
+      // Resolve login code to actual parent ID
+      const parentIdResult = await readData(`/parentLoginCodes/${parentKey}`);
+      if (!parentIdResult.data) {
+        Alert.alert('Error', 'Invalid parent key. Please contact your teacher.');
+        setProfileEditLoading(false);
+        return;
+      }
+      
+      const actualParentId = parentIdResult.data;
+
       let profilePictureUrl = parentData?.profilePictureUrl || '';
       
       // Upload new profile picture if provided
@@ -1579,7 +1623,7 @@ Focus on:
           const response = await fetch(profileEditData.profilePicture);
           const blob = await response.blob();
           const timestamp = Date.now();
-          const filename = `parents/profiles/${parentKey}_${timestamp}.jpg`;
+          const filename = `parents/profiles/${actualParentId}_${timestamp}.jpg`;
           
           const { downloadURL, error: uploadError } = await uploadFile(filename, blob, {
             contentType: 'image/jpeg',
@@ -1605,7 +1649,7 @@ Focus on:
         profilePictureUrl: profilePictureUrl,
       };
       
-      const { success, error: dbError } = await writeData(`/parents/${parentKey}`, updatedParentData);
+      const { success, error: dbError } = await writeData(`/parents/${actualParentId}`, updatedParentData);
       
       if (success) {
         Alert.alert('Success', 'Profile updated successfully!');
@@ -1644,6 +1688,221 @@ Focus on:
     );
   };
 
+  // Floating button functions
+  const fadeOutFloatingButton = () => {
+    Animated.timing(floatingOpacity, {
+      toValue: 0.3,
+      duration: 300,
+      useNativeDriver: false,
+    }).start();
+  };
+  
+  const fadeInFloatingButton = () => {
+    Animated.timing(floatingOpacity, {
+      toValue: 1,
+      duration: 200,
+      useNativeDriver: false,
+    }).start();
+  };
+  
+  const resetInactivityTimer = () => {
+    // Clear existing timer
+    if (inactivityTimer.current) {
+      clearTimeout(inactivityTimer.current);
+    }
+    
+    // Fade in immediately
+    fadeInFloatingButton();
+    
+    // Set new timer to fade out after 3 seconds
+    inactivityTimer.current = setTimeout(() => {
+      fadeOutFloatingButton();
+    }, 3000);
+  };
+  
+  // Start the initial fade out timer
+  useEffect(() => {
+    const initialTimer = setTimeout(() => {
+      fadeOutFloatingButton();
+    }, 3000);
+    
+    return () => {
+      clearTimeout(initialTimer);
+      if (inactivityTimer.current) {
+        clearTimeout(inactivityTimer.current);
+      }
+    };
+  }, []);
+  
+  // PanResponder for dragging
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => {
+        resetInactivityTimer();
+        pan.setOffset({
+          x: (pan.x as any)._value,
+          y: (pan.y as any)._value,
+        });
+        pan.setValue({ x: 0, y: 0 });
+      },
+      onPanResponderMove: Animated.event(
+        [null, { dx: pan.x, dy: pan.y }],
+        { useNativeDriver: false }
+      ),
+      onPanResponderRelease: (_, gesture) => {
+        pan.flattenOffset();
+        
+        // Get current position
+        const currentX = (pan.x as any)._value;
+        const currentY = (pan.y as any)._value;
+        
+        // Keep button within screen bounds (with padding)
+        const buttonSize = 60;
+        const padding = 10;
+        const maxX = width - buttonSize - padding;
+        const maxY = height - buttonSize - padding;
+        
+        let finalX = currentX;
+        let finalY = currentY;
+        
+        // Constrain X
+        if (currentX < padding) finalX = padding;
+        if (currentX > maxX) finalX = maxX;
+        
+        // Constrain Y
+        if (currentY < padding) finalY = padding;
+        if (currentY > maxY) finalY = maxY;
+        
+        // Animate to final position if needed
+        if (finalX !== currentX || finalY !== currentY) {
+          Animated.spring(pan, {
+            toValue: { x: finalX, y: finalY },
+            useNativeDriver: false,
+            tension: 50,
+            friction: 7,
+          }).start();
+        }
+      },
+    })
+  ).current;
+
+  // Technical Report functions
+  const pickReportImage = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Please grant permission to access photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: 'images',
+        allowsMultipleSelection: true,
+        quality: 0.8,
+        selectionLimit: 5 - reportScreenshots.length,
+      });
+
+      if (!result.canceled && result.assets) {
+        const newUris = result.assets.map(asset => asset.uri);
+        setReportScreenshots(prev => [...prev, ...newUris].slice(0, 5));
+      }
+    } catch (error) {
+      console.error('Error picking image:', error);
+      Alert.alert('Error', 'Failed to pick image. Please try again.');
+    }
+  };
+
+  const takeReportPhoto = async () => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Please grant permission to access camera.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets && result.assets[0]) {
+        if (reportScreenshots.length < 5) {
+          setReportScreenshots(prev => [...prev, result.assets[0].uri]);
+        } else {
+          Alert.alert('Limit Reached', 'You can only attach up to 5 screenshots.');
+        }
+      }
+    } catch (error) {
+      console.error('Error taking photo:', error);
+      Alert.alert('Error', 'Failed to take photo. Please try again.');
+    }
+  };
+
+  const removeReportScreenshot = (uri: string) => {
+    setReportScreenshots(prev => prev.filter(s => s !== uri));
+  };
+
+  const submitTechnicalReport = async () => {
+    if (!reportDescription.trim()) {
+      Alert.alert('Missing Information', 'Please describe the problem.');
+      return;
+    }
+
+    setSubmittingReport(true);
+    try {
+      const timestamp = new Date().toISOString();
+      const reportId = `report_${Date.now()}`;
+
+      // Upload screenshots to Firebase Storage
+      const uploadedUrls: string[] = [];
+      for (let i = 0; i < reportScreenshots.length; i++) {
+        const uri = reportScreenshots[i];
+        const fileName = `technical-reports/${reportId}/screenshot_${i + 1}.jpg`;
+        
+        const response = await fetch(uri);
+        const blob = await response.blob();
+        const { downloadURL } = await uploadFile(fileName, blob);
+        if (downloadURL) {
+          uploadedUrls.push(downloadURL);
+        }
+      }
+
+      const report = {
+        id: reportId,
+        reportedBy: parentData?.parentKey || 'unknown',
+        reportedByEmail: parentData?.email || 'unknown',
+        reportedByName: parentData ? `${parentData.firstName} ${parentData.lastName}` : 'Unknown Parent',
+        userRole: 'parent',
+        timestamp,
+        description: reportDescription.trim(),
+        screenshots: uploadedUrls,
+        status: 'pending',
+      };
+
+      const { success, error } = await writeData(`/technicalReports/${reportId}`, report);
+      
+      if (success) {
+        setShowTechReportModal(false);
+        setReportDescription('');
+        setReportScreenshots([]);
+        Alert.alert('Success', 'Your technical report has been submitted to the Admin. Thank you for helping us improve!');
+      } else {
+        throw new Error(error || 'Failed to submit report');
+      }
+    } catch (error) {
+      console.error('Error submitting report:', error);
+      if (error instanceof Error) {
+        logErrorWithStack(error, 'error', 'ParentDashboard', 'Failed to submit technical report');
+      } else {
+        logError('Failed to submit technical report: ' + String(error), 'error', 'ParentDashboard');
+      }
+      Alert.alert('Error', 'Failed to submit report. Please try again later.');
+    } finally {
+      setSubmittingReport(false);
+    }
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.backgroundPattern} />
@@ -1672,7 +1931,7 @@ Focus on:
                 />
               ) : (
                 <View style={styles.profileImagePlaceholder}>
-                  <MaterialIcons name="person" size={20} color="#9ca3af" />
+                  <MaterialIcons name="person" size={32} color="#9ca3af" />
                 </View>
               )}
             </TouchableOpacity>
@@ -2604,12 +2863,35 @@ Focus on:
       </ScrollView>
       </Animated.View>
 
+      {/* Floating Report Button */}
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={[
+          styles.floatingReportButton,
+          {
+            transform: [{ translateX: pan.x }, { translateY: pan.y }],
+            opacity: floatingOpacity,
+          },
+        ]}
+      >
+        <TouchableOpacity 
+          style={styles.floatingReportButtonInner}
+          onPress={() => {
+            resetInactivityTimer();
+            setShowTechReportModal(true);
+          }}
+          activeOpacity={0.85}
+        >
+          <MaterialCommunityIcons name="headset" size={28} color="#ffffff" />
+        </TouchableOpacity>
+      </Animated.View>
+
       <Animated.View style={[styles.bottomNav, { opacity: fadeAnim }] }>
         <TouchableOpacity 
           style={[styles.navItem, activeSection === 'home' && styles.activeNavItem]}
           onPress={() => setActiveSection('home')}
         >
-          <MaterialIcons name="home" size={24} color={activeSection === 'home' ? "#000000" : "#9ca3af"} />
+          <MaterialIcons name="home" size={24} color={activeSection === 'home' ? "#1e293b" : "#9ca3af"} />
           <Text style={[styles.navText, activeSection === 'home' && styles.activeNavText]}>Home</Text>
         </TouchableOpacity>
 
@@ -2617,7 +2899,7 @@ Focus on:
           style={[styles.navItem, activeSection === 'tasks' && styles.activeNavItem]}
           onPress={() => setActiveSection('tasks')}
         >
-          <MaterialCommunityIcons name="clipboard-check" size={24} color={activeSection === 'tasks' ? "#000000" : "#9ca3af"} />
+          <MaterialCommunityIcons name="clipboard-check" size={24} color={activeSection === 'tasks' ? "#1e293b" : "#9ca3af"} />
           <Text style={[styles.navText, activeSection === 'tasks' && styles.activeNavText]}>Tasks</Text>
         </TouchableOpacity>
 
@@ -2625,7 +2907,7 @@ Focus on:
           style={[styles.navItem, activeSection === 'history' && styles.activeNavItem]}
           onPress={() => setActiveSection('history')}
         >
-          <MaterialCommunityIcons name="clock-outline" size={24} color={activeSection === 'history' ? "#000000" : "#9ca3af"} />
+          <MaterialCommunityIcons name="clock-outline" size={24} color={activeSection === 'history' ? "#1e293b" : "#9ca3af"} />
           <Text style={[styles.navText, activeSection === 'history' && styles.activeNavText]}>History</Text>
         </TouchableOpacity>
       </Animated.View>
@@ -2939,6 +3221,140 @@ Focus on:
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Technical Report Modal */}
+      <Modal visible={showTechReportModal} animationType="slide" transparent>
+        <KeyboardAvoidingView 
+          style={styles.techReportModalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.techReportModal}>
+            <View style={styles.techReportModalHeader}>
+              <View style={styles.techReportModalTitleContainer}>
+                <MaterialCommunityIcons name="bug-outline" size={24} color="#ef4444" />
+                <Text style={styles.techReportModalTitle}>Report Technical Problem</Text>
+              </View>
+              <TouchableOpacity 
+                onPress={() => {
+                  setShowTechReportModal(false);
+                  setReportDescription('');
+                  setReportScreenshots([]);
+                }}
+                disabled={submittingReport}
+              >
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+            
+            <ScrollView 
+              style={styles.techReportModalContent} 
+              showsVerticalScrollIndicator={false} 
+              keyboardShouldPersistTaps="handled"
+            >
+              <View style={styles.techReportForm}>
+                <Text style={styles.techReportHint}>
+                  Help us improve! Please describe any bugs or errors you encountered. Be as detailed as possible and attach screenshots if available.
+                </Text>
+
+                <View style={styles.techReportField}>
+                  <Text style={styles.techReportFieldLabel}>Problem Description *</Text>
+                  <TextInput
+                    style={[styles.techReportFieldInput, styles.techReportMessageInput]}
+                    value={reportDescription}
+                    onChangeText={setReportDescription}
+                    placeholder="Describe the bug or error you encountered..."
+                    placeholderTextColor="#94a3b8"
+                    multiline
+                    textAlignVertical="top"
+                    editable={!submittingReport}
+                  />
+                </View>
+
+                <View style={styles.techReportField}>
+                  <Text style={styles.techReportFieldLabel}>Screenshots (Optional)</Text>
+                  <Text style={styles.techReportFieldHint}>
+                    You can attach up to 5 screenshots to help us understand the issue
+                  </Text>
+                  
+                  {reportScreenshots.length > 0 && (
+                    <ScrollView 
+                      horizontal 
+                      showsHorizontalScrollIndicator={false} 
+                      style={styles.screenshotsPreviewContainer}
+                    >
+                      {reportScreenshots.map((uri, idx) => (
+                        <View key={idx} style={styles.screenshotPreviewWrapper}>
+                          <Image source={{ uri }} style={styles.screenshotPreview} />
+                          <TouchableOpacity
+                            style={styles.removeScreenshotButton}
+                            onPress={() => removeReportScreenshot(uri)}
+                            disabled={submittingReport}
+                          >
+                            <AntDesign name="close" size={16} color="#ffffff" />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  )}
+
+                  <View style={styles.screenshotButtons}>
+                    <TouchableOpacity
+                      style={styles.screenshotButton}
+                      onPress={takeReportPhoto}
+                      disabled={submittingReport || reportScreenshots.length >= 5}
+                    >
+                      <MaterialIcons name="photo-camera" size={20} color="#3b82f6" />
+                      <Text style={styles.screenshotButtonText}>Take Photo</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.screenshotButton}
+                      onPress={pickReportImage}
+                      disabled={submittingReport || reportScreenshots.length >= 5}
+                    >
+                      <MaterialIcons name="photo-library" size={20} color="#3b82f6" />
+                      <Text style={styles.screenshotButtonText}>Choose from Gallery</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
+
+            <View style={styles.techReportModalFooter}>
+              <TouchableOpacity 
+                style={styles.techReportCancelButton} 
+                onPress={() => {
+                  setShowTechReportModal(false);
+                  setReportDescription('');
+                  setReportScreenshots([]);
+                }} 
+                disabled={submittingReport}
+              >
+                <Text style={styles.techReportCancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.techReportSubmitButton,
+                  (!reportDescription.trim() || submittingReport) && styles.techReportSubmitButtonDisabled
+                ]}
+                disabled={submittingReport || !reportDescription.trim()}
+                onPress={submitTechnicalReport}
+              >
+                {submittingReport ? (
+                  <View style={styles.techReportLoadingContainer}>
+                    <MaterialCommunityIcons name="loading" size={18} color="#ffffff" />
+                    <Text style={styles.techReportSubmitButtonText}>Submitting...</Text>
+                  </View>
+                ) : (
+                  <View style={styles.techReportSubmitContainer}>
+                    <MaterialIcons name="send" size={18} color="#ffffff" />
+                    <Text style={styles.techReportSubmitButtonText}>Submit Report</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
       
     </View>
   );
@@ -2967,6 +3383,8 @@ const styles = StyleSheet.create({
     paddingBottom: 120, // Extra padding to prevent content from being covered by bottom nav
   },
   header: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginBottom: 24,
     paddingHorizontal: 0,
     paddingVertical: 12,
@@ -2979,34 +3397,46 @@ const styles = StyleSheet.create({
     marginRight: 16,
   },
   profileImage: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: '#f1f5f9',
+    borderWidth: 3,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
   },
   profileImagePlaceholder: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: '#f1f5f9',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#d1d5db',
+    borderWidth: 3,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
   },
   welcomeText: {
     flex: 1,
   },
   welcomeLabel: {
     fontSize: 14,
-    color: '#9ca3af',
-    marginBottom: 2,
-    fontWeight: '400',
+    color: '#64748b',
+    marginBottom: 4,
+    fontWeight: '500',
   },
   welcomeTitle: {
-    fontSize: 18,
+    fontSize: 22,
     fontWeight: '700',
-    color: '#374151',
+    color: '#1e293b',
   },
   announcementSection: {
     marginBottom: 24,
@@ -3237,10 +3667,17 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     flexDirection: 'row',
-    backgroundColor: '#f1f5f9',
-    paddingVertical: 12,
+    backgroundColor: '#ffffff',
+    paddingVertical: 16,
     paddingHorizontal: 20,
-    paddingBottom: Platform.OS === 'ios' ? 32 : 12,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 8,
   },
   navItem: {
     flex: 1,
@@ -3248,17 +3685,16 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   activeNavItem: {
-    borderBottomWidth: 2,
-    borderBottomColor: '#374151',
+    // Active state styling handled by text and icon color
   },
   navText: {
     fontSize: 12,
     color: '#9ca3af',
-    marginTop: 4,
+    marginTop: 6,
     fontWeight: '500',
   },
   activeNavText: {
-    color: '#374151',
+    color: '#1e293b',
     fontWeight: '700',
   },
   // Registration Modal Styles
@@ -4901,5 +5337,209 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 4,
+  },
+
+  // Floating Report Button Styles
+  floatingReportButton: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 60,
+    height: 60,
+    zIndex: 1000,
+  },
+  floatingReportButtonInner: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#3b82f6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    elevation: 10,
+    borderWidth: 3,
+    borderColor: '#ffffff',
+  },
+
+  // Technical Report Modal Styles
+  techReportModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  techReportModal: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    width: '100%',
+    maxHeight: '85%',
+    minHeight: '60%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    elevation: 16,
+  },
+  techReportModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+    paddingVertical: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  techReportModalTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  techReportModalTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.3,
+  },
+  techReportModalContent: {
+    flex: 1,
+  },
+  techReportForm: {
+    paddingHorizontal: 28,
+    paddingVertical: 20,
+    gap: 20,
+  },
+  techReportHint: {
+    fontSize: 14,
+    color: '#64748b',
+    lineHeight: 20,
+    backgroundColor: '#f8fafc',
+    padding: 12,
+    borderRadius: 12,
+  },
+  techReportField: {
+    gap: 8,
+  },
+  techReportFieldLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  techReportFieldHint: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginBottom: 8,
+  },
+  techReportFieldInput: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  techReportMessageInput: {
+    height: 140,
+  },
+  screenshotsPreviewContainer: {
+    marginVertical: 12,
+  },
+  screenshotPreviewWrapper: {
+    marginRight: 12,
+    position: 'relative',
+  },
+  screenshotPreview: {
+    width: 100,
+    height: 100,
+    borderRadius: 12,
+    backgroundColor: '#f1f5f9',
+  },
+  removeScreenshotButton: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    backgroundColor: '#ef4444',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  screenshotButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  screenshotButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#f8fafc',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+  },
+  screenshotButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#3b82f6',
+  },
+  techReportModalFooter: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 24,
+    paddingBottom: 24,
+    paddingTop: 12,
+  },
+  techReportCancelButton: {
+    flex: 1,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f1f5f9',
+  },
+  techReportCancelButtonText: {
+    color: '#0f172a',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  techReportSubmitButton: {
+    flex: 1,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#3b82f6',
+  },
+  techReportSubmitButtonDisabled: {
+    opacity: 0.6,
+  },
+  techReportLoadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  techReportSubmitContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  techReportSubmitButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 15,
   },
 });

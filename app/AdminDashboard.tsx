@@ -1,8 +1,11 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import { Accelerometer } from 'expo-sensors';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Dimensions, FlatList, Image, Modal, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
-import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
+import { deleteData, listenToData, readData, stopListening, updateData, writeData } from '../lib/firebase-database';
+import { uploadFile } from '../lib/firebase-storage';
 
 type TabKey = 'home' | 'teacher' | 'blocklist' | 'reports';
 
@@ -18,6 +21,28 @@ interface Teacher {
   createdAt: string;
   isVerified?: boolean;
   isBlocked?: boolean;
+}
+
+interface ErrorLog {
+  id: string;
+  timestamp: string;
+  message: string;
+  severity: 'error' | 'warning' | 'info';
+  source?: string;
+  userId?: string;
+  userEmail?: string;
+}
+
+interface TechnicalReport {
+  id: string;
+  reportedBy: string;
+  reportedByEmail: string;
+  reportedByName?: string;
+  userRole?: 'teacher' | 'parent' | 'admin';
+  timestamp: string;
+  description: string;
+  screenshots: string[];
+  status: 'pending' | 'in_progress' | 'resolved';
 }
 
 export default function AdminDashboard() {
@@ -45,6 +70,22 @@ export default function AdminDashboard() {
   const [annTitle, setAnnTitle] = useState('');
   const [annMessage, setAnnMessage] = useState('');
   const [sendingAnn, setSendingAnn] = useState(false);
+
+  // Error logs and technical reports state
+  const [errorLogs, setErrorLogs] = useState<ErrorLog[]>([]);
+  const [technicalReports, setTechnicalReports] = useState<TechnicalReport[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logSearchQuery, setLogSearchQuery] = useState('');
+  const [logSeverityFilter, setLogSeverityFilter] = useState<'all' | 'error' | 'warning' | 'info'>('all');
+  
+  // Technical Report Modal state
+  const [showTechReportModal, setShowTechReportModal] = useState(false);
+  const [reportDescription, setReportDescription] = useState('');
+  const [reportScreenshots, setReportScreenshots] = useState<string[]>([]);
+  const [submittingReport, setSubmittingReport] = useState(false);
+  
+  // Shake detection state
+  const [shakeSubscription, setShakeSubscription] = useState<any>(null);
 
   // Admin identity for welcome header
   const [adminName, setAdminName] = useState<string>('');
@@ -268,7 +309,327 @@ export default function AdminDashboard() {
         setRefreshing(false);
       }
     }
+    if (activeTab === 'reports') {
+      setRefreshing(true);
+      try {
+        await Promise.all([fetchErrorLogs(), fetchTechnicalReports()]);
+      } finally {
+        setRefreshing(false);
+      }
+    }
   };
+
+  // Fetch error logs from Firebase
+  const fetchErrorLogs = async () => {
+    setLogsLoading(true);
+    try {
+      const { data, error } = await readData('/errorLogs');
+      if (error) {
+        console.error('Error fetching logs:', error);
+        return;
+      }
+      
+      if (data) {
+        const logsList: ErrorLog[] = Object.entries(data).map(([id, logData]: [string, any]) => ({
+          id,
+          ...logData,
+        })).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        setErrorLogs(logsList);
+      } else {
+        setErrorLogs([]);
+      }
+    } catch (error) {
+      console.error('Error fetching logs:', error);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
+  // Fetch technical reports from Firebase
+  const fetchTechnicalReports = async () => {
+    try {
+      const { data, error } = await readData('/technicalReports');
+      if (error) {
+        console.error('Error fetching reports:', error);
+        return;
+      }
+      
+      if (data) {
+        const reportsList: TechnicalReport[] = Object.entries(data).map(([id, reportData]: [string, any]) => ({
+          id,
+          ...reportData,
+          // Ensure screenshots is always an array
+          screenshots: reportData.screenshots || [],
+          // Ensure status has a default
+          status: reportData.status || 'pending',
+        })).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        setTechnicalReports(reportsList);
+      } else {
+        setTechnicalReports([]);
+      }
+    } catch (error) {
+      console.error('Error fetching reports:', error);
+      setTechnicalReports([]); // Set empty array on error
+    }
+  };
+
+  // Load logs with real-time updates when Reports tab is selected
+  useEffect(() => {
+    if (activeTab === 'reports') {
+      setLogsLoading(true);
+      
+      // Set up real-time listener for error logs
+      const unsubscribeErrorLogs = listenToData('/errorLogs', (data) => {
+        if (data) {
+          const logsList: ErrorLog[] = Object.entries(data).map(([id, logData]: [string, any]) => ({
+            id,
+            ...logData,
+          })).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+          setErrorLogs(logsList);
+        } else {
+          setErrorLogs([]);
+        }
+        setLogsLoading(false);
+      });
+
+      // Set up real-time listener for technical reports
+      const unsubscribeTechnicalReports = listenToData('/technicalReports', (data) => {
+        if (data) {
+          const reportsList: TechnicalReport[] = Object.entries(data).map(([id, reportData]: [string, any]) => ({
+            id,
+            ...reportData,
+            // Ensure screenshots is always an array
+            screenshots: reportData.screenshots || [],
+            // Ensure status has a default
+            status: reportData.status || 'pending',
+          })).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+          setTechnicalReports(reportsList);
+        } else {
+          setTechnicalReports([]);
+        }
+      });
+
+      // Cleanup listeners when leaving Reports tab
+      return () => {
+        stopListening('/errorLogs');
+        stopListening('/technicalReports');
+      };
+    }
+  }, [activeTab]);
+
+  // Shake detection for Reports tab
+  useEffect(() => {
+    if (activeTab === 'reports') {
+      let lastShake = 0;
+      const SHAKE_THRESHOLD = 2.5;
+      const SHAKE_TIMEOUT = 1000; // Prevent multiple triggers
+
+      const subscription = Accelerometer.addListener(({ x, y, z }) => {
+        const acceleration = Math.sqrt(x * x + y * y + z * z);
+        const now = Date.now();
+
+        if (acceleration > SHAKE_THRESHOLD && now - lastShake > SHAKE_TIMEOUT) {
+          lastShake = now;
+          setShowTechReportModal(true);
+        }
+      });
+
+      Accelerometer.setUpdateInterval(100);
+      setShakeSubscription(subscription);
+
+      return () => {
+        subscription?.remove();
+      };
+    } else {
+      // Clean up when leaving Reports tab
+      shakeSubscription?.remove();
+      setShakeSubscription(null);
+    }
+  }, [activeTab]);
+
+  // Pick image from gallery
+  const pickImage = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Please grant permission to access photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsMultipleSelection: true,
+        quality: 0.8,
+        selectionLimit: 5 - reportScreenshots.length, // Max 5 total screenshots
+      });
+
+      if (!result.canceled && result.assets) {
+        const newUris = result.assets.map(asset => asset.uri);
+        setReportScreenshots(prev => [...prev, ...newUris].slice(0, 5));
+      }
+    } catch (error) {
+      console.error('Error picking image:', error);
+      Alert.alert('Error', 'Failed to pick image. Please try again.');
+    }
+  };
+
+  // Take photo with camera
+  const takePhoto = async () => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Please grant permission to access camera.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets && result.assets[0]) {
+        if (reportScreenshots.length < 5) {
+          setReportScreenshots(prev => [...prev, result.assets[0].uri]);
+        } else {
+          Alert.alert('Limit Reached', 'You can only attach up to 5 screenshots.');
+        }
+      }
+    } catch (error) {
+      console.error('Error taking photo:', error);
+      Alert.alert('Error', 'Failed to take photo. Please try again.');
+    }
+  };
+
+  // Remove screenshot
+  const removeScreenshot = (uri: string) => {
+    setReportScreenshots(prev => prev.filter(s => s !== uri));
+  };
+
+  // Submit technical report
+  const submitTechnicalReport = async () => {
+    if (!reportDescription.trim()) {
+      Alert.alert('Missing Information', 'Please describe the problem.');
+      return;
+    }
+
+    setSubmittingReport(true);
+    try {
+      const user = getCurrentUser();
+      const timestamp = new Date().toISOString();
+      const reportId = `report_${Date.now()}`;
+
+      // Upload screenshots to Firebase Storage
+      const uploadedUrls: string[] = [];
+      for (let i = 0; i < reportScreenshots.length; i++) {
+        const uri = reportScreenshots[i];
+        const fileName = `technical-reports/${reportId}/screenshot_${i + 1}.jpg`;
+        
+        // Convert URI to Blob for upload
+        const response = await fetch(uri);
+        const blob = await response.blob();
+        const { downloadURL } = await uploadFile(fileName, blob);
+        if (downloadURL) {
+          uploadedUrls.push(downloadURL);
+        }
+      }
+
+      const report: TechnicalReport = {
+        id: reportId,
+        reportedBy: user?.uid || 'unknown',
+        reportedByEmail: user?.email || 'unknown',
+        timestamp,
+        description: reportDescription.trim(),
+        screenshots: uploadedUrls,
+        status: 'pending',
+      };
+
+      const { success, error } = await writeData(`/technicalReports/${reportId}`, report);
+      
+      if (success) {
+        Alert.alert('Success', 'Your technical report has been submitted to the Super Admin.');
+        setShowTechReportModal(false);
+        setReportDescription('');
+        setReportScreenshots([]);
+        fetchTechnicalReports(); // Refresh the list
+      } else {
+        throw new Error(error || 'Failed to submit report');
+      }
+    } catch (error) {
+      console.error('Error submitting report:', error);
+      Alert.alert('Error', 'Failed to submit report. Please try again.');
+    } finally {
+      setSubmittingReport(false);
+    }
+  };
+
+  // Mark technical report as done (resolved)
+  const handleMarkReportAsDone = async (reportId: string) => {
+    try {
+      const { success, error } = await updateData(`/technicalReports/${reportId}`, {
+        status: 'resolved',
+        resolvedAt: new Date().toISOString(),
+      });
+
+      if (success) {
+        // Update local state immediately
+        setTechnicalReports(prev => 
+          prev.map(report => 
+            report.id === reportId ? { ...report, status: 'resolved' } : report
+          )
+        );
+        Alert.alert('Success', 'Technical report marked as resolved.');
+      } else {
+        console.error('Failed to mark report as done:', error);
+        Alert.alert('Error', 'Failed to update report status.');
+      }
+    } catch (error) {
+      console.error('Error marking report as done:', error);
+      Alert.alert('Error', 'Failed to update report status.');
+    }
+  };
+
+  // Remove resolved technical report
+  const handleRemoveReport = async (reportId: string) => {
+    Alert.alert(
+      'Remove Report',
+      'Are you sure you want to permanently remove this technical report?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const { success, error } = await deleteData(`/technicalReports/${reportId}`);
+              
+              if (success) {
+                // Update local state immediately
+                setTechnicalReports(prev => prev.filter(report => report.id !== reportId));
+                Alert.alert('Success', 'Technical report removed.');
+              } else {
+                console.error('Failed to remove report:', error);
+                Alert.alert('Error', 'Failed to remove report.');
+              }
+            } catch (error) {
+              console.error('Error removing report:', error);
+              Alert.alert('Error', 'Failed to remove report.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  // Filter error logs
+  const filteredErrorLogs = errorLogs.filter(log => {
+    const matchesSearch = !logSearchQuery || 
+      log.message.toLowerCase().includes(logSearchQuery.toLowerCase()) ||
+      log.source?.toLowerCase().includes(logSearchQuery.toLowerCase()) ||
+      log.userEmail?.toLowerCase().includes(logSearchQuery.toLowerCase());
+    
+    const matchesSeverity = logSeverityFilter === 'all' || log.severity === logSeverityFilter;
+    
+    return matchesSearch && matchesSeverity;
+  });
 
   return (
     <View style={styles.container}>
@@ -598,11 +959,294 @@ export default function AdminDashboard() {
           style={styles.scrollArea}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              colors={["#0ea5e9"]}
+              tintColor="#0ea5e9"
+            />
+          }
         >
-          <View style={styles.placeholderCard}>
-            <Text style={styles.placeholderTitle}>Reports</Text>
-            <Text style={styles.placeholderSubtitle}>This section is intentionally blank.</Text>
+          {/* Page Header */}
+          <View style={styles.reportsPageHeader}>
+            <View>
+              <Text style={styles.reportsPageTitle}>Reports & Logs</Text>
+              <Text style={styles.reportsPageSubtitle}>Monitor system health and technical issues</Text>
+            </View>
           </View>
+
+          {/* Shake to report hint */}
+          <View style={styles.shakeHintCard}>
+            <View style={styles.shakeHintIconContainer}>
+              <MaterialCommunityIcons name="cellphone" size={28} color="#0ea5e9" />
+            </View>
+            <View style={styles.shakeHintTextContainer}>
+              <Text style={styles.shakeHintTitle}>Quick Report</Text>
+              <Text style={styles.shakeHintText}>Shake your device to report a technical problem</Text>
+            </View>
+          </View>
+
+          {/* Technical Reports Section */}
+          <View style={styles.reportsCard}>
+            <View style={styles.reportsHeader}>
+              <View style={styles.reportsHeaderLeft}>
+                <View style={styles.reportsIconContainer}>
+                  <MaterialCommunityIcons name="bug" size={24} color="#ef4444" />
+                </View>
+                <View>
+                  <Text style={styles.reportsTitle}>Technical Reports</Text>
+                  <Text style={styles.reportsSubtitle}>User-submitted issues</Text>
+                </View>
+              </View>
+              <View style={styles.reportsBadge}>
+                <Text style={styles.reportsBadgeText}>{technicalReports.length}</Text>
+              </View>
+            </View>
+            
+            {logsLoading ? (
+              <View style={styles.logsLoadingContainer}>
+                <ActivityIndicator size="small" color="#0ea5e9" />
+                <Text style={styles.logsLoadingText}>Loading reports...</Text>
+              </View>
+            ) : technicalReports.length === 0 ? (
+              <View style={styles.emptyLogsContainer}>
+                <View style={styles.emptyLogsIconContainer}>
+                  <MaterialCommunityIcons name="check-circle-outline" size={48} color="#10b981" />
+                </View>
+                <Text style={styles.emptyLogsTitle}>All Clear!</Text>
+                <Text style={styles.emptyLogsText}>No technical reports submitted yet</Text>
+              </View>
+            ) : (
+              <View style={styles.reportsList}>
+                {technicalReports.map(report => (
+                  <View key={report.id} style={styles.reportItem}>
+                    <View style={styles.reportItemHeader}>
+                      <View style={styles.reportItemLeft}>
+                        <View style={styles.reportItemUserRow}>
+                          <MaterialCommunityIcons 
+                            name={report.userRole === 'teacher' ? 'account-tie' : 
+                                  report.userRole === 'parent' ? 'account-heart' : 'account-circle'} 
+                            size={16} 
+                            color="#64748b" 
+                          />
+                          <Text style={styles.reportItemUser}>
+                            {report.reportedByName || report.reportedByEmail}
+                          </Text>
+                          {report.userRole && (
+                            <View style={[
+                              styles.reportUserRoleBadge,
+                              report.userRole === 'teacher' && styles.reportUserRoleTeacher,
+                              report.userRole === 'parent' && styles.reportUserRoleParent,
+                              report.userRole === 'admin' && styles.reportUserRoleAdmin,
+                            ]}>
+                              <Text style={styles.reportUserRoleText}>
+                                {report.userRole === 'teacher' ? 'Teacher' : 
+                                 report.userRole === 'parent' ? 'Parent' : 'Admin'}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                        <View style={styles.reportItemTimeRow}>
+                          <MaterialIcons name="access-time" size={14} color="#94a3b8" />
+                          <Text style={styles.reportItemTime}>
+                            {new Date(report.timestamp).toLocaleString()}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={[
+                        styles.reportStatusBadge,
+                        report.status === 'resolved' && styles.reportStatusResolved,
+                        report.status === 'in_progress' && styles.reportStatusInProgress,
+                      ]}>
+                        <View style={[
+                          styles.reportStatusDot,
+                          report.status === 'resolved' && styles.reportStatusDotResolved,
+                          report.status === 'in_progress' && styles.reportStatusDotInProgress,
+                        ]} />
+                        <Text style={styles.reportStatusText}>
+                          {report.status === 'pending' ? 'Pending' : 
+                           report.status === 'in_progress' ? 'In Progress' : 'Resolved'}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.reportItemDescriptionContainer}>
+                      <Text style={styles.reportItemDescription}>{report.description}</Text>
+                    </View>
+                    {report.screenshots && report.screenshots.length > 0 && (
+                      <View style={styles.reportScreenshotsContainer}>
+                        <View style={styles.reportScreenshotsHeader}>
+                          <MaterialIcons name="photo-library" size={16} color="#64748b" />
+                          <Text style={styles.reportScreenshotsLabel}>
+                            {report.screenshots.length} screenshot{report.screenshots.length > 1 ? 's' : ''} attached
+                          </Text>
+                        </View>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportScreenshotsScroll}>
+                          {report.screenshots.map((url, idx) => (
+                            <View key={idx} style={styles.reportScreenshotWrapper}>
+                              <Image source={{ uri: url }} style={styles.reportScreenshotThumb} />
+                            </View>
+                          ))}
+                        </ScrollView>
+                      </View>
+                    )}
+                    
+                    {/* Action Buttons */}
+                    <View style={styles.reportActionsContainer}>
+                      {report.status !== 'resolved' ? (
+                        <TouchableOpacity 
+                          style={styles.markDoneButton}
+                          onPress={() => handleMarkReportAsDone(report.id)}
+                        >
+                          <MaterialCommunityIcons name="check-circle" size={18} color="#ffffff" />
+                          <Text style={styles.markDoneButtonText}>Mark as Done</Text>
+                        </TouchableOpacity>
+                      ) : (
+                        <TouchableOpacity 
+                          style={styles.removeReportButton}
+                          onPress={() => handleRemoveReport(report.id)}
+                        >
+                          <MaterialCommunityIcons name="delete-outline" size={18} color="#ffffff" />
+                          <Text style={styles.removeReportButtonText}>Remove</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+
+          {/* Error Logs Section */}
+          <View style={styles.reportsCard}>
+            <View style={styles.reportsHeader}>
+              <View style={styles.reportsHeaderLeft}>
+                <View style={[styles.reportsIconContainer, styles.reportsIconContainerWarning]}>
+                  <MaterialIcons name="error-outline" size={24} color="#f59e0b" />
+                </View>
+                <View>
+                  <Text style={styles.reportsTitle}>Error Logs</Text>
+                  <Text style={styles.reportsSubtitle}>System diagnostics</Text>
+                </View>
+              </View>
+              <View style={[styles.reportsBadge, styles.reportsBadgeWarning]}>
+                <Text style={styles.reportsBadgeText}>{errorLogs.length}</Text>
+              </View>
+            </View>
+
+            {/* Search and filter */}
+            <View style={styles.logsFiltersWrap}>
+              <View style={styles.searchBox}>
+                <MaterialIcons name="search" size={20} color="#94a3b8" />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Search logs by message, source, or user..."
+                  placeholderTextColor="#94a3b8"
+                  value={logSearchQuery}
+                  onChangeText={setLogSearchQuery}
+                  returnKeyType="search"
+                />
+              </View>
+              <View style={styles.filterChips}>
+                <TouchableOpacity
+                  style={[styles.filterChip, logSeverityFilter === 'all' && styles.filterChipActive]}
+                  onPress={() => setLogSeverityFilter('all')}
+                >
+                  <Text style={[styles.filterChipText, logSeverityFilter === 'all' && styles.filterChipTextActive]}>All</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterChip, logSeverityFilter === 'error' && styles.filterChipActive]}
+                  onPress={() => setLogSeverityFilter('error')}
+                >
+                  <Text style={[styles.filterChipText, logSeverityFilter === 'error' && styles.filterChipTextActive]}>Errors</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterChip, logSeverityFilter === 'warning' && styles.filterChipActive]}
+                  onPress={() => setLogSeverityFilter('warning')}
+                >
+                  <Text style={[styles.filterChipText, logSeverityFilter === 'warning' && styles.filterChipTextActive]}>Warnings</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterChip, logSeverityFilter === 'info' && styles.filterChipActive]}
+                  onPress={() => setLogSeverityFilter('info')}
+                >
+                  <Text style={[styles.filterChipText, logSeverityFilter === 'info' && styles.filterChipTextActive]}>Info</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {logsLoading ? (
+              <View style={styles.logsLoadingContainer}>
+                <ActivityIndicator size="small" color="#0ea5e9" />
+                <Text style={styles.logsLoadingText}>Loading logs...</Text>
+              </View>
+            ) : filteredErrorLogs.length === 0 ? (
+              <View style={styles.emptyLogsContainer}>
+                <View style={styles.emptyLogsIconContainer}>
+                  <MaterialCommunityIcons name="check-circle-outline" size={48} color="#10b981" />
+                </View>
+                <Text style={styles.emptyLogsTitle}>
+                  {errorLogs.length === 0 ? 'All Clear!' : 'No Matches'}
+                </Text>
+                <Text style={styles.emptyLogsText}>
+                  {errorLogs.length === 0 ? 'No error logs found' : 'Try adjusting your filters'}
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.logsList}>
+                {filteredErrorLogs.map(log => (
+                  <View key={log.id} style={[
+                    styles.logItem,
+                    log.severity === 'error' && styles.logItemError,
+                    log.severity === 'warning' && styles.logItemWarning,
+                    log.severity === 'info' && styles.logItemInfo,
+                  ]}>
+                    <View style={styles.logItemHeader}>
+                      <View style={[
+                        styles.logSeverityBadge,
+                        log.severity === 'error' && styles.logSeverityError,
+                        log.severity === 'warning' && styles.logSeverityWarning,
+                        log.severity === 'info' && styles.logSeverityInfo,
+                      ]}>
+                        <MaterialIcons 
+                          name={log.severity === 'error' ? 'error' : log.severity === 'warning' ? 'warning' : 'info'} 
+                          size={12} 
+                          color="#ffffff" 
+                        />
+                        <Text style={styles.logSeverityText}>
+                          {log.severity.toUpperCase()}
+                        </Text>
+                      </View>
+                      <View style={styles.logItemTimeContainer}>
+                        <MaterialIcons name="access-time" size={12} color="#94a3b8" />
+                        <Text style={styles.logItemTime}>
+                          {new Date(log.timestamp).toLocaleString()}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.logItemMessage}>{log.message}</Text>
+                    {(log.source || log.userEmail) && (
+                      <View style={styles.logItemMeta}>
+                        {log.source && (
+                          <View style={styles.logItemMetaRow}>
+                            <MaterialIcons name="code" size={12} color="#64748b" />
+                            <Text style={styles.logItemSource}>{log.source}</Text>
+                          </View>
+                        )}
+                        {log.userEmail && (
+                          <View style={styles.logItemMetaRow}>
+                            <MaterialCommunityIcons name="account" size={12} color="#64748b" />
+                            <Text style={styles.logItemUser}>{log.userEmail}</Text>
+                          </View>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+          
           <View style={{ height: 90 }} />
         </ScrollView>
       )}
@@ -951,6 +1595,138 @@ export default function AdminDashboard() {
                   <View style={styles.announcementSendContainer}>
                     <MaterialCommunityIcons name="send" size={18} color="#ffffff" />
                     <Text style={styles.announcementSendButtonText}>Send</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Technical Report Modal */}
+      <Modal visible={showTechReportModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.techReportModal}>
+            <View style={styles.techReportModalHeader}>
+              <View style={styles.techReportModalTitleContainer}>
+                <MaterialCommunityIcons name="bug-outline" size={24} color="#ef4444" />
+                <Text style={styles.techReportModalTitle}>Report Technical Problem</Text>
+              </View>
+              <TouchableOpacity 
+                onPress={() => {
+                  setShowTechReportModal(false);
+                  setReportDescription('');
+                  setReportScreenshots([]);
+                }} 
+                style={styles.closeButton}
+                disabled={submittingReport}
+              >
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+            
+            <ScrollView 
+              style={styles.techReportModalContent} 
+              showsVerticalScrollIndicator={false} 
+              keyboardShouldPersistTaps="handled"
+            >
+              <View style={styles.techReportForm}>
+                <Text style={styles.techReportHint}>
+                  Please describe the issue you're experiencing. Be as detailed as possible and attach screenshots if available.
+                </Text>
+
+                <View style={styles.techReportField}>
+                  <Text style={styles.techReportFieldLabel}>Problem Description *</Text>
+                  <TextInput
+                    style={[styles.techReportFieldInput, styles.techReportMessageInput]}
+                    value={reportDescription}
+                    onChangeText={setReportDescription}
+                    placeholder="Describe the bug or error you encountered..."
+                    placeholderTextColor="#94a3b8"
+                    multiline
+                    textAlignVertical="top"
+                    editable={!submittingReport}
+                  />
+                </View>
+
+                <View style={styles.techReportField}>
+                  <Text style={styles.techReportFieldLabel}>Screenshots (Optional)</Text>
+                  <Text style={styles.techReportFieldHint}>
+                    You can attach up to 5 screenshots
+                  </Text>
+                  
+                  {reportScreenshots.length > 0 && (
+                    <ScrollView 
+                      horizontal 
+                      showsHorizontalScrollIndicator={false} 
+                      style={styles.screenshotsPreviewContainer}
+                    >
+                      {reportScreenshots.map((uri, idx) => (
+                        <View key={idx} style={styles.screenshotPreviewWrapper}>
+                          <Image source={{ uri }} style={styles.screenshotPreview} />
+                          <TouchableOpacity
+                            style={styles.removeScreenshotButton}
+                            onPress={() => removeScreenshot(uri)}
+                            disabled={submittingReport}
+                          >
+                            <AntDesign name="close" size={16} color="#ffffff" />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  )}
+
+                  <View style={styles.screenshotButtons}>
+                    <TouchableOpacity
+                      style={styles.screenshotButton}
+                      onPress={takePhoto}
+                      disabled={submittingReport || reportScreenshots.length >= 5}
+                    >
+                      <MaterialIcons name="photo-camera" size={20} color="#0ea5e9" />
+                      <Text style={styles.screenshotButtonText}>Take Photo</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.screenshotButton}
+                      onPress={pickImage}
+                      disabled={submittingReport || reportScreenshots.length >= 5}
+                    >
+                      <MaterialIcons name="photo-library" size={20} color="#0ea5e9" />
+                      <Text style={styles.screenshotButtonText}>Choose from Gallery</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
+
+            <View style={styles.techReportModalFooter}>
+              <TouchableOpacity 
+                style={styles.techReportCancelButton} 
+                onPress={() => {
+                  setShowTechReportModal(false);
+                  setReportDescription('');
+                  setReportScreenshots([]);
+                }} 
+                disabled={submittingReport}
+              >
+                <Text style={styles.techReportCancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.techReportSubmitButton,
+                  (!reportDescription.trim() || submittingReport) && styles.techReportSubmitButtonDisabled
+                ]}
+                disabled={submittingReport || !reportDescription.trim()}
+                onPress={submitTechnicalReport}
+              >
+                {submittingReport ? (
+                  <View style={styles.techReportLoadingContainer}>
+                    <ActivityIndicator size="small" color="#ffffff" />
+                    <Text style={styles.techReportSubmitButtonText}>Submitting...</Text>
+                  </View>
+                ) : (
+                  <View style={styles.techReportSubmitContainer}>
+                    <MaterialIcons name="send" size={18} color="#ffffff" />
+                    <Text style={styles.techReportSubmitButtonText}>Submit Report</Text>
                   </View>
                 )}
               </TouchableOpacity>
@@ -1908,6 +2684,636 @@ const styles = StyleSheet.create({
   },
   activeIndicatorOn: {
     backgroundColor: '#0ea5e9',
+  },
+  // Reports Tab Styles
+  reportsPageHeader: {
+    marginBottom: 24,
+  },
+  reportsPageTitle: {
+    fontSize: 32,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.5,
+    marginBottom: 4,
+  },
+  reportsPageSubtitle: {
+    fontSize: 15,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  shakeHintCard: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 20,
+    padding: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 24,
+    borderWidth: 2,
+    borderColor: '#bfdbfe',
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  shakeHintIconContainer: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  shakeHintTextContainer: {
+    flex: 1,
+  },
+  shakeHintTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#1e40af',
+    marginBottom: 4,
+  },
+  shakeHintText: {
+    fontSize: 14,
+    color: '#1e40af',
+    fontWeight: '500',
+    lineHeight: 20,
+  },
+  reportsCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    padding: 24,
+    marginBottom: 24,
+    borderWidth: 0,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  reportsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  reportsHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  reportsIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#fee2e2',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  reportsIconContainerWarning: {
+    backgroundColor: '#fef3c7',
+  },
+  reportsTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.3,
+  },
+  reportsSubtitle: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  reportsBadge: {
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    minWidth: 36,
+    alignItems: 'center',
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  reportsBadgeWarning: {
+    backgroundColor: '#f59e0b',
+    shadowColor: '#f59e0b',
+  },
+  reportsBadgeText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  logsLoadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingVertical: 40,
+  },
+  logsLoadingText: {
+    fontSize: 15,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  emptyLogsContainer: {
+    alignItems: 'center',
+    paddingVertical: 48,
+  },
+  emptyLogsIconContainer: {
+    marginBottom: 16,
+  },
+  emptyLogsTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 6,
+  },
+  emptyLogsText: {
+    fontSize: 14,
+    color: '#94a3b8',
+    fontWeight: '500',
+  },
+  reportsList: {
+    gap: 16,
+  },
+  reportItem: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 18,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  reportItemHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  reportItemLeft: {
+    flex: 1,
+    gap: 6,
+  },
+  reportItemUserRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  reportItemUser: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  reportUserRoleBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  reportUserRoleTeacher: {
+    backgroundColor: '#dbeafe',
+  },
+  reportUserRoleParent: {
+    backgroundColor: '#fce7f3',
+  },
+  reportUserRoleAdmin: {
+    backgroundColor: '#f3e8ff',
+  },
+  reportUserRoleText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#1e293b',
+    letterSpacing: 0.5,
+  },
+  reportItemTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  reportItemTime: {
+    fontSize: 12,
+    color: '#94a3b8',
+    fontWeight: '500',
+  },
+  reportStatusBadge: {
+    backgroundColor: '#f59e0b',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  reportStatusResolved: {
+    backgroundColor: '#10b981',
+  },
+  reportStatusInProgress: {
+    backgroundColor: '#3b82f6',
+  },
+  reportStatusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#ffffff',
+  },
+  reportStatusDotResolved: {
+    backgroundColor: '#ffffff',
+  },
+  reportStatusDotInProgress: {
+    backgroundColor: '#ffffff',
+  },
+  reportStatusText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#ffffff',
+    letterSpacing: 0.3,
+  },
+  reportItemDescriptionContainer: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+  },
+  reportItemDescription: {
+    fontSize: 14,
+    color: '#1e293b',
+    lineHeight: 21,
+    fontWeight: '500',
+  },
+  reportScreenshotsContainer: {
+    marginTop: 4,
+  },
+  reportScreenshotsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 10,
+  },
+  reportScreenshotsLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  reportScreenshotsScroll: {
+    flexDirection: 'row',
+    marginHorizontal: -4,
+  },
+  reportScreenshotWrapper: {
+    marginHorizontal: 4,
+  },
+  reportScreenshotThumb: {
+    width: 100,
+    height: 100,
+    borderRadius: 12,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+  reportActionsContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 12,
+  },
+  markDoneButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#10b981',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    gap: 8,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  markDoneButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ffffff',
+    letterSpacing: 0.3,
+  },
+  removeReportButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ef4444',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    gap: 8,
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  removeReportButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ffffff',
+    letterSpacing: 0.3,
+  },
+  logsFiltersWrap: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 20,
+    gap: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  logsList: {
+    gap: 12,
+  },
+  logItem: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    padding: 14,
+    borderLeftWidth: 4,
+    borderLeftColor: '#e2e8f0',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+    elevation: 1,
+  },
+  logItemError: {
+    borderLeftColor: '#ef4444',
+    backgroundColor: '#fef2f2',
+  },
+  logItemWarning: {
+    borderLeftColor: '#f59e0b',
+    backgroundColor: '#fffbeb',
+  },
+  logItemInfo: {
+    borderLeftColor: '#3b82f6',
+    backgroundColor: '#eff6ff',
+  },
+  logItemHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  logSeverityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  logSeverityError: {
+    backgroundColor: '#ef4444',
+  },
+  logSeverityWarning: {
+    backgroundColor: '#f59e0b',
+  },
+  logSeverityInfo: {
+    backgroundColor: '#3b82f6',
+  },
+  logSeverityText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#ffffff',
+    letterSpacing: 0.5,
+  },
+  logItemTimeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  logItemTime: {
+    fontSize: 11,
+    color: '#94a3b8',
+    fontWeight: '600',
+  },
+  logItemMessage: {
+    fontSize: 14,
+    color: '#1e293b',
+    lineHeight: 20,
+    marginBottom: 8,
+    fontWeight: '500',
+  },
+  logItemMeta: {
+    flexDirection: 'row',
+    gap: 16,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  logItemMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  logItemSource: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  logItemUser: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  // Technical Report Modal Styles
+  techReportModal: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    maxHeight: '90%',
+    minHeight: '70%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    elevation: 16,
+  },
+  techReportModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+    paddingVertical: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  techReportModalTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  techReportModalTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.3,
+  },
+  techReportModalContent: {
+    flex: 1,
+  },
+  techReportForm: {
+    paddingHorizontal: 28,
+    paddingVertical: 20,
+    gap: 20,
+  },
+  techReportHint: {
+    fontSize: 14,
+    color: '#64748b',
+    lineHeight: 20,
+    backgroundColor: '#f8fafc',
+    padding: 12,
+    borderRadius: 12,
+  },
+  techReportField: {
+    gap: 8,
+  },
+  techReportFieldLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  techReportFieldHint: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginBottom: 8,
+  },
+  techReportFieldInput: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  techReportMessageInput: {
+    height: 140,
+  },
+  screenshotsPreviewContainer: {
+    marginVertical: 12,
+  },
+  screenshotPreviewWrapper: {
+    marginRight: 12,
+    position: 'relative',
+  },
+  screenshotPreview: {
+    width: 100,
+    height: 100,
+    borderRadius: 12,
+    backgroundColor: '#f1f5f9',
+  },
+  removeScreenshotButton: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    backgroundColor: '#ef4444',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  screenshotButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  screenshotButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#f8fafc',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+  },
+  screenshotButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#0ea5e9',
+  },
+  techReportModalFooter: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 24,
+    paddingBottom: 24,
+    paddingTop: 12,
+  },
+  techReportCancelButton: {
+    flex: 1,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f1f5f9',
+  },
+  techReportCancelButtonText: {
+    color: '#0f172a',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  techReportSubmitButton: {
+    flex: 1,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ef4444',
+  },
+  techReportSubmitButtonDisabled: {
+    opacity: 0.6,
+  },
+  techReportLoadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  techReportSubmitContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  techReportSubmitButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 15,
   },
 });
 
