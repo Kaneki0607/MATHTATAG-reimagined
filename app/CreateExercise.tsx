@@ -6,7 +6,6 @@ import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
-  Alert,
   Image,
   Modal,
   ScrollView,
@@ -30,6 +29,7 @@ import {
   debugKeyStatus,
   getActiveApiKeys,
   getApiKeyStatus,
+  getRandomApiKey,
   markApiKeyAsFailed,
   markApiKeyAsUsed,
   performMaintenanceCleanup,
@@ -108,7 +108,7 @@ const callElevenLabsWithFallback = async (
   voiceId: string = 'cgSgspJ2msm6clMCkdW9',
   useV3: boolean = true,
   outputFormat: string = 'mp3_44100_128'
-): Promise<{ audioBlob: Blob; usedApiKey: string; performanceLog: any }> => {
+): Promise<{ audioBlob: Blob; usedApiKey: string; performanceLog: any } | null> => {
   const performanceLog: any = {};
   
   // Clean up expired keys first
@@ -177,6 +177,16 @@ const callElevenLabsWithFallback = async (
       } else {
         const errorText = await response.text();
         console.warn(`⚠️ ElevenLabs API key ${i + 1} failed:`, response.status, errorText);
+        
+        // Check for IP address unusual activity first - this should stop all retries
+        if (errorText.includes('detected_unusual_activity') || 
+            errorText.includes('Unusual activity detected') ||
+            errorText.includes('Free Tier usage disabled')) {
+          console.log(`🚫 IP address detected doing unusual activity - stopping retries`);
+          
+          // Stop retrying and return null instead of throwing error to prevent crash
+          return null;
+        }
         
         // Handle different error types
         if (response.status === 401) {
@@ -1039,11 +1049,95 @@ export default function CreateExercise() {
   const [uploadingImage, setUploadingImage] = useState(false);
   const [modalStack, setModalStack] = useState<string[]>([]);
   
+  // Custom Alert state
+  const [customAlert, setCustomAlert] = useState<{
+    visible: boolean;
+    title: string;
+    message: string;
+    buttons: Array<{
+      text: string;
+      onPress?: () => void;
+      style?: 'default' | 'cancel' | 'destructive';
+    }>;
+  }>({
+    visible: false,
+    title: '',
+    message: '',
+    buttons: []
+  });
+
+  // Text Review Modal state
+  const [textReviewModal, setTextReviewModal] = useState<{
+    visible: boolean;
+    originalText: string;
+    processedText: string;
+    onUseOriginal?: (text: string) => void;
+    onUseProcessed?: (text: string) => void;
+    onCancel?: () => void;
+  }>({
+    visible: false,
+    originalText: '',
+    processedText: '',
+  });
+  
   // Generate 6-digit code for exercise
   const generateExerciseCode = () => {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     setExerciseCode(code);
     return code;
+  };
+
+  // Custom Alert functions
+  const showCustomAlert = (
+    title: string,
+    message: string,
+    buttons: Array<{
+      text: string;
+      onPress?: () => void;
+      style?: 'default' | 'cancel' | 'destructive';
+    }> = [{ text: 'OK' }]
+  ) => {
+    setCustomAlert({
+      visible: true,
+      title,
+      message,
+      buttons
+    });
+  };
+
+  const hideCustomAlert = () => {
+    setCustomAlert({
+      visible: false,
+      title: '',
+      message: '',
+      buttons: []
+    });
+  };
+
+  // Text Review Modal functions
+  const showTextReviewModal = (
+    originalText: string,
+    processedText: string,
+    onUseOriginal?: (text: string) => void,
+    onUseProcessed?: (text: string) => void,
+    onCancel?: () => void
+  ) => {
+    setTextReviewModal({
+      visible: true,
+      originalText,
+      processedText,
+      onUseOriginal,
+      onUseProcessed,
+      onCancel
+    });
+  };
+
+  const hideTextReviewModal = () => {
+    setTextReviewModal({
+      visible: false,
+      originalText: '',
+      processedText: '',
+    });
   };
 
   // Initialize Audio
@@ -1200,12 +1294,12 @@ export default function CreateExercise() {
           setResourceFile({ name: 'Resource File', uri: data.resourceUrl });
         }
       } else {
-        Alert.alert('Error', 'Exercise not found');
+        showCustomAlert('Error', 'Exercise not found');
         router.back();
       }
     } catch (error) {
       console.error('Error loading exercise for edit:', error);
-      Alert.alert('Error', 'Failed to load exercise');
+      showCustomAlert('Error', 'Failed to load exercise');
       router.back();
     } finally {
       setLoading(false);
@@ -1861,12 +1955,12 @@ export default function CreateExercise() {
   // AI Questions Generator function
   const generateAIQuestions = async () => {
     if (!exerciseTitle.trim() || !exerciseDescription.trim() || !exerciseCategory.trim()) {
-      Alert.alert('Error', 'Please fill in the exercise title, description, and category first');
+      showCustomAlert('Error', 'Please fill in the exercise title, description, and category first');
       return;
     }
 
     if (!aiPrompt.trim()) {
-      Alert.alert('Error', 'Please provide additional details for the AI to generate questions');
+      showCustomAlert('Error', 'Please provide additional details for the AI to generate questions');
       return;
     }
 
@@ -2577,16 +2671,28 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       console.log('Generating TTS audio for AI-generated questions sequentially...');
       setIsGeneratingTTS(true);
       
-      // Process questions one by one with 3-second delays
+      // Process questions in batches of 2 using the same API key, then randomly select next key
       const processTTSSequentially = async () => {
         // Initialize progress tracking
         setTtsProgress({ current: 0, total: newQuestions.length });
+        
+        // Get initial random API key
+        let currentApiKey = getRandomApiKey();
+        if (!currentApiKey) {
+          throw new Error('No active API keys available for TTS processing');
+        }
+        
+        let requestsWithCurrentKey = 0;
+        const REQUESTS_PER_KEY = 2;
+        
+        console.log(`🎯 Starting TTS processing. Using API key: ${currentApiKey.substring(0, 10)}...`);
         
         for (let i = 0; i < newQuestions.length; i++) {
           const question = newQuestions[i];
           
           try {
             console.log(`Processing TTS for question ${i + 1}/${newQuestions.length}: ${question.id}`);
+            console.log(`Using API key: ${currentApiKey.substring(0, 10)}... (${requestsWithCurrentKey + 1}/${REQUESTS_PER_KEY} requests)`);
             
             // Update progress
             setTtsProgress({ current: i + 1, total: newQuestions.length });
@@ -2594,8 +2700,8 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             // Preprocess the question text for TTS (enhanced version)
             const processedText = await preprocessTextForTTS(question.question);
             
-            // Generate TTS audio directly without user prompt (use enhanced version)
-            const audioData = await generateTTSForAI(processedText, question.id);
+            // Generate TTS audio using the current API key
+            const audioData = await generateTTSForAIWithKey(processedText, question.id, currentApiKey);
             
             if (audioData && typeof audioData === 'string') {
               // Save TTS audio locally
@@ -2619,9 +2725,39 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             } else {
               console.warn(`⚠️ No audio data returned for question: ${question.id}`);
             }
+            
+            // Increment request counter for current key
+            requestsWithCurrentKey++;
+            
+            // Check if we need to switch to a new API key
+            if (requestsWithCurrentKey >= REQUESTS_PER_KEY && i < newQuestions.length - 1) {
+              // Get a new random API key
+              const newApiKey = getRandomApiKey();
+              if (newApiKey && newApiKey !== currentApiKey) {
+                currentApiKey = newApiKey;
+                requestsWithCurrentKey = 0;
+                console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... for next batch`);
+              } else {
+                // If no different key available, reset counter to reuse current key
+                requestsWithCurrentKey = 0;
+                console.log(`🔄 Reusing current API key: ${currentApiKey.substring(0, 10)}... for next batch`);
+              }
+            }
+            
           } catch (error) {
-            console.error(`❌ Failed to generate TTS for question ${question.id}:`, error);
-            // Continue with next question even if this one fails
+            console.error(`❌ Error processing TTS for question ${question.id}:`, error);
+            
+            // If current key fails, try to switch to another key
+            const newApiKey = getRandomApiKey();
+            if (newApiKey && newApiKey !== currentApiKey) {
+              currentApiKey = newApiKey;
+              requestsWithCurrentKey = 0;
+              console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to error`);
+            } else {
+              // Reset counter to retry with current key
+              requestsWithCurrentKey = 0;
+              console.log(`🔄 Retrying with current API key: ${currentApiKey.substring(0, 10)}...`);
+            }
           }
           
           // Add 3-second delay between requests (except for the last question)
@@ -2642,14 +2778,14 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
         setIsGeneratingTTS(false);
       });
       
-      Alert.alert('Success', `Generated ${newQuestions.length} questions successfully! TTS audio is being generated in the background.`);
+      showCustomAlert('Success', `Generated ${newQuestions.length} questions successfully! TTS audio is being generated in the background.`);
       setShowAIGenerator(false);
       setAiPrompt('');
 
     } catch (error) {
       console.error('Error generating AI questions:', error);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      Alert.alert('Error', `Failed to generate questions: ${errorMessage}`);
+      showCustomAlert('Error', `Failed to generate questions: ${errorMessage}`);
     } finally {
       setIsGeneratingQuestions(false);
     }
@@ -2776,7 +2912,7 @@ Enhanced text with emotions:`;
   // TTS Functions
   const generateTTS = async (text: string, isRegenerate: boolean = false) => {
     if (!text.trim()) {
-      Alert.alert('Error', 'Please enter some text to convert to speech');
+      showCustomAlert('Error', 'Please enter some text to convert to speech');
       return;
     }
 
@@ -2809,38 +2945,31 @@ Enhanced text with emotions:`;
       performanceLog.steps.preprocessing = Date.now() - preprocessStart;
       
       // Show processed text to teacher for approval
-      const shouldProceed = await new Promise<boolean>((resolve) => {
-        Alert.alert(
-          'Review Processed Text',
-          `Original: "${text.trim()}"\n\nProcessed: "${processedText}"\n\nDo you want to generate TTS with this enhanced text?`,
-          [
-            {
-              text: 'Cancel',
-              style: 'cancel',
-              onPress: () => resolve(false)
-            },
-            {
-              text: 'Use Original',
-              onPress: () => {
-                // Use original text instead
-                resolve(true);
-              }
-            },
-            {
-              text: 'Use Enhanced',
-              onPress: () => resolve(true)
-            }
-          ]
+      const selectedText = await new Promise<string | null>((resolve) => {
+        showTextReviewModal(
+          '', // No original text needed
+          processedText,
+          undefined, // No original text callback
+          (selectedText) => {
+            // Use selected processed text (may have been edited)
+            hideTextReviewModal();
+            resolve(selectedText);
+          },
+          () => {
+            // Cancel
+            hideTextReviewModal();
+            resolve(null);
+          }
         );
       });
       
-      if (!shouldProceed) {
+      if (!selectedText) {
         setIsGeneratingTTS(false);
         return;
       }
       
-      // Use processed text for TTS generation
-      const finalTextForTTS = processedText;
+      // Use selected text for TTS generation
+      const finalTextForTTS = selectedText;
 
       // Generate parameters for natural speech - ElevenLabs v3 only accepts specific stability values
       const stabilityOptions = [0.0, 0.5, 1.0]; // 0.0 = Creative, 0.5 = Natural, 1.0 = Robust
@@ -2874,6 +3003,17 @@ Enhanced text with emotions:`;
           true, // useV3
           'mp3_44100_128'
         );
+
+        // Check if result is null (IP ban detected)
+        if (!result) {
+          console.log('🚫 TTS generation cancelled due to IP ban');
+          showCustomAlert(
+            'Network Access Restricted',
+            'Your IP address has been detected doing unusual activity. Please try using a different WiFi network or switch to mobile data, then try again.',
+            [{ text: 'OK' }]
+          );
+          return;
+        }
 
       performanceLog.steps.elevenLabs = Date.now() - elevenLabsStart;
         performanceLog.steps.elevenLabsDetails = result.performanceLog;
@@ -2909,7 +3049,7 @@ Enhanced text with emotions:`;
             });
           } catch (saveError) {
             console.error('❌ Failed to save TTS audio locally:', saveError);
-            Alert.alert('Save Error', 'Audio generated but failed to save locally. Please try again.');
+            showCustomAlert('Save Error', 'Audio generated but failed to save locally. Please try again.');
             return;
           }
         } else {
@@ -2978,7 +3118,7 @@ Enhanced text with emotions:`;
         totalTime: `${totalTime}ms`,
         steps: performanceLog.steps
       });
-      Alert.alert('Error', 'Failed to generate speech. Please try again.');
+      showCustomAlert('Error', 'Failed to generate speech. Please try again.');
     } finally {
       setIsGeneratingTTS(false);
     }
@@ -3020,6 +3160,17 @@ Enhanced text with emotions:`;
           'mp3_44100_128'
         );
         
+        // Check if result is null (IP ban detected)
+        if (!result) {
+          console.log('🚫 AI TTS generation cancelled due to IP ban');
+          showCustomAlert(
+            'Network Access Restricted',
+            'Your IP address has been detected doing unusual activity. Please try using a different WiFi network or switch to mobile data, then try again.',
+            [{ text: 'OK' }]
+          );
+          return null;
+        }
+        
         console.log(`✅ AI TTS generated using API key: ${result.usedApiKey.substring(0, 10)}...`);
 
       // Process successful response
@@ -3048,6 +3199,80 @@ Enhanced text with emotions:`;
     }
   };
 
+  // TTS function for AI-generated questions with specific API key
+  const generateTTSForAIWithKey = async (processedText: string, questionId: string, apiKey: string): Promise<string | null> => {
+    if (!processedText.trim()) {
+      console.error('No text provided for AI TTS generation');
+      return null;
+    }
+
+    console.log('🎤 AI TTS Generation Started for question:', questionId, 'with specific API key');
+
+    try {
+      // Generate parameters for natural speech
+      const stability = 0.5; // Use Natural (0.5) as default
+      const similarityBoost = Math.random() * 0.1 + 0.8; // 0.8 to 0.9
+
+      // Prepare request payload
+      const requestPayload: any = {
+        text: processedText,
+        model_id: 'eleven_v3',
+        voice_settings: {
+          stability: stability,
+          similarity_boost: Math.max(0, Math.min(1, similarityBoost)),
+          style: 0.0,
+          use_speaker_boost: true
+        }
+      };
+
+      // ElevenLabs API call with specific API key
+      try {
+        const url = `https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9?output_format=mp3_44100_128`;
+        
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Accept': 'audio/mpeg',
+            'Content-Type': 'application/json',
+            'xi-api-key': apiKey
+          },
+          body: JSON.stringify(requestPayload)
+        });
+
+        if (response.ok) {
+          const audioBlob = await response.blob();
+          console.log(`✅ AI TTS generated using specific API key: ${apiKey.substring(0, 10)}...`);
+
+          // Process successful response
+          const reader = new FileReader();
+          
+          return new Promise((resolve, reject) => {
+            reader.onloadend = () => {
+              const base64data = reader.result as string;
+              const base64Audio = base64data.split(',')[1];
+              console.log('🎵 AI TTS Audio generated successfully');
+              resolve(base64Audio);
+            };
+            reader.onerror = () => reject(new Error('Failed to read audio blob'));
+            reader.readAsDataURL(audioBlob);
+          });
+        } else {
+          const errorText = await response.text();
+          console.error(`❌ ElevenLabs API failed with key ${apiKey.substring(0, 10)}...:`, response.status, errorText);
+          throw new Error(`API call failed: ${response.status} - ${errorText}`);
+        }
+        
+      } catch (apiError: any) {
+        console.error('❌ ElevenLabs API call failed for AI TTS:', apiError);
+        throw new Error(`AI TTS Generation failed: ${apiError.message}`);
+      }
+
+    } catch (error) {
+      console.error('❌ AI TTS Generation Error:', error);
+      return null;
+    }
+  };
+
   const playTTS = async (audioData?: string) => {
     // Use provided audioData (base64 for immediate playback) or stored Firebase URL
     let audioToPlay = audioData || editingQuestion?.ttsAudioUrl;
@@ -3068,7 +3293,7 @@ Enhanced text with emotions:`;
     });
     
     if (!audioToPlay) {
-      Alert.alert('No Audio', 'Please generate speech first');
+      showCustomAlert('No Audio', 'Please generate speech first');
       return;
     }
 
@@ -3106,7 +3331,7 @@ Enhanced text with emotions:`;
           }
         } else if ('error' in status) {
           console.error('Audio loading error:', (status as any).error);
-          Alert.alert('Audio Error', 'Failed to load audio file');
+          showCustomAlert('Audio Error', 'Failed to load audio file');
           setIsPlayingTTS(false);
           player.remove();
           setCurrentAudioPlayer(null);
@@ -3122,14 +3347,14 @@ Enhanced text with emotions:`;
           console.log('Play command sent successfully');
         } catch (playError) {
           console.error('Play command failed:', playError);
-          Alert.alert('Playback Error', 'Failed to start audio playback');
+          showCustomAlert('Playback Error', 'Failed to start audio playback');
           setIsPlayingTTS(false);
         }
       }, 100);
       
     } catch (error: any) {
       console.error('Playback Error:', error);
-      Alert.alert('Error', `Failed to play audio: ${error.message}`);
+      showCustomAlert('Error', `Failed to play audio: ${error.message}`);
       setIsPlayingTTS(false);
       setCurrentAudioPlayer(null);
     }
@@ -3145,7 +3370,7 @@ Enhanced text with emotions:`;
   };
 
   const deleteQuestion = (questionId: string) => {
-    Alert.alert(
+    showCustomAlert(
       'Delete Question',
       'Are you sure you want to delete this question?',
       [
@@ -3161,21 +3386,21 @@ Enhanced text with emotions:`;
 
   const saveExercise = async () => {
     if (!exerciseTitle.trim()) {
-      Alert.alert('Error', 'Please enter an exercise title');
+      showCustomAlert('Error', 'Please enter an exercise title');
       return;
     }
     if (!exerciseCategory.trim()) {
-      Alert.alert('Error', 'Please select a category');
+      showCustomAlert('Error', 'Please select a category');
       return;
     }
     if (questions.length === 0) {
-      Alert.alert('Error', 'Please add at least one question');
+      showCustomAlert('Error', 'Please add at least one question');
       return;
     }
     
     // Check for pending TTS uploads
     if (pendingTTSUploads.length > 0) {
-      Alert.alert(
+      showCustomAlert(
         'Pending TTS Audio', 
         `You have ${pendingTTSUploads.length} text-to-speech audio file(s) that need to be uploaded. Please wait for the upload to complete before saving the exercise.`,
         [{ text: 'OK' }]
@@ -3185,7 +3410,7 @@ Enhanced text with emotions:`;
     
     // Check if currently generating TTS
     if (isGeneratingTTS) {
-      Alert.alert(
+      showCustomAlert(
         'TTS Generation In Progress', 
         'Please wait for text-to-speech generation to complete before saving the exercise.',
         [{ text: 'OK' }]
@@ -3196,7 +3421,7 @@ Enhanced text with emotions:`;
     // Validate that all questions have content
     const incompleteQuestions = questions.filter(q => !q.question.trim());
     if (incompleteQuestions.length > 0) {
-      Alert.alert('Error', 'Please complete all questions before saving');
+      showCustomAlert('Error', 'Please complete all questions before saving');
       return;
     }
     
@@ -3219,7 +3444,7 @@ Enhanced text with emotions:`;
     return !ans;
   });
     if (invalidMultipleChoice.length > 0) {
-      Alert.alert('Error', 'Please complete all multiple choice options and select a correct answer');
+      showCustomAlert('Error', 'Please complete all multiple choice options and select a correct answer');
       return;
     }
     
@@ -3228,7 +3453,7 @@ Enhanced text with emotions:`;
       q.type === 'identification' && !q.answer
     );
     if (invalidIdentification.length > 0) {
-      Alert.alert('Error', 'Please provide answers for all identification questions');
+      showCustomAlert('Error', 'Please provide answers for all identification questions');
       return;
     }
     
@@ -3256,7 +3481,7 @@ Enhanced text with emotions:`;
       return !(hasPassage && hasAtLeastOne && subsValid);
     });
     if (invalidReading) {
-      Alert.alert('Error', 'Please complete the reading passage and all sub-questions');
+      showCustomAlert('Error', 'Please complete the reading passage and all sub-questions');
       return;
     }
     
@@ -3301,7 +3526,7 @@ Enhanced text with emotions:`;
           console.log('✅ TTS audio files uploaded successfully');
         } catch (ttsError) {
           console.error('❌ Failed to upload TTS audio files:', ttsError);
-          Alert.alert('Upload Error', 'Audio generated but failed to upload TTS audio to Firebase.');
+          showCustomAlert('Upload Error', 'Audio generated but failed to upload TTS audio to Firebase.');
           return; // Stop the save process if TTS upload fails
         }
       } else {
@@ -3447,13 +3672,13 @@ Enhanced text with emotions:`;
           errorMessage += `Error: ${error || 'Unknown error'}`;
         }
         
-        Alert.alert('Error', errorMessage);
+        showCustomAlert('Error', errorMessage);
         return;
       }
       
       console.log(`Exercise ${isEditing ? 'updated' : 'saved'} successfully with key:`, key);
       
-      Alert.alert('Success', `Exercise ${isEditing ? 'updated' : 'created'} successfully!`, [
+      showCustomAlert('Success', `Exercise ${isEditing ? 'updated' : 'created'} successfully!`, [
         { text: 'OK', onPress: () => router.push('/TeacherDashboard') }
       ]);
     } catch (error: any) {
@@ -3471,7 +3696,7 @@ Enhanced text with emotions:`;
         errorMessage += `Error: ${error?.message || 'Unknown error'}`;
       }
       
-      Alert.alert('Error', errorMessage);
+      showCustomAlert('Error', errorMessage);
     } finally {
       setUploading(false);
     }
@@ -3491,7 +3716,7 @@ Enhanced text with emotions:`;
 
       setResourceFile({ name: asset.name || 'resource', uri: asset.uri });
     } catch (e) {
-      Alert.alert('Error', 'Failed to pick a file');
+      showCustomAlert('Error', 'Failed to pick a file');
     }
   };
 
@@ -3501,14 +3726,14 @@ Enhanced text with emotions:`;
       setUploading(true);
       const fileInfo = await FileSystem.getInfoAsync(resourceFile.uri);
       if (!fileInfo.exists) {
-        Alert.alert('Error', 'Selected file not found');
+        showCustomAlert('Error', 'Selected file not found');
         return null;
       }
       // If you want to upload to Firebase Storage, reuse uploadFile from lib/firebase-storage
       // For now we just return the local URI as placeholder
       return resourceFile.uri;
     } catch (e) {
-      Alert.alert('Error', 'Failed to upload file');
+      showCustomAlert('Error', 'Failed to upload file');
       return null;
     } finally {
       setUploading(false);
@@ -3667,7 +3892,7 @@ Enhanced text with emotions:`;
         
         // Check file size (10MB limit)
         if (asset.fileSize && asset.fileSize > 10 * 1024 * 1024) {
-          Alert.alert('File Too Large', 'Image must be smaller than 10MB');
+          showCustomAlert('File Too Large', 'Image must be smaller than 10MB');
           return;
         }
         
@@ -3682,7 +3907,7 @@ Enhanced text with emotions:`;
         });
         
         if (uploadError) {
-          Alert.alert('Upload Failed', 'Failed to upload image to database');
+          showCustomAlert('Upload Failed', 'Failed to upload image to database');
           return;
         }
         
@@ -3711,7 +3936,7 @@ Enhanced text with emotions:`;
       }
     } catch (error) {
       console.error('Image upload error:', error);
-      Alert.alert('Upload Failed', 'Failed to upload image');
+      showCustomAlert('Upload Failed', 'Failed to upload image');
     } finally {
       setUploadingImage(false);
     }
@@ -3719,7 +3944,7 @@ Enhanced text with emotions:`;
 
   const handleCreateCategory = async () => {
     if (!newCategoryName.trim()) {
-      Alert.alert('Error', 'Please enter a category name');
+      showCustomAlert('Error', 'Please enter a category name');
       return;
     }
     
@@ -3732,7 +3957,7 @@ Enhanced text with emotions:`;
       
       const { key, error } = await pushData('/imageCategories', categoryData);
       if (error) {
-        Alert.alert('Error', 'Failed to create category');
+        showCustomAlert('Error', 'Failed to create category');
         return;
       }
       
@@ -3743,9 +3968,9 @@ Enhanced text with emotions:`;
       
       setNewCategoryName('');
       setShowAddCategory(false);
-      Alert.alert('Success', 'Category created successfully!');
+      showCustomAlert('Success', 'Category created successfully!');
     } catch (error) {
-      Alert.alert('Error', 'Failed to create category');
+      showCustomAlert('Error', 'Failed to create category');
     }
   };
 
@@ -5242,6 +5467,116 @@ Enhanced text with emotions:`;
             </View>
           </ScrollView>
         </View>
+        
+        {/* Text Review Modal - Rendered inside question editor to show on top */}
+        <Modal
+          visible={textReviewModal.visible}
+          transparent={false}
+          animationType="slide"
+          presentationStyle="fullScreen"
+          onRequestClose={hideTextReviewModal}
+          statusBarTranslucent={true}
+        >
+          <View style={styles.textReviewOverlay}>
+            <View style={styles.textReviewContainer}>
+              <View style={styles.textReviewHeader}>
+                <TouchableOpacity 
+                  onPress={hideTextReviewModal}
+                  style={styles.textReviewCloseButton}
+                >
+                  <AntDesign name="close" size={24} color="#64748b" />
+                </TouchableOpacity>
+                <Text style={styles.textReviewTitle}>Review Processed Text</Text>
+                <View style={styles.textReviewHeaderSpacer} />
+              </View>
+              
+              <ScrollView style={styles.textReviewContent} showsVerticalScrollIndicator={false}>
+                <View style={styles.textReviewSection}>
+                  <Text style={styles.textReviewLabel}>Processed Text:</Text>
+                  <TextInput
+                    style={styles.textReviewTextInput}
+                    value={textReviewModal.processedText}
+                    onChangeText={(text) => setTextReviewModal(prev => ({ ...prev, processedText: text }))}
+                    multiline
+                    textAlignVertical="top"
+                    placeholder="Processed text..."
+                  />
+                </View>
+                
+                <Text style={styles.textReviewQuestion}>
+                  Do you want to generate TTS with this enhanced text?
+                </Text>
+              </ScrollView>
+              
+              <View style={styles.textReviewButtonContainer}>
+                <TouchableOpacity
+                  style={[styles.textReviewButton, styles.textReviewButtonCancel]}
+                  onPress={() => {
+                    if (textReviewModal.onCancel) textReviewModal.onCancel();
+                  }}
+                >
+                  <Text style={styles.textReviewButtonTextCancel}>Cancel</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity
+                  style={[styles.textReviewButton, styles.textReviewButtonAction]}
+                  onPress={() => {
+                    if (textReviewModal.onUseProcessed) {
+                      // Pass the current edited text from the textbox
+                      textReviewModal.onUseProcessed(textReviewModal.processedText);
+                    }
+                  }}
+                >
+                  <Text style={styles.textReviewButtonTextAction}>Use Enhanced</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+        
+        {/* Custom Alert Modal - Rendered inside question editor to show on top */}
+        <Modal
+          visible={customAlert.visible}
+          transparent
+          animationType="fade"
+          onRequestClose={hideCustomAlert}
+        >
+          <View style={styles.customAlertOverlay}>
+            <View style={styles.customAlertContainer}>
+              <View style={styles.customAlertContent}>
+                <Text style={styles.customAlertTitle}>{customAlert.title}</Text>
+                <Text style={styles.customAlertMessage}>{customAlert.message}</Text>
+              </View>
+              <View style={styles.customAlertButtonContainer}>
+                {customAlert.buttons.map((button, index) => (
+                  <TouchableOpacity
+                    key={index}
+                    style={[
+                      styles.customAlertButton,
+                      button.style === 'cancel' && styles.customAlertButtonCancel,
+                      button.style === 'destructive' && styles.customAlertButtonDestructive,
+                      customAlert.buttons.length > 1 && index < customAlert.buttons.length - 1 && styles.customAlertButtonBorder
+                    ]}
+                    onPress={() => {
+                      hideCustomAlert();
+                      if (button.onPress) button.onPress();
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.customAlertButtonText,
+                        button.style === 'cancel' && styles.customAlertButtonTextCancel,
+                        button.style === 'destructive' && styles.customAlertButtonTextDestructive
+                      ]}
+                    >
+                      {button.text}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          </View>
+        </Modal>
       </Modal>
     );
   };
@@ -5783,7 +6118,7 @@ Enhanced text with emotions:`;
                   onPress={async () => {
                     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
                     if (status !== 'granted') {
-                      Alert.alert('Permission needed', 'Media library access is required to pick images.');
+                      showCustomAlert('Permission needed', 'Media library access is required to pick images.');
                       return;
                     }
                     const res = await ImagePicker.launchImageLibraryAsync({
@@ -6811,6 +7146,9 @@ Enhanced text with emotions:`;
           </View>
         </View>
       </Modal>
+
+
+
     </View>
   );
 }
@@ -8779,5 +9117,187 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(100, 116, 139, 0.9)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  
+  // Custom Alert Styles
+  customAlertOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  customAlertContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    minWidth: 280,
+    maxWidth: '90%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 8,
+    overflow: 'hidden',
+  },
+  customAlertContent: {
+    padding: 24,
+  },
+  customAlertTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  customAlertMessage: {
+    fontSize: 15,
+    color: '#64748b',
+    lineHeight: 22,
+    textAlign: 'center',
+  },
+  customAlertButtonContainer: {
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+  customAlertButton: {
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  customAlertButtonBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  customAlertButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#3b82f6',
+  },
+  customAlertButtonCancel: {
+    backgroundColor: '#f8fafc',
+  },
+  customAlertButtonTextCancel: {
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  customAlertButtonDestructive: {
+    backgroundColor: '#fef2f2',
+  },
+  customAlertButtonTextDestructive: {
+    color: '#ef4444',
+  },
+
+  // Text Review Modal Styles
+  textReviewOverlay: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    paddingTop: 60,
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+  },
+  textReviewContainer: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 20,
+    overflow: 'hidden',
+  },
+  textReviewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+  },
+  textReviewCloseButton: {
+    padding: 8,
+    borderRadius: 20,
+    backgroundColor: '#f1f5f9',
+  },
+  textReviewTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1e293b',
+    textAlign: 'center',
+    flex: 1,
+  },
+  textReviewHeaderSpacer: {
+    width: 40,
+  },
+  textReviewContent: {
+    flex: 1,
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+  },
+  textReviewSection: {
+    marginBottom: 24,
+  },
+  textReviewLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 12,
+  },
+  textReviewTextInput: {
+    borderWidth: 2,
+    borderColor: '#d1d5db',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 15,
+    color: '#374151',
+    backgroundColor: '#ffffff',
+    minHeight: 140,
+    maxHeight: 200,
+    textAlignVertical: 'top',
+    lineHeight: 22,
+  },
+  textReviewQuestion: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#6b7280',
+    textAlign: 'center',
+    marginTop: 16,
+    marginBottom: 16,
+    paddingHorizontal: 16,
+  },
+  textReviewButtonContainer: {
+    flexDirection: 'row',
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+  },
+  textReviewButton: {
+    flex: 1,
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    minHeight: 56,
+  },
+  textReviewButtonCancel: {
+    backgroundColor: '#f8fafc',
+  },
+  textReviewButtonAction: {
+    backgroundColor: '#ffffff',
+    borderLeftWidth: 1,
+    borderLeftColor: '#e2e8f0',
+  },
+  textReviewButtonTextCancel: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#64748b',
+  },
+  textReviewButtonTextAction: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#3b82f6',
   },
 });
