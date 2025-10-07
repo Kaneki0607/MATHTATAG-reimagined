@@ -36,8 +36,6 @@ const performApiKeyMaintenance = async () => {
 // Helper function to check if API key has low credits and update status
 const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, errorText: string): Promise<boolean> => {
   try {
-    console.log('🔍 Raw error text:', errorText);
-    
     // Try to extract credits directly from the raw text using regex
     const creditsMatch = errorText.match(/"credits_remaining":\s*(\d+)/);
     const requiredMatch = errorText.match(/"credits_required":\s*(\d+)/);
@@ -45,8 +43,6 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
     if (creditsMatch) {
       const creditsRemaining = parseInt(creditsMatch[1]);
       const creditsRequired = requiredMatch ? parseInt(requiredMatch[1]) : 0;
-      
-      console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
       
       // Update the API key credits and status
       if (apiKey) {
@@ -57,14 +53,11 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
     } else {
       // Fallback to JSON parsing
       const errorData = JSON.parse(errorText);
-      console.log('🔍 Parsed error data:', JSON.stringify(errorData, null, 2));
       
       // Check if it's a quota exceeded error with specific credit information
       if (errorData.detail && (errorData.detail.status === 'quota_exceeded' || errorData.detail.status === 'qquota_exceeded')) {
         const creditsRemaining = errorData.detail.credits_remaining || 0;
         const creditsRequired = errorData.detail.credits_required || 0;
-        
-        console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
         
         // Update the API key credits and status
         if (apiKey) await updateApiKeyCredits(apiKey, creditsRemaining);
@@ -75,7 +68,6 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
     }
   } catch (parseError) {
     console.warn('⚠️ Could not parse error response for credit check:', parseError);
-    console.log('Raw error text:', errorText);
   }
   
   return false; // Key was not marked as low credits
@@ -84,7 +76,7 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
 // Helper function to try multiple ElevenLabs API keys with fallback
 const callElevenLabsWithFallback = async (
   text: string, 
-  voiceId: string = 'cgSgspJ2msm6clMCkdW9',
+  voiceId: string = 'jBpfuIE2acCO8z3wKNLl',
   useV3: boolean = true,
   outputFormat: string = 'mp3_44100_128'
 ): Promise<{ audioBlob: Blob; usedApiKey: string; performanceLog: any } | null> => {
@@ -104,13 +96,13 @@ const callElevenLabsWithFallback = async (
       // Prepare request payload based on version
       const requestPayload = useV3 ? {
         text: text,
-        model_id: 'eleven_v3',
+        model_id: 'eleven_turbo_v2_5',
         voice_settings: {
+          speed: 0.8,
           stability: 0.5,
-          similarity_boost: 0.8,
-          style: 0.0,
-          use_speaker_boost: true
-        }
+          similarity_boost: 0.75,
+        },
+        language_code: 'fil'
       } : {
         text: text,
         voice_settings: {
@@ -137,10 +129,9 @@ const callElevenLabsWithFallback = async (
       if (response.ok) {
         const audioBlob = await response.blob();
         performanceLog.apiKey = Date.now() - attemptStart;
-        console.log(`✅ ElevenLabs API key succeeded`);
         
-        // Mark this key as used in DB
-        await markApiKeyAsUsed(apiKey);
+        // Mark this key as used in DB with TTS generation time
+        await markApiKeyAsUsed(apiKey, performanceLog.apiKey);
         
         return {
           audioBlob,
@@ -149,13 +140,11 @@ const callElevenLabsWithFallback = async (
         };
       } else {
         const errorText = await response.text();
-        console.warn(`⚠️ ElevenLabs API key failed:`, response.status, errorText);
         
         // Check for IP address unusual activity first - this should stop all retries
         if (errorText.includes('detected_unusual_activity') || 
             errorText.includes('Unusual activity detected') ||
             errorText.includes('Free Tier usage disabled')) {
-          console.log(`🚫 IP address detected doing unusual activity - stopping retries`);
           
           // Stop retrying and return null instead of throwing error to prevent crash
           return null;
@@ -164,16 +153,10 @@ const callElevenLabsWithFallback = async (
         // Handle different error types
         if (response.status === 401) {
           // Unauthorized - invalid API key
-          console.log(`🔑 API key is invalid/unauthorized - marking as failed`);
           await markApiKeyAsFailed(apiKey);
         } else if (response.status === 429) {
           // Rate limit or quota exceeded
-          console.log(`⏰ API key hit rate limit or quota - checking credits`);
           const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
-          if (!hasLowCredits) {
-            // If not a credit issue, might be temporary rate limit
-            console.log(`⏰ API key hit temporary rate limit`);
-          }
         } else {
           // Check if this key has low credits and update status
           const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
@@ -935,6 +918,11 @@ export default function CreateExercise() {
   const [showTTSProgressModal, setShowTTSProgressModal] = useState(false);
   const [ttsUploadProgress, setTtsUploadProgress] = useState({ current: 0, total: 0 });
   const [ttsUploadStatus, setTtsUploadStatus] = useState<string>('');
+  
+  // Main Upload Progress state
+  const [showUploadProgressModal, setShowUploadProgressModal] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
+  const [uploadStatus, setUploadStatus] = useState<string>('');
   // TTS language is now handled directly in the API call, no need for state
   const [currentAudioPlayer, setCurrentAudioPlayer] = useState<any | null>(null);
   
@@ -962,6 +950,9 @@ export default function CreateExercise() {
   const [ttsGenerationStartTime, setTtsGenerationStartTime] = useState<number | null>(null);
   const [ttsGenerationElapsedMs, setTtsGenerationElapsedMs] = useState(0);
   const [ttsGenerationLastDurationMs, setTtsGenerationLastDurationMs] = useState<number | null>(null);
+  const [ttsProcessStartTime, setTtsProcessStartTime] = useState<number | null>(null);
+  const [ttsProcessElapsedSeconds, setTtsProcessElapsedSeconds] = useState(0);
+  const [ttsEstimatedTimeRemaining, setTtsEstimatedTimeRemaining] = useState<number | null>(null);
   const [ttsUploadStartTime, setTtsUploadStartTime] = useState<number | null>(null);
   const [ttsUploadElapsedMs, setTtsUploadElapsedMs] = useState(0);
   const [ttsUploadLastDurationMs, setTtsUploadLastDurationMs] = useState<number | null>(null);
@@ -1007,6 +998,7 @@ export default function CreateExercise() {
     }
     return () => timer && clearInterval(timer);
   }, [ttsUploadProgress.total, ttsUploadProgress.current]);
+
 
   const formatMs = (ms: number) => {
     const sec = Math.max(0, Math.round(ms / 1000));
@@ -1082,6 +1074,31 @@ export default function CreateExercise() {
   // Track failed TTS generations
   const [failedTTSQuestions, setFailedTTSQuestions] = useState<Set<string>>(new Set());
   const [isRetryingFailedTTS, setIsRetryingFailedTTS] = useState(false);
+
+  // Timer for TTS process (generation + upload)
+  useEffect(() => {
+    let timer: any;
+    
+    if (ttsProcessStartTime && (isGeneratingTTS || isRetryingFailedTTS)) {
+      timer = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - ttsProcessStartTime) / 1000);
+        setTtsProcessElapsedSeconds(elapsed);
+        
+        // Calculate estimated time remaining based on progress
+        if (ttsProgress.total > 0 && ttsProgress.current > 0) {
+          const progressRatio = ttsProgress.current / ttsProgress.total;
+          const estimatedTotalTime = elapsed / progressRatio;
+          const remaining = Math.max(0, Math.floor(estimatedTotalTime - elapsed));
+          setTtsEstimatedTimeRemaining(remaining);
+        }
+      }, 1000);
+    } else {
+      setTtsProcessElapsedSeconds(0);
+      setTtsEstimatedTimeRemaining(null);
+    }
+    
+    return () => timer && clearInterval(timer);
+  }, [ttsProcessStartTime, isGeneratingTTS, isRetryingFailedTTS, ttsProgress.current, ttsProgress.total]);
   
   // Generate 6-digit code for exercise
   const generateExerciseCode = () => {
@@ -1152,7 +1169,6 @@ export default function CreateExercise() {
           playsInSilentMode: true,
           shouldPlayInBackground: false,
         });
-        console.log('Audio mode configured successfully');
       } catch (error) {
         console.warn('Audio mode setup failed:', error);
       }
@@ -1212,18 +1228,15 @@ export default function CreateExercise() {
             const fileInfo = await FileSystem.getInfoAsync(localTTSAudio.localUri);
             if (fileInfo.exists) {
               await FileSystem.deleteAsync(localTTSAudio.localUri);
-              console.log('Cleaned up current local TTS file:', localTTSAudio.localUri);
             }
           } catch (error) {
             console.warn('Failed to clean up current local TTS file:', error);
           }
         } else {
-          console.log('Skipping cleanup - file is in pending uploads:', localTTSAudio.localUri);
         }
       }
       
       // DON'T clean up pending uploads - they need to stay for upload
-      console.log(`Keeping ${pendingTTSUploads.length} pending TTS files for upload/retry`);
       
       // Only clear the current local audio, NOT the pending uploads
       setLocalTTSAudio(null);
@@ -1311,38 +1324,40 @@ export default function CreateExercise() {
 
   // Upload local images to Firebase Storage and return remote URLs
   const uploadLocalImages = async (questions: Question[], exerciseCode: string): Promise<Question[]> => {
-    const uploadPromises: Promise<any>[] = [];
     const updatedQuestions = [...questions];
+    const imagesToUpload: Array<{
+      questionIndex: number;
+      imageType: 'question' | 'questionImages' | 'optionImages' | 'pairLeft' | 'pairRight' | 'reorderItem';
+      imageIndex?: number;
+      imageUri: string;
+      storagePath: string;
+    }> = [];
 
+    // Collect all images that need to be uploaded
     for (let qIndex = 0; qIndex < updatedQuestions.length; qIndex++) {
       const question = updatedQuestions[qIndex];
       
       // Handle question image
       if (question.questionImage && isLocalImage(question.questionImage)) {
-        uploadPromises.push(
-          uploadLocalImageToStorage(question.questionImage, `exercises/${exerciseCode}/question-${qIndex}`)
-            .then(remoteUrl => {
-              updatedQuestions[qIndex].questionImage = remoteUrl;
-            })
-        );
+        imagesToUpload.push({
+          questionIndex: qIndex,
+          imageType: 'question',
+          imageUri: question.questionImage,
+          storagePath: `exercises/${exerciseCode}/question-${qIndex}`
+        });
       }
 
       // Handle multiple question images
       if (question.questionImages && Array.isArray(question.questionImages)) {
         question.questionImages.forEach((imageUri, imgIndex) => {
           if (isLocalImage(imageUri)) {
-            uploadPromises.push(
-              uploadLocalImageToStorage(imageUri, `exercises/${exerciseCode}/question-${qIndex}-image-${imgIndex}`)
-                .then(remoteUrl => {
-                  if (!updatedQuestions[qIndex].questionImages) {
-                    updatedQuestions[qIndex].questionImages = [...(question.questionImages || [])];
-                  }
-                  const questionImages = updatedQuestions[qIndex].questionImages;
-                  if (questionImages && Array.isArray(questionImages) && questionImages.length > imgIndex) {
-                    questionImages[imgIndex] = remoteUrl;
-                  }
-                })
-            );
+            imagesToUpload.push({
+              questionIndex: qIndex,
+              imageType: 'questionImages',
+              imageIndex: imgIndex,
+              imageUri,
+              storagePath: `exercises/${exerciseCode}/question-${qIndex}-image-${imgIndex}`
+            });
           }
         });
       }
@@ -1351,15 +1366,13 @@ export default function CreateExercise() {
       if (question.optionImages) {
         question.optionImages.forEach((imageUri, optionIndex) => {
           if (imageUri && isLocalImage(imageUri)) {
-            uploadPromises.push(
-              uploadLocalImageToStorage(imageUri, `exercises/${exerciseCode}/question-${qIndex}/option-${optionIndex}`)
-                .then(remoteUrl => {
-                  if (!updatedQuestions[qIndex].optionImages) {
-                    updatedQuestions[qIndex].optionImages = [];
-                  }
-                  updatedQuestions[qIndex].optionImages![optionIndex] = remoteUrl;
-                })
-            );
+            imagesToUpload.push({
+              questionIndex: qIndex,
+              imageType: 'optionImages',
+              imageIndex: optionIndex,
+              imageUri,
+              storagePath: `exercises/${exerciseCode}/question-${qIndex}/option-${optionIndex}`
+            });
           }
         });
       }
@@ -1368,20 +1381,22 @@ export default function CreateExercise() {
       if (question.pairs) {
         question.pairs.forEach((pair, pairIndex) => {
           if (pair.leftImage && isLocalImage(pair.leftImage)) {
-            uploadPromises.push(
-              uploadLocalImageToStorage(pair.leftImage, `exercises/${exerciseCode}/question-${qIndex}/pair-${pairIndex}-left`)
-                .then(remoteUrl => {
-                  updatedQuestions[qIndex].pairs![pairIndex].leftImage = remoteUrl;
-                })
-            );
+            imagesToUpload.push({
+              questionIndex: qIndex,
+              imageType: 'pairLeft',
+              imageIndex: pairIndex,
+              imageUri: pair.leftImage,
+              storagePath: `exercises/${exerciseCode}/question-${qIndex}/pair-${pairIndex}-left`
+            });
           }
           if (pair.rightImage && isLocalImage(pair.rightImage)) {
-            uploadPromises.push(
-              uploadLocalImageToStorage(pair.rightImage, `exercises/${exerciseCode}/question-${qIndex}/pair-${pairIndex}-right`)
-                .then(remoteUrl => {
-                  updatedQuestions[qIndex].pairs![pairIndex].rightImage = remoteUrl;
-                })
-            );
+            imagesToUpload.push({
+              questionIndex: qIndex,
+              imageType: 'pairRight',
+              imageIndex: pairIndex,
+              imageUri: pair.rightImage,
+              storagePath: `exercises/${exerciseCode}/question-${qIndex}/pair-${pairIndex}-right`
+            });
           }
         });
       }
@@ -1390,40 +1405,138 @@ export default function CreateExercise() {
       if (question.reorderItems) {
         question.reorderItems.forEach((item, itemIndex) => {
           if (item.type === 'image' && item.imageUrl && isLocalImage(item.imageUrl)) {
-            uploadPromises.push(
-              uploadLocalImageToStorage(item.imageUrl, `exercises/${exerciseCode}/question-${qIndex}/reorder-${itemIndex}`)
-                .then(remoteUrl => {
-                  updatedQuestions[qIndex].reorderItems![itemIndex].imageUrl = remoteUrl;
-                  updatedQuestions[qIndex].reorderItems![itemIndex].content = remoteUrl;
-                })
-            );
+            imagesToUpload.push({
+              questionIndex: qIndex,
+              imageType: 'reorderItem',
+              imageIndex: itemIndex,
+              imageUri: item.imageUrl,
+              storagePath: `exercises/${exerciseCode}/question-${qIndex}/reorder-${itemIndex}`
+            });
           }
         });
       }
     }
 
-    // Wait for all uploads to complete
-    await Promise.all(uploadPromises);
+    // Upload images in parallel batches for better performance
+    const BATCH_SIZE = 3; // Upload 3 images at a time to avoid overwhelming the server
+    const uploadResults: Array<{ success: boolean; imageInfo: any; remoteUrl?: string; error?: any }> = [];
+    
+    for (let i = 0; i < imagesToUpload.length; i += BATCH_SIZE) {
+      const batch = imagesToUpload.slice(i, i + BATCH_SIZE);
+      
+      // Upload batch in parallel
+      const batchPromises = batch.map(async (imageInfo) => {
+      try {
+        const remoteUrl = await uploadLocalImageToStorage(imageInfo.imageUri, imageInfo.storagePath);
+          return { success: true, imageInfo, remoteUrl };
+        } catch (error) {
+          console.error(`Failed to upload image:`, error);
+          return { success: false, imageInfo, error };
+        }
+      });
+      
+      // Wait for batch to complete
+      const batchResults = await Promise.all(batchPromises);
+      uploadResults.push(...batchResults);
+      
+      // Update progress
+      const progress = Math.round(((i + batch.length) / imagesToUpload.length) * 100);
+      setUploadStatus(`Uploading images... ${progress}%`);
+      
+      // Small delay between batches to prevent overwhelming the server
+      if (i + BATCH_SIZE < imagesToUpload.length) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }
+    
+    // Update questions with successful uploads
+    uploadResults.forEach(({ success, imageInfo, remoteUrl }) => {
+      if (success && remoteUrl) {
+        const question = updatedQuestions[imageInfo.questionIndex];
+        switch (imageInfo.imageType) {
+          case 'question':
+            question.questionImage = remoteUrl;
+            break;
+          case 'questionImages':
+            if (!question.questionImages) {
+              question.questionImages = [...(question.questionImages || [])];
+            }
+            if (question.questionImages && Array.isArray(question.questionImages) && 
+                question.questionImages.length > (imageInfo.imageIndex || 0)) {
+              question.questionImages[imageInfo.imageIndex!] = remoteUrl;
+            }
+            break;
+          case 'optionImages':
+            if (!question.optionImages) {
+              question.optionImages = [];
+            }
+            question.optionImages[imageInfo.imageIndex!] = remoteUrl;
+            break;
+          case 'pairLeft':
+            if (question.pairs && question.pairs.length > (imageInfo.imageIndex || 0)) {
+              question.pairs[imageInfo.imageIndex!].leftImage = remoteUrl;
+            }
+            break;
+          case 'pairRight':
+            if (question.pairs && question.pairs.length > (imageInfo.imageIndex || 0)) {
+              question.pairs[imageInfo.imageIndex!].rightImage = remoteUrl;
+            }
+            break;
+          case 'reorderItem':
+            if (question.reorderItems && question.reorderItems.length > (imageInfo.imageIndex || 0)) {
+              question.reorderItems[imageInfo.imageIndex!].imageUrl = remoteUrl;
+              question.reorderItems[imageInfo.imageIndex!].content = remoteUrl;
+            }
+            break;
+        }
+      }
+    });
+    
+    const successCount = uploadResults.filter(r => r.success).length;
+    const failCount = uploadResults.filter(r => !r.success).length;
+    console.log(`📸 Image upload complete: ${successCount} successful, ${failCount} failed`);
+
     return updatedQuestions;
   };
 
   // Upload a single local image to Firebase Storage
   const uploadLocalImageToStorage = async (localUri: string, storagePath: string): Promise<string> => {
     try {
-      // For local images from require(), we need to get the actual file
-      const response = await fetch(localUri);
-      const blob = await response.blob();
+      // Add timeout protection
+      const uploadPromise = (async () => {
+        // For local images from require(), we need to get the actual file
+        const response = await fetch(localUri);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+        }
+        
+        const blob = await response.blob();
+        if (blob.size === 0) {
+          throw new Error('Image blob is empty');
+        }
+        
+        const { downloadURL, error } = await uploadFile(`${storagePath}.png`, blob, {
+          contentType: 'image/png',
+        });
+        
+        if (error) {
+          throw new Error(`Upload failed: ${error}`);
+        }
+        
+        if (!downloadURL) {
+          throw new Error('No download URL returned');
+        }
+        
+        return downloadURL;
+      })();
       
-      const { downloadURL, error } = await uploadFile(`${storagePath}.png`, blob, {
-        contentType: 'image/png',
+      // Add 15-second timeout for faster failure detection
+      const timeoutPromise = new Promise<string>((_, reject) => {
+        setTimeout(() => reject(new Error('Upload timeout after 15 seconds')), 15000);
       });
       
-      if (error) {
-        console.error('Failed to upload local image:', error);
-        return localUri; // Return original URI if upload fails
-      }
+      return await Promise.race([uploadPromise, timeoutPromise]);
       
-      return downloadURL || localUri;
     } catch (error) {
       console.error('Error uploading local image:', error);
       return localUri; // Return original URI if upload fails
@@ -1747,7 +1860,6 @@ export default function CreateExercise() {
   // Function to save TTS audio locally
   const saveTTSAudioLocally = async (base64Audio: string, questionId: string): Promise<string> => {
     try {
-      console.log('Saving TTS audio locally...');
       
       // Create file name and local path using the cache directory
       const fileName = `tts_${questionId}_${Date.now()}.mp3`;
@@ -1758,8 +1870,6 @@ export default function CreateExercise() {
         encoding: 'base64',
       });
       
-      console.log('TTS audio saved locally as MP3:', localUri);
-      console.log('File will be kept for upload - not deleted immediately');
       return localUri;
       
     } catch (error) {
@@ -1771,8 +1881,6 @@ export default function CreateExercise() {
   // Function to upload local MP3 file to Firebase Storage
   const uploadTTSAudioToStorage = async (localUri: string, exerciseCode: string, questionId: string): Promise<string> => {
     try {
-      console.log('Uploading local MP3 file to Firebase Storage...');
-      console.log('Local file path:', localUri);
       
       // Check if file exists
       const fileInfo = await FileSystem.getInfoAsync(localUri);
@@ -1780,27 +1888,21 @@ export default function CreateExercise() {
         throw new Error(`Local TTS file not found: ${localUri}`);
       }
       
-      console.log('File exists, size:', fileInfo.size, 'bytes');
       
       // Create file name and storage path
       const fileName = `tts_${questionId}_${Date.now()}.mp3`;
       const storagePath = `exercises/${exerciseCode}/tts/${fileName}`;
       
       // Fetch the local file and convert to blob
-      console.log('Fetching local file...');
       const response = await fetch(localUri);
       
       if (!response.ok) {
         throw new Error(`Failed to fetch local file: ${response.status} ${response.statusText}`);
       }
       
-      console.log('Converting response to blob...');
       const blob = await response.blob();
       
-      console.log('Blob created, size:', blob.size, 'bytes, type:', blob.type);
-      
       // Upload blob to Firebase Storage
-      console.log('Uploading to Firebase Storage...');
       const result = await uploadFile(storagePath, blob, {
         contentType: 'audio/mpeg'
       });
@@ -1818,8 +1920,6 @@ export default function CreateExercise() {
         throw new Error('Invalid download URL received from Firebase Storage');
       }
       
-      console.log('TTS audio uploaded successfully to Firebase Storage as MP3');
-      console.log('Download URL:', result.downloadURL);
       
       return result.downloadURL;
       
@@ -1834,7 +1934,6 @@ export default function CreateExercise() {
     if (pendingTTSUploads.length === 0) return currentQuestions;
     
     const uploadStart = Date.now();
-    console.log(`🎵 Uploading ${pendingTTSUploads.length} pending TTS audio files as MP3...`);
     
     // Initialize progress
     setTtsUploadProgress({ current: 0, total: pendingTTSUploads.length });
@@ -1852,13 +1951,11 @@ export default function CreateExercise() {
       setTtsUploadStatus(`Uploading TTS audio ${i + 1} of ${pendingTTSUploads.length}...`);
       try {
         const fileStart = Date.now();
-        console.log(`🎵 Uploading TTS for question ${ttsAudio.questionId} from: ${ttsAudio.localUri}`);
         
         // Upload using local file path
         const audioUrl = await uploadTTSAudioToStorage(ttsAudio.localUri, exerciseCode, ttsAudio.questionId);
         const fileTime = Date.now() - fileStart;
         
-        console.log(`✅ TTS uploaded as MP3 for question ${ttsAudio.questionId} in ${fileTime}ms`);
         
         // Update the question with the Firebase URL in the local array
         updatedQuestions = updatedQuestions.map(q => 
@@ -1875,7 +1972,6 @@ export default function CreateExercise() {
           const fileInfo = await FileSystem.getInfoAsync(ttsAudio.localUri);
           if (fileInfo.exists) {
             await FileSystem.deleteAsync(ttsAudio.localUri);
-            console.log(`🗑️ Cleaned up local TTS file for question ${ttsAudio.questionId}`);
           }
         } catch (cleanupError) {
           console.warn('⚠️ Failed to clean up local TTS file:', cleanupError);
@@ -1886,7 +1982,6 @@ export default function CreateExercise() {
         
       } catch (error) {
         console.error(`❌ Failed to upload TTS audio for question ${ttsAudio.questionId}:`, error);
-        console.log(`🔄 Local file kept for retry: ${ttsAudio.localUri}`);
         
         // Track failed upload
         failedUploads.push(ttsAudio);
@@ -1894,7 +1989,6 @@ export default function CreateExercise() {
     }
     
     const totalTime = Date.now() - uploadStart;
-    console.log(`🎵 TTS Upload Complete: ${successfulUploads.length} successful, ${failedUploads.length} failed in ${totalTime}ms`);
     
     // Reset progress and store duration
     setTtsUploadProgress({ current: 0, total: 0 });
@@ -1904,12 +1998,10 @@ export default function CreateExercise() {
     // Only clear successful uploads from pending list
     if (successfulUploads.length > 0) {
       setPendingTTSUploads(prev => prev.filter(p => !successfulUploads.includes(p.questionId)));
-      console.log(`🎵 Cleared ${successfulUploads.length} successful uploads from pending list`);
     }
     
     // Keep failed uploads in pending list for retry
     if (failedUploads.length > 0) {
-      console.log(`🔄 Keeping ${failedUploads.length} failed uploads for retry`);
     }
     
     // Clear current local audio only if no pending uploads remain
@@ -1968,7 +2060,6 @@ export default function CreateExercise() {
     try {
       const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
       
-      console.log('Starting AI question generation with model: gemini-2.0-flash');
       
       // Get available stock images for reference
       const availableImages = Object.keys(stockImages).map(category => 
@@ -2136,8 +2227,24 @@ IMPORTANT FOR IDENTIFICATION ALTERNATIVE ANSWERS:
   * For "tubig": ["water", "tubig", "liquid"]
   * For "araw": ["sun", "araw", "sunshine", "sikat ng araw"]
   * For "bulaklak": ["flower", "bulaklak", "bloom"]
-- Include 2-4 alternative answers per question
+- Include 6-10 alternative answers per question
 - Use simple, common terms that Grade 1 students would know
+
+CRITICAL RULE FOR ALL QUESTIONS:
+- NEVER mention the answer in the question text even if its in the filename of the text.
+- WRONG: "Ano ang [Money:40 pesos] Magkano ang halaga nito?"
+- WRONG: "Ano ang hugis nito? Tingnan ang 'Triangle'"
+- WRONG: "Ano ito? Ito ay isang aso"
+- WRONG: "What is this? This is a house"
+- WRONG: "Ano ang shape na nasa picture? (ipakita ang image ng Square)"
+- WRONG: "What shape is this? (show the image of a Square)"
+- CORRECT: "Ano ang hugis nito?" (What shape is this?)
+- CORRECT: "Ano ito?" (What is this?)
+- CORRECT: "What is this?"
+- CORRECT: "Ano ang shape na nasa picture?" (What shape is in the picture?)
+- The question should ONLY ask, never provide  answers
+- Do NOT include parenthetical hints like "(show the image of X)" or "(ipakita ang image ng X)"
+- Do NOT include the answer in any form within the question text
 
 CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
 - NEVER mention the answer in the question text
@@ -2150,12 +2257,11 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
 - CORRECT: "Ano ito?" (What is this?)
 - CORRECT: "What is this?"
 - CORRECT: "Ano ang shape na nasa picture?" (What shape is in the picture?)
-- The question should ONLY ask, never provide hints or answers
+- The question should ONLY ask, never provide  answers
 - Do NOT include parenthetical hints like "(show the image of X)" or "(ipakita ang image ng X)"
 - Do NOT include the answer in any form within the question text`;
 
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
-      console.log('API URL:', apiUrl);
       
       // Retry logic for 503 errors
       let response;
@@ -2225,7 +2331,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       }
 
       const data = await response.json();
-      console.log('Full API Response:', JSON.stringify(data, null, 2));
       
       const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
       
@@ -2233,7 +2338,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
         throw new Error('No content generated by AI');
       }
       
-      console.log('Generated questions text:', generatedText);
       
       // Clean and extract JSON from the response
       let cleanText = generatedText.trim();
@@ -2667,18 +2771,18 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       setQuestions(prev => [...prev, ...newQuestions]);
       
       // Generate TTS audio for all new questions sequentially to avoid rate limits
-      console.log('Generating TTS audio for AI-generated questions sequentially...');
       setIsGeneratingTTS(true);
       
       // TTS generation will run in background without blocking modal
       
       // Process questions in batches of 2 using the same API key, then randomly select next key
       const processTTSSequentially = async () => {
-        // Initialize progress tracking - DISABLED MODAL TO PREVENT FREEZING
+        // Initialize progress tracking
         setTtsProgress({ current: 0, total: newQuestions.length });
-        // setTtsUploadProgress({ current: 0, total: newQuestions.length });
-        // setTtsUploadStatus('Starting TTS generation...');
-        // setShowTTSProgressModal(true);
+        setTtsUploadProgress({ current: 0, total: newQuestions.length });
+        setTtsUploadStatus('Starting TTS generation...');
+        setShowTTSProgressModal(true);
+        setTtsProcessStartTime(Date.now());
 
         // Get initial random API key
         const firstKey = await getRandomApiKey();
@@ -2692,26 +2796,22 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
         const MAX_RETRIES_PER_QUESTION = 3; // Limit retries per question
         const REQUEST_TIMEOUT = 30000; // 30 second timeout per request
         
-        console.log(`🎯 Starting TTS processing. Using API key: ${currentApiKey.substring(0, 10)}...`);
         
         for (let i = 0; i < newQuestions.length; i++) {
           const question = newQuestions[i];
           
           try {
-            console.log(`Processing TTS for question ${i + 1}/${newQuestions.length}: ${question.id}`);
-            console.log(`Using API key: ${currentApiKey.substring(0, 10)}... (${requestsWithCurrentKey + 1}/${REQUESTS_PER_KEY} requests)`);
             
             // Update progress - simplified to prevent freezing
             const current = i + 1;
             const total = newQuestions.length;
             setTtsProgress({ current, total });
-            // setTtsUploadProgress({ current, total });
-            // setTtsUploadStatus(`Generating TTS audio ${current} of ${total}...`);
+            setTtsUploadProgress({ current, total });
+            setTtsUploadStatus(`Generating TTS audio ${current} of ${total}...`);
             
             // Add delay between requests to prevent rate limiting and allow UI updates
             if (i > 0) {
               const delay = 1000 + Math.random() * 1000; // 1-2 seconds random delay
-              console.log(`⏳ Waiting ${Math.round(delay)}ms before next request...`);
               // setTtsUploadStatus(`Waiting ${Math.round(delay/1000)}s before next request...`);
               await new Promise(resolve => setTimeout(resolve, delay));
             }
@@ -2729,7 +2829,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             
             while (!audioData && retryCount < MAX_RETRIES_PER_QUESTION && !skipQuestion) {
               try {
-                console.log(`🔄 TTS attempt ${retryCount + 1}/${MAX_RETRIES_PER_QUESTION} for question ${i + 1} (skipQuestion: ${skipQuestion})`);
                 
                 // Create a timeout promise
                 const timeoutPromise = new Promise((_, reject) => 
@@ -2743,7 +2842,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
                 ]);
                 
                 if (audioData && typeof audioData === 'string') {
-                  console.log(`✅ TTS generated successfully for question ${i + 1}`);
                   break;
                 }
               } catch (error: any) {
@@ -2752,7 +2850,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
                 
                 // Check if it's an unusual activity error - skip to next question immediately
                 if (error?.message?.includes('UNUSUAL_ACTIVITY_DETECTED')) {
-                  console.log(`🚫 Unusual activity detected - skipping question ${i + 1} and moving to next`);
                   // Mark this question as failed TTS
                   setFailedTTSQuestions(prev => new Set([...prev, question.id]));
                   // Mark the problematic API key as failed (keep in database)
@@ -2762,19 +2859,15 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
                   if (newApiKey && newApiKey !== currentApiKey) {
                     currentApiKey = newApiKey;
                     requestsWithCurrentKey = 0;
-                    console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to unusual activity`);
                   }
                   // Add a longer delay to avoid triggering more suspicious activity
-                  console.log(`⏳ Adding 10-second delay to avoid triggering more suspicious activity...`);
                   await new Promise(resolve => setTimeout(resolve, 10000));
                   skipQuestion = true; // Set flag to skip this question entirely
-                  console.log(`🚫 Setting skipQuestion = true, breaking out of retry loop`);
                   break; // Exit the retry loop
                 }
                 
                 // Check if it's a quota exceeded error - skip to next question immediately
                 if (error?.message?.includes('QUOTA_EXCEEDED')) {
-                  console.log(`💰 Quota exceeded - skipping question ${i + 1} and moving to next`);
                   // Mark this question as failed TTS
                   setFailedTTSQuestions(prev => new Set([...prev, question.id]));
                   // Try to get a different API key for the next question
@@ -2782,19 +2875,15 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
                   if (newApiKey && newApiKey !== currentApiKey) {
                     currentApiKey = newApiKey;
                     requestsWithCurrentKey = 0;
-                    console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to quota exceeded`);
                   }
                   // Add a delay to avoid rapid switching
-                  console.log(`⏳ Adding 5-second delay due to quota exceeded...`);
                   await new Promise(resolve => setTimeout(resolve, 5000));
                   skipQuestion = true; // Set flag to skip this question entirely
-                  console.log(`💰 Setting skipQuestion = true, breaking out of retry loop`);
                   break; // Exit the retry loop
                 }
                 
                 if (retryCount < MAX_RETRIES_PER_QUESTION) {
                   const retryDelay = 2000 * retryCount; // Exponential backoff
-                  console.log(`⏳ Retrying in ${retryDelay}ms...`);
                   // setTtsUploadStatus(`Retrying TTS for question ${i + 1} (attempt ${retryCount + 1}/${MAX_RETRIES_PER_QUESTION})...`);
                   await new Promise(resolve => setTimeout(resolve, retryDelay));
                 } else {
@@ -2804,11 +2893,9 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
               }
             }
             
-            console.log(`🔄 Exited while loop for question ${i + 1} - audioData: ${!!audioData}, retryCount: ${retryCount}, skipQuestion: ${skipQuestion}`);
             
             // Skip TTS processing if unusual activity was detected
             if (skipQuestion) {
-              console.log(`⏭️ Skipping TTS processing for question ${i + 1} due to unusual activity (skipQuestion: ${skipQuestion})`);
               continue; // Skip to next question
             }
             
@@ -2830,7 +2917,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
                   : q
               ));
               
-              console.log(`✅ TTS generated for question: ${question.id}`);
             } else {
               console.warn(`⚠️ No audio data returned for question: ${question.id}`);
             }
@@ -2925,34 +3011,33 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             if (newApiKey && newApiKey !== currentApiKey) {
               currentApiKey = newApiKey;
               requestsWithCurrentKey = 0;
-              console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to error`);
             } else {
               // Reset counter to retry with current key
               requestsWithCurrentKey = 0;
-              console.log(`🔄 Retrying with current API key: ${currentApiKey.substring(0, 10)}...`);
             }
           }
         }
         
-        console.log('🎉 Sequential TTS generation completed for all AI-generated questions');
-        // setTtsUploadStatus('TTS generation completed successfully!');
+        setTtsUploadStatus('TTS generation completed successfully!');
         
         // Close progress modal after a short delay
-        // setTimeout(() => {
-        //   setShowTTSProgressModal(false);
-        // }, 1500);
+        setTimeout(() => {
+          setShowTTSProgressModal(false);
+        }, 1500);
         
         setIsGeneratingTTS(false);
         setTtsProgress({ current: 0, total: 0 }); // Reset progress
+        setTtsProcessStartTime(null); // Reset process start time
       };
       
       // Start sequential processing (don't await to keep UI responsive)
       setTtsGenerationStartTime(Date.now());
       processTTSSequentially().catch((error) => {
         console.error('Sequential TTS generation failed:', error);
-        // setShowTTSProgressModal(false);
+        setShowTTSProgressModal(false);
         setIsGeneratingTTS(false);
         setTtsProgress({ current: 0, total: 0 });
+        setTtsProcessStartTime(null);
         showCustomAlert('TTS Generation Error', 'Failed to generate audio for some questions. You can regenerate them individually.');
       });
       
@@ -2969,66 +3054,26 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
     }
   };
 
-  // Helper function to add basic stage directions if GPT fails
-  const addBasicStageDirections = (text: string): string => {
-    let enhanced = text;
-    
-    // Add excitement at the beginning if it's a greeting or instruction
-    if (/^(hello|hi|good|welcome|kumusta|let's|today)/i.test(text)) {
-      enhanced = `[excited]${enhanced}`;
-    }
-    
-    // Add curiosity for questions
-    if (text.includes('?') && !enhanced.includes('[')) {
-      enhanced = enhanced.replace('?', '? [curious]');
-    }
-    
-    // Add laughter for positive statements
-    if (/\b(good|great|correct|yes|tama|magaling)\b/i.test(text)) {
-      enhanced = enhanced.replace(/\b(good|great|correct|yes|tama|magaling)\b/i, '[laughs]$1');
-    }
-    
-    // Add whisper for secrets or special information
-    if (/\b(secret|special|amazing|surprise)\b/i.test(text)) {
-      enhanced = enhanced.replace(/\b(secret|special|amazing|surprise)\b/i, '[whispers]$1');
-    }
-    
-    // If still no stage directions, add a general excited tone
-    if (!enhanced.includes('[')) {
-      enhanced = `[excited]${enhanced}`;
-    }
-    
-    return enhanced;
-  };
-
   // TTS Preprocessing Function - Direct Gemini API call
   const preprocessTextForTTS = async (text: string): Promise<string> => {
     try {
       const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
-      const prompt = `Transform this text for Text-to-Speech by adding emotional stage directions and improving punctuation. You MUST add at least 2-3 stage directions to make it engaging.
+      const prompt = `Enhance this text for Text-to-Speech by improving punctuation and rhythm for natural speech delivery.
 
-REQUIRED: Use these stage directions in square brackets:
-[excited], [curious], [laughs], [whispers], [sighs], [mischievously], [sarcastic], [starts laughing], [exhales]
-
-Rules:
-1. ALWAYS add stage directions - don't return text unchanged
-2. Add proper punctuation for natural pauses
-3. Make it sound like a lively teacher or storyteller
-4. Keep the original language (90% Filipino/10% English mix)
-5. Place directions where they feel natural
-6. Dont limit it to 1 emotion, add as many as you can
-7. Dont say Ok Class, because it will show up 1 by one per student in their home phones.
-8. Dont give the answer. hints only.
-9. Dont use too much english words. Target audience are grade 1 students and their mother tongue is filipino.
-
-Examples:
-- "Hello kids" → "[excited]Hello kids!"
-- "Let me tell you" → "[whispers]Let me tell you something amazing..."
-- "That's correct" → "[laughs]That's absolutely correct!"
-
-Original text: "${text}"
-
-Enhanced text with emotions:`;
+      Rules:
+      1. Do NOT add any stage directions, emotions, or parentheses.
+      2. Add proper punctuation for natural pauses and storytelling flow.
+      3. Make it sound lively, like a cheerful Grade 1 teacher or storyteller.
+      4. Keep the original language (about 90% Filipino, 10% English mix).
+      5. Maintain natural expressions suited for young learners.
+      6. Do NOT include “Ok class” since this will play per student.
+      7. Do NOT reveal answers — give hints only.
+      8. Avoid using too many English words. Prioritize simple Filipino that’s easy for Grade 1 pupils.
+      
+      Original text: "${text}"
+      
+      Enhanced text:`;
+      
 
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
@@ -3059,11 +3104,6 @@ Enhanced text with emotions:`;
       const data = await response.json();
       let processedText = data.candidates?.[0]?.content?.parts?.[0]?.text || text;
       console.log('Processed text:', processedText);
-      
-      // Check if Gemini actually added stage directions, if not, add some basic ones
-      if (processedText === text || !processedText.includes('[')) {
-        processedText = addBasicStageDirections(text);
-      }
       
       return processedText.trim();
       
@@ -3149,26 +3189,17 @@ Enhanced text with emotions:`;
       // Use selected text for TTS generation
       const finalTextForTTS = selectedText;
 
-      // Generate parameters for natural speech - ElevenLabs v3 only accepts specific stability values
-      const stabilityOptions = [0.0, 0.5, 1.0]; // 0.0 = Creative, 0.5 = Natural, 1.0 = Robust
-      const stability = isRegenerate ? 
-        stabilityOptions[Math.floor(Math.random() * stabilityOptions.length)] :
-        0.5; // Use Natural (0.5) as default
-      
-      const similarityBoost = isRegenerate ?
-        Math.random() * 0.2 + 0.7 : // 0.7 to 0.9
-        Math.random() * 0.1 + 0.8;  // 0.8 to 0.9
 
       // Step 2: Prepare request payload with final text and validated parameters
       const requestPayload: any = {
         text: finalTextForTTS,
-        model_id: 'eleven_v3',
+        model_id: 'eleven_turbo_v2_5',
         voice_settings: {
-          stability: stability,
-          similarity_boost: Math.max(0, Math.min(1, similarityBoost)),
-          style: 0.0,
-          use_speaker_boost: true
-        }
+          speed: 0.8,
+          stability: 0.5,
+          similarity_boost: 0.75,
+        },
+        language_code: 'fil'
       };
 
       // Step 3: ElevenLabs API call with multiple API key fallback
@@ -3177,7 +3208,7 @@ Enhanced text with emotions:`;
       try {
         const result = await callElevenLabsWithFallback(
           finalTextForTTS,
-          'cgSgspJ2msm6clMCkdW9',
+          'jBpfuIE2acCO8z3wKNLl',
           true, // useV3
           'mp3_44100_128'
         );
@@ -3195,7 +3226,6 @@ Enhanced text with emotions:`;
 
       performanceLog.steps.elevenLabs = Date.now() - elevenLabsStart;
         performanceLog.steps.elevenLabsDetails = result.performanceLog;
-        console.log(`✅ ElevenLabs TTS generated using API key: ${result.usedApiKey.substring(0, 10)}...`);
 
       // Convert response to base64 for React Native
         const audioBlob = result.audioBlob;
@@ -3205,7 +3235,6 @@ Enhanced text with emotions:`;
         const base64data = reader.result as string;
         
         // Save audio locally
-        console.log('🎵 TTS Audio generated, editingQuestion:', editingQuestion ? editingQuestion.id : 'null');
         if (editingQuestion) {
           try {
             const base64Audio = base64data.split(',')[1];
@@ -3217,7 +3246,7 @@ Enhanced text with emotions:`;
               base64Data: base64Audio
             };
             
-            console.log('🎵 Adding TTS audio to pending uploads for question:', editingQuestion.id);
+            console.log('🎵 TTS now pending for upload for question:', editingQuestion.id);
             setLocalTTSAudio(ttsAudioData);
             setPendingTTSUploads(prev => {
               const filtered = prev.filter(p => p.questionId !== editingQuestion.id);
@@ -3240,7 +3269,6 @@ Enhanced text with emotions:`;
         } else {
           // If no editingQuestion, we still need to save the audio for the current question being worked on
           // This handles cases where TTS is generated outside of the question editor
-          console.warn('⚠️ TTS generated but no editingQuestion set - audio will not be saved for upload');
         }
         
         // Auto-play the generated speech
@@ -3325,28 +3353,24 @@ Enhanced text with emotions:`;
     console.log('🎤 AI TTS Generation Started for question:', questionId);
 
     try {
-      // Generate parameters for natural speech
-      const stabilityOptions = [0.0, 0.5, 1.0];
-      const stability = 0.5; // Use Natural (0.5) as default
-      const similarityBoost = Math.random() * 0.1 + 0.8; // 0.8 to 0.9
 
       // Prepare request payload
       const requestPayload: any = {
         text: processedText,
-        model_id: 'eleven_v3',
+        model_id: 'eleven_turbo_v2_5',
         voice_settings: {
-          stability: stability,
-          similarity_boost: Math.max(0, Math.min(1, similarityBoost)),
-          style: 0.0,
-          use_speaker_boost: true
-        }
+          speed: 0.8,
+          stability: 0.5,
+          similarity_boost: 0.75,
+        },
+        language_code: 'fil'
       };
 
       // ElevenLabs API call with multiple API key fallback
       try {
         const result = await callElevenLabsWithFallback(
           processedText,
-          'cgSgspJ2msm6clMCkdW9',
+          'jBpfuIE2acCO8z3wKNLl',
           true, // useV3
           'mp3_44100_128'
         );
@@ -3362,7 +3386,6 @@ Enhanced text with emotions:`;
           return null;
         }
         
-        console.log(`✅ AI TTS generated using API key: ${result.usedApiKey.substring(0, 10)}...`);
 
       // Process successful response
         const audioBlob = result.audioBlob;
@@ -3372,7 +3395,6 @@ Enhanced text with emotions:`;
         reader.onloadend = () => {
           const base64data = reader.result as string;
           const base64Audio = base64data.split(',')[1];
-          console.log('🎵 AI TTS Audio generated successfully');
           resolve(base64Audio);
         };
         reader.onerror = () => reject(new Error('Failed to read audio blob'));
@@ -3397,28 +3419,27 @@ Enhanced text with emotions:`;
       return null;
     }
 
-    console.log('🎤 AI TTS Generation Started for question:', questionId, 'with specific API key');
+    console.log('🎤 AI TTS Generation Started for question:', questionId, 'with API key:', apiKey);
+
+    const startTime = Date.now();
 
     try {
-      // Generate parameters for natural speech
-      const stability = 0.5; // Use Natural (0.5) as default
-      const similarityBoost = Math.random() * 0.1 + 0.8; // 0.8 to 0.9
 
       // Prepare request payload
       const requestPayload: any = {
         text: processedText,
-        model_id: 'eleven_v3',
+        model_id: 'eleven_turbo_v2_5',
         voice_settings: {
-          stability: stability,
-          similarity_boost: Math.max(0, Math.min(1, similarityBoost)),
-          style: 0.0,
-          use_speaker_boost: true
-        }
+          speed: 0.8,
+          stability: 0.5,
+          similarity_boost: 0.75,
+        },
+        language_code: 'fil'
       };
 
       // ElevenLabs API call with specific API key
       try {
-        const url = `https://api.elevenlabs.io/v1/text-to-speech/cgSgspJ2msm6clMCkdW9?output_format=mp3_44100_128`;
+        const url = `https://api.elevenlabs.io/v1/text-to-speech/jBpfuIE2acCO8z3wKNLl?output_format=mp3_44100_128`;
         
         const response = await fetch(url, {
           method: 'POST',
@@ -3431,8 +3452,12 @@ Enhanced text with emotions:`;
         });
 
         if (response.ok) {
+          const ttsTimeMs = Date.now() - startTime;
+          console.log('✅ TTS Generation Successful for Question:', questionId, `(${ttsTimeMs}ms)`);
           const audioBlob = await response.blob();
-          console.log(`✅ AI TTS generated using specific API key: ${apiKey.substring(0, 10)}...`);
+
+          // Mark API key as used for this individual TTS generation
+          await markApiKeyAsUsed(apiKey, ttsTimeMs);
 
           // Process successful response
           const reader = new FileReader();
@@ -3441,7 +3466,6 @@ Enhanced text with emotions:`;
             reader.onloadend = () => {
               const base64data = reader.result as string;
               const base64Audio = base64data.split(',')[1];
-              console.log('🎵 AI TTS Audio generated successfully');
               resolve(base64Audio);
             };
             reader.onerror = () => reject(new Error('Failed to read audio blob'));
@@ -3501,14 +3525,12 @@ Enhanced text with emotions:`;
   // Function to identify questions with failed TTS
   const getFailedTTSQuestions = (): Question[] => {
     return questions.filter(question => {
-      // Check main question
-      const hasMainQuestionTTS = question.ttsAudioUrl && question.ttsAudioUrl !== 'pending';
-      const isMainQuestionFailed = !hasMainQuestionTTS && question.question && question.question.trim().length > 0;
+      // Check if this question is in the failed TTS set
+      const isMainQuestionFailed = failedTTSQuestions.has(question.id);
       
       // Check sub-questions
       const hasFailedSubQuestions = question.subQuestions?.some(sub => {
-        const hasSubTTS = sub.ttsAudioUrl && sub.ttsAudioUrl !== 'pending';
-        return !hasSubTTS && sub.question && sub.question.trim().length > 0;
+        return failedTTSQuestions.has(sub.id);
       });
       
       return isMainQuestionFailed || hasFailedSubQuestions;
@@ -3526,8 +3548,9 @@ Enhanced text with emotions:`;
 
     setIsRetryingFailedTTS(true);
     setTtsProgress({ current: 0, total: failedQuestions.length });
-    // setShowTTSProgressModal(true);
-    // setTtsUploadStatus('Retrying failed TTS generations...');
+    setShowTTSProgressModal(true);
+    setTtsUploadStatus('Retrying failed TTS generations...');
+    setTtsProcessStartTime(Date.now());
 
     try {
       let successCount = 0;
@@ -3536,7 +3559,7 @@ Enhanced text with emotions:`;
       for (let i = 0; i < failedQuestions.length; i++) {
         const question = failedQuestions[i];
         setTtsProgress({ current: i + 1, total: failedQuestions.length });
-        // setTtsUploadStatus(`Retrying TTS for question ${i + 1} of ${failedQuestions.length}...`);
+        setTtsUploadStatus(`Retrying TTS for question ${i + 1} of ${failedQuestions.length}...`);
 
         // Allow UI to update by yielding control - increased delay
         await new Promise(resolve => setTimeout(resolve, 200));
@@ -3601,22 +3624,23 @@ Enhanced text with emotions:`;
         }
       }
 
-      // setTtsUploadStatus(`Retry completed! ${successCount} successful, ${failCount} failed.`);
+      setTtsUploadStatus(`Retry completed! ${successCount} successful, ${failCount} failed.`);
       
       // Close progress modal after a short delay
-      // setTimeout(() => {
-      //   setShowTTSProgressModal(false);
-      // }, 2000);
+      setTimeout(() => {
+        setShowTTSProgressModal(false);
+      }, 2000);
 
     } catch (error) {
       console.error('Error retrying failed TTS:', error);
-      // setTtsUploadStatus('Error occurred while retrying TTS generations.');
-      // setTimeout(() => {
-      //   setShowTTSProgressModal(false);
-      // }, 2000);
+      setTtsUploadStatus('Error occurred while retrying TTS generations.');
+      setTimeout(() => {
+        setShowTTSProgressModal(false);
+      }, 2000);
     } finally {
       setIsRetryingFailedTTS(false);
       setTtsProgress({ current: 0, total: 0 });
+      setTtsProcessStartTime(null);
     }
   };
 
@@ -3757,14 +3781,11 @@ Please respond with a JSON object in this exact format:
       
       // Set up status listener
       const subscription = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
-        console.log('Audio status:', status);
         
         if (status.isLoaded) {
           if (status.playing) {
             setIsPlayingTTS(true);
-            console.log('Audio is now playing');
           } else if (status.didJustFinish) {
-            console.log('Audio playback finished');
             setIsPlayingTTS(false);
             player.remove();
             setCurrentAudioPlayer(null);
@@ -3938,23 +3959,31 @@ Please respond with a JSON object in this exact format:
     try {
       console.log('Attempting to save exercise...');
       
-      // Show loading indicator for image uploads
+      // Show loading indicator and progress modal
       setUploading(true);
+      setShowUploadProgressModal(true);
+      setUploadProgress({ current: 0, total: 4 }); // 4 main steps: images, TTS, database, complete
+      setUploadStatus('Starting exercise upload...');
       
-      // Upload local images to Firebase Storage first
+      // Step 1: Upload local images to Firebase Storage
       console.log('Uploading local images to Firebase Storage...');
+      setUploadProgress({ current: 1, total: 4 });
+      setUploadStatus('Preparing images for upload...');
       const questionsWithRemoteImages = await uploadLocalImages(questions, finalExerciseCode);
       console.log('Local images uploaded successfully');
+      setUploadStatus('Images uploaded successfully');
       
-      // Upload pending TTS audio files to Firebase Storage
+      // Step 2: Upload pending TTS audio files to Firebase Storage
       let finalQuestions = questions;
       console.log('🎵 Checking pending TTS uploads, count:', pendingTTSUploads.length);
       console.log('🎵 Pending uploads:', pendingTTSUploads.map(p => ({ questionId: p.questionId, hasBase64: !!p.base64Data })));
       
       if (pendingTTSUploads.length > 0) {
         console.log(`🎵 Uploading ${pendingTTSUploads.length} TTS audio files...`);
+        setUploadProgress({ current: 2, total: 4 });
+        setUploadStatus(`Uploading TTS audio files (${pendingTTSUploads.length} files)...`);
         
-        // Show progress modal
+        // Show TTS progress modal
         setShowTTSProgressModal(true);
         setTtsUploadProgress({ current: 0, total: pendingTTSUploads.length });
         setTtsUploadStatus('Preparing TTS audio upload...');
@@ -3964,18 +3993,21 @@ Please respond with a JSON object in this exact format:
           console.log('✅ TTS audio files uploaded successfully');
           setTtsUploadStatus('TTS audio upload completed successfully!');
           
-          // Close progress modal after a short delay
+          // Close TTS progress modal after a short delay
           setTimeout(() => {
             setShowTTSProgressModal(false);
           }, 1500);
         } catch (ttsError) {
           console.error('❌ Failed to upload TTS audio files:', ttsError);
           setShowTTSProgressModal(false);
+          setShowUploadProgressModal(false);
           showCustomAlert('Upload Error', 'Audio generated but failed to upload TTS audio to Firebase.');
           return; // Stop the save process if TTS upload fails
         }
       } else {
         console.log('ℹ️ No TTS audio files to upload');
+        setUploadProgress({ current: 2, total: 4 });
+        setUploadStatus('No TTS audio files to upload');
       }
       
       // Clean the payload to ensure it's serializable
@@ -4059,6 +4091,10 @@ Please respond with a JSON object in this exact format:
         createdAt: new Date().toISOString(),
       };
       
+      // Step 3: Prepare and save to database
+      setUploadProgress({ current: 3, total: 4 });
+      setUploadStatus('Preparing exercise data for database...');
+      
       // Clean all undefined values from the payload
       const finalCleanPayload = cleanUndefinedValues(cleanPayload);
       
@@ -4084,6 +4120,7 @@ Please respond with a JSON object in this exact format:
         hasAnswer: 'answer' in q
       })));
       
+      setUploadStatus('Saving exercise to database...');
       let key: string | null = null;
       let error: string | null = null;
       
@@ -4104,6 +4141,7 @@ Please respond with a JSON object in this exact format:
       
       if (error || !key) {
         console.error('Firebase error:', error);
+        setShowUploadProgressModal(false);
         
         // Try to provide more specific error messages
         let errorMessage = `Failed to ${isEditing ? 'update' : 'save'} exercise. `;
@@ -4121,13 +4159,22 @@ Please respond with a JSON object in this exact format:
         return;
       }
       
+      // Step 4: Complete
+      setUploadProgress({ current: 4, total: 4 });
+      setUploadStatus('Exercise saved successfully!');
+      
       console.log(`Exercise ${isEditing ? 'updated' : 'saved'} successfully with key:`, key);
       
-      showCustomAlert('Success', `Exercise ${isEditing ? 'updated' : 'created'} successfully!`, [
-        { text: 'OK', onPress: () => router.push('/TeacherDashboard') }
-      ]);
+      // Close progress modal and show success
+      setTimeout(() => {
+        setShowUploadProgressModal(false);
+        showCustomAlert('Success', `Exercise ${isEditing ? 'updated' : 'created'} successfully!`, [
+          { text: 'OK', onPress: () => router.push('/TeacherDashboard') }
+        ]);
+      }, 1000);
     } catch (error: any) {
       console.error('Error saving exercise:', error);
+      setShowUploadProgressModal(false);
       
       // Provide more specific error messages
       let errorMessage = 'Failed to save exercise. ';
@@ -6324,7 +6371,6 @@ Please respond with a JSON object in this exact format:
 
         {/* Save Button */}
         <View style={styles.saveSection}>
-          {/* Retry Failed TTS Button */}
           {getFailedTTSQuestions().length > 0 && (
             <TouchableOpacity
               style={[styles.retryFailedTTSButton, isRetryingFailedTTS && styles.retryFailedTTSButtonDisabled]}
@@ -6342,37 +6388,6 @@ Please respond with a JSON object in this exact format:
             </TouchableOpacity>
           )}
           
-          {(ttsUploadProgress.total > 0 || ttsUploadLastDurationMs) && (
-            <View style={styles.ttsUploadProgressContainer}>
-              <View style={styles.ttsUploadProgressHeader}>
-                <MaterialCommunityIcons name="upload" size={20} color="#3b82f6" />
-                {ttsUploadProgress.total > 0 ? (
-                  <Text style={styles.ttsUploadProgressText}>
-                    Uploading TTS Audio: {ttsUploadProgress.current} / {ttsUploadProgress.total}
-                  </Text>
-                ) : (
-                  <Text style={styles.ttsUploadProgressText}>
-                    TTS Upload Completed in {formatMs(ttsUploadLastDurationMs || 0)}
-                  </Text>
-                )}
-              </View>
-              {ttsUploadProgress.total > 0 && (
-                <>
-                  <View style={styles.progressBarBackground}>
-                    <View 
-                      style={[
-                        styles.progressBarFill, 
-                        { width: `${(ttsUploadProgress.current / Math.max(1, ttsUploadProgress.total)) * 100}%` }
-                      ]} 
-                    />
-                  </View>
-                  <Text style={styles.ttsUploadProgressSubtext}>
-                    Elapsed {formatMs(ttsUploadElapsedMs)} · ETA {formatMs(Math.max(0, (ttsUploadElapsedMs / Math.max(1, ttsUploadProgress.current)) * (ttsUploadProgress.total - ttsUploadProgress.current)))}
-                  </Text>
-                </>
-              )}
-            </View>
-          )}
           
           <TouchableOpacity 
             style={[
@@ -6608,6 +6623,59 @@ Please respond with a JSON object in this exact format:
                 </View>
                 <Text style={styles.ttsProgressText}>
                   {ttsUploadProgress.current || 0} of {ttsUploadProgress.total || 0} questions
+                </Text>
+              </View>
+              
+              {/* Time tracking */}
+              <View style={styles.ttsTimeInfo}>
+                <Text style={styles.ttsTimeText}>
+                  Elapsed: {ttsProcessElapsedSeconds}s   
+                </Text>
+                {ttsEstimatedTimeRemaining !== null && ttsEstimatedTimeRemaining > 0 && (
+                  <Text style={styles.ttsTimeText}>
+                  Est. remaining: {ttsEstimatedTimeRemaining}s
+                  </Text>
+                )}
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+      
+      {/* Main Upload Progress Modal */}
+      <Modal
+        visible={showUploadProgressModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          // Don't allow closing during upload
+          if (uploading) return;
+          setShowUploadProgressModal(false);
+        }}
+      >
+        <View style={styles.uploadProgressOverlay}>
+          <View style={styles.uploadProgressModal}>
+            <View style={styles.uploadProgressHeader}>
+              <MaterialCommunityIcons name="cloud-upload" size={32} color="#3b82f6" />
+              <Text style={styles.uploadProgressTitle}>Uploading Exercise</Text>
+            </View>
+            
+            <View style={styles.uploadProgressContent}>
+              <Text style={styles.uploadProgressStatus}>{uploadStatus}</Text>
+              
+              <View style={styles.uploadProgressBarContainer}>
+                <View style={styles.uploadProgressBar}>
+                  <View 
+                    style={[
+                      styles.uploadProgressBarFill, 
+                      { 
+                        width: uploadProgress.total > 0 ? `${Math.min(100, (uploadProgress.current / uploadProgress.total) * 100)}%` : '0%'
+                      }
+                    ]} 
+                  />
+                </View>
+                <Text style={styles.uploadProgressText}>
+                  Step {uploadProgress.current || 0} of {uploadProgress.total || 0}
                 </Text>
               </View>
             </View>
@@ -7963,6 +8031,80 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   ttsProgressText: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  
+  ttsTimeInfo: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: 8,
+    gap: 8,
+    paddingHorizontal: 4,
+  },
+  
+  ttsTimeText: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  
+  // Upload Progress Modal Styles
+  uploadProgressOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  uploadProgressModal: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 320,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  uploadProgressHeader: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  uploadProgressTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginTop: 8,
+  },
+  uploadProgressContent: {
+    alignItems: 'center',
+  },
+  uploadProgressStatus: {
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  uploadProgressBarContainer: {
+    width: '100%',
+  },
+  uploadProgressBar: {
+    height: 8,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  uploadProgressBarFill: {
+    height: '100%',
+    backgroundColor: '#3b82f6',
+    borderRadius: 4,
+  },
+  uploadProgressText: {
     fontSize: 12,
     color: '#64748b',
     textAlign: 'center',

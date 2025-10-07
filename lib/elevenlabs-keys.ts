@@ -12,6 +12,7 @@ export interface ApiKeyInfo {
   creditsRemaining?: number;
   status: 'active' | 'low_credits' | 'expired' | 'failed';
   usageCount?: number; // Track number of successful uses
+  totalTtsTimeMs?: number; // Track total TTS generation time in milliseconds
 }
 
 const FIREBASE_PATH = '/elevenlabskeys';
@@ -60,13 +61,13 @@ export const getApiKeyStatus = async () => {
     keys: allKeys.map((keyInfo: any, index) => ({
       id: keyInfo.id,
       index: index + 1,
-      key: keyInfo.key.substring(0, 8) + '...', // Show first 8 characters
-      fullKey: keyInfo.key, // Keep full key for operations
+      key: keyInfo.key,
       status: keyInfo.status,
       addedAt: keyInfo.addedAt,
       lastUsed: keyInfo.lastUsed,
       creditsRemaining: keyInfo.creditsRemaining,
-      usageCount: keyInfo.usageCount || 0
+      usageCount: keyInfo.usageCount || 0,
+      totalTtsTimeMs: keyInfo.totalTtsTimeMs || 0
     }))
   };
 };
@@ -103,17 +104,20 @@ export const addApiKey = async (newKey: string): Promise<boolean> => {
 };
 
 // Mark API key as used and increment usage count
-export const markApiKeyAsUsed = async (key: string): Promise<void> => {
+export const markApiKeyAsUsed = async (key: string, ttsTimeMs?: number): Promise<void> => {
   const allKeys = await getAllKeysFromFirebase();
   const keyInfo = allKeys.find((k: any) => k.key === key);
   
   if (keyInfo) {
     const currentUsageCount = keyInfo.usageCount || 0;
+  
+    
     await updateData(`${FIREBASE_PATH}/${(keyInfo as any).id}`, {
       lastUsed: new Date().toISOString(),
-      usageCount: currentUsageCount + 1
+      usageCount: currentUsageCount + 1,
     });
-    console.log(`📊 API key usage incremented: ${key.substring(0, 10)}... (${currentUsageCount + 1} uses)`);
+    
+    console.log(`📊 API key usage incremented: ${key.substring(0, 10)}... (${currentUsageCount + 1} uses`);
   }
 };
 
