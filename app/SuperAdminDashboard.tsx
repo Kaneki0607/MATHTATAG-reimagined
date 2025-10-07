@@ -2,8 +2,9 @@ import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-i
 import { Stack } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { addApiKey, deleteAllApiKeys, deleteApiKey, getApiKeyStatus } from '../lib/elevenlabs-keys';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
-import { deleteData, pushData, readData, updateData, writeData } from '../lib/firebase-database';
+import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
 
 type TabKey = 'home' | 'teachers' | 'admins' | 'apikeys' | 'logs';
 
@@ -45,6 +46,7 @@ interface ElevenKey {
   creditsRemaining?: number;
   addedAt?: string;
   lastUsed?: string;
+  usageCount?: number;
 }
 
 export default function SuperAdminDashboard() {
@@ -123,14 +125,9 @@ export default function SuperAdminDashboard() {
         setLogs(logsList);
       }
 
-      // API Keys
-      if (keysRes.data) {
-        const keysList: ElevenKey[] = Object.entries(keysRes.data).map(([id, data]: [string, any]) => ({
-          id,
-          ...data,
-        }));
-        setApiKeys(keysList);
-      }
+      // API Keys - Use the new getApiKeyStatus function
+      const apiKeyStatus = await getApiKeyStatus();
+      setApiKeys(apiKeyStatus.keys);
     } catch (error) {
       console.error('Error fetching data:', error);
     } finally {
@@ -502,39 +499,70 @@ export default function SuperAdminDashboard() {
                   onChangeText={setSearchQuery}
                 />
               </View>
-              <TouchableOpacity
-                style={styles.addKeysButton}
-                onPress={() => {
-                  setBulkKeysText('');
-                  setAddResultsMsg(null);
-                  setShowAddKeysModal(true);
-                }}
-                activeOpacity={0.85}
-              >
-                <MaterialCommunityIcons name="key-plus" size={18} color="#ffffff" />
-                <Text style={styles.addKeysButtonText}>Add API Keys</Text>
-              </TouchableOpacity>
+              <View style={styles.apiKeyActions}>
+                <TouchableOpacity
+                  style={styles.addKeysButton}
+                  onPress={() => {
+                    setBulkKeysText('');
+                    setAddResultsMsg(null);
+                    setShowAddKeysModal(true);
+                  }}
+                  activeOpacity={0.85}
+                >
+                  <MaterialCommunityIcons name="key-plus" size={18} color="#ffffff" />
+                  <Text style={styles.addKeysButtonText}>Add API Keys</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.deleteAllKeysButton}
+                  onPress={async () => {
+                    Alert.alert(
+                      'Delete All API Keys',
+                      'Are you sure you want to delete ALL API keys? This action cannot be undone.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: 'Delete All',
+                          style: 'destructive',
+                          onPress: async () => {
+                            try {
+                              const deletedCount = await deleteAllApiKeys();
+                              Alert.alert('Success', `Deleted ${deletedCount} API keys`);
+                              await onRefresh();
+                            } catch (error) {
+                              Alert.alert('Error', 'Failed to delete API keys');
+                            }
+                          }
+                        }
+                      ]
+                    );
+                  }}
+                  activeOpacity={0.85}
+                >
+                  <MaterialCommunityIcons name="delete-sweep" size={18} color="#ffffff" />
+                  <Text style={styles.deleteAllKeysButtonText}>Delete All</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           }
           renderItem={({ item: apiKey }) => (
             <View style={styles.apiKeyCard}>
               <View style={styles.apiKeyHeader}>
-                <MaterialCommunityIcons name="key" size={24} color="#0ea5e9" />
-                <Text style={styles.apiKeyText}>{apiKey.key?.slice(0, 15)}...</Text>
+                <MaterialCommunityIcons name="key" size={20} color="#0ea5e9" />
+                <Text style={styles.apiKeyText}>{apiKey.key}</Text>
                 <View style={{ flex: 1 }} />
                 <TouchableOpacity
                   onPress={async () => {
-                    // Confirm delete
                     try {
-                      await deleteData(`/elevenlabsKeys/${apiKey.id}`);
-                      await onRefresh();
-                    } catch {}
+                        await deleteApiKey(apiKey.fullKey);
+                        await onRefresh();
+                      } catch (error) {
+                        Alert.alert('Error', 'Failed to delete API key');
+                      }
                   }}
                   style={styles.deleteKeyButton}
                   activeOpacity={0.8}
                 >
-                  <MaterialCommunityIcons name="trash-can-outline" size={18} color="#ef4444" />
-                  <Text style={styles.deleteKeyText}>Delete</Text>
+                  <MaterialCommunityIcons name="trash-can-outline" size={16} color="#ef4444" />
                 </TouchableOpacity>
               </View>
               <View style={styles.apiKeyDetails}>
@@ -552,6 +580,10 @@ export default function SuperAdminDashboard() {
                 <View style={styles.apiKeyRow}>
                   <Text style={styles.apiKeyLabel}>Credits:</Text>
                   <Text style={styles.apiKeyValue}>{apiKey.creditsRemaining ?? 'unknown'}</Text>
+                </View>
+                <View style={styles.apiKeyRow}>
+                  <Text style={styles.apiKeyLabel}>Uses:</Text>
+                  <Text style={styles.apiKeyValue}>{apiKey.usageCount || 0} Times</Text>
                 </View>
                 {apiKey.lastUsed && (
                   <View style={styles.apiKeyRow}>
@@ -860,8 +892,12 @@ export default function SuperAdminDashboard() {
                       let failed = 0;
                       for (const key of toAdd) {
                         try {
-                          await pushData('/elevenlabsKeys', { key, status: 'active', addedAt: new Date().toISOString() });
-                          success++;
+                          const result = await addApiKey(key);
+                          if (result) {
+                            success++;
+                          } else {
+                            failed++;
+                          }
                         } catch {
                           failed++;
                         }
@@ -1217,32 +1253,33 @@ const styles = StyleSheet.create({
   },
   apiKeyCard: {
     backgroundColor: '#ffffff',
-    borderRadius: 20,
-    padding: 20,
+    borderRadius: 12,
+    padding: 16,
     marginHorizontal: 4,
+    marginBottom: 8,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 6,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 3,
   },
   apiKeyHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    marginBottom: 12,
-    paddingBottom: 12,
+    gap: 8,
+    marginBottom: 8,
+    paddingBottom: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
   },
   deleteKeyButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 4,
     backgroundColor: 'rgba(239,68,68,0.08)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
   },
   deleteKeyText: {
     fontSize: 12,
@@ -1250,13 +1287,14 @@ const styles = StyleSheet.create({
     color: '#ef4444',
   },
   apiKeyText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     color: '#1e293b',
     fontFamily: 'monospace',
+    flex: 1,
   },
   apiKeyDetails: {
-    gap: 8,
+    gap: 6,
   },
   apiKeyRow: {
     flexDirection: 'row',
@@ -1264,14 +1302,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   apiKeyLabel: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#64748b',
     fontWeight: '500',
+    minWidth: 60,
   },
   apiKeyValue: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#1e293b',
     fontWeight: '600',
+    textAlign: 'right',
+    flex: 1,
   },
   logCard: {
     backgroundColor: '#ffffff',
@@ -1335,6 +1376,24 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   addKeysButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+  },
+  apiKeyActions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+  },
+  deleteAllKeysButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  deleteAllKeysButtonText: {
     color: '#ffffff',
     fontWeight: '700',
   },

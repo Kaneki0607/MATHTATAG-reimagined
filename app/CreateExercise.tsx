@@ -6,56 +6,26 @@ import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
-    Image,
-    Modal,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  Image,
+  Modal,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
+import { getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
 import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
 // Import ElevenLabs API key management
-// Firebase-backed ElevenLabs keys helpers (dynamic keys from DB)
-type DbElevenKey = { key: string; status?: 'active'|'low_credits'|'expired'|'failed'; creditsRemaining?: number; lastUsed?: string; addedAt?: string };
-const ELEVEN_KEYS_PATH = '/elevenlabsKeys';
 
-const fetchActiveElevenKeys = async (): Promise<Array<{id: string} & DbElevenKey>> => {
-  const { data } = await readData(ELEVEN_KEYS_PATH);
-  const obj = (data || {}) as Record<string, DbElevenKey>;
-  return Object.keys(obj)
-    .map(id => ({ id, ...obj[id] }))
-    .filter(k => (k.status ?? 'active') === 'active' && typeof k.key === 'string' && k.key.startsWith('sk_'));
-};
 
-const getRandomApiKeyFromDb = async (): Promise<{ id: string; key: string } | null> => {
-  const keys = await fetchActiveElevenKeys();
-  if (keys.length === 0) return null;
-  const idx = Math.floor(Math.random() * keys.length);
-  return { id: keys[idx].id, key: keys[idx].key };
-};
-
-const markApiKeyAsUsedInDb = async (id: string): Promise<void> => {
-  await updateData(`${ELEVEN_KEYS_PATH}/${id}/lastUsed`, new Date().toISOString());
-};
-
-const markApiKeyAsFailedInDb = async (id: string): Promise<void> => {
-  await updateData(`${ELEVEN_KEYS_PATH}/${id}/status`, 'failed');
-};
-
-const updateApiKeyCreditsInDb = async (id: string, creditsRemaining: number): Promise<void> => {
-  await updateData(`${ELEVEN_KEYS_PATH}/${id}`, {
-    creditsRemaining,
-    status: creditsRemaining <= 0 ? 'expired' : creditsRemaining < 300 ? 'low_credits' : 'active',
-    lastUsed: new Date().toISOString(),
-  });
-};
 
 // Maintenance placeholder (kept to minimize code churn)
 const performApiKeyMaintenance = async () => {
@@ -64,7 +34,7 @@ const performApiKeyMaintenance = async () => {
 };
 
 // Helper function to check if API key has low credits and update status
-const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, errorText: string, keyId?: string): Promise<boolean> => {
+const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, errorText: string): Promise<boolean> => {
   try {
     console.log('🔍 Raw error text:', errorText);
     
@@ -79,8 +49,8 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
       console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
       
       // Update the API key credits and status
-      if (keyId) {
-        await updateApiKeyCreditsInDb(keyId, creditsRemaining);
+      if (apiKey) {
+        await updateApiKeyCredits(apiKey, creditsRemaining);
       }
       // If credits are below 300, flag as low credits in DB
       if (creditsRemaining < 300) return true;
@@ -97,7 +67,7 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
         console.log(`💰 API Key Credits - Remaining: ${creditsRemaining}, Required: ${creditsRequired}`);
         
         // Update the API key credits and status
-        if (keyId) await updateApiKeyCreditsInDb(keyId, creditsRemaining);
+        if (apiKey) await updateApiKeyCredits(apiKey, creditsRemaining);
         
         // If credits are below 300, immediately remove this key
         if (creditsRemaining < 300) return true;
@@ -120,18 +90,16 @@ const callElevenLabsWithFallback = async (
 ): Promise<{ audioBlob: Blob; usedApiKey: string; performanceLog: any } | null> => {
   const performanceLog: any = {};
   
-  // Load active API keys from Firebase
-  const dbKeys = await fetchActiveElevenKeys();
-  if (dbKeys.length === 0) {
+  // Get a random API key
+  const apiKey = await getRandomApiKey();
+  if (!apiKey) {
     throw new Error('No active ElevenLabs API keys available');
   }
   
-  for (let i = 0; i < dbKeys.length; i++) {
-    const { id: keyId, key: apiKey } = dbKeys[i];
-    const attemptStart = Date.now();
+  const attemptStart = Date.now();
     
     try {
-      console.log(`🔄 Trying ElevenLabs API key ${i + 1}/${dbKeys.length} (${apiKey.substring(0, 10)}...)`);
+      console.log(`🔄 Trying ElevenLabs API key (${apiKey.substring(0, 10)}...)`);
       
       // Prepare request payload based on version
       const requestPayload = useV3 ? {
@@ -168,11 +136,11 @@ const callElevenLabsWithFallback = async (
 
       if (response.ok) {
         const audioBlob = await response.blob();
-        performanceLog[`apiKey${i + 1}`] = Date.now() - attemptStart;
-        console.log(`✅ ElevenLabs API key ${i + 1} succeeded`);
+        performanceLog.apiKey = Date.now() - attemptStart;
+        console.log(`✅ ElevenLabs API key succeeded`);
         
         // Mark this key as used in DB
-        await markApiKeyAsUsedInDb(keyId);
+        await markApiKeyAsUsed(apiKey);
         
         return {
           audioBlob,
@@ -181,7 +149,7 @@ const callElevenLabsWithFallback = async (
         };
       } else {
         const errorText = await response.text();
-        console.warn(`⚠️ ElevenLabs API key ${i + 1} failed:`, response.status, errorText);
+        console.warn(`⚠️ ElevenLabs API key failed:`, response.status, errorText);
         
         // Check for IP address unusual activity first - this should stop all retries
         if (errorText.includes('detected_unusual_activity') || 
@@ -196,45 +164,38 @@ const callElevenLabsWithFallback = async (
         // Handle different error types
         if (response.status === 401) {
           // Unauthorized - invalid API key
-          console.log(`🔑 API key ${i + 1} is invalid/unauthorized - marking as failed`);
-          await markApiKeyAsFailedInDb(keyId);
+          console.log(`🔑 API key is invalid/unauthorized - marking as failed`);
+          await markApiKeyAsFailed(apiKey);
         } else if (response.status === 429) {
           // Rate limit or quota exceeded
-          console.log(`⏰ API key ${i + 1} hit rate limit or quota - checking credits`);
-          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText, keyId);
+          console.log(`⏰ API key hit rate limit or quota - checking credits`);
+          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
           if (!hasLowCredits) {
             // If not a credit issue, might be temporary rate limit
-            console.log(`⏰ API key ${i + 1} hit temporary rate limit`);
+            console.log(`⏰ API key hit temporary rate limit`);
           }
         } else {
           // Check if this key has low credits and update status
-          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText, keyId);
+          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
           
           // Mark key as failed if it's not a credit issue and not a temporary error
           if (!hasLowCredits && response.status >= 400 && response.status < 500) {
-            await markApiKeyAsFailedInDb(keyId);
+            await markApiKeyAsFailed(apiKey);
           }
         }
         
-        // If this is the last key, throw the error
-        if (i === dbKeys.length - 1) {
-          throw new Error(`All ElevenLabs API keys failed. Last error: ${response.status} - ${errorText}`);
-        }
+        // Throw error to indicate this key failed
+        throw new Error(`API call failed with status ${response.status}: ${errorText}`);
       }
     } catch (error) {
-      console.warn(`⚠️ ElevenLabs API key ${i + 1} error:`, error);
+      console.warn(`⚠️ ElevenLabs API key error:`, error);
       
       // Mark key as failed
-      await markApiKeyAsFailedInDb(keyId);
+      await markApiKeyAsFailed(apiKey);
       
-      // If this is the last key, throw the error
-      if (i === dbKeys.length - 1) {
-        throw error;
-      }
+      // Re-throw the error
+      throw error;
     }
-  }
-  
-  throw new Error('No ElevenLabs API keys available');
 };
 
 // Utility placeholders removed (DB-driven now)
@@ -965,6 +926,15 @@ export default function CreateExercise() {
   const [isGeneratingTTS, setIsGeneratingTTS] = useState(false);
   const [isPlayingTTS, setIsPlayingTTS] = useState(false);
   const [currentAudioUri, setCurrentAudioUri] = useState<string | null>(null);
+  
+  // AI Improve state
+  const [isImprovingDescription, setIsImprovingDescription] = useState(false);
+  const [improveError, setImproveError] = useState<string | null>(null);
+  
+  // TTS Upload Progress state
+  const [showTTSProgressModal, setShowTTSProgressModal] = useState(false);
+  const [ttsUploadProgress, setTtsUploadProgress] = useState({ current: 0, total: 0 });
+  const [ttsUploadStatus, setTtsUploadStatus] = useState<string>('');
   // TTS language is now handled directly in the API call, no need for state
   const [currentAudioPlayer, setCurrentAudioPlayer] = useState<any | null>(null);
   
@@ -987,7 +957,6 @@ export default function CreateExercise() {
   const [numberOfQuestions, setNumberOfQuestions] = useState(5);
   const [selectedQuestionType, setSelectedQuestionType] = useState('multiple-choice');
   const [ttsProgress, setTtsProgress] = useState({ current: 0, total: 0 });
-  const [ttsUploadProgress, setTtsUploadProgress] = useState({ current: 0, total: 0 });
   
   // TTS timing/metrics for UI (generation + upload)
   const [ttsGenerationStartTime, setTtsGenerationStartTime] = useState<number | null>(null);
@@ -1109,6 +1078,10 @@ export default function CreateExercise() {
     originalText: '',
     processedText: '',
   });
+
+  // Track failed TTS generations
+  const [failedTTSQuestions, setFailedTTSQuestions] = useState<Set<string>>(new Set());
+  const [isRetryingFailedTTS, setIsRetryingFailedTTS] = useState(false);
   
   // Generate 6-digit code for exercise
   const generateExerciseCode = () => {
@@ -1876,6 +1849,7 @@ export default function CreateExercise() {
       
       // Update progress
       setTtsUploadProgress({ current: i + 1, total: pendingTTSUploads.length });
+      setTtsUploadStatus(`Uploading TTS audio ${i + 1} of ${pendingTTSUploads.length}...`);
       try {
         const fileStart = Date.now();
         console.log(`🎵 Uploading TTS for question ${ttsAudio.questionId} from: ${ttsAudio.localUri}`);
@@ -1987,10 +1961,7 @@ export default function CreateExercise() {
       return;
     }
 
-    if (!aiPrompt.trim()) {
-      showCustomAlert('Error', 'Please provide additional details for the AI to generate questions');
-      return;
-    }
+    // Additional requirements are now optional since there's already a specific prompt
 
     setIsGeneratingQuestions(true);
 
@@ -2026,7 +1997,7 @@ REQUIREMENTS FOR FILIPINO GRADE 1 STUDENTS:
 6. Include visual concepts that Filipino children can relate to
 7. MAXIMIZE USE OF STOCK IMAGES: Reference specific images from the available list in questions and options
 8. When using images, mention the exact image name from the stock images list
-9. CRITICAL: NEVER include the answer in the question text - questions should only ask, not provide answers
+9. CRITICAL: NEVER include the answer in the question text - questions should only ask, not provide answers even if its multiple answer.
 
 QUESTION TYPE SPECIFIC RULES:
 
@@ -2699,20 +2670,27 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       console.log('Generating TTS audio for AI-generated questions sequentially...');
       setIsGeneratingTTS(true);
       
+      // TTS generation will run in background without blocking modal
+      
       // Process questions in batches of 2 using the same API key, then randomly select next key
       const processTTSSequentially = async () => {
-        // Initialize progress tracking
+        // Initialize progress tracking - DISABLED MODAL TO PREVENT FREEZING
         setTtsProgress({ current: 0, total: newQuestions.length });
+        // setTtsUploadProgress({ current: 0, total: newQuestions.length });
+        // setTtsUploadStatus('Starting TTS generation...');
+        // setShowTTSProgressModal(true);
 
         // Get initial random API key
-        const firstKey = await getRandomApiKeyFromDb();
-        let currentApiKey = firstKey?.key || null;
+        const firstKey = await getRandomApiKey();
+        let currentApiKey = firstKey || null;
         if (!currentApiKey) {
           throw new Error('No active API keys available for TTS processing');
         }
         
         let requestsWithCurrentKey = 0;
         const REQUESTS_PER_KEY = 2;
+        const MAX_RETRIES_PER_QUESTION = 3; // Limit retries per question
+        const REQUEST_TIMEOUT = 30000; // 30 second timeout per request
         
         console.log(`🎯 Starting TTS processing. Using API key: ${currentApiKey.substring(0, 10)}...`);
         
@@ -2723,14 +2701,116 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             console.log(`Processing TTS for question ${i + 1}/${newQuestions.length}: ${question.id}`);
             console.log(`Using API key: ${currentApiKey.substring(0, 10)}... (${requestsWithCurrentKey + 1}/${REQUESTS_PER_KEY} requests)`);
             
-            // Update progress
-            setTtsProgress({ current: i + 1, total: newQuestions.length });
+            // Update progress - simplified to prevent freezing
+            const current = i + 1;
+            const total = newQuestions.length;
+            setTtsProgress({ current, total });
+            // setTtsUploadProgress({ current, total });
+            // setTtsUploadStatus(`Generating TTS audio ${current} of ${total}...`);
+            
+            // Add delay between requests to prevent rate limiting and allow UI updates
+            if (i > 0) {
+              const delay = 1000 + Math.random() * 1000; // 1-2 seconds random delay
+              console.log(`⏳ Waiting ${Math.round(delay)}ms before next request...`);
+              // setTtsUploadStatus(`Waiting ${Math.round(delay/1000)}s before next request...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+            
+            // Allow UI to update by yielding control - increased delay
+            await new Promise(resolve => setTimeout(resolve, 200));
             
             // Preprocess the question text for TTS (enhanced version)
             const processedText = await preprocessTextForTTS(question.question);
             
-            // Generate TTS audio using the current API key
-            const audioData = await generateTTSForAIWithKey(processedText, question.id, currentApiKey);
+            // Generate TTS audio using the current API key with timeout and retry
+            let audioData = null;
+            let retryCount = 0;
+            let skipQuestion = false; // Flag to skip this question entirely
+            
+            while (!audioData && retryCount < MAX_RETRIES_PER_QUESTION && !skipQuestion) {
+              try {
+                console.log(`🔄 TTS attempt ${retryCount + 1}/${MAX_RETRIES_PER_QUESTION} for question ${i + 1} (skipQuestion: ${skipQuestion})`);
+                
+                // Create a timeout promise
+                const timeoutPromise = new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error('TTS request timeout')), REQUEST_TIMEOUT)
+                );
+                
+                // Race between TTS generation and timeout
+                audioData = await Promise.race([
+                  generateTTSForAIWithKey(processedText, question.id, currentApiKey),
+                  timeoutPromise
+                ]);
+                
+                if (audioData && typeof audioData === 'string') {
+                  console.log(`✅ TTS generated successfully for question ${i + 1}`);
+                  break;
+                }
+              } catch (error: any) {
+                retryCount++;
+                console.warn(`⚠️ TTS attempt ${retryCount} failed for question ${i + 1}:`, error);
+                
+                // Check if it's an unusual activity error - skip to next question immediately
+                if (error?.message?.includes('UNUSUAL_ACTIVITY_DETECTED')) {
+                  console.log(`🚫 Unusual activity detected - skipping question ${i + 1} and moving to next`);
+                  // Mark this question as failed TTS
+                  setFailedTTSQuestions(prev => new Set([...prev, question.id]));
+                  // Mark the problematic API key as failed (keep in database)
+                  await markApiKeyAsFailed(currentApiKey);
+                  // Try to get a different API key for the next question
+                  const newApiKey = await getRandomApiKey();
+                  if (newApiKey && newApiKey !== currentApiKey) {
+                    currentApiKey = newApiKey;
+                    requestsWithCurrentKey = 0;
+                    console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to unusual activity`);
+                  }
+                  // Add a longer delay to avoid triggering more suspicious activity
+                  console.log(`⏳ Adding 10-second delay to avoid triggering more suspicious activity...`);
+                  await new Promise(resolve => setTimeout(resolve, 10000));
+                  skipQuestion = true; // Set flag to skip this question entirely
+                  console.log(`🚫 Setting skipQuestion = true, breaking out of retry loop`);
+                  break; // Exit the retry loop
+                }
+                
+                // Check if it's a quota exceeded error - skip to next question immediately
+                if (error?.message?.includes('QUOTA_EXCEEDED')) {
+                  console.log(`💰 Quota exceeded - skipping question ${i + 1} and moving to next`);
+                  // Mark this question as failed TTS
+                  setFailedTTSQuestions(prev => new Set([...prev, question.id]));
+                  // Try to get a different API key for the next question
+                  const newApiKey = await getRandomApiKey();
+                  if (newApiKey && newApiKey !== currentApiKey) {
+                    currentApiKey = newApiKey;
+                    requestsWithCurrentKey = 0;
+                    console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to quota exceeded`);
+                  }
+                  // Add a delay to avoid rapid switching
+                  console.log(`⏳ Adding 5-second delay due to quota exceeded...`);
+                  await new Promise(resolve => setTimeout(resolve, 5000));
+                  skipQuestion = true; // Set flag to skip this question entirely
+                  console.log(`💰 Setting skipQuestion = true, breaking out of retry loop`);
+                  break; // Exit the retry loop
+                }
+                
+                if (retryCount < MAX_RETRIES_PER_QUESTION) {
+                  const retryDelay = 2000 * retryCount; // Exponential backoff
+                  console.log(`⏳ Retrying in ${retryDelay}ms...`);
+                  // setTtsUploadStatus(`Retrying TTS for question ${i + 1} (attempt ${retryCount + 1}/${MAX_RETRIES_PER_QUESTION})...`);
+                  await new Promise(resolve => setTimeout(resolve, retryDelay));
+                } else {
+                  console.error(`❌ All TTS attempts failed for question ${i + 1}`);
+                  // setTtsUploadStatus(`Failed to generate TTS for question ${i + 1} after ${MAX_RETRIES_PER_QUESTION} attempts`);
+                }
+              }
+            }
+            
+            console.log(`🔄 Exited while loop for question ${i + 1} - audioData: ${!!audioData}, retryCount: ${retryCount}, skipQuestion: ${skipQuestion}`);
+            
+            // Skip TTS processing if unusual activity was detected
+            if (skipQuestion) {
+              console.log(`⏭️ Skipping TTS processing for question ${i + 1} due to unusual activity (skipQuestion: ${skipQuestion})`);
+              continue; // Skip to next question
+            }
             
             if (audioData && typeof audioData === 'string') {
               // Save TTS audio locally
@@ -2761,8 +2841,7 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             // Check if we need to switch to a new API key
             if (requestsWithCurrentKey >= REQUESTS_PER_KEY && i < newQuestions.length - 1) {
               // Get a new random API key
-              const newKeyObj = await getRandomApiKeyFromDb();
-              const newApiKey = newKeyObj?.key;
+              const newApiKey = await getRandomApiKey();
               if (newApiKey && newApiKey !== currentApiKey) {
                 currentApiKey = newApiKey;
                 requestsWithCurrentKey = 0;
@@ -2774,12 +2853,75 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
               }
             }
             
-          } catch (error) {
+          } catch (error: any) {
             console.error(`❌ Error processing TTS for question ${question.id}:`, error);
             
+            // Check if it's an unusual activity error - skip to next question
+            const errorMessage = error?.message || error?.toString() || '';
+            if (errorMessage.includes('UNUSUAL_ACTIVITY_DETECTED')) {
+              console.log(`🚫 Unusual activity detected for question ${question.id} - skipping to next question`);
+              // Mark this question as failed TTS
+              setFailedTTSQuestions(prev => new Set([...prev, question.id]));
+              // Mark the problematic API key as failed (keep in database)
+              await markApiKeyAsFailed(currentApiKey);
+              // Try to get a different API key for the next question
+              const newApiKey = await getRandomApiKey();
+              if (newApiKey && newApiKey !== currentApiKey) {
+                currentApiKey = newApiKey;
+                requestsWithCurrentKey = 0;
+                console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to unusual activity`);
+              }
+              // Add a longer delay to avoid triggering more suspicious activity
+              console.log(`⏳ Adding 10-second delay to avoid triggering more suspicious activity...`);
+              await new Promise(resolve => setTimeout(resolve, 10000));
+              continue; // Skip to next question
+            }
+            
+            // Check if it's a quota exceeded error - skip to next question
+            if (errorMessage.includes('QUOTA_EXCEEDED')) {
+              console.log(`💰 Quota exceeded for question ${question.id} - skipping to next question`);
+              // Mark this question as failed TTS
+              setFailedTTSQuestions(prev => new Set([...prev, question.id]));
+              // Try to get a different API key for the next question
+              const newApiKey = await getRandomApiKey();
+              if (newApiKey && newApiKey !== currentApiKey) {
+                currentApiKey = newApiKey;
+                requestsWithCurrentKey = 0;
+                console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to quota exceeded`);
+              }
+              // Add a delay to avoid rapid switching
+              console.log(`⏳ Adding 5-second delay due to quota exceeded...`);
+              await new Promise(resolve => setTimeout(resolve, 5000));
+              continue; // Skip to next question
+            }
+            
+            // Check if it's a rate limiting error
+            const isRateLimitError = errorMessage.includes('rate_limit') || 
+                                   errorMessage.includes('too_many_requests');
+            
+            if (isRateLimitError) {
+              console.log(`🚫 Rate limit detected for question ${question.id}. Adding longer delay...`);
+              
+              // Add longer delay for rate limit errors
+              const extendedDelay = 5000 + Math.random() * 3000; // 5-8 seconds
+              console.log(`⏳ Extended delay: ${Math.round(extendedDelay)}ms due to rate limiting...`);
+              await new Promise(resolve => setTimeout(resolve, extendedDelay));
+              
+              // Try to get a different API key
+              const newApiKey = await getRandomApiKey();
+              if (newApiKey && newApiKey !== currentApiKey) {
+                currentApiKey = newApiKey;
+                requestsWithCurrentKey = 0;
+                console.log(`🔄 Switching to new API key: ${currentApiKey.substring(0, 10)}... due to rate limiting`);
+                
+                // Retry the same question with new key
+                i--; // Decrement to retry the same question
+                continue;
+              }
+            }
+            
             // If current key fails, try to switch to another key
-            const newKeyObj = await getRandomApiKeyFromDb();
-            const newApiKey = newKeyObj?.key;
+            const newApiKey = await getRandomApiKey();
             if (newApiKey && newApiKey !== currentApiKey) {
               currentApiKey = newApiKey;
               requestsWithCurrentKey = 0;
@@ -2790,15 +2932,16 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
               console.log(`🔄 Retrying with current API key: ${currentApiKey.substring(0, 10)}...`);
             }
           }
-          
-          // Add 3-second delay between requests (except for the last question)
-          if (i < newQuestions.length - 1) {
-            console.log('⏳ Waiting 3 seconds before next TTS generation...');
-            await new Promise(resolve => setTimeout(resolve, 3000));
-          }
         }
         
         console.log('🎉 Sequential TTS generation completed for all AI-generated questions');
+        // setTtsUploadStatus('TTS generation completed successfully!');
+        
+        // Close progress modal after a short delay
+        // setTimeout(() => {
+        //   setShowTTSProgressModal(false);
+        // }, 1500);
+        
         setIsGeneratingTTS(false);
         setTtsProgress({ current: 0, total: 0 }); // Reset progress
       };
@@ -2807,10 +2950,13 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       setTtsGenerationStartTime(Date.now());
       processTTSSequentially().catch((error) => {
         console.error('Sequential TTS generation failed:', error);
+        // setShowTTSProgressModal(false);
         setIsGeneratingTTS(false);
+        setTtsProgress({ current: 0, total: 0 });
+        showCustomAlert('TTS Generation Error', 'Failed to generate audio for some questions. You can regenerate them individually.');
       });
       
-      showCustomAlert('Success', `Generated ${newQuestions.length} questions successfully! TTS audio is being generated in the background.`);
+      // Success - questions generated, TTS will run in background
       setShowAIGenerator(false);
       setAiPrompt('');
 
@@ -3079,6 +3225,13 @@ Enhanced text with emotions:`;
               console.log('🎵 Pending uploads updated, count:', updated.length);
               return updated;
             });
+            
+            // Clear failed TTS tracking for this question since TTS was successful
+            setFailedTTSQuestions(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(editingQuestion.id);
+              return newSet;
+            });
           } catch (saveError) {
             console.error('❌ Failed to save TTS audio locally:', saveError);
             showCustomAlert('Save Error', 'Audio generated but failed to save locally. Please try again.');
@@ -3150,6 +3303,12 @@ Enhanced text with emotions:`;
         totalTime: `${totalTime}ms`,
         steps: performanceLog.steps
       });
+      
+      // Track failure for editing question if applicable
+      if (editingQuestion) {
+        setFailedTTSQuestions(prev => new Set([...prev, editingQuestion.id]));
+      }
+      
       showCustomAlert('Error', 'Failed to generate speech. Please try again.');
     } finally {
       setIsGeneratingTTS(false);
@@ -3291,6 +3450,38 @@ Enhanced text with emotions:`;
         } else {
           const errorText = await response.text();
           console.error(`❌ ElevenLabs API failed with key ${apiKey.substring(0, 10)}...:`, response.status, errorText);
+          
+          // Check for unusual activity error - this should stop all retries
+          if (errorText.includes('detected_unusual_activity') || 
+              errorText.includes('Unusual activity detected') ||
+              errorText.includes('Free Tier usage disabled')) {
+            console.log(`🚫 Unusual activity detected - stopping TTS generation for this question`);
+            // Mark this API key as failed to prevent further use
+            await markApiKeyAsFailed(apiKey);
+            // Return a special error that indicates we should skip to next question
+            throw new Error('UNUSUAL_ACTIVITY_DETECTED');
+          }
+          
+          // Check for quota exceeded error - this should also stop retries
+          if (errorText.includes('quota_exceeded') || 
+              errorText.includes('exceeds your quota') ||
+              errorText.includes('credits remaining')) {
+            console.log(`💰 Quota exceeded detected - stopping TTS generation for this question`);
+            
+            // Extract credits remaining from error message
+            const creditsMatch = errorText.match(/(\d+)\s+credits\s+remaining/);
+            if (creditsMatch) {
+              const creditsRemaining = parseInt(creditsMatch[1]);
+              console.log(`📊 Recording credits remaining: ${creditsRemaining} for key ${apiKey.substring(0, 10)}...`);
+              await updateApiKeyCredits(apiKey, creditsRemaining);
+            }
+            
+            // Mark this API key as failed to prevent further use
+            await markApiKeyAsFailed(apiKey);
+            // Return a special error that indicates we should skip to next question
+            throw new Error('QUOTA_EXCEEDED');
+          }
+          
           throw new Error(`API call failed: ${response.status} - ${errorText}`);
         }
         
@@ -3301,7 +3492,224 @@ Enhanced text with emotions:`;
 
     } catch (error) {
       console.error('❌ AI TTS Generation Error:', error);
+      // Track this question as having failed TTS
+      setFailedTTSQuestions(prev => new Set([...prev, questionId]));
       return null;
+    }
+  };
+
+  // Function to identify questions with failed TTS
+  const getFailedTTSQuestions = (): Question[] => {
+    return questions.filter(question => {
+      // Check main question
+      const hasMainQuestionTTS = question.ttsAudioUrl && question.ttsAudioUrl !== 'pending';
+      const isMainQuestionFailed = !hasMainQuestionTTS && question.question && question.question.trim().length > 0;
+      
+      // Check sub-questions
+      const hasFailedSubQuestions = question.subQuestions?.some(sub => {
+        const hasSubTTS = sub.ttsAudioUrl && sub.ttsAudioUrl !== 'pending';
+        return !hasSubTTS && sub.question && sub.question.trim().length > 0;
+      });
+      
+      return isMainQuestionFailed || hasFailedSubQuestions;
+    });
+  };
+
+  // Function to retry all failed TTS generations
+  const retryAllFailedTTS = async () => {
+    const failedQuestions = getFailedTTSQuestions();
+    
+    if (failedQuestions.length === 0) {
+      showCustomAlert('No Failed TTS', 'All questions have TTS audio generated successfully!');
+      return;
+    }
+
+    setIsRetryingFailedTTS(true);
+    setTtsProgress({ current: 0, total: failedQuestions.length });
+    // setShowTTSProgressModal(true);
+    // setTtsUploadStatus('Retrying failed TTS generations...');
+
+    try {
+      let successCount = 0;
+      let failCount = 0;
+
+      for (let i = 0; i < failedQuestions.length; i++) {
+        const question = failedQuestions[i];
+        setTtsProgress({ current: i + 1, total: failedQuestions.length });
+        // setTtsUploadStatus(`Retrying TTS for question ${i + 1} of ${failedQuestions.length}...`);
+
+        // Allow UI to update by yielding control - increased delay
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        try {
+          // Retry main question TTS with timeout
+          if (!question.ttsAudioUrl || question.ttsAudioUrl === 'pending') {
+            const ttsUrl = await Promise.race([
+              generateTTSForAI(question.question, question.id),
+              new Promise<null>((_, reject) => 
+                setTimeout(() => reject(new Error('TTS retry timeout')), 30000)
+              )
+            ]).catch(() => null);
+            if (ttsUrl) {
+              updateQuestion(question.id, { ttsAudioUrl: ttsUrl });
+              // Clear failed TTS tracking for this question since TTS was successful
+              setFailedTTSQuestions(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(question.id);
+                return newSet;
+              });
+              successCount++;
+            } else {
+              failCount++;
+              setFailedTTSQuestions(prev => new Set([...prev, question.id]));
+            }
+          }
+
+          // Retry sub-questions TTS
+          if (question.subQuestions) {
+            for (const sub of question.subQuestions) {
+              if (!sub.ttsAudioUrl || sub.ttsAudioUrl === 'pending') {
+                const subTtsUrl = await Promise.race([
+                  generateTTSForAI(sub.question, sub.id),
+                  new Promise<null>((_, reject) => 
+                    setTimeout(() => reject(new Error('Sub-question TTS retry timeout')), 30000)
+                  )
+                ]).catch(() => null);
+                if (subTtsUrl) {
+                  const updatedSubQuestions = question.subQuestions.map(s => 
+                    s.id === sub.id ? { ...s, ttsAudioUrl: subTtsUrl } : s
+                  );
+                  updateQuestion(question.id, { subQuestions: updatedSubQuestions });
+                  // Clear failed TTS tracking for this sub-question since TTS was successful
+                  setFailedTTSQuestions(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(sub.id);
+                    return newSet;
+                  });
+                  successCount++;
+                } else {
+                  failCount++;
+                  setFailedTTSQuestions(prev => new Set([...prev, sub.id]));
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`Failed to retry TTS for question ${question.id}:`, error);
+          failCount++;
+          setFailedTTSQuestions(prev => new Set([...prev, question.id]));
+        }
+      }
+
+      // setTtsUploadStatus(`Retry completed! ${successCount} successful, ${failCount} failed.`);
+      
+      // Close progress modal after a short delay
+      // setTimeout(() => {
+      //   setShowTTSProgressModal(false);
+      // }, 2000);
+
+    } catch (error) {
+      console.error('Error retrying failed TTS:', error);
+      // setTtsUploadStatus('Error occurred while retrying TTS generations.');
+      // setTimeout(() => {
+      //   setShowTTSProgressModal(false);
+      // }, 2000);
+    } finally {
+      setIsRetryingFailedTTS(false);
+      setTtsProgress({ current: 0, total: 0 });
+    }
+  };
+
+  // AI Improve function for exercise title and description
+  const improveExerciseDetails = async () => {
+    if (!exerciseTitle.trim() && !exerciseDescription.trim()) {
+      setImproveError('Please enter a title or description to improve');
+      return;
+    }
+
+    setIsImprovingDescription(true);
+    setImproveError(null);
+
+    try {
+      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
+      
+      const prompt = `You are an expert educational content writer. Rewrite the following exercise title and description to make them more professional and appealing for co-teachers who will see this exercise in a public library.
+
+Current Title: "${exerciseTitle}"
+Current Description: "${exerciseDescription}"
+
+Requirements:
+- Make the title clear, engaging, and professional
+- Write a compelling description that explains what students will learn and practice
+- Use educational terminology that teachers will understand
+- Highlight the key learning objectives and skills
+- Keep it concise but informative
+- Make it sound professional for sharing in a teacher community
+
+Please respond with a JSON object in this exact format:
+{
+  "title": "Improved title here",
+  "description": "Improved description here"
+}`;
+
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
+      
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: prompt
+                }
+              ]
+            }
+          ],
+          generationConfig: {
+            temperature: 0.7,
+            topK: 40,
+            topP: 0.95,
+            maxOutputTokens: 1024,
+          }
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API request failed: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+        throw new Error('Invalid response from AI service');
+      }
+
+      const responseText = data.candidates[0].content.parts[0].text;
+      
+      // Extract JSON from response
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('Could not parse AI response');
+      }
+
+      const improvedData = JSON.parse(jsonMatch[0]);
+      
+      if (improvedData.title) {
+        setExerciseTitle(improvedData.title);
+      }
+      if (improvedData.description) {
+        setExerciseDescription(improvedData.description);
+      }
+
+    } catch (error) {
+      console.error('Error improving exercise details:', error);
+      setImproveError('Failed to improve description. Please try again.');
+    } finally {
+      setIsImprovingDescription(false);
     }
   };
 
@@ -3430,15 +3838,7 @@ Enhanced text with emotions:`;
       return;
     }
     
-    // Check for pending TTS uploads
-    if (pendingTTSUploads.length > 0) {
-      showCustomAlert(
-        'Pending TTS Audio', 
-        `You have ${pendingTTSUploads.length} text-to-speech audio file(s) that need to be uploaded. Please wait for the upload to complete before saving the exercise.`,
-        [{ text: 'OK' }]
-      );
-      return;
-    }
+    // Note: Pending TTS uploads will be handled during the save process
     
     // Check if currently generating TTS
     if (isGeneratingTTS) {
@@ -3553,11 +3953,24 @@ Enhanced text with emotions:`;
       
       if (pendingTTSUploads.length > 0) {
         console.log(`🎵 Uploading ${pendingTTSUploads.length} TTS audio files...`);
+        
+        // Show progress modal
+        setShowTTSProgressModal(true);
+        setTtsUploadProgress({ current: 0, total: pendingTTSUploads.length });
+        setTtsUploadStatus('Preparing TTS audio upload...');
+        
         try {
           finalQuestions = await uploadPendingTTSAudio(finalExerciseCode, questions);
           console.log('✅ TTS audio files uploaded successfully');
+          setTtsUploadStatus('TTS audio upload completed successfully!');
+          
+          // Close progress modal after a short delay
+          setTimeout(() => {
+            setShowTTSProgressModal(false);
+          }, 1500);
         } catch (ttsError) {
           console.error('❌ Failed to upload TTS audio files:', ttsError);
+          setShowTTSProgressModal(false);
           showCustomAlert('Upload Error', 'Audio generated but failed to upload TTS audio to Firebase.');
           return; // Stop the save process if TTS upload fails
         }
@@ -5650,15 +6063,34 @@ Enhanced text with emotions:`;
           </View>
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Description</Text>
-            <TextInput
-              style={[styles.textInput, styles.textArea]}
-              value={exerciseDescription}
-              onChangeText={setExerciseDescription}
-              placeholder="Enter exercise description..."
-              placeholderTextColor="#64748b"
-              multiline
-              numberOfLines={3}
-            />
+            <View style={styles.descriptionContainer}>
+              <TextInput
+                style={[styles.textInput, styles.textArea]}
+                value={exerciseDescription}
+                onChangeText={setExerciseDescription}
+                placeholder="Enter exercise description..."
+                placeholderTextColor="#64748b"
+                multiline
+                numberOfLines={3}
+              />
+              <TouchableOpacity
+                style={[
+                  styles.aiImproveButton,
+                  isImprovingDescription && styles.aiImproveButtonDisabled
+                ]}
+                onPress={improveExerciseDetails}
+                disabled={isImprovingDescription}
+              >
+                {isImprovingDescription ? (
+                  <ActivityIndicator size="small" color="#ffffff" />
+                ) : (
+                  <Text style={styles.aiImproveButtonText}>✨ AI Improve</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+            {improveError && (
+              <Text style={styles.errorText}>{improveError}</Text>
+            )}
           </View>
           
           {/* Category Dropdown */}
@@ -5850,6 +6282,12 @@ Enhanced text with emotions:`;
                   <Text style={styles.questionType}>
                     {questionTypes.find(t => t.id === question.type)?.title}
                   </Text>
+                  {failedTTSQuestions.has(question.id) && (
+                    <View style={styles.failedTTSIndicator}>
+                      <MaterialCommunityIcons name="volume-off" size={12} color="#ef4444" />
+                      <Text style={styles.failedTTSText}>TTS Failed</Text>
+                    </View>
+                  )}
                 </View>
                 <View style={styles.questionActions}>
                   <TouchableOpacity
@@ -5886,6 +6324,24 @@ Enhanced text with emotions:`;
 
         {/* Save Button */}
         <View style={styles.saveSection}>
+          {/* Retry Failed TTS Button */}
+          {getFailedTTSQuestions().length > 0 && (
+            <TouchableOpacity
+              style={[styles.retryFailedTTSButton, isRetryingFailedTTS && styles.retryFailedTTSButtonDisabled]}
+              onPress={retryAllFailedTTS}
+              disabled={isRetryingFailedTTS}
+            >
+              <MaterialCommunityIcons 
+                name="refresh" 
+                size={18} 
+                color={isRetryingFailedTTS ? "#9ca3af" : "#ffffff"} 
+              />
+              <Text style={[styles.retryFailedTTSButtonText, isRetryingFailedTTS && styles.retryFailedTTSButtonTextDisabled]}>
+                Retry Failed TTS ({getFailedTTSQuestions().length})
+              </Text>
+            </TouchableOpacity>
+          )}
+          
           {(ttsUploadProgress.total > 0 || ttsUploadLastDurationMs) && (
             <View style={styles.ttsUploadProgressContainer}>
               <View style={styles.ttsUploadProgressHeader}>
@@ -6010,15 +6466,20 @@ Enhanced text with emotions:`;
                 <View style={styles.aiExerciseInfo}>
                   <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Title:</Text> {exerciseTitle}</Text>
                   <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Category:</Text> {exerciseCategory}</Text>
-                  <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Description:</Text> {exerciseDescription}</Text>
+                  <View style={styles.aiDescriptionContainer}>
+                    <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Description:</Text></Text>
+                    <ScrollView style={styles.aiDescriptionScroll} showsVerticalScrollIndicator={true}>
+                      <Text style={styles.aiExerciseText}>{exerciseDescription}</Text>
+                    </ScrollView>
+                  </View>
                 </View>
                 
-                <Text style={styles.aiModalLabel}>Additional Requirements</Text>
+                <Text style={styles.aiModalLabel}>Additional Requirements (Optional)</Text>
                 <TextInput
                   style={styles.aiModalTextArea}
                   value={aiPrompt}
                   onChangeText={setAiPrompt}
-                  placeholder="Halimbawa: 'Tungkol sa mga hayop sa bahay', 'Mga kulay at hugis', 'Bilang 1-10', 'Mga letra A-Z'"
+                  placeholder="Halimbawa: 'Tungkol sa mga hayop sa bahay', 'Mga kulay at hugis', 'Bilang 1-10', 'Mga letra A-Z' (Optional)"
                   placeholderTextColor="#9ca3af"
                   multiline
                   textAlignVertical="top"
@@ -6073,7 +6534,7 @@ Enhanced text with emotions:`;
                 <TouchableOpacity
                   style={[styles.aiGenerateButton, (isGeneratingQuestions || isGeneratingTTS) && styles.aiGenerateButtonDisabled]}
                   onPress={generateAIQuestions}
-                  disabled={isGeneratingQuestions || isGeneratingTTS || !aiPrompt.trim()}
+                  disabled={isGeneratingQuestions || isGeneratingTTS}
                 >
                   {isGeneratingQuestions ? (
                     <>
@@ -6106,6 +6567,51 @@ Enhanced text with emotions:`;
               </View>
             </View>
           </ScrollView>
+        </View>
+      </Modal>
+      
+      {/* TTS Upload Progress Modal */}
+      <Modal
+        visible={showTTSProgressModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          // Simple close without nested alerts to prevent freezing
+          setShowTTSProgressModal(false);
+          if (isGeneratingTTS || isRetryingFailedTTS) {
+            setIsGeneratingTTS(false);
+            setIsRetryingFailedTTS(false);
+            setTtsProgress({ current: 0, total: 0 });
+          }
+        }}
+      >
+        <View style={styles.ttsProgressOverlay}>
+          <View style={styles.ttsProgressModal}>
+            <View style={styles.ttsProgressHeader}>
+              <MaterialCommunityIcons name="volume-high" size={32} color="#7c3aed" />
+              <Text style={styles.ttsProgressTitle}>Generating TTS Audio</Text>
+            </View>
+            
+            <View style={styles.ttsProgressContent}>
+              <Text style={styles.ttsProgressStatus}>{ttsUploadStatus}</Text>
+              
+              <View style={styles.ttsProgressBarContainer}>
+                <View style={styles.ttsProgressBar}>
+                  <View 
+                    style={[
+                      styles.ttsProgressBarFill, 
+                      { 
+                        width: ttsUploadProgress.total > 0 ? `${Math.min(100, (ttsUploadProgress.current / ttsUploadProgress.total) * 100)}%` : '0%'
+                      }
+                    ]} 
+                  />
+                </View>
+                <Text style={styles.ttsProgressText}>
+                  {ttsUploadProgress.current || 0} of {ttsUploadProgress.total || 0} questions
+                </Text>
+              </View>
+            </View>
+          </View>
         </View>
       </Modal>
       
@@ -7368,6 +7874,100 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   
+  // AI Improve Button Styles
+  descriptionContainer: {
+    position: 'relative',
+  },
+  aiImproveButton: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    backgroundColor: '#7c3aed',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  aiImproveButtonDisabled: {
+    backgroundColor: '#a78bfa',
+    opacity: 0.7,
+  },
+  aiImproveButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  errorText: {
+    color: '#ef4444',
+    fontSize: 12,
+    marginTop: 4,
+    marginLeft: 4,
+  },
+  
+  // TTS Progress Modal Styles
+  ttsProgressOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  ttsProgressModal: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 320,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  ttsProgressHeader: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  ttsProgressTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginTop: 8,
+  },
+  ttsProgressContent: {
+    alignItems: 'center',
+  },
+  ttsProgressStatus: {
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  ttsProgressBarContainer: {
+    width: '100%',
+  },
+  ttsProgressBar: {
+    height: 8,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  ttsProgressBarFill: {
+    height: '100%',
+    backgroundColor: '#7c3aed',
+    borderRadius: 4,
+  },
+  ttsProgressText: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  
   // Dropdown Styles
   dropdownContainer: {
     position: 'relative',
@@ -7489,6 +8089,49 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     marginLeft: 6,
+  },
+  retryFailedTTSButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 12,
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
+    marginBottom: 16,
+  },
+  retryFailedTTSButtonDisabled: {
+    backgroundColor: '#9ca3af',
+    opacity: 0.7,
+  },
+  retryFailedTTSButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  retryFailedTTSButtonTextDisabled: {
+    color: '#9ca3af',
+  },
+  failedTTSIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fef2f2',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginTop: 4,
+  },
+  failedTTSText: {
+    color: '#ef4444',
+    fontSize: 10,
+    fontWeight: '600',
+    marginLeft: 4,
   },
   
   // Question Card Styles
@@ -9003,6 +9646,13 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 16,
     marginBottom: 8,
+  },
+  aiDescriptionContainer: {
+    marginTop: 8,
+  },
+  aiDescriptionScroll: {
+    maxHeight: 120,
+    marginTop: 4,
   },
   aiExerciseText: {
     fontSize: 14,

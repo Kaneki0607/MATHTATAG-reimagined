@@ -11,9 +11,10 @@ export interface ApiKeyInfo {
   lastUsed?: string; // Changed to string for Firebase serialization
   creditsRemaining?: number;
   status: 'active' | 'low_credits' | 'expired' | 'failed';
+  usageCount?: number; // Track number of successful uses
 }
 
-const FIREBASE_PATH = '/elevenlabsKeys';
+const FIREBASE_PATH = '/elevenlabskeys';
 
 // Helper: Get all keys from Firebase
 const getAllKeysFromFirebase = async (): Promise<ApiKeyInfo[]> => {
@@ -57,12 +58,15 @@ export const getApiKeyStatus = async () => {
     expiredKeys: allKeys.filter(k => k.status === 'expired').length,
     failedKeys: allKeys.filter(k => k.status === 'failed').length,
     keys: allKeys.map((keyInfo: any, index) => ({
+      id: keyInfo.id,
       index: index + 1,
-      key: keyInfo.key.substring(0, 10) + '...',
+      key: keyInfo.key.substring(0, 8) + '...', // Show first 8 characters
+      fullKey: keyInfo.key, // Keep full key for operations
       status: keyInfo.status,
       addedAt: keyInfo.addedAt,
       lastUsed: keyInfo.lastUsed,
-      creditsRemaining: keyInfo.creditsRemaining
+      creditsRemaining: keyInfo.creditsRemaining,
+      usageCount: keyInfo.usageCount || 0
     }))
   };
 };
@@ -98,15 +102,18 @@ export const addApiKey = async (newKey: string): Promise<boolean> => {
   return true;
 };
 
-// Mark API key as used
+// Mark API key as used and increment usage count
 export const markApiKeyAsUsed = async (key: string): Promise<void> => {
   const allKeys = await getAllKeysFromFirebase();
   const keyInfo = allKeys.find((k: any) => k.key === key);
   
   if (keyInfo) {
+    const currentUsageCount = keyInfo.usageCount || 0;
     await updateData(`${FIREBASE_PATH}/${(keyInfo as any).id}`, {
-      lastUsed: new Date().toISOString()
+      lastUsed: new Date().toISOString(),
+      usageCount: currentUsageCount + 1
     });
+    console.log(`📊 API key usage incremented: ${key.substring(0, 10)}... (${currentUsageCount + 1} uses)`);
   }
 };
 
@@ -150,7 +157,7 @@ export const updateApiKeyCredits = async (key: string, creditsRemaining: number)
   }
 };
 
-// Remove API key with low credits
+// Remove API key with low credits (only remove truly expired keys, keep failed keys for tracking)
 export const removeLowCreditKeys = async (): Promise<number> => {
   const allKeys = await getAllKeysFromFirebase();
   const initialCount = allKeys.length;
@@ -158,19 +165,22 @@ export const removeLowCreditKeys = async (): Promise<number> => {
   
   let removedCount = 0;
   
-  // Delete keys with low credits, expired, or failed status
+  // Only delete keys that are truly expired (0 credits) - keep failed and low_credits for tracking
   for (const keyInfo of allKeys) {
-    if (keyInfo.status === 'low_credits' || keyInfo.status === 'failed' || keyInfo.status === 'expired') {
+    if (keyInfo.status === 'expired' && (keyInfo.creditsRemaining === 0 || keyInfo.creditsRemaining === undefined)) {
       await deleteData(`${FIREBASE_PATH}/${(keyInfo as any).id}`);
       removedCount++;
+      console.log(`🗑️ Removed expired key: ${keyInfo.key.substring(0, 10)}... (0 credits)`);
     }
   }
   
   if (removedCount > 0) {
     const afterKeys = await getAllKeysFromFirebase();
-    console.log(`🗑️ Removed ${removedCount} API keys with low credits/failed status. Remaining: ${afterKeys.length}`);
+    console.log(`🗑️ Removed ${removedCount} truly expired API keys. Remaining: ${afterKeys.length}`);
     console.log('Before removal:', beforeRemoval);
     console.log('After removal:', afterKeys.map((k: any) => ({ key: k.key.substring(0, 10), status: k.status, credits: k.creditsRemaining })));
+  } else {
+    console.log(`📊 No expired keys to remove. Keeping failed/low_credits keys for tracking.`);
   }
   
   return removedCount;
@@ -178,15 +188,96 @@ export const removeLowCreditKeys = async (): Promise<number> => {
 
 // Mark API key as failed
 export const markApiKeyAsFailed = async (key: string): Promise<void> => {
+  console.log(`🔍 Attempting to mark API key as failed: ${key.substring(0, 10)}...`);
+  const allKeys = await getAllKeysFromFirebase();
+  console.log(`🔍 Found ${allKeys.length} total keys in database`);
+  
+  const keyInfo = allKeys.find((k: any) => k.key === key);
+  
+  if (keyInfo) {
+    console.log(`🔍 Found key info:`, {
+      id: (keyInfo as any).id,
+      key: keyInfo.key.substring(0, 10) + '...',
+      currentStatus: keyInfo.status
+    });
+    
+    const updatePath = `${FIREBASE_PATH}/${(keyInfo as any).id}`;
+    console.log(`🔍 Updating path: ${updatePath}`);
+    
+    const result = await updateData(updatePath, {
+      status: 'failed'
+    });
+    
+    if (result.error) {
+      console.error(`❌ Failed to update API key status:`, result.error);
+    } else {
+      console.log(`✅ Successfully marked API key as failed: ${key.substring(0, 10)}...`);
+    }
+  } else {
+    console.warn(`⚠️ API key not found in database: ${key.substring(0, 10)}...`);
+    console.log(`🔍 Available keys:`, allKeys.map((k: any) => ({
+      id: k.id,
+      key: k.key.substring(0, 10) + '...',
+      status: k.status
+    })));
+  }
+};
+
+// Immediately remove API key that triggered unusual activity
+export const removeUnusualActivityKey = async (key: string): Promise<void> => {
+  console.log(`🗑️ Immediately removing API key due to unusual activity: ${key.substring(0, 10)}...`);
   const allKeys = await getAllKeysFromFirebase();
   const keyInfo = allKeys.find((k: any) => k.key === key);
   
   if (keyInfo) {
-    await updateData(`${FIREBASE_PATH}/${(keyInfo as any).id}`, {
-      status: 'failed'
-    });
-    console.log(`❌ Marked API key as failed: ${key.substring(0, 10)}...`);
+    const deletePath = `${FIREBASE_PATH}/${(keyInfo as any).id}`;
+    console.log(`🗑️ Deleting key at path: ${deletePath}`);
+    
+    const result = await deleteData(deletePath);
+    
+    if (result.error) {
+      console.error(`❌ Failed to delete API key:`, result.error);
+    } else {
+      console.log(`✅ Successfully removed API key due to unusual activity: ${key.substring(0, 10)}...`);
+    }
+  } else {
+    console.warn(`⚠️ API key not found for deletion: ${key.substring(0, 10)}...`);
   }
+};
+
+// Delete a specific API key
+export const deleteApiKey = async (key: string): Promise<boolean> => {
+  const allKeys = await getAllKeysFromFirebase();
+  const keyInfo = allKeys.find((k: any) => k.key === key);
+  
+  if (keyInfo) {
+    const result = await deleteData(`${FIREBASE_PATH}/${(keyInfo as any).id}`);
+    if (result.error) {
+      console.error('❌ Failed to delete API key:', result.error);
+      return false;
+    }
+    console.log(`🗑️ Deleted API key: ${key.substring(0, 10)}...`);
+    return true;
+  } else {
+    console.warn(`⚠️ API key not found for deletion: ${key.substring(0, 10)}...`);
+    return false;
+  }
+};
+
+// Delete all API keys
+export const deleteAllApiKeys = async (): Promise<number> => {
+  const allKeys = await getAllKeysFromFirebase();
+  let deletedCount = 0;
+  
+  for (const keyInfo of allKeys) {
+    const result = await deleteData(`${FIREBASE_PATH}/${(keyInfo as any).id}`);
+    if (!result.error) {
+      deletedCount++;
+    }
+  }
+  
+  console.log(`🗑️ Deleted ${deletedCount} API keys`);
+  return deletedCount;
 };
 
 // Get next available API key
@@ -291,7 +382,15 @@ export const checkAllApiKeyCredits = async (): Promise<void> => {
           } catch {}
           const messageSnippet = errorText ? ` - ${errorText.substring(0, 200)}` : '';
           console.warn(`⚠️ Failed to check credits for key ${keyInfo.key.substring(0, 10)}...: ${response.status}${messageSnippet}`);
-          if (response.status === 401) {
+          
+          // Check for unusual activity error
+          if (errorText.includes('detected_unusual_activity') || 
+              errorText.includes('Unusual activity detected') ||
+              errorText.includes('Free Tier usage disabled')) {
+            console.log(`🚫 Unusual activity detected for key ${keyInfo.key.substring(0, 10)}... - marking as failed`);
+            await markApiKeyAsFailed(keyInfo.key);
+          } else if (response.status === 401) {
+            console.log(`🔑 Unauthorized access for key ${keyInfo.key.substring(0, 10)}... - marking as failed`);
             await markApiKeyAsFailed(keyInfo.key);
           }
         }
@@ -319,4 +418,19 @@ export const performMaintenanceCleanup = async (): Promise<void> => {
   const expiredCount = await cleanupExpiredKeys();
   
   console.log(`🧹 Maintenance completed: removed ${removedCount} low/failed keys, ${expiredCount} expired keys`);
+};
+
+// Test function to manually mark a key as failed (for debugging)
+export const testMarkKeyAsFailed = async (key: string): Promise<void> => {
+  console.log(`🧪 TEST: Attempting to mark key as failed: ${key.substring(0, 10)}...`);
+  await markApiKeyAsFailed(key);
+  
+  // Wait a moment and then check the status
+  setTimeout(async () => {
+    const status = await getApiKeyStatus();
+    console.log(`🧪 TEST: Current key statuses:`, status.keys.map(k => ({
+      key: k.key,
+      status: k.status
+    })));
+  }, 2000);
 };
