@@ -5,7 +5,6 @@ import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import TermsAndConditions from '../components/TermsAndConditions';
-import { signInUser } from '../lib/firebase-auth';
 import { hasAdminAgreedToTerms, recordAdminTermsAgreement } from '../lib/terms-utils';
 
 const { width } = Dimensions.get('window');
@@ -69,21 +68,17 @@ export default function AdminLogin() {
     setLoading(true);
     
     try {
-
-      const { user, error } = await signInUser(email, password);
-      
-      if (error) {
-        Alert.alert('Login Error', error);
-        setLoading(false);
-        return;
-      }
+      // Admin login doesn't require email verification - use raw signInWithEmailAndPassword
+      const auth = require('../lib/firebase-auth').getAuthInstance();
+      const { signInWithEmailAndPassword } = require('firebase/auth');
+      const { user } = await signInWithEmailAndPassword(auth, email, password);
       
       if (user) {
         // Check if user is a super admin
         const isSuperAdmin = SUPER_ADMIN_UIDS.includes(user.uid);
         
         if (isSuperAdmin) {
-          // Super admin login
+          // Super admin login - no email verification required
           setCurrentAdminId(user.uid);
           router.replace('/AdminDashboard');
         } else {
@@ -97,8 +92,9 @@ export default function AdminLogin() {
           return;
         }
       }
-    } catch (error) {
-      Alert.alert('Error', 'An unexpected error occurred during login.');
+    } catch (error: any) {
+      Alert.alert('Login Error', error.message || 'An unexpected error occurred during login.');
+      setLoading(false);
     } finally {
       setLoading(false);
     }
