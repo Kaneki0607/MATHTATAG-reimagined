@@ -1,16 +1,16 @@
 // firebase-auth.ts
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
-    createUserWithEmailAndPassword,
-    getAuth,
-    initializeAuth,
-    onAuthStateChanged,
-    sendEmailVerification,
-    sendPasswordResetEmail,
-    signInWithEmailAndPassword,
-    signOut,
-    updateProfile,
-    type User,
+  createUserWithEmailAndPassword,
+  getAuth,
+  initializeAuth,
+  onAuthStateChanged,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signOut,
+  updateProfile,
+  type User,
 } from 'firebase/auth';
 import { Platform } from 'react-native';
 import { app } from './firebase';
@@ -43,13 +43,25 @@ export const signInUser = async (email: string, password: string) => {
   try {
     const auth = getAuthInstance();
     const { user } = await signInWithEmailAndPassword(auth, email, password);
-    
-    // Check if email is verified
-    if (!user.emailVerified) {
-      return { user: null, error: 'EMAIL_NOT_VERIFIED', emailNotVerified: true, unverifiedUser: user };
+
+    // Always reload to get the freshest verification status after email link click
+    try {
+      await user.reload();
+    } catch {}
+
+    // If now verified, sync flags in the database and allow login
+    if (user.emailVerified) {
+      try {
+        const { writeData } = await import('./firebase-database');
+        // Mark emailVerified true and clear pendingVerification if present
+        await writeData(`/teachers/${user.uid}/emailVerified`, true);
+        await writeData(`/teachers/${user.uid}/pendingVerification`, false);
+      } catch {}
+      return { user, error: null, emailNotVerified: false };
     }
-    
-    return { user, error: null, emailNotVerified: false };
+
+    // Still not verified – bubble up for UI to handle
+    return { user: null, error: 'EMAIL_NOT_VERIFIED', emailNotVerified: true, unverifiedUser: user };
   } catch (e: any) {
     return { user: null, error: e.message, emailNotVerified: false };
   }
