@@ -6170,31 +6170,29 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
              {/* Exercises Library Header */}
 
-             <View style={styles.exercisesHeader}>
+             <View style={styles.classTabHeader}>
 
-               <Text style={styles.exercisesTitle}>Exercises Library</Text>
+               <View>
 
-               <View style={styles.exercisesActions}>
+                 <Text style={styles.classTabTitle}>Exercises Library</Text>
 
-                <TouchableOpacity 
+                 <Text style={styles.classTabSubtitle}>Create, manage, and assign exercises</Text>
 
-                  style={styles.createExerciseButton}
+               </View>
+
+               <TouchableOpacity 
+
+                  style={styles.createExerciseButtonHeader}
 
                   onPress={() => router.push('/CreateExercise')}
 
                 >
 
-                  <View style={styles.createExerciseIcon}>
+                  <AntDesign name="plus" size={16} color="#ffffff" />
 
-                    <AntDesign name="plus" size={12} color="#ffffff" />
-
-                  </View>
-
-                  <Text style={styles.createExerciseText}>Create Exercise</Text>
+                  <Text style={styles.createExerciseText}>Create</Text>
 
                 </TouchableOpacity>
-
-               </View>
 
              </View>
 
@@ -7010,49 +7008,105 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
          {activeTab === 'list' && (
 
-           <View style={{ paddingBottom: 100 }}>
+           <View style={{ paddingBottom: 140 }}>
 
-             <Text style={styles.sectionTitle}>Student Lists</Text>
+             {/* Header */}
 
-             {activeClasses.map((cls) => (
+             <View style={styles.classTabHeader}>
 
-               <View key={cls.id} style={styles.classroomCard}>
+               <View>
 
-                 <View style={styles.classroomHeader}>
+                 <Text style={styles.classTabTitle}>Student Lists</Text>
 
-                   <Text style={styles.classroomTitle}>{cls.name}</Text>
+                 <Text style={styles.classTabSubtitle}>View and manage all your students</Text>
 
-                   <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+               </View>
 
-                   <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+               <MaterialCommunityIcons name="account-multiple" size={32} color="#3b82f6" />
 
-                 </View>
+             </View>
 
-                <View style={styles.classHeader}>
+             {activeClasses.length === 0 ? (
 
-                  <Text style={{ color: '#64748b', flex: 1 }}>Total Students: {studentsByClass[cls.id]?.length ?? 0}</Text>
+               <View style={styles.emptyStateContainer}>
 
-                  <View style={styles.headerActions}>
+                 <MaterialCommunityIcons name="account-group-outline" size={64} color="#cbd5e1" />
 
-                     <TouchableOpacity style={[styles.addStudentBtn, { backgroundColor: '#3b82f6' }]} onPress={() => handleOpenAddStudent({ id: cls.id, name: cls.name })}>
+                 <Text style={styles.emptyStateText}>No active classes</Text>
 
-                       <AntDesign name="plus" size={16} color="#ffffff" />
+                 <Text style={styles.emptyStateSubtext}>Create a class to add students</Text>
 
-                       <Text style={[styles.addStudentBtnText, { marginLeft: 6 }]}>Add Student</Text>
+               </View>
 
-                     </TouchableOpacity>
+             ) : (
 
-                     <TouchableOpacity style={styles.exportBtn} onPress={() => exportClassListToPdf(cls)}>
+             activeClasses.map((cls) => (
 
-                       <MaterialCommunityIcons name="file-pdf-box" size={18} color="#ffffff" />
+               <View key={cls.id} style={styles.classTabCard}>
 
-                       <Text style={styles.exportBtnText}>Export PDF</Text>
+                 <View style={styles.classCardHeader}>
 
-                     </TouchableOpacity>
+                   <View style={styles.classIconContainer}>
+
+                     <MaterialCommunityIcons name="google-classroom" size={24} color="#3b82f6" />
+
+                   </View>
+
+                   <View style={{ flex: 1 }}>
+
+                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+
+                       <Text style={styles.classroomTitle}>{cls.name}</Text>
+
+                       <TouchableOpacity style={styles.exportBtn} onPress={() => exportClassListToPdf(cls)}>
+
+                         <MaterialCommunityIcons name="file-pdf-box" size={14} color="#ffffff" />
+
+                         <Text style={styles.exportBtnText}>Export PDF</Text>
+
+                       </TouchableOpacity>
+
+                     </View>
+
+                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+
+                       <MaterialIcons name="school" size={14} color="#64748b" />
+
+                       <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+
+                     </View>
+
+                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+
+                       <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+
+                       <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+
+                     </View>
 
                    </View>
 
                  </View>
+
+                <View style={styles.classStudentCount}>
+
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
+
+                    <MaterialCommunityIcons name="account-group" size={18} color="#64748b" />
+
+                    <Text style={styles.studentCountText}>{studentsByClass[cls.id]?.length ?? 0} Total Students</Text>
+
+                  </View>
+
+                  <TouchableOpacity style={[styles.addStudentBtn, { backgroundColor: '#3b82f6' }]} onPress={() => handleOpenAddStudent({ id: cls.id, name: cls.name })}>
+
+                    <AntDesign name="plus" size={16} color="#ffffff" />
+
+                    <Text style={[styles.addStudentBtnText, { marginLeft: 6 }]}>Add Student</Text>
+
+                  </TouchableOpacity>
+
+                </View>
 
                  {(studentsByClass[cls.id] || []).length === 0 ? (
 
@@ -7172,7 +7226,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                </View>
 
-             ))}
+             ))
+
+             )}
 
            </View>
 
@@ -7182,15 +7238,43 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
          {activeTab === 'results' && (
 
-           <View style={{ paddingBottom: 60 }}>
+           <View style={{ paddingBottom: 140 }}>
 
-             <Text style={styles.sectionTitle}>Exercise Results & Analytics</Text>
+             {/* Header */}
+
+             <View style={styles.classTabHeader}>
+
+               <View>
+
+                 <Text style={styles.classTabTitle}>Exercise Results</Text>
+
+                 <Text style={styles.classTabSubtitle}>Track performance and analytics</Text>
+
+               </View>
+
+               <MaterialIcons name="assessment" size={32} color="#3b82f6" />
+
+             </View>
 
 
 
              {/* Class-wise Results */}
 
-             {activeClasses.map((cls) => {
+             {activeClasses.length === 0 ? (
+
+               <View style={styles.emptyStateContainer}>
+
+                 <MaterialCommunityIcons name="chart-box-outline" size={64} color="#cbd5e1" />
+
+                 <Text style={styles.emptyStateText}>No results yet</Text>
+
+                 <Text style={styles.emptyStateSubtext}>Results will appear once students complete exercises</Text>
+
+               </View>
+
+             ) : (
+
+             activeClasses.map((cls) => {
 
                const classResults = exerciseResults[cls.id] || [];
 
@@ -7216,15 +7300,37 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                return (
 
-                 <View key={cls.id} style={styles.classroomCard}>
+                 <View key={cls.id} style={styles.classTabCard}>
 
-                   <View style={styles.classroomHeader}>
+                   <View style={styles.classCardHeader}>
 
-                     <Text style={styles.classroomTitle}>{cls.name}</Text>
+                     <View style={styles.classIconContainer}>
 
-                     <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+                       <MaterialCommunityIcons name="google-classroom" size={24} color="#3b82f6" />
 
-                     <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                     </View>
+
+                     <View style={{ flex: 1 }}>
+
+                       <Text style={styles.classroomTitle}>{cls.name}</Text>
+
+                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+
+                         <MaterialIcons name="school" size={14} color="#64748b" />
+
+                         <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+
+                       </View>
+
+                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+
+                         <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+
+                         <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+
+                       </View>
+
+                     </View>
 
                    </View>
 
@@ -7888,7 +7994,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                );
 
-             })}
+             })
+
+             )}
 
            </View>
 
@@ -7898,13 +8006,35 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         {activeTab === 'class' && (
 
-          <View style={{ paddingBottom: 100 }}>
+          <View style={{ paddingBottom: 140 }}>
 
-            <Text style={styles.sectionTitle}>Classroom</Text>
+            {/* Header */}
+
+            <View style={styles.classTabHeader}>
+
+              <View>
+
+                <Text style={styles.classTabTitle}>Classroom</Text>
+
+                <Text style={styles.classTabSubtitle}>Manage your classes and students</Text>
+
+              </View>
+
+              <MaterialCommunityIcons name="google-classroom" size={32} color="#3b82f6" />
+
+            </View>
 
             {teacherClasses.length === 0 ? (
 
-              <Text style={styles.classroomSubtitle}>No classes yet.</Text>
+              <View style={styles.emptyStateContainer}>
+
+                <MaterialCommunityIcons name="school-outline" size={64} color="#cbd5e1" />
+
+                <Text style={styles.emptyStateText}>No classes yet</Text>
+
+                <Text style={styles.emptyStateSubtext}>Create a class to get started</Text>
+
+              </View>
 
             ) : (
 
@@ -7914,31 +8044,69 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                   <>
 
-                    <Text style={[styles.classroomSubtitle, { marginBottom: 8 }]}>Active</Text>
+                    <View style={styles.classSectionHeader}>
+
+                      <View style={styles.classSectionBadge}>
+
+                        <MaterialCommunityIcons name="check-circle" size={16} color="#10B981" />
+
+                        <Text style={styles.classSectionTitle}>Active Classes</Text>
+
+                      </View>
+
+                      <Text style={styles.classSectionCount}>{activeClasses.length}</Text>
+
+                    </View>
 
                     {[...activeClasses].sort(compareBySchoolYearDescThenName).map((cls) => (
 
-                      <View key={cls.id} style={[styles.classroomCard, { marginBottom: 12 }]}>
+                      <View key={cls.id} style={styles.classTabCard}>
 
-                        <View style={styles.classroomHeader}>
+                        <View style={styles.classCardHeader}>
 
-                          <Text style={styles.classroomTitle}>{cls.name}</Text>
+                          <View style={styles.classIconContainer}>
 
-                          <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
-
-                          <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
-
-                        </View>
-
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-
-                          <View style={styles.statusPillActive}>
-
-                            <Text style={styles.statusText}>Active</Text>
+                            <MaterialCommunityIcons name="google-classroom" size={24} color="#3b82f6" />
 
                           </View>
 
-                          <Text style={{ color: '#64748b' }}>Students: {studentsByClass[cls.id]?.length ?? 0}</Text>
+                          <View style={{ flex: 1 }}>
+
+                            <Text style={styles.classroomTitle}>{cls.name}</Text>
+
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+
+                              <MaterialIcons name="school" size={14} color="#64748b" />
+
+                              <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+
+                            </View>
+
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+
+                              <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+
+                              <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+
+                            </View>
+
+                          </View>
+
+                          <View style={styles.statusPillActive}>
+
+                            <MaterialCommunityIcons name="circle" size={8} color="#10B981" />
+
+                            <Text style={styles.statusTextActive}>Active</Text>
+
+                          </View>
+
+                        </View>
+
+                        <View style={styles.classStudentCount}>
+
+                          <MaterialCommunityIcons name="account-group" size={18} color="#64748b" />
+
+                          <Text style={styles.studentCountText}>{studentsByClass[cls.id]?.length ?? 0} Students</Text>
 
                         </View>
 
@@ -7986,7 +8154,19 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                   <>
 
-                    <Text style={[styles.classroomSubtitle, { marginVertical: 8 }]}>Inactive</Text>
+                    <View style={styles.classSectionHeader}>
+
+                      <View style={styles.classSectionBadge}>
+
+                        <MaterialCommunityIcons name="archive" size={16} color="#94a3b8" />
+
+                        <Text style={styles.classSectionTitle}>Inactive Classes</Text>
+
+                      </View>
+
+                      <Text style={styles.classSectionCount}>{teacherClasses.filter((c) => c.status === 'inactive').length}</Text>
+
+                    </View>
 
                     {teacherClasses
 
@@ -7996,27 +8176,53 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                       .map((cls) => (
 
-                      <View key={cls.id} style={[styles.classroomCard, { marginBottom: 12 }]}>
+                      <View key={cls.id} style={styles.classTabCard}>
 
-                        <View style={styles.classroomHeader}>
+                        <View style={styles.classCardHeader}>
 
-                          <Text style={styles.classroomTitle}>{cls.name}</Text>
+                          <View style={styles.classIconContainerInactive}>
 
-                          <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
-
-                          <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
-
-                        </View>
-
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-
-                          <View style={styles.statusPillInactive}>
-
-                            <Text style={styles.statusText}>Inactive</Text>
+                            <MaterialCommunityIcons name="google-classroom" size={24} color="#94a3b8" />
 
                           </View>
 
-                          <Text style={{ color: '#64748b' }}>Students: {studentsByClass[cls.id]?.length ?? 0}</Text>
+                          <View style={{ flex: 1 }}>
+
+                            <Text style={styles.classroomTitle}>{cls.name}</Text>
+
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+
+                              <MaterialIcons name="school" size={14} color="#64748b" />
+
+                              <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+
+                            </View>
+
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+
+                              <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+
+                              <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+
+                            </View>
+
+                          </View>
+
+                          <View style={styles.statusPillInactive}>
+
+                            <MaterialCommunityIcons name="circle" size={8} color="#94a3b8" />
+
+                            <Text style={styles.statusTextInactive}>Inactive</Text>
+
+                          </View>
+
+                        </View>
+
+                        <View style={styles.classStudentCount}>
+
+                          <MaterialCommunityIcons name="account-group" size={18} color="#64748b" />
+
+                          <Text style={styles.studentCountText}>{studentsByClass[cls.id]?.length ?? 0} Students</Text>
 
                         </View>
 
@@ -11421,7 +11627,7 @@ const styles = StyleSheet.create({
 
     paddingTop: Math.min(40, height * 0.05),
 
-    paddingBottom: Math.min(70, height * 0.08),
+    paddingBottom: Math.min(120, height * 0.15),
 
   },
 
@@ -11521,29 +11727,35 @@ const styles = StyleSheet.create({
 
   announcementCard: {
 
-    borderRadius: 24,
+    borderRadius: 20,
 
     marginBottom: 24,
 
+    marginHorizontal: 4,
+
     shadowColor: '#3b82f6',
 
-    shadowOffset: { width: 0, height: 8 },
+    shadowOffset: { width: 0, height: 4 },
 
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.12,
 
-    shadowRadius: 20,
+    shadowRadius: 16,
 
-    elevation: 8,
+    elevation: 6,
 
     overflow: 'hidden',
+
+    borderWidth: 1,
+
+    borderColor: '#dbeafe',
 
   },
 
   announcementGradient: {
 
-    backgroundColor: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)',
+    backgroundColor: '#EFF6FF',
 
-    padding: 28,
+    padding: 24,
 
     position: 'relative',
 
@@ -11555,19 +11767,29 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    marginBottom: 20,
+    marginBottom: 16,
 
   },
 
   megaphoneIcon: {
 
-    marginRight: 16,
+    marginRight: 14,
 
-    padding: 12,
+    padding: 14,
 
-    borderRadius: 16,
+    borderRadius: 18,
 
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    backgroundColor: '#DBEAFE',
+
+    shadowColor: '#3b82f6',
+
+    shadowOffset: { width: 0, height: 2 },
+
+    shadowOpacity: 0.15,
+
+    shadowRadius: 4,
+
+    elevation: 3,
 
   },
 
@@ -11585,7 +11807,7 @@ const styles = StyleSheet.create({
 
   announcementTitle: {
 
-    fontSize: 22,
+    fontSize: 24,
 
     fontWeight: '800',
 
@@ -11593,45 +11815,57 @@ const styles = StyleSheet.create({
 
     flex: 1,
 
+    letterSpacing: -0.5,
+
   },
 
   announcementBadge: {
 
-    backgroundColor: '#3b82f6',
+    backgroundColor: '#10B981',
 
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
 
-    paddingVertical: 6,
+    paddingVertical: 7,
 
-    borderRadius: 20,
+    borderRadius: 24,
 
     marginLeft: 12,
+
+    shadowColor: '#10B981',
+
+    shadowOffset: { width: 0, height: 2 },
+
+    shadowOpacity: 0.25,
+
+    shadowRadius: 4,
+
+    elevation: 3,
 
   },
 
   announcementBadgeText: {
 
-    fontSize: 12,
+    fontSize: 11,
 
-    fontWeight: '700',
+    fontWeight: '800',
 
     color: '#ffffff',
 
     textTransform: 'uppercase',
 
-    letterSpacing: 0.5,
+    letterSpacing: 1,
 
   },
 
   announcementText: {
 
-    fontSize: 16,
+    fontSize: 15,
 
-    color: '#475569',
+    color: '#64748b',
 
-    lineHeight: 24,
+    lineHeight: 22,
 
-    marginBottom: 24,
+    marginBottom: 20,
 
     fontWeight: '500',
 
@@ -11641,9 +11875,11 @@ const styles = StyleSheet.create({
 
     flexDirection: 'row',
 
-    marginBottom: 24,
+    marginBottom: 20,
 
-    gap: 20,
+    gap: 16,
+
+    flexWrap: 'wrap',
 
   },
 
@@ -11655,13 +11891,25 @@ const styles = StyleSheet.create({
 
     gap: 8,
 
+    backgroundColor: '#ffffff',
+
+    paddingHorizontal: 12,
+
+    paddingVertical: 8,
+
+    borderRadius: 12,
+
+    borderWidth: 1,
+
+    borderColor: '#E0E7FF',
+
   },
 
   featureText: {
 
-    fontSize: 14,
+    fontSize: 13,
 
-    color: '#64748b',
+    color: '#475569',
 
     fontWeight: '600',
 
@@ -11677,33 +11925,35 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#3b82f6',
 
-    paddingVertical: 16,
+    paddingVertical: 18,
 
-    paddingHorizontal: 24,
+    paddingHorizontal: 28,
 
-    borderRadius: 16,
+    borderRadius: 14,
 
     shadowColor: '#3b82f6',
 
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 6 },
 
-    shadowOpacity: 0.3,
+    shadowOpacity: 0.35,
 
-    shadowRadius: 8,
+    shadowRadius: 10,
 
-    elevation: 6,
+    elevation: 8,
 
-    gap: 8,
+    gap: 10,
 
   },
 
   announcementButtonText: {
 
-    fontSize: 16,
+    fontSize: 17,
 
     fontWeight: '700',
 
     color: '#ffffff',
+
+    letterSpacing: 0.3,
 
   },
 
@@ -12201,7 +12451,7 @@ const styles = StyleSheet.create({
 
   classroomsSection: {
 
-    marginBottom: 100, // Space for bottom nav
+    marginBottom: 140, // Space for bottom nav
 
   },
 
@@ -12253,27 +12503,27 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    borderRadius: Math.min(8, width * 0.02),
+    borderRadius: Math.min(16, width * 0.04),
 
-    padding: Math.min(12, width * 0.03),
+    padding: Math.min(20, width * 0.05),
 
-    marginHorizontal: Math.min(4, width * 0.01),
+    marginHorizontal: Math.min(8, width * 0.02),
 
-    marginBottom: Math.min(8, height * 0.01),
+    marginBottom: Math.min(16, height * 0.02),
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: 1 },
+    shadowOffset: { width: 0, height: 2 },
 
-    shadowOpacity: 0.04,
+    shadowOpacity: 0.06,
 
-    shadowRadius: 3,
+    shadowRadius: 8,
 
-    elevation: 1,
+    elevation: 3,
 
     borderWidth: 1,
 
-    borderColor: '#f1f5f9',
+    borderColor: '#e2e8f0',
 
     width: width - Math.min(32, width * 0.08),
 
@@ -12283,29 +12533,29 @@ const styles = StyleSheet.create({
 
   classroomHeader: {
 
-    marginBottom: 8,
+    marginBottom: 12,
 
   },
 
   classroomTitle: {
 
-    fontSize: Math.max(14, Math.min(18, width * 0.045)),
+    fontSize: Math.max(16, Math.min(20, width * 0.05)),
 
     fontWeight: '700',
 
     color: '#1e293b',
 
-    marginBottom: Math.min(4, height * 0.005),
+    marginBottom: Math.min(6, height * 0.008),
 
   },
 
   classroomSubtitle: {
 
-    fontSize: Math.max(11, Math.min(13, width * 0.03)),
+    fontSize: Math.max(12, Math.min(14, width * 0.035)),
 
     color: '#64748b',
 
-    marginBottom: Math.min(2, height * 0.002),
+    marginBottom: Math.min(4, height * 0.005),
 
     fontWeight: '500',
 
@@ -12313,7 +12563,7 @@ const styles = StyleSheet.create({
 
   classroomYear: {
 
-    fontSize: Math.max(10, Math.min(12, width * 0.03)),
+    fontSize: Math.max(11, Math.min(13, width * 0.032)),
 
     color: '#64748b',
 
@@ -12323,13 +12573,13 @@ const styles = StyleSheet.create({
 
   classMetricsContainer: {
 
-    marginTop: 6,
+    marginTop: 10,
 
-    padding: 12,
+    padding: 16,
 
     backgroundColor: '#f8fafc',
 
-    borderRadius: 8,
+    borderRadius: 12,
 
     borderWidth: 1,
 
@@ -12343,27 +12593,27 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    marginBottom: 6,
+    marginBottom: 8,
 
-    gap: 6,
+    gap: 8,
 
   },
 
   classMetricLabel: {
 
-    fontSize: 12,
+    fontSize: 13,
 
     color: '#64748b',
 
     fontWeight: '500',
 
-    minWidth: 80,
+    minWidth: 90,
 
   },
 
   classMetricValue: {
 
-    fontSize: 12,
+    fontSize: 13,
 
     color: '#1e293b',
 
@@ -13177,23 +13427,25 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    paddingVertical: 16,
+    paddingVertical: 12,
 
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
+
+    paddingBottom: 16,
 
     borderTopWidth: 1,
 
-    borderTopColor: '#f1f5f9',
+    borderTopColor: '#e2e8f0',
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: -4 },
+    shadowOffset: { width: 0, height: -2 },
 
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.06,
 
-    shadowRadius: 12,
+    shadowRadius: 8,
 
-    elevation: 8,
+    elevation: 6,
 
   },
 
@@ -13203,7 +13455,9 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    paddingVertical: 8,
+    paddingVertical: 6,
+
+    justifyContent: 'center',
 
   },
 
@@ -13215,13 +13469,13 @@ const styles = StyleSheet.create({
 
   navText: {
 
-    fontSize: 12,
+    fontSize: 11,
 
     color: '#9ca3af',
 
-    marginTop: 6,
+    marginTop: 4,
 
-    fontWeight: '500',
+    fontWeight: '600',
 
   },
 
@@ -13315,25 +13569,45 @@ const styles = StyleSheet.create({
 
   statusPillActive: {
 
+    flexDirection: 'row',
+
+    alignItems: 'center',
+
+    gap: 6,
+
     backgroundColor: '#dcfce7',
 
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
 
-    paddingVertical: 4,
+    paddingVertical: 6,
 
-    borderRadius: 999,
+    borderRadius: 20,
+
+    borderWidth: 1,
+
+    borderColor: '#86efac',
 
   },
 
   statusPillInactive: {
 
-    backgroundColor: '#fee2e2',
+    flexDirection: 'row',
 
-    paddingHorizontal: 10,
+    alignItems: 'center',
 
-    paddingVertical: 4,
+    gap: 6,
 
-    borderRadius: 999,
+    backgroundColor: '#f1f5f9',
+
+    paddingHorizontal: 12,
+
+    paddingVertical: 6,
+
+    borderRadius: 20,
+
+    borderWidth: 1,
+
+    borderColor: '#cbd5e1',
 
   },
 
@@ -13347,21 +13621,325 @@ const styles = StyleSheet.create({
 
   },
 
+  statusTextActive: {
+
+    color: '#15803d',
+
+    fontSize: 12,
+
+    fontWeight: '700',
+
+  },
+
+  statusTextInactive: {
+
+    color: '#64748b',
+
+    fontSize: 12,
+
+    fontWeight: '700',
+
+  },
+
+  
+
+  // Class Tab Styles
+
+  classTabHeader: {
+
+    flexDirection: 'row',
+
+    justifyContent: 'space-between',
+
+    alignItems: 'center',
+
+    marginBottom: 24,
+
+    paddingHorizontal: 12,
+
+    paddingVertical: 16,
+
+    backgroundColor: '#f8fafc',
+
+    borderRadius: 16,
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+  },
+
+  classTabTitle: {
+
+    fontSize: 24,
+
+    fontWeight: '800',
+
+    color: '#1e293b',
+
+    marginBottom: 4,
+
+  },
+
+  classTabSubtitle: {
+
+    fontSize: 14,
+
+    color: '#64748b',
+
+    fontWeight: '500',
+
+  },
+
+  emptyStateContainer: {
+
+    alignItems: 'center',
+
+    justifyContent: 'center',
+
+    paddingVertical: 60,
+
+    paddingHorizontal: 20,
+
+  },
+
+  emptyStateText: {
+
+    fontSize: 18,
+
+    fontWeight: '700',
+
+    color: '#94a3b8',
+
+    marginTop: 16,
+
+    marginBottom: 8,
+
+  },
+
+  emptyStateSubtext: {
+
+    fontSize: 14,
+
+    color: '#cbd5e1',
+
+    fontWeight: '500',
+
+  },
+
+  classSectionHeader: {
+
+    flexDirection: 'row',
+
+    justifyContent: 'space-between',
+
+    alignItems: 'center',
+
+    paddingHorizontal: 12,
+
+    paddingVertical: 12,
+
+    marginBottom: 12,
+
+    marginTop: 8,
+
+  },
+
+  classSectionBadge: {
+
+    flexDirection: 'row',
+
+    alignItems: 'center',
+
+    gap: 8,
+
+  },
+
+  classSectionTitle: {
+
+    fontSize: 16,
+
+    fontWeight: '700',
+
+    color: '#1e293b',
+
+  },
+
+  classSectionCount: {
+
+    fontSize: 16,
+
+    fontWeight: '700',
+
+    color: '#64748b',
+
+    backgroundColor: '#f1f5f9',
+
+    paddingHorizontal: 12,
+
+    paddingVertical: 4,
+
+    borderRadius: 12,
+
+  },
+
+  classTabCard: {
+
+    backgroundColor: '#ffffff',
+
+    borderRadius: 16,
+
+    padding: 18,
+
+    marginHorizontal: 8,
+
+    marginBottom: 16,
+
+    shadowColor: '#000',
+
+    shadowOffset: { width: 0, height: 2 },
+
+    shadowOpacity: 0.08,
+
+    shadowRadius: 12,
+
+    elevation: 4,
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+  },
+
+  classCardHeader: {
+
+    flexDirection: 'row',
+
+    alignItems: 'flex-start',
+
+    marginBottom: 14,
+
+    gap: 12,
+
+  },
+
+  classIconContainer: {
+
+    width: 48,
+
+    height: 48,
+
+    borderRadius: 14,
+
+    backgroundColor: '#eff6ff',
+
+    justifyContent: 'center',
+
+    alignItems: 'center',
+
+    borderWidth: 1,
+
+    borderColor: '#dbeafe',
+
+  },
+
+  classIconContainerInactive: {
+
+    width: 48,
+
+    height: 48,
+
+    borderRadius: 14,
+
+    backgroundColor: '#f8fafc',
+
+    justifyContent: 'center',
+
+    alignItems: 'center',
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+  },
+
+  classStudentCount: {
+
+    flexDirection: 'row',
+
+    alignItems: 'center',
+
+    gap: 8,
+
+    paddingVertical: 10,
+
+    paddingHorizontal: 12,
+
+    backgroundColor: '#f8fafc',
+
+    borderRadius: 10,
+
+    marginBottom: 12,
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+  },
+
+  studentCountText: {
+
+    fontSize: 14,
+
+    fontWeight: '600',
+
+    color: '#475569',
+
+  },
+
+  createExerciseButtonHeader: {
+
+    flexDirection: 'row',
+
+    alignItems: 'center',
+
+    gap: 8,
+
+    backgroundColor: '#3b82f6',
+
+    paddingHorizontal: 16,
+
+    paddingVertical: 10,
+
+    borderRadius: 12,
+
+    shadowColor: '#3b82f6',
+
+    shadowOffset: { width: 0, height: 2 },
+
+    shadowOpacity: 0.25,
+
+    shadowRadius: 4,
+
+    elevation: 3,
+
+  },
+
   exportBtn: {
 
     flexDirection: 'row',
 
     alignItems: 'center',
 
-    gap: 6,
+    gap: 4,
 
     backgroundColor: '#ef4444',
 
-    paddingHorizontal: 14,
+    paddingHorizontal: 10,
 
-    paddingVertical: 10,
+    paddingVertical: 6,
 
-    borderRadius: 10,
+    borderRadius: 8,
 
   },
 
@@ -13369,7 +13947,7 @@ const styles = StyleSheet.create({
 
     color: '#ffffff',
 
-    fontSize: 12,
+    fontSize: 10,
 
     fontWeight: '700',
 
@@ -13975,7 +14553,7 @@ const styles = StyleSheet.create({
 
   exercisesSection: {
 
-    paddingBottom: 100,
+    paddingBottom: 140,
 
   },
 
@@ -14482,34 +15060,6 @@ const styles = StyleSheet.create({
     paddingVertical: 40,
 
     paddingHorizontal: 20,
-
-  },
-
-  emptyStateText: {
-
-    fontSize: 16,
-
-    fontWeight: '600',
-
-    color: '#374151',
-
-    marginTop: 12,
-
-    textAlign: 'center',
-
-  },
-
-  emptyStateSubtext: {
-
-    fontSize: 14,
-
-    color: '#6b7280',
-
-    marginTop: 4,
-
-    textAlign: 'center',
-
-    lineHeight: 20,
 
   },
 
