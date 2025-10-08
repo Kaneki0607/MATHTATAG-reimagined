@@ -23,6 +23,7 @@ import {
   Modal,
 
   PanResponder,
+  Platform,
   RefreshControl,
 
   ScrollView,
@@ -8082,7 +8083,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         {activeTab === 'class' && (
 
-          <View style={{ paddingBottom: 140 }}>
+          <View style={{ paddingBottom: 350 }}>
 
             {/* Header */}
 
@@ -9513,6 +9514,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
             <ScrollView 
 
               style={styles.profileContent}
+
+              contentContainerStyle={{ paddingBottom: 20 }}
 
               nestedScrollEnabled={true}
 
@@ -13505,25 +13508,25 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    paddingVertical: Math.min(8, height * 0.01),
+    paddingVertical: 2,
 
-    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingHorizontal: 20,
 
-    paddingBottom: Math.min(12, height * 0.015),
+    paddingBottom: Platform.OS === 'ios' ? 6 : 2,
 
     borderTopWidth: 1,
 
-    borderTopColor: '#e2e8f0',
+    borderTopColor: '#f1f5f9',
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: -1 },
+    shadowOffset: { width: 0, height: -4 },
 
-    shadowOpacity: 0.05,
+    shadowOpacity: 0.08,
 
-    shadowRadius: 4,
+    shadowRadius: 12,
 
-    elevation: 4,
+    elevation: 8,
 
   },
 
@@ -13533,9 +13536,7 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    paddingVertical: Math.min(4, height * 0.005),
-
-    justifyContent: 'center',
+    paddingVertical: 8,
 
   },
 
@@ -13547,13 +13548,13 @@ const styles = StyleSheet.create({
 
   navText: {
 
-    fontSize: Math.min(9, width * 0.022),
+    fontSize: 12,
 
     color: '#9ca3af',
 
-    marginTop: Math.min(2, height * 0.002),
+    marginTop: 6,
 
-    fontWeight: '600',
+    fontWeight: '500',
 
   },
 
@@ -13871,7 +13872,7 @@ const styles = StyleSheet.create({
 
     marginHorizontal: 8,
 
-    marginBottom: 16,
+    marginBottom: 32,
 
     shadowColor: '#000',
 
