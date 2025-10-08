@@ -1172,7 +1172,7 @@ export default function SuperAdminDashboard() {
                 <Text style={styles.logsTitle}>App Updates</Text>
               </View>
               <TouchableOpacity style={styles.refreshButton} onPress={loadMaintenanceStatus} disabled={refreshing}>
-                <MaterialIcons name="refresh" size={20} color="#FFFFFF" />
+                <MaterialIcons name="refresh" size={20} color="#0ea5e9" />
               </TouchableOpacity>
             </View>
             <Text style={styles.logsSubtitle}>Manage app version and update notifications</Text>
@@ -2811,7 +2811,7 @@ const styles = StyleSheet.create({
   },
   apiKeysList: {
     padding: 20,
-    paddingBottom: 250,
+    paddingBottom: 150,
     gap: 12,
   },
   apiKeyCardItem: {
@@ -3192,7 +3192,7 @@ const styles = StyleSheet.create({
   },
   professionalApiKeysList: {
     padding: 16,
-    paddingBottom: 250,
+    paddingBottom: 150,
   },
   professionalApiKeyCard: {
     backgroundColor: '#ffffff',
@@ -3763,7 +3763,7 @@ const styles = StyleSheet.create({
   },
   logsList: {
     padding: 16,
-    paddingBottom: 250,
+    paddingBottom: 150,
   },
   logCardHeader: {
     flexDirection: 'row',
@@ -3951,7 +3951,7 @@ const styles = StyleSheet.create({
   },
   professionalTeachersList: {
     padding: 16,
-    paddingBottom: 250,
+    paddingBottom: 150,
   },
   professionalTeacherCard: {
     backgroundColor: '#ffffff',
