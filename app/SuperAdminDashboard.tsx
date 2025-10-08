@@ -6,7 +6,7 @@ import { addApiKey, deleteApiKey, getApiKeyStatus } from '../lib/elevenlabs-keys
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
 import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
 
-type TabKey = 'home' | 'teachers' | 'apikeys' | 'logs';
+type TabKey = 'home' | 'teachers' | 'apikeys' | 'reports';
 
 interface Admin {
   uid: string;
@@ -467,10 +467,10 @@ export default function SuperAdminDashboard() {
                   <Text style={styles.adminToolSubtext}>Manage keys</Text>
                 </TouchableOpacity>
                 
-                <TouchableOpacity style={styles.adminToolButton} onPress={() => setActiveTab('logs')}>
-                  <MaterialIcons name="analytics" size={20} color="#f59e0b" />
-                  <Text style={styles.adminToolLabel}>Logs</Text>
-                  <Text style={styles.adminToolSubtext}>System logs</Text>
+                <TouchableOpacity style={styles.adminToolButton} onPress={() => setActiveTab('reports')}>
+                  <MaterialCommunityIcons name="ticket-outline" size={20} color="#f59e0b" />
+                  <Text style={styles.adminToolLabel}>Reports</Text>
+                  <Text style={styles.adminToolSubtext}>Tech reports</Text>
                 </TouchableOpacity>
                 
                 <TouchableOpacity style={styles.adminToolButton} onPress={async () => {
@@ -1082,14 +1082,14 @@ export default function SuperAdminDashboard() {
         </View>
       )}
 
-      {/* Logs Tab - Advanced System Monitoring */}
-      {activeTab === 'logs' && (
+      {/* Reports Tab - Technical Reports from Teachers & Parents */}
+      {activeTab === 'reports' && (
         <View style={styles.logsContainer}>
-          {/* Logs Header with Controls */}
+          {/* Reports Header with Controls */}
           <View style={styles.logsHeader}>
             <View style={styles.logsHeaderTop}>
               <View style={styles.logsTitleSection}>
-                <Text style={styles.logsTitle}>System Logs & Analytics</Text>
+                <Text style={styles.logsTitle}>Technical Reports</Text>
                 <View style={styles.logsBadge}>
                   <Text style={styles.logsBadgeText}>{logs.length}</Text>
                 </View>
@@ -1143,7 +1143,7 @@ export default function SuperAdminDashboard() {
               <MaterialIcons name="search" size={18} color="#9ca3af" />
               <TextInput
                 style={styles.logsSearchInput}
-                placeholder="Search logs by message or teacher ID..."
+                placeholder="Search reports by message, user, or description..."
                 placeholderTextColor="#9ca3af"
                 value={searchQuery}
                 onChangeText={setSearchQuery}
@@ -1229,10 +1229,10 @@ export default function SuperAdminDashboard() {
             )}
             ListEmptyComponent={
               <View style={styles.logsEmptyContainer}>
-                <MaterialIcons name="analytics" size={48} color="#d1d5db" />
-                <Text style={styles.logsEmptyTitle}>No Logs Found</Text>
+                <MaterialCommunityIcons name="ticket-outline" size={48} color="#d1d5db" />
+                <Text style={styles.logsEmptyTitle}>No Reports Found</Text>
                 <Text style={styles.logsEmptySubtitle}>
-                  {searchQuery ? 'Try adjusting your search terms' : 'System logs will appear here as activities occur'}
+                  {searchQuery ? 'Try adjusting your search terms' : 'Technical reports from teachers and parents will appear here'}
                 </Text>
               </View>
             }
@@ -1270,12 +1270,12 @@ export default function SuperAdminDashboard() {
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.navItem, activeTab === 'logs' && styles.activeNavItem]}
-          onPress={() => setActiveTab('logs')}
+          style={[styles.navItem, activeTab === 'reports' && styles.activeNavItem]}
+          onPress={() => setActiveTab('reports')}
         >
-          <View style={[styles.activeIndicator, activeTab === 'logs' ? styles.activeIndicatorOn : undefined]} />
-          <MaterialIcons name="analytics" size={26} color={activeTab === 'logs' ? '#0ea5e9' : '#9ca3af'} />
-          <Text style={[styles.navText, activeTab === 'logs' && styles.activeNavText]}>Logs</Text>
+          <View style={[styles.activeIndicator, activeTab === 'reports' ? styles.activeIndicatorOn : undefined]} />
+          <MaterialCommunityIcons name="ticket-outline" size={26} color={activeTab === 'reports' ? '#0ea5e9' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'reports' && styles.activeNavText]}>Reports</Text>
         </TouchableOpacity>
         </View>
 

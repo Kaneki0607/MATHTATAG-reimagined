@@ -91,6 +91,118 @@ interface Task {
 
 const { width, height } = Dimensions.get('window');
 
+interface CustomAlertProps {
+  visible: boolean;
+  title: string;
+  message: string;
+  buttons?: Array<{
+    text: string;
+    onPress?: () => void;
+    style?: 'default' | 'cancel' | 'destructive';
+  }>;
+  onClose: () => void;
+  icon?: 'success' | 'error' | 'warning' | 'info';
+}
+
+const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, buttons = [], onClose, icon }) => {
+  if (!visible) return null;
+
+  const defaultButtons = buttons.length > 0 ? buttons : [{ text: 'OK', onPress: onClose }];
+  const isThreeButtons = defaultButtons.length === 3;
+  const isFourButtons = defaultButtons.length === 4;
+
+  const renderIcon = () => {
+    if (!icon) return null;
+
+    const iconSize = 48;
+    const iconContainerStyle = {
+      marginBottom: 16,
+      alignItems: 'center' as const,
+    };
+
+    switch (icon) {
+      case 'success':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="check" size={iconSize} color="#10b981" />
+          </View>
+        );
+      case 'error':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="close" size={iconSize} color="#ef4444" />
+          </View>
+        );
+      case 'warning':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="warning" size={iconSize} color="#f59e0b" />
+          </View>
+        );
+      case 'info':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="info" size={iconSize} color="#3b82f6" />
+          </View>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <Modal
+      transparent
+      visible={visible}
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <View style={styles.alertOverlay}>
+        <View style={styles.alertContainer}>
+          <View style={styles.alertContent}>
+            {renderIcon()}
+            <Text style={styles.alertTitle}>{title}</Text>
+            <Text style={styles.alertMessage}>{message}</Text>
+            <View style={[
+              styles.alertButtons,
+              isThreeButtons && styles.alertButtonsThree,
+              isFourButtons && styles.alertButtonsFour
+            ]}>
+              {defaultButtons.map((button, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={[
+                    styles.alertButton,
+                    button.style === 'destructive' && styles.alertButtonDestructive,
+                    button.style === 'cancel' && styles.alertButtonCancel,
+                    defaultButtons.length === 1 && styles.alertButtonSingle,
+                    isThreeButtons && styles.alertButtonThree,
+                    isFourButtons && styles.alertButtonFour
+                  ]}
+                  onPress={() => {
+                    if (button.onPress) {
+                      button.onPress();
+                    }
+                    onClose();
+                  }}
+                >
+                  <Text style={[
+                    styles.alertButtonText,
+                    button.style === 'destructive' && styles.alertButtonTextDestructive,
+                    button.style === 'cancel' && styles.alertButtonTextCancel
+                  ]}>
+                    {button.text}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
 export default function ParentDashboard() {
   const router = useRouter();
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -162,6 +274,14 @@ export default function ParentDashboard() {
   const [reportDescription, setReportDescription] = useState('');
   const [reportScreenshots, setReportScreenshots] = useState<string[]>([]);
   const [submittingReport, setSubmittingReport] = useState(false);
+  
+  // Custom alert state
+  const [showCustomAlert, setShowCustomAlert] = useState(false);
+  const [alertConfig, setAlertConfig] = useState({
+    title: '',
+    message: '',
+    icon: 'success' as 'success' | 'error' | 'warning' | 'info',
+  });
 
   // Load parent data on component mount
   useEffect(() => {
@@ -1843,6 +1963,16 @@ Focus on:
     setReportScreenshots(prev => prev.filter(s => s !== uri));
   };
 
+  // Show custom alert helper function
+  const showCustomAlertMessage = (
+    title: string, 
+    message: string, 
+    icon: 'success' | 'error' | 'warning' | 'info' = 'success'
+  ) => {
+    setAlertConfig({ title, message, icon });
+    setShowCustomAlert(true);
+  };
+
   const submitTechnicalReport = async () => {
     if (!reportDescription.trim()) {
       Alert.alert('Missing Information', 'Please describe the problem.');
@@ -1886,7 +2016,11 @@ Focus on:
         setShowTechReportModal(false);
         setReportDescription('');
         setReportScreenshots([]);
-        Alert.alert('Success', 'Your technical report has been submitted to the Admin. Thank you for helping us improve!');
+        showCustomAlertMessage(
+          'Success', 
+          'Your technical report has been submitted to the Admin. Thank you for helping us improve!',
+          'success'
+        );
       } else {
         throw new Error(error || 'Failed to submit report');
       }
@@ -1897,7 +2031,11 @@ Focus on:
       } else {
         logError('Failed to submit technical report: ' + String(error), 'error', 'ParentDashboard');
       }
-      Alert.alert('Error', 'Failed to submit report. Please try again later.');
+      showCustomAlertMessage(
+        'Error', 
+        'Failed to submit report. Please try again later.',
+        'error'
+      );
     } finally {
       setSubmittingReport(false);
     }
@@ -3355,6 +3493,15 @@ Focus on:
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Custom Alert */}
+      <CustomAlert
+        visible={showCustomAlert}
+        title={alertConfig.title}
+        message={alertConfig.message}
+        icon={alertConfig.icon}
+        onClose={() => setShowCustomAlert(false)}
+      />
       
     </View>
   );
@@ -5541,5 +5688,96 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '700',
     fontSize: 15,
+  },
+  // Custom Alert Styles
+  alertOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  alertContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 0,
+    minWidth: 280,
+    maxWidth: 350,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  alertContent: {
+    padding: 20,
+  },
+  alertTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#1f2937',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  alertMessage: {
+    fontSize: 15,
+    color: '#6b7280',
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  alertButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  alertButtonsThree: {
+    flexDirection: 'column',
+  },
+  alertButtonsFour: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  alertButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 120,
+  },
+  alertButtonSingle: {
+    width: '100%',
+  },
+  alertButtonThree: {
+    width: '100%',
+    marginBottom: 8,
+  },
+  alertButtonFour: {
+    flex: 1,
+    minWidth: '45%',
+  },
+  alertButtonDestructive: {
+    backgroundColor: '#ef4444',
+  },
+  alertButtonCancel: {
+    backgroundColor: '#6b7280',
+  },
+  alertButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  alertButtonTextDestructive: {
+    color: '#ffffff',
+  },
+  alertButtonTextCancel: {
+    color: '#ffffff',
   },
 });
