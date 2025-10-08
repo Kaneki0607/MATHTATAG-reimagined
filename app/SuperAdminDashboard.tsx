@@ -6,7 +6,7 @@ import { addApiKey, deleteApiKey, getApiKeyStatus } from '../lib/elevenlabs-keys
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
 import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
 
-type TabKey = 'home' | 'teachers' | 'apikeys' | 'reports';
+type TabKey = 'home' | 'teachers' | 'apikeys' | 'logs';
 
 interface Admin {
   uid: string;
@@ -75,6 +75,40 @@ export default function SuperAdminDashboard() {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'low_credits' | 'failed'>('all');
   
+  // Maintenance status state
+  const [maintenanceStatus, setMaintenanceStatus] = useState<{
+    isEnabled: boolean;
+    message: string;
+    version: string;
+  }>({
+    isEnabled: false,
+    message: 'App is under maintenance. Please try again later.',
+    version: '1.0.0'
+  });
+  const [showMaintenanceModal, setShowMaintenanceModal] = useState(false);
+  const [maintenanceMessage, setMaintenanceMessage] = useState('');
+  const [appVersion, setAppVersion] = useState('1.0.0');
+  const [downloadUrl, setDownloadUrl] = useState('');
+  
+  // Update notification modal state
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState('');
+  const [updateVersion, setUpdateVersion] = useState('1.0.0');
+  const [updateDownloadUrl, setUpdateDownloadUrl] = useState('');
+  
+  // Update notification state (separate from maintenance)
+  const [updateNotification, setUpdateNotification] = useState<{
+    isEnabled: boolean;
+    message: string;
+    version: string;
+    downloadUrl: string;
+  }>({
+    isEnabled: false,
+    message: 'A new version of the app is available.',
+    version: '1.0.0',
+    downloadUrl: ''
+  });
+  
   // Modal state
   const [showTeacherModal, setShowTeacherModal] = useState(false);
   const [selectedTeacher, setSelectedTeacher] = useState<Teacher | null>(null);
@@ -94,6 +128,74 @@ export default function SuperAdminDashboard() {
     const unsub = onAuthChange(() => setFromUser());
     return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
+
+  // Load maintenance status on component mount
+  useEffect(() => {
+    loadMaintenanceStatus();
+  }, []);
+
+  const loadMaintenanceStatus = async () => {
+    try {
+      const [maintenanceResult, updateResult] = await Promise.all([
+        readData('/maintenanceStatus'),
+        readData('/updateNotification')
+      ]);
+      
+      if (maintenanceResult.data) {
+        setMaintenanceStatus(maintenanceResult.data);
+        setMaintenanceMessage(maintenanceResult.data.message || '');
+        setAppVersion(maintenanceResult.data.version || '1.0.0');
+      }
+      
+      if (updateResult.data) {
+        setUpdateNotification(updateResult.data);
+        setUpdateMessage(updateResult.data.message || '');
+        setUpdateVersion(updateResult.data.version || '1.0.0');
+        setUpdateDownloadUrl(updateResult.data.downloadUrl || '');
+      }
+    } catch (error) {
+      console.error('Failed to load maintenance status:', error);
+    }
+  };
+
+  const updateMaintenanceStatus = async () => {
+    try {
+      const newStatus = {
+        isEnabled: maintenanceStatus.isEnabled,
+        message: maintenanceMessage,
+        version: appVersion,
+        updatedAt: new Date().toISOString(),
+        updatedBy: superAdminName || 'Super Admin'
+      };
+      
+      await writeData('/maintenanceStatus', newStatus);
+      setMaintenanceStatus(newStatus);
+      setShowMaintenanceModal(false);
+      Alert.alert('Success', 'Maintenance status updated successfully');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to update maintenance status');
+    }
+  };
+
+  const updateNotificationStatus = async () => {
+    try {
+      const newStatus = {
+        isEnabled: updateNotification.isEnabled,
+        message: updateMessage,
+        version: updateVersion,
+        downloadUrl: updateDownloadUrl,
+        updatedAt: new Date().toISOString(),
+        updatedBy: superAdminName || 'Super Admin'
+      };
+      
+      await writeData('/updateNotification', newStatus);
+      setUpdateNotification(newStatus);
+      setShowUpdateModal(false);
+      Alert.alert('Success', 'Update notification settings updated successfully');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to update notification settings');
+    }
+  };
 
   // Fetch all data
   const fetchAll = async () => {
@@ -467,10 +569,12 @@ export default function SuperAdminDashboard() {
                   <Text style={styles.adminToolSubtext}>Manage keys</Text>
                 </TouchableOpacity>
                 
-                <TouchableOpacity style={styles.adminToolButton} onPress={() => setActiveTab('reports')}>
-                  <MaterialCommunityIcons name="ticket-outline" size={20} color="#f59e0b" />
-                  <Text style={styles.adminToolLabel}>Reports</Text>
-                  <Text style={styles.adminToolSubtext}>Tech reports</Text>
+                <TouchableOpacity style={styles.adminToolButton} onPress={() => {
+                  setActiveTab('logs');
+                }}>
+                  <MaterialIcons name="system-update" size={20} color="#f59e0b" />
+                  <Text style={styles.adminToolLabel}>Updates</Text>
+                  <Text style={styles.adminToolSubtext}>App updates</Text>
                 </TouchableOpacity>
                 
                 <TouchableOpacity style={styles.adminToolButton} onPress={async () => {
@@ -566,38 +670,14 @@ export default function SuperAdminDashboard() {
                   <Text style={styles.adminToolSubtext}>System info</Text>
                 </TouchableOpacity>
                 
-                <TouchableOpacity style={styles.adminToolButton} onPress={async () => {
-                  Alert.alert(
-                    'Emergency Actions',
-                    '⚠️ WARNING: These actions are irreversible!',
-                    [
-                      { text: 'Cancel', style: 'cancel' },
-                      { text: 'Block All Teachers', onPress: async () => {
-                        try {
-                          for (const teacher of teachers) {
-                            await updateData(`/teachers/${teacher.uid}`, { isBlocked: true });
-                          }
-                          Alert.alert('Success', 'All teachers blocked');
-                          await fetchAll();
-                        } catch (error) {
-                          Alert.alert('Error', 'Failed to block teachers');
-                        }
-                      }},
-                      { text: 'Delete All Logs', onPress: async () => {
-                        try {
-                          await deleteData('/teacherLogs');
-                          Alert.alert('Success', 'All logs deleted');
-                          await fetchAll();
-                        } catch (error) {
-                          Alert.alert('Error', 'Failed to delete logs');
-                        }
-                      }}
-                    ]
-                  );
+                <TouchableOpacity style={styles.adminToolButton} onPress={() => {
+                  setMaintenanceMessage(maintenanceStatus.message);
+                  setAppVersion(maintenanceStatus.version);
+                  setShowMaintenanceModal(true);
                 }}>
-                  <MaterialIcons name="warning" size={20} color="#ef4444" />
-                  <Text style={styles.adminToolLabel}>Emergency</Text>
-                  <Text style={styles.adminToolSubtext}>Critical actions</Text>
+                  <MaterialIcons name="build" size={20} color="#ef4444" />
+                  <Text style={styles.adminToolLabel}>Maintenance</Text>
+                  <Text style={styles.adminToolSubtext}>Maintenance mode</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1082,161 +1162,105 @@ export default function SuperAdminDashboard() {
         </View>
       )}
 
-      {/* Reports Tab - Technical Reports from Teachers & Parents */}
-      {activeTab === 'reports' && (
+      {/* Updates Tab - App Version Management */}
+      {activeTab === 'logs' && (
         <View style={styles.logsContainer}>
-          {/* Reports Header with Controls */}
           <View style={styles.logsHeader}>
             <View style={styles.logsHeaderTop}>
               <View style={styles.logsTitleSection}>
-                <Text style={styles.logsTitle}>Technical Reports</Text>
-                <View style={styles.logsBadge}>
-                  <Text style={styles.logsBadgeText}>{logs.length}</Text>
-                </View>
+                <MaterialIcons name="system-update" size={24} color="#1e293b" />
+                <Text style={styles.logsTitle}>App Updates</Text>
               </View>
+              <TouchableOpacity style={styles.refreshButton} onPress={loadMaintenanceStatus} disabled={refreshing}>
+                <MaterialIcons name="refresh" size={20} color="#0ea5e9" />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.logsSubtitle}>Manage app version and update notifications</Text>
+          </View>
+
+          <ScrollView style={styles.logsList} showsVerticalScrollIndicator={false}>
+            {/* Maintenance Status Card */}
+            <View style={styles.updateCard}>
+              <View style={styles.updateHeader}>
+                <MaterialIcons name="build" size={24} color="#ef4444" />
+                <Text style={styles.updateTitle}>Maintenance Mode</Text>
+              </View>
+              <Text style={styles.updateVersion}>Version: {maintenanceStatus.version}</Text>
+              <Text style={styles.updateMessage}>{maintenanceStatus.message}</Text>
               
-              <View style={styles.logsActions}>
-                <TouchableOpacity
-                  style={styles.logsActionButton}
-                  onPress={async () => {
-                    try {
-                      await deleteData('/teacherLogs');
-                      Alert.alert('Success', 'All logs cleared');
-                      await fetchAll();
-                    } catch (error) {
-                      Alert.alert('Error', 'Failed to clear logs');
-                    }
-                  }}
-                >
-                  <MaterialIcons name="clear-all" size={18} color="#ef4444" />
-                </TouchableOpacity>
-                
-                <TouchableOpacity
-                  style={styles.logsActionButton}
-                  onPress={() => fetchAll()}
-                >
-                  <MaterialIcons name="refresh" size={18} color="#0ea5e9" />
-                </TouchableOpacity>
-              </View>
-            </View>
-            
-            {/* Log Statistics */}
-            <View style={styles.logStatsRow}>
-              <View style={styles.logStatItem}>
-                <View style={[styles.logStatDot, { backgroundColor: '#10b981' }]} />
-                <Text style={styles.logStatText}>Recent: {logs.filter(l => new Date(l.timestamp) > new Date(Date.now() - 24*60*60*1000)).length}</Text>
-              </View>
-              <View style={styles.logStatItem}>
-                <View style={[styles.logStatDot, { backgroundColor: '#f59e0b' }]} />
-                <Text style={styles.logStatText}>This Week: {logs.filter(l => new Date(l.timestamp) > new Date(Date.now() - 7*24*60*60*1000)).length}</Text>
-              </View>
-              <View style={styles.logStatItem}>
-                <View style={[styles.logStatDot, { backgroundColor: '#ef4444' }]} />
-                <Text style={styles.logStatText}>Errors: {logs.filter(l => l.message.toLowerCase().includes('error')).length}</Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Search and Filter Controls */}
-          <View style={styles.logsControls}>
-            <View style={styles.logsSearchContainer}>
-              <MaterialIcons name="search" size={18} color="#9ca3af" />
-              <TextInput
-                style={styles.logsSearchInput}
-                placeholder="Search reports by message, user, or description..."
-                placeholderTextColor="#9ca3af"
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-              />
-              {searchQuery.length > 0 && (
-                <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.logsClearButton}>
-                  <MaterialIcons name="clear" size={16} color="#9ca3af" />
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
-
-          {/* Logs List */}
-          <FlatList
-            data={filteredLogs}
-            keyExtractor={(l) => l.id}
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            contentContainerStyle={styles.logsList}
-            showsVerticalScrollIndicator={false}
-            renderItem={({ item: log, index }) => (
-              <View style={[
-                styles.logCard,
-                { marginTop: index === 0 ? 0 : 8 }
-              ]}>
-                <View style={styles.logCardHeader}>
-                  <View style={styles.logCardLeft}>
-                    <MaterialIcons 
-                      name={
-                        log.message.toLowerCase().includes('error') ? 'error' :
-                        log.message.toLowerCase().includes('login') ? 'login' :
-                        log.message.toLowerCase().includes('create') ? 'add' :
-                        log.message.toLowerCase().includes('delete') ? 'delete' :
-                        'info'
-                      } 
-                      size={18} 
-                      color={
-                        log.message.toLowerCase().includes('error') ? '#ef4444' :
-                        log.message.toLowerCase().includes('login') ? '#10b981' :
-                        log.message.toLowerCase().includes('create') ? '#0ea5e9' :
-                        log.message.toLowerCase().includes('delete') ? '#f59e0b' :
-                        '#64748b'
-                      } 
-                    />
-                    <Text style={styles.logTime}>{new Date(log.timestamp).toLocaleString()}</Text>
-                  </View>
-                  <View style={[
-                    styles.logTypeBadge,
-                    {
-                      backgroundColor: log.message.toLowerCase().includes('error') ? '#fee2e2' :
-                                      log.message.toLowerCase().includes('login') ? '#dcfce7' :
-                                      log.message.toLowerCase().includes('create') ? '#dbeafe' :
-                                      log.message.toLowerCase().includes('delete') ? '#fef3c7' :
-                                      '#f1f5f9'
-                    }
-                  ]}>
-                    <Text style={[
-                      styles.logTypeText,
-                      {
-                        color: log.message.toLowerCase().includes('error') ? '#dc2626' :
-                               log.message.toLowerCase().includes('login') ? '#16a34a' :
-                               log.message.toLowerCase().includes('create') ? '#2563eb' :
-                               log.message.toLowerCase().includes('delete') ? '#d97706' :
-                               '#64748b'
-                      }
-                    ]}>
-                      {log.message.toLowerCase().includes('error') ? 'ERROR' :
-                       log.message.toLowerCase().includes('login') ? 'LOGIN' :
-                       log.message.toLowerCase().includes('create') ? 'CREATE' :
-                       log.message.toLowerCase().includes('delete') ? 'DELETE' :
-                       'INFO'}
-                    </Text>
-                  </View>
-                </View>
-                <Text style={styles.logMessage}>{log.message}</Text>
-                {log.teacherId && (
-                  <View style={styles.logTeacherInfo}>
-                    <MaterialIcons name="person" size={14} color="#64748b" />
-                    <Text style={styles.logTeacherId}>Teacher ID: {log.teacherId}</Text>
-                  </View>
-                )}
-              </View>
-            )}
-            ListEmptyComponent={
-              <View style={styles.logsEmptyContainer}>
-                <MaterialCommunityIcons name="ticket-outline" size={48} color="#d1d5db" />
-                <Text style={styles.logsEmptyTitle}>No Reports Found</Text>
-                <Text style={styles.logsEmptySubtitle}>
-                  {searchQuery ? 'Try adjusting your search terms' : 'Technical reports from teachers and parents will appear here'}
+              <View style={styles.updateStatus}>
+                <View style={[styles.statusIndicator, maintenanceStatus.isEnabled ? styles.statusIndicatorActive : styles.statusIndicatorInactive]} />
+                <Text style={styles.statusText}>
+                  {maintenanceStatus.isEnabled ? 'Maintenance Mode Active' : 'Normal Operation'}
                 </Text>
               </View>
-            }
-          />
+
+              <TouchableOpacity 
+                style={styles.updateEditButton}
+                onPress={() => {
+                  setMaintenanceMessage(maintenanceStatus.message);
+                  setAppVersion(maintenanceStatus.version);
+                  setShowMaintenanceModal(true);
+                }}
+              >
+                <MaterialIcons name="edit" size={20} color="#ffffff" />
+                <Text style={styles.updateEditButtonText}>Edit Maintenance Settings</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Update Notification Card */}
+            <View style={styles.updateCard}>
+              <View style={styles.updateHeader}>
+                <MaterialIcons name="system-update" size={24} color="#0ea5e9" />
+                <Text style={styles.updateTitle}>Update Notifications</Text>
+              </View>
+              <Text style={styles.updateVersion}>{updateNotification.version}</Text>
+              <Text style={styles.updateMessage}>{updateNotification.message}</Text>
+              
+              <View style={styles.updateStatus}>
+                <View style={[styles.statusIndicator, updateNotification.isEnabled ? styles.statusIndicatorActive : styles.statusIndicatorInactive]} />
+                <Text style={styles.statusText}>
+                  {updateNotification.isEnabled ? 'Update Notifications Enabled' : 'Update Notifications Disabled'}
+                </Text>
+              </View>
+
+              {updateNotification.downloadUrl && (
+                <View style={styles.downloadSection}>
+                  <Text style={styles.downloadLabel}>Download URL:</Text>
+                  <Text style={styles.downloadUrl}>{updateNotification.downloadUrl}</Text>
+                </View>
+              )}
+
+              <TouchableOpacity 
+                style={styles.updateEditButton}
+                onPress={() => {
+                  setUpdateMessage(updateNotification.message);
+                  setUpdateVersion(updateNotification.version);
+                  setUpdateDownloadUrl(updateNotification.downloadUrl);
+                  setShowUpdateModal(true);
+                }}
+              >
+                <MaterialIcons name="edit" size={20} color="#ffffff" />
+                <Text style={styles.updateEditButtonText}>Edit Update Settings</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.updateInfoCard}>
+              <Text style={styles.infoTitle}>How it works:</Text>
+              <Text style={styles.infoText}>
+                • <Text style={styles.boldText}>Maintenance Mode:</Text> When enabled, completely blocks all teacher and parent login attempts with maintenance message
+              </Text>
+              <Text style={styles.infoText}>
+                • <Text style={styles.boldText}>Update Mode:</Text> Forces users to update - they cannot continue with old version, must download latest version
+              </Text>
+              <Text style={styles.infoText}>
+                • <Text style={styles.boldText}>Download URLs:</Text> Should point to the latest APK file for Android users
+              </Text>
+              <Text style={styles.infoText}>
+                • <Text style={styles.boldText}>Version Control:</Text> Users must update to continue using the app
+              </Text>
+            </View>
+          </ScrollView>
         </View>
       )}
 
@@ -1270,12 +1294,12 @@ export default function SuperAdminDashboard() {
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.navItem, activeTab === 'reports' && styles.activeNavItem]}
-          onPress={() => setActiveTab('reports')}
+          style={[styles.navItem, activeTab === 'logs' && styles.activeNavItem]}
+          onPress={() => setActiveTab('logs')}
         >
-          <View style={[styles.activeIndicator, activeTab === 'reports' ? styles.activeIndicatorOn : undefined]} />
-          <MaterialCommunityIcons name="ticket-outline" size={26} color={activeTab === 'reports' ? '#0ea5e9' : '#9ca3af'} />
-          <Text style={[styles.navText, activeTab === 'reports' && styles.activeNavText]}>Reports</Text>
+          <View style={[styles.activeIndicator, activeTab === 'logs' ? styles.activeIndicatorOn : undefined]} />
+          <MaterialIcons name="analytics" size={26} color={activeTab === 'logs' ? '#0ea5e9' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'logs' && styles.activeNavText]}>Logs</Text>
         </TouchableOpacity>
         </View>
 
@@ -1697,6 +1721,179 @@ export default function SuperAdminDashboard() {
                 ) : (
                   <Text style={{ color: '#ffffff', fontWeight: '700' }}>Add Keys</Text>
                 )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Maintenance Status Modal */}
+      <Modal
+        visible={showMaintenanceModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowMaintenanceModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Maintenance Mode</Text>
+              <TouchableOpacity style={styles.closeButton} onPress={() => setShowMaintenanceModal(false)}>
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <View style={styles.maintenanceSection}>
+                <View style={styles.maintenanceToggle}>
+                  <Text style={styles.maintenanceLabel}>Enable Maintenance Mode</Text>
+                  <TouchableOpacity
+                    style={[styles.toggleButton, maintenanceStatus.isEnabled && styles.toggleButtonActive]}
+                    onPress={() => setMaintenanceStatus(prev => ({ ...prev, isEnabled: !prev.isEnabled }))}
+                  >
+                    <View style={[styles.toggleThumb, maintenanceStatus.isEnabled && styles.toggleThumbActive]} />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Maintenance Message</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={maintenanceMessage}
+                    onChangeText={setMaintenanceMessage}
+                    placeholder="Enter maintenance message..."
+                    placeholderTextColor="#94a3b8"
+                    multiline
+                    numberOfLines={3}
+                  />
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>App Version (for reference)</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={appVersion}
+                    onChangeText={setAppVersion}
+                    placeholder="e.g., 1.0.0"
+                    placeholderTextColor="#94a3b8"
+                  />
+                </View>
+
+                <View style={styles.maintenanceStatus}>
+                  <Text style={styles.statusLabel}>Current Status:</Text>
+                  <View style={[styles.maintenanceStatusBadge, maintenanceStatus.isEnabled ? styles.maintenanceStatusBadgeActive : styles.maintenanceStatusBadgeInactive]}>
+                    <Text style={[styles.maintenanceStatusText, maintenanceStatus.isEnabled ? styles.maintenanceStatusTextActive : styles.maintenanceStatusTextInactive]}>
+                      {maintenanceStatus.isEnabled ? 'MAINTENANCE ENABLED' : 'NORMAL OPERATION'}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.actionButton, styles.cancelButton]}
+                onPress={() => setShowMaintenanceModal(false)}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionButton, styles.saveButton]}
+                onPress={updateMaintenanceStatus}
+              >
+                <Text style={styles.saveButtonText}>Save Changes</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Update Notification Modal */}
+      <Modal
+        visible={showUpdateModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowUpdateModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Update Notifications</Text>
+              <TouchableOpacity style={styles.closeButton} onPress={() => setShowUpdateModal(false)}>
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <View style={styles.maintenanceSection}>
+                <View style={styles.maintenanceToggle}>
+                  <Text style={styles.maintenanceLabel}>Enable Update Notifications</Text>
+                  <TouchableOpacity
+                    style={[styles.toggleButton, updateNotification.isEnabled && styles.toggleButtonActive]}
+                    onPress={() => setUpdateNotification(prev => ({ ...prev, isEnabled: !prev.isEnabled }))}
+                  >
+                    <View style={[styles.toggleThumb, updateNotification.isEnabled && styles.toggleThumbActive]} />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Update Message</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={updateMessage}
+                    onChangeText={setUpdateMessage}
+                    placeholder="Enter update notification message..."
+                    placeholderTextColor="#94a3b8"
+                    multiline
+                    numberOfLines={3}
+                  />
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Latest App Version</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={updateVersion}
+                    onChangeText={setUpdateVersion}
+                    placeholder="e.g., 1.0.1"
+                    placeholderTextColor="#94a3b8"
+                  />
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Download URL</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={updateDownloadUrl}
+                    onChangeText={setUpdateDownloadUrl}
+                    placeholder="https://example.com/app.apk"
+                    placeholderTextColor="#94a3b8"
+                  />
+                </View>
+
+                <View style={styles.maintenanceStatus}>
+                  <Text style={styles.statusLabel}>Current Status:</Text>
+                  <View style={[styles.maintenanceStatusBadge, updateNotification.isEnabled ? styles.maintenanceStatusBadgeActive : styles.maintenanceStatusBadgeInactive]}>
+                    <Text style={[styles.maintenanceStatusText, updateNotification.isEnabled ? styles.maintenanceStatusTextActive : styles.maintenanceStatusTextInactive]}>
+                      {updateNotification.isEnabled ? 'UPDATE NOTIFICATIONS ENABLED' : 'UPDATE NOTIFICATIONS DISABLED'}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            </ScrollView>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.actionButton, styles.cancelButton]}
+                onPress={() => setShowUpdateModal(false)}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionButton, styles.saveButton]}
+                onPress={updateNotificationStatus}
+              >
+                <Text style={styles.saveButtonText}>Save Changes</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2614,6 +2811,7 @@ const styles = StyleSheet.create({
   },
   apiKeysList: {
     padding: 20,
+    paddingBottom: 150,
     gap: 12,
   },
   apiKeyCardItem: {
@@ -2994,7 +3192,7 @@ const styles = StyleSheet.create({
   },
   professionalApiKeysList: {
     padding: 16,
-    paddingBottom: 100,
+    paddingBottom: 150,
   },
   professionalApiKeyCard: {
     backgroundColor: '#ffffff',
@@ -3489,6 +3687,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1e293b',
   },
+  logsSubtitle: {
+    fontSize: 14,
+    color: '#64748b',
+    marginTop: 4,
+    fontWeight: '500',
+  },
   logsBadge: {
     backgroundColor: '#0ea5e9',
     paddingHorizontal: 8,
@@ -3559,7 +3763,7 @@ const styles = StyleSheet.create({
   },
   logsList: {
     padding: 16,
-    paddingBottom: 100,
+    paddingBottom: 150,
   },
   logCardHeader: {
     flexDirection: 'row',
@@ -3747,7 +3951,7 @@ const styles = StyleSheet.create({
   },
   professionalTeachersList: {
     padding: 16,
-    paddingBottom: 100,
+    paddingBottom: 150,
   },
   professionalTeacherCard: {
     backgroundColor: '#ffffff',
@@ -3856,5 +4060,261 @@ const styles = StyleSheet.create({
     color: '#9ca3af',
     textAlign: 'center',
     lineHeight: 20,
+  },
+
+  // Maintenance Modal Styles
+  maintenanceSection: {
+    padding: 20,
+  },
+  maintenanceToggle: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  maintenanceLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  toggleButton: {
+    width: 50,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#e2e8f0',
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+  },
+  toggleButtonActive: {
+    backgroundColor: '#10b981',
+  },
+  toggleThumb: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  toggleThumbActive: {
+    transform: [{ translateX: 20 }],
+  },
+  inputGroup: {
+    marginBottom: 20,
+  },
+  inputLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  textInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 14,
+    color: '#1f2937',
+    backgroundColor: '#ffffff',
+  },
+  maintenanceStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 16,
+    padding: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  statusLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginRight: 12,
+  },
+  maintenanceStatusBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  maintenanceStatusBadgeActive: {
+    backgroundColor: '#fef2f2',
+    borderWidth: 1,
+    borderColor: '#fecaca',
+  },
+  maintenanceStatusBadgeInactive: {
+    backgroundColor: '#f0fdf4',
+    borderWidth: 1,
+    borderColor: '#bbf7d0',
+  },
+  maintenanceStatusText: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  maintenanceStatusTextActive: {
+    color: '#dc2626',
+  },
+  maintenanceStatusTextInactive: {
+    color: '#16a34a',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    padding: 20,
+    gap: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  actionButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelButton: {
+    backgroundColor: '#f3f4f6',
+  },
+  cancelButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  saveButton: {
+    backgroundColor: '#0ea5e9',
+  },
+  saveButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  // Update Card Styles
+  updateCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  updateHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  updateTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: 12,
+  },
+  updateVersion: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#0ea5e9',
+    marginBottom: 8,
+  },
+  updateMessage: {
+    fontSize: 14,
+    color: '#64748b',
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  updateStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  statusIndicatorActive: {
+    backgroundColor: '#ef4444',
+  },
+  statusIndicatorInactive: {
+    backgroundColor: '#10b981',
+  },
+  statusText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  downloadSection: {
+    marginBottom: 16,
+    padding: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  downloadLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  downloadUrl: {
+    fontSize: 14,
+    color: '#0ea5e9',
+    fontFamily: 'monospace',
+  },
+  updateEditButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0ea5e9',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    gap: 8,
+  },
+  updateEditButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  updateInfoCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  infoTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+  infoText: {
+    fontSize: 14,
+    color: '#64748b',
+    lineHeight: 20,
+    marginBottom: 8,
+  },
+  boldText: {
+    fontWeight: '700',
+    color: '#1e293b',
   },
 });
