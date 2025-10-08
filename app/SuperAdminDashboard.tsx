@@ -415,7 +415,7 @@ export default function SuperAdminDashboard() {
             <View style={styles.statsGrid}>
               <View style={[styles.statCard, { backgroundColor: '#0ea5e9' }]}>
                 <MaterialCommunityIcons name="account-group" size={32} color="#ffffff" />
-                <Text style={styles.statNumber}>{teachers.length}</Text>
+                <Text style={styles.statNumber}>{teachers.filter(t => t.isVerified).length}</Text>
                 <Text style={styles.statLabel}>Teachers</Text>
               </View>
               <View style={[styles.statCard, { backgroundColor: '#10b981' }]}>
@@ -428,11 +428,7 @@ export default function SuperAdminDashboard() {
                 <Text style={styles.statNumber}>{apiKeys.length}</Text>
                 <Text style={styles.statLabel}>API Keys</Text>
               </View>
-              <View style={[styles.statCard, { backgroundColor: '#8b5cf6' }]}>
-                <MaterialIcons name="receipt-long" size={32} color="#ffffff" />
-                <Text style={styles.statNumber}>{logs.length}</Text>
-                <Text style={styles.statLabel}>Logs</Text>
-        </View>
+    
       </View>
 
             {/* Quick Stats */}
@@ -451,7 +447,7 @@ export default function SuperAdminDashboard() {
                 <Text style={styles.overviewValue}>{teachers.filter(t => t.isBlocked).length}</Text>
               </View>
               <View style={styles.overviewRow}>
-                <Text style={styles.overviewLabel}>Teachers with Admin Access:</Text>
+                <Text style={styles.overviewLabel}>Accounts with Admin Access:</Text>
                 <Text style={styles.overviewValue}>{teachers.filter(t => t.isAdmin).length}</Text>
               </View>
               <View style={styles.overviewRow}>
