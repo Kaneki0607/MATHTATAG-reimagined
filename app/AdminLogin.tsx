@@ -3,15 +3,20 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts } from 'expo-font';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import TermsAndConditions from '../components/TermsAndConditions';
+import { readData } from '../lib/firebase-database';
 import { hasAdminAgreedToTerms, recordAdminTermsAgreement } from '../lib/terms-utils';
 
 const { width } = Dimensions.get('window');
 
 // Super Admin UIDs - Add more super admin UIDs to this array
+// Super Admins (Developers) have access to SuperAdminDashboard
+// Regular Admins (School Admins) have access to AdminDashboard
 const SUPER_ADMIN_UIDS = [
-  'XFDRJABVrIY5tQ07ry3jO9eEnCL2', // First super admin
+  'XFDRJABVrIY5tQ07ry3jO9eEnCL2', // Super admin 1
+  '3mXL3wcXCQQg90kKC6mvRyN0uk12', // Super admin 2
+  'v48KBqVpsMTDCAIb2wiZAgXRnj73', // Super admin 3
   // Add more super admin UIDs here as needed
 ];
 
@@ -28,6 +33,9 @@ export default function AdminLogin() {
   const [showTermsModal, setShowTermsModal] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [currentAdminId, setCurrentAdminId] = useState<string | null>(null);
+  const [showCustomAlert, setShowCustomAlert] = useState(false);
+  const [customAlertTitle, setCustomAlertTitle] = useState<string>('');
+  const [customAlertMessage, setCustomAlertMessage] = useState<string>('');
   
   // Remember me keys
   const STORAGE_EMAIL_KEY = 'admin_email';
@@ -74,22 +82,34 @@ export default function AdminLogin() {
       const { user } = await signInWithEmailAndPassword(auth, email, password);
       
       if (user) {
-        // Check if user is a super admin
+        // Check if user is a super admin (developer)
         const isSuperAdmin = SUPER_ADMIN_UIDS.includes(user.uid);
-        
+
         if (isSuperAdmin) {
-          // Super admin login - no email verification required
+          // Super admin (developer) login - route to SuperAdminDashboard
           setCurrentAdminId(user.uid);
-          router.replace('/AdminDashboard');
+          router.replace('/SuperAdminDashboard' as any);
         } else {
-          // Regular user trying to access admin - deny access
-          Alert.alert(
-            'Access Denied', 
-            'You do not have admin privileges. Please contact an administrator.',
-            [{ text: 'OK' }]
-          );
-          setLoading(false);
-          return;
+          // Verify regular admin permission in Firebase before routing
+          try {
+            const { data: adminData } = await readData(`/admins/${user.uid}`);
+            const hasAdminAccess = !!adminData && (adminData.isAdmin === true || adminData === true);
+
+            if (hasAdminAccess) {
+              setCurrentAdminId(user.uid);
+              router.replace('/AdminDashboard' as any);
+            } else {
+              // Show custom alert modal for insufficient permissions
+              setCustomAlertTitle('Access Denied');
+              setCustomAlertMessage('Your account does not have admin privileges. Please contact a super admin to request access.');
+              setShowCustomAlert(true);
+            }
+          } catch (e) {
+            // Fallback error
+            setCustomAlertTitle('Login Error');
+            setCustomAlertMessage('Unable to verify admin permissions at this time. Please try again later.');
+            setShowCustomAlert(true);
+          }
         }
       }
     } catch (error: any) {
@@ -121,6 +141,18 @@ export default function AdminLogin() {
       resizeMode="cover"
       imageStyle={{ opacity: 1 }}
     >
+      {/* Custom Alert Modal */}
+      <Modal visible={showCustomAlert} transparent animationType="fade" onRequestClose={() => setShowCustomAlert(false)}>
+        <View style={styles.alertOverlay}>
+          <View style={styles.alertCard}>
+            <Text style={styles.alertTitle}>{customAlertTitle}</Text>
+            <Text style={styles.alertMessage}>{customAlertMessage}</Text>
+            <TouchableOpacity style={styles.alertButton} onPress={() => setShowCustomAlert(false)}>
+              <Text style={styles.alertButtonText}>OK</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
       {/* Gradient overlay for depth */}
       <View style={styles.gradientOverlay} pointerEvents="none" />
       <KeyboardAvoidingView
@@ -345,5 +377,48 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.3)',
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 2,
+  },
+  alertOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  alertCard: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  alertTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0f172a',
+    marginBottom: 8,
+  },
+  alertMessage: {
+    fontSize: 14,
+    color: '#475569',
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  alertButton: {
+    alignSelf: 'flex-end',
+    backgroundColor: '#0ea5e9',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  alertButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 14,
   },
 });

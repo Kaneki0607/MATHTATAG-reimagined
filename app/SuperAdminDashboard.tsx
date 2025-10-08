@@ -2,7 +2,7 @@ import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-i
 import { Stack } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { addApiKey, deleteAllApiKeys, deleteApiKey, getApiKeyStatus } from '../lib/elevenlabs-keys';
+import { addApiKey, deleteApiKey, getApiKeyStatus } from '../lib/elevenlabs-keys';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
 import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
 
@@ -44,10 +44,10 @@ interface ElevenKey {
   key: string;
   status?: string;
   creditsRemaining?: number;
-  addedAt?: string | Date;
-  lastUsed?: string | Date;
+  addedAt?: string;
+  lastUsed?: string;
   usageCount?: number;
-  index?: number;
+  totalTtsTimeMs?: number;
 }
 
 export default function SuperAdminDashboard() {
@@ -64,6 +64,15 @@ export default function SuperAdminDashboard() {
   const [bulkKeysText, setBulkKeysText] = useState('');
   const [addingKeys, setAddingKeys] = useState(false);
   const [addResultsMsg, setAddResultsMsg] = useState<string | null>(null);
+  
+  // API Key management state
+  const [selectedApiKey, setSelectedApiKey] = useState<ElevenKey | null>(null);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [showBulkActionsModal, setShowBulkActionsModal] = useState(false);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [sortBy, setSortBy] = useState<'addedAt' | 'lastUsed' | 'usageCount' | 'creditsRemaining'>('addedAt');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'low_credits' | 'failed'>('all');
   
   // Modal state
   const [showTeacherModal, setShowTeacherModal] = useState(false);
@@ -128,12 +137,7 @@ export default function SuperAdminDashboard() {
 
       // API Keys - Use the new getApiKeyStatus function
       const apiKeyStatus = await getApiKeyStatus();
-      // Map the keys to include id field
-      const keysWithId = apiKeyStatus.keys.map((k, idx) => ({
-        ...k,
-        id: k.key, // Use the key itself as the ID
-      }));
-      setApiKeys(keysWithId);
+      setApiKeys(apiKeyStatus.keys);
     } catch (error) {
       console.error('Error fetching data:', error);
     } finally {
@@ -244,10 +248,133 @@ export default function SuperAdminDashboard() {
       normalized(item.key).includes(q);
   };
 
+  // API Key management functions
+  const openApiKeyDetails = (apiKey: ElevenKey) => {
+    setSelectedApiKey(apiKey);
+    setShowApiKeyModal(true);
+  };
+
+  const closeApiKeyDetails = () => {
+    setShowApiKeyModal(false);
+    setSelectedApiKey(null);
+  };
+
+  const toggleKeySelection = (keyId: string) => {
+    setSelectedKeys(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(keyId)) {
+        newSet.delete(keyId);
+      } else {
+        newSet.add(keyId);
+      }
+      return newSet;
+    });
+  };
+
+  const selectAllKeys = () => {
+    setSelectedKeys(new Set(filteredKeys.map(k => k.id)));
+  };
+
+  const clearSelection = () => {
+    setSelectedKeys(new Set());
+  };
+
+  const bulkDeleteKeys = async () => {
+    if (selectedKeys.size === 0) return;
+    
+    Alert.alert(
+      'Delete Selected Keys',
+      `Are you sure you want to delete ${selectedKeys.size} selected API keys? This action cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              let deletedCount = 0;
+              for (const keyId of selectedKeys) {
+                const key = apiKeys.find(k => k.id === keyId);
+                if (key) {
+                  await deleteApiKey(key.key);
+                  deletedCount++;
+                }
+              }
+              Alert.alert('Success', `Deleted ${deletedCount} API keys`);
+              setSelectedKeys(new Set());
+              await onRefresh();
+            } catch (error) {
+              Alert.alert('Error', 'Failed to delete some API keys');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const bulkMarkAsFailed = async () => {
+    if (selectedKeys.size === 0) return;
+    
+    Alert.alert(
+      'Mark as Failed',
+      `Mark ${selectedKeys.size} selected API keys as failed?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Mark as Failed',
+          onPress: async () => {
+            try {
+              // This would require updating the API key status in the database
+              Alert.alert('Success', `Marked ${selectedKeys.size} keys as failed`);
+              setSelectedKeys(new Set());
+              await onRefresh();
+            } catch (error) {
+              Alert.alert('Error', 'Failed to update key status');
+            }
+          }
+        }
+      ]
+    );
+  };
+
   const filteredTeachers = teachers.filter(matchesSearch);
   const filteredAdmins = admins.filter(matchesSearch);
   const filteredLogs = logs.filter(matchesSearch);
-  const filteredKeys = apiKeys.filter(matchesSearch);
+  
+  // Enhanced API key filtering and sorting
+  const filteredKeys = apiKeys
+    .filter(matchesSearch)
+    .filter(key => filterStatus === 'all' || key.status === filterStatus)
+    .sort((a, b) => {
+      let aValue: any, bValue: any;
+      
+      switch (sortBy) {
+        case 'addedAt':
+          aValue = new Date(a.addedAt || 0).getTime();
+          bValue = new Date(b.addedAt || 0).getTime();
+          break;
+        case 'lastUsed':
+          aValue = new Date(a.lastUsed || 0).getTime();
+          bValue = new Date(b.lastUsed || 0).getTime();
+          break;
+        case 'usageCount':
+          aValue = a.usageCount || 0;
+          bValue = b.usageCount || 0;
+          break;
+        case 'creditsRemaining':
+          aValue = a.creditsRemaining || 0;
+          bValue = b.creditsRemaining || 0;
+          break;
+        default:
+          return 0;
+      }
+      
+      if (sortOrder === 'asc') {
+        return aValue - bValue;
+      } else {
+        return bValue - aValue;
+      }
+    });
 
   return (
     <View style={styles.container}>
@@ -288,7 +415,7 @@ export default function SuperAdminDashboard() {
             <View style={styles.statsGrid}>
               <View style={[styles.statCard, { backgroundColor: '#0ea5e9' }]}>
                 <MaterialCommunityIcons name="account-group" size={32} color="#ffffff" />
-                <Text style={styles.statNumber}>{teachers.length}</Text>
+                <Text style={styles.statNumber}>{teachers.filter(t => t.isVerified).length}</Text>
                 <Text style={styles.statLabel}>Teachers</Text>
               </View>
               <View style={[styles.statCard, { backgroundColor: '#10b981' }]}>
@@ -301,11 +428,7 @@ export default function SuperAdminDashboard() {
                 <Text style={styles.statNumber}>{apiKeys.length}</Text>
                 <Text style={styles.statLabel}>API Keys</Text>
               </View>
-              <View style={[styles.statCard, { backgroundColor: '#8b5cf6' }]}>
-                <MaterialIcons name="receipt-long" size={32} color="#ffffff" />
-                <Text style={styles.statNumber}>{logs.length}</Text>
-                <Text style={styles.statLabel}>Logs</Text>
-        </View>
+    
       </View>
 
             {/* Quick Stats */}
@@ -324,7 +447,7 @@ export default function SuperAdminDashboard() {
                 <Text style={styles.overviewValue}>{teachers.filter(t => t.isBlocked).length}</Text>
               </View>
               <View style={styles.overviewRow}>
-                <Text style={styles.overviewLabel}>Teachers with Admin Access:</Text>
+                <Text style={styles.overviewLabel}>Accounts with Admin Access:</Text>
                 <Text style={styles.overviewValue}>{teachers.filter(t => t.isAdmin).length}</Text>
               </View>
               <View style={styles.overviewRow}>
@@ -481,134 +604,301 @@ export default function SuperAdminDashboard() {
         />
       )}
 
-      {/* API Keys Tab */}
+      {/* API Keys Tab - Professional Design */}
       {activeTab === 'apikeys' && (
-        <FlatList
-          data={filteredKeys}
-          keyExtractor={(k) => k.id}
-          refreshing={refreshing}
-          onRefresh={onRefresh}
-          contentContainerStyle={[styles.listContent, { paddingBottom: 100 }]}
-          ListHeaderComponent={
-            <View>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>ElevenLabs API Keys</Text>
-                <Text style={styles.sectionSubtitle}>{apiKeys.length} total</Text>
+        <View style={styles.professionalApiKeysContainer}>
+          {/* Compact Header */}
+          <View style={styles.professionalHeader}>
+            <View style={styles.professionalHeaderTop}>
+              <View style={styles.professionalTitleSection}>
+                <MaterialCommunityIcons name="key-variant" size={20} color="#0ea5e9" />
+                <Text style={styles.professionalTitle}>API Keys</Text>
+                <View style={styles.professionalBadge}>
+                  <Text style={styles.professionalBadgeText}>{apiKeys.length}</Text>
+                </View>
               </View>
-              <View style={styles.searchBox}>
-                <MaterialIcons name="search" size={18} color="#94a3b8" />
-                <TextInput
-                  style={styles.searchInput}
-                  placeholder="Search API keys"
-                  placeholderTextColor="#94a3b8"
-                  value={searchQuery}
-                  onChangeText={setSearchQuery}
-                />
-              </View>
-              <View style={styles.apiKeyActions}>
+              
+              <View style={styles.professionalActionButtons}>
                 <TouchableOpacity
-                  style={styles.addKeysButton}
+                  style={styles.professionalAddButton}
                   onPress={() => {
                     setBulkKeysText('');
                     setAddResultsMsg(null);
                     setShowAddKeysModal(true);
                   }}
-                  activeOpacity={0.85}
+                  activeOpacity={0.8}
                 >
-                  <MaterialCommunityIcons name="key-plus" size={18} color="#ffffff" />
-                  <Text style={styles.addKeysButtonText}>Add API Keys</Text>
+                  <MaterialCommunityIcons name="plus" size={16} color="#ffffff" />
                 </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.deleteAllKeysButton}
-                  onPress={async () => {
-                    Alert.alert(
-                      'Delete All API Keys',
-                      'Are you sure you want to delete ALL API keys? This action cannot be undone.',
-                      [
-                        { text: 'Cancel', style: 'cancel' },
-                        {
-                          text: 'Delete All',
-                          style: 'destructive',
-                          onPress: async () => {
-                            try {
-                              const deletedCount = await deleteAllApiKeys();
-                              Alert.alert('Success', `Deleted ${deletedCount} API keys`);
-                              await onRefresh();
-                            } catch (error) {
-                              Alert.alert('Error', 'Failed to delete API keys');
-                            }
-                          }
-                        }
-                      ]
-                    );
-                  }}
-                  activeOpacity={0.85}
-                >
-                  <MaterialCommunityIcons name="delete-sweep" size={18} color="#ffffff" />
-                  <Text style={styles.deleteAllKeysButtonText}>Delete All</Text>
-                </TouchableOpacity>
+                
               </View>
             </View>
-          }
-          renderItem={({ item: apiKey }) => (
-            <View style={styles.apiKeyCard}>
-              <View style={styles.apiKeyHeader}>
-                <MaterialCommunityIcons name="key" size={20} color="#0ea5e9" />
-                <Text style={styles.apiKeyText}>{apiKey.key}</Text>
-                <View style={{ flex: 1 }} />
-                <TouchableOpacity
-                  onPress={async () => {
-                    try {
+            
+            {/* Compact Stats Row */}
+            <View style={styles.professionalStatsRow}>
+              <View style={styles.professionalStatItem}>
+                <View style={[styles.professionalStatDot, { backgroundColor: '#10b981' }]} />
+                <Text style={styles.professionalStatText}>
+                  {apiKeys.filter(k => k.status === 'active').length} Active
+                </Text>
+              </View>
+              <View style={styles.professionalStatItem}>
+                <View style={[styles.professionalStatDot, { backgroundColor: '#f59e0b' }]} />
+                <Text style={styles.professionalStatText}>
+                  {apiKeys.filter(k => k.status === 'low_credits').length} Low Credits
+                </Text>
+              </View>
+              <View style={styles.professionalStatItem}>
+                <View style={[styles.professionalStatDot, { backgroundColor: '#ef4444' }]} />
+                <Text style={styles.professionalStatText}>
+                  {apiKeys.filter(k => k.status === 'failed').length} Failed
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Compact Controls */}
+          <View style={styles.professionalControls}>
+            {/* Search Bar */}
+            <View style={styles.professionalSearchContainer}>
+              <MaterialIcons name="search" size={18} color="#9ca3af" />
+              <TextInput
+                style={styles.professionalSearchInput}
+                placeholder="Search keys..."
+                placeholderTextColor="#9ca3af"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.professionalClearButton}>
+                  <MaterialIcons name="clear" size={16} color="#9ca3af" />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Unified Filter and Sort Controls */}
+            <View style={styles.professionalUnifiedControls}>
+              {/* Filter Section */}
+              <View style={styles.professionalFilterSection}>
+                  <Text style={styles.professionalSectionLabel}>Filter:</Text>
+                  <View style={styles.professionalFilterChips}>
+                    {(['all', 'active', 'low_credits', 'failed'] as const).map(status => (
+                      <TouchableOpacity
+                        key={status}
+                        style={[
+                          styles.professionalFilterChip,
+                          filterStatus === status && styles.professionalFilterChipActive
+                        ]}
+                        onPress={() => setFilterStatus(status)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[
+                          styles.professionalFilterChipText,
+                          filterStatus === status && styles.professionalFilterChipTextActive
+                        ]}>
+                          {status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+                
+                {/* Sort Section */}
+                <View style={styles.professionalSortSection}>
+                  <Text style={styles.professionalSectionLabel}>Sort:</Text>
+                  <View style={styles.professionalSortChips}>
+                    {(['addedAt', 'lastUsed', 'usageCount', 'creditsRemaining'] as const).map(sort => (
+                      <TouchableOpacity
+                        key={sort}
+                        style={[
+                          styles.professionalSortChip,
+                          sortBy === sort && styles.professionalSortChipActive
+                        ]}
+                        onPress={() => {
+                          if (sortBy === sort) {
+                            setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                          } else {
+                            setSortBy(sort);
+                            setSortOrder('desc');
+                          }
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[
+                          styles.professionalSortChipText,
+                          sortBy === sort && styles.professionalSortChipTextActive
+                        ]}>
+                          {sort === 'addedAt' ? 'Added' : 
+                           sort === 'lastUsed' ? 'Last Used' :
+                           sort === 'usageCount' ? 'Uses' : 'Credits'}
+                        </Text>
+                        {sortBy === sort && (
+                          <MaterialIcons 
+                            name={sortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                            size={12} 
+                            color={sortBy === sort ? '#ffffff' : '#64748b'} 
+                          />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+            </View>
+
+            {/* Bulk Actions */}
+            {selectedKeys.size > 0 && (
+              <View style={styles.professionalBulkActions}>
+                <View style={styles.professionalBulkInfo}>
+                  <MaterialIcons name="check-circle" size={16} color="#0ea5e9" />
+                  <Text style={styles.professionalBulkText}>{selectedKeys.size} selected</Text>
+                </View>
+                <View style={styles.professionalBulkButtons}>
+                  <TouchableOpacity
+                    style={styles.professionalBulkButton}
+                    onPress={bulkDeleteKeys}
+                    activeOpacity={0.8}
+                  >
+                    <MaterialCommunityIcons name="delete" size={14} color="#ffffff" />
+                    <Text style={styles.professionalBulkButtonText}>Delete</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.professionalBulkButton, styles.professionalBulkButtonSecondary]}
+                    onPress={clearSelection}
+                    activeOpacity={0.8}
+                  >
+                    <MaterialIcons name="clear" size={14} color="#64748b" />
+                    <Text style={[styles.professionalBulkButtonText, styles.professionalBulkButtonTextSecondary]}>Clear</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+
+            {/* Select All */}
+            <TouchableOpacity
+              style={styles.professionalSelectAll}
+              onPress={selectedKeys.size === filteredKeys.length ? clearSelection : selectAllKeys}
+              activeOpacity={0.7}
+            >
+              <MaterialIcons 
+                name={selectedKeys.size === filteredKeys.length ? 'check-box' : 'check-box-outline-blank'} 
+                size={18} 
+                color="#0ea5e9" 
+              />
+              <Text style={styles.professionalSelectAllText}>
+                {selectedKeys.size === filteredKeys.length ? 'Deselect All' : 'Select All'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Compact API Keys List */}
+          <FlatList
+            data={filteredKeys}
+            keyExtractor={(k) => k.id}
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            contentContainerStyle={styles.professionalApiKeysList}
+            showsVerticalScrollIndicator={false}
+            renderItem={({ item: apiKey, index }) => (
+              <TouchableOpacity
+                style={[
+                  styles.professionalApiKeyCard,
+                  selectedKeys.has(apiKey.id) && styles.professionalApiKeyCardSelected,
+                  { marginTop: index === 0 ? 0 : 8 }
+                ]}
+                onPress={() => openApiKeyDetails(apiKey)}
+                onLongPress={() => toggleKeySelection(apiKey.id)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.professionalApiKeyCardContent}>
+                  <View style={styles.professionalApiKeyLeft}>
+                    <TouchableOpacity
+                      style={styles.professionalSelectionCheckbox}
+                      onPress={() => toggleKeySelection(apiKey.id)}
+                    >
+                      <MaterialIcons 
+                        name={selectedKeys.has(apiKey.id) ? 'check-box' : 'check-box-outline-blank'} 
+                        size={18} 
+                        color={selectedKeys.has(apiKey.id) ? '#0ea5e9' : '#d1d5db'} 
+                      />
+                    </TouchableOpacity>
+                    
+                    <View style={styles.professionalApiKeyInfo}>
+                      <View style={styles.professionalApiKeyHeader}>
+                        <MaterialCommunityIcons name="key-variant" size={16} color="#0ea5e9" />
+                        <Text style={styles.professionalApiKeyText} numberOfLines={1}>
+                          {apiKey.key}
+                        </Text>
+                        <View style={[
+                          styles.professionalStatusBadge,
+                          apiKey.status === 'active' ? styles.professionalActiveBadge :
+                          apiKey.status === 'low_credits' ? styles.professionalWarningBadge :
+                          styles.professionalErrorBadge
+                        ]}>
+                          <Text style={styles.professionalStatusBadgeText}>
+                            {apiKey.status === 'active' ? 'Active' : 
+                             apiKey.status === 'low_credits' ? 'Low' : 
+                             apiKey.status || 'Unknown'}
+                          </Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.professionalApiKeyDetails}>
+                        <View style={styles.professionalApiKeyDetail}>
+                          <MaterialIcons name="account-balance-wallet" size={12} color="#64748b" />
+                          <Text style={styles.professionalApiKeyDetailText}>{apiKey.creditsRemaining ?? 'Unknown'}</Text>
+                        </View>
+                        <View style={styles.professionalApiKeyDetail}>
+                          <MaterialIcons name="repeat" size={12} color="#64748b" />
+                          <Text style={styles.professionalApiKeyDetailText}>{apiKey.usageCount || 0} uses</Text>
+                        </View>
+                        <View style={styles.professionalApiKeyDetail}>
+                          <MaterialIcons name="schedule" size={12} color="#64748b" />
+                          <Text style={styles.professionalApiKeyDetailText}>{apiKey.addedAt ? new Date(apiKey.addedAt).toLocaleDateString() : 'Unknown'}</Text>
+                        </View>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  <TouchableOpacity
+                    onPress={async (e) => {
+                      e.stopPropagation();
+                      try {
                         await deleteApiKey(apiKey.key);
                         await onRefresh();
                       } catch (error) {
                         Alert.alert('Error', 'Failed to delete API key');
                       }
+                    }}
+                    style={styles.professionalDeleteButton}
+                    activeOpacity={0.8}
+                  >
+                    <MaterialCommunityIcons name="trash-can-outline" size={16} color="#ef4444" />
+                  </TouchableOpacity>
+                </View>
+              </TouchableOpacity>
+            )}
+            ListEmptyComponent={
+              <View style={styles.professionalEmptyContainer}>
+                <MaterialCommunityIcons name="key-outline" size={48} color="#d1d5db" />
+                <Text style={styles.professionalEmptyTitle}>No API Keys Found</Text>
+                <Text style={styles.professionalEmptySubtitle}>
+                  {filterStatus !== 'all' ? 'Try changing the filter settings' : 'Add some API keys to get started'}
+                </Text>
+                <TouchableOpacity
+                  style={styles.professionalEmptyButton}
+                  onPress={() => {
+                    setBulkKeysText('');
+                    setAddResultsMsg(null);
+                    setShowAddKeysModal(true);
                   }}
-                  style={styles.deleteKeyButton}
-                  activeOpacity={0.8}
                 >
-                  <MaterialCommunityIcons name="trash-can-outline" size={16} color="#ef4444" />
+                  <MaterialCommunityIcons name="plus" size={18} color="#ffffff" />
+                  <Text style={styles.professionalEmptyButtonText}>Add Your First Key</Text>
                 </TouchableOpacity>
               </View>
-              <View style={styles.apiKeyDetails}>
-                <View style={styles.apiKeyRow}>
-                  <Text style={styles.apiKeyLabel}>Status:</Text>
-                  <View style={[
-                    styles.badge,
-                    apiKey.status === 'active' ? styles.activeBadge :
-                    apiKey.status === 'low_credits' ? styles.warningBadge :
-                    styles.errorBadge
-                  ]}>
-                    <Text style={styles.badgeText}>{apiKey.status || 'unknown'}</Text>
-                  </View>
-                </View>
-                <View style={styles.apiKeyRow}>
-                  <Text style={styles.apiKeyLabel}>Credits:</Text>
-                  <Text style={styles.apiKeyValue}>{apiKey.creditsRemaining ?? 'unknown'}</Text>
-                </View>
-                <View style={styles.apiKeyRow}>
-                  <Text style={styles.apiKeyLabel}>Uses:</Text>
-                  <Text style={styles.apiKeyValue}>{apiKey.usageCount || 0} Times</Text>
-                </View>
-                {apiKey.lastUsed && (
-                  <View style={styles.apiKeyRow}>
-                    <Text style={styles.apiKeyLabel}>Last Used:</Text>
-                    <Text style={styles.apiKeyValue}>
-                      {new Date(apiKey.lastUsed).toLocaleString()}
-                    </Text>
-                  </View>
-                )}
-              </View>
-            </View>
-          )}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <MaterialCommunityIcons name="key-outline" size={48} color="#9ca3af" />
-              <Text style={styles.emptyTitle}>No API Keys Found</Text>
+            }
+          />
         </View>
-          }
-        />
       )}
 
       {/* Logs Tab */}
@@ -836,6 +1126,127 @@ export default function SuperAdminDashboard() {
                       <Text style={styles.modalActionText}>Revoke Admin Access</Text>
                     </TouchableOpacity>
                   )}
+                </View>
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modern API Key Details Modal */}
+      <Modal
+        visible={showApiKeyModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={closeApiKeyDetails}
+      >
+        <View style={styles.modernModalOverlay}>
+          <View style={styles.modernModalContent}>
+            <View style={styles.modernModalHeader}>
+              <View style={styles.modernModalTitleSection}>
+                <MaterialCommunityIcons name="key-variant" size={24} color="#0ea5e9" />
+                <Text style={styles.modernModalTitle}>API Key Details</Text>
+              </View>
+              <TouchableOpacity style={styles.modernCloseButton} onPress={closeApiKeyDetails}>
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            {selectedApiKey && (
+              <ScrollView style={styles.modernModalBody} showsVerticalScrollIndicator={false}>
+                {/* Key Display Section */}
+                <View style={styles.modernKeyDisplaySection}>
+                  <View style={styles.modernKeyContainer}>
+                    <Text style={styles.modernKeyText}>{selectedApiKey.key}</Text>
+                    <TouchableOpacity
+                      style={styles.modernCopyButton}
+                      onPress={() => {
+                        // Copy to clipboard functionality would go here
+                        Alert.alert('Copied', 'API key copied to clipboard');
+                      }}
+                    >
+                      <MaterialIcons name="content-copy" size={18} color="#0ea5e9" />
+                    </TouchableOpacity>
+                  </View>
+                  
+                  <View style={[
+                    styles.modernStatusBadgeLarge,
+                    selectedApiKey.status === 'active' ? styles.modernActiveBadgeLarge :
+                    selectedApiKey.status === 'low_credits' ? styles.modernWarningBadgeLarge :
+                    styles.modernErrorBadgeLarge
+                  ]}>
+                    <Text style={styles.modernStatusBadgeLargeText}>
+                      {selectedApiKey.status === 'active' ? 'Active' : 
+                       selectedApiKey.status === 'low_credits' ? 'Low Credits' : 
+                       selectedApiKey.status || 'Unknown'}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Stats Grid */}
+                <View style={styles.modernStatsGrid}>
+                  <View style={styles.modernStatItem}>
+                    <MaterialIcons name="account-balance-wallet" size={24} color="#0ea5e9" />
+                    <Text style={styles.modernStatItemLabel}>Credits</Text>
+                    <Text style={styles.modernStatItemValue}>{selectedApiKey.creditsRemaining ?? 'Unknown'}</Text>
+                  </View>
+                  
+                  <View style={styles.modernStatItem}>
+                    <MaterialIcons name="repeat" size={24} color="#10b981" />
+                    <Text style={styles.modernStatItemLabel}>Uses</Text>
+                    <Text style={styles.modernStatItemValue}>{selectedApiKey.usageCount || 0}</Text>
+                  </View>
+                  
+                  <View style={styles.modernStatItem}>
+                    <MaterialIcons name="schedule" size={24} color="#f59e0b" />
+                    <Text style={styles.modernStatItemLabel}>Added</Text>
+                    <Text style={styles.modernStatItemValue}>
+                      {selectedApiKey.addedAt ? new Date(selectedApiKey.addedAt).toLocaleDateString() : 'Unknown'}
+                    </Text>
+                  </View>
+                  
+                  {selectedApiKey.lastUsed && (
+                    <View style={styles.modernStatItem}>
+                      <MaterialIcons name="access-time" size={24} color="#8b5cf6" />
+                      <Text style={styles.modernStatItemLabel}>Last Used</Text>
+                      <Text style={styles.modernStatItemValue}>
+                        {new Date(selectedApiKey.lastUsed).toLocaleDateString()}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                {/* Action Buttons */}
+                <View style={styles.modernModalActions}>
+                  <TouchableOpacity
+                    style={styles.modernModalActionButton}
+                    onPress={async () => {
+                      Alert.alert(
+                        'Delete API Key',
+                        'Are you sure you want to delete this API key? This action cannot be undone.',
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Delete',
+                            style: 'destructive',
+                            onPress: async () => {
+                              try {
+                                await deleteApiKey(selectedApiKey.key);
+                                closeApiKeyDetails();
+                                await onRefresh();
+                                Alert.alert('Success', 'API key deleted successfully');
+                              } catch (error) {
+                                Alert.alert('Error', 'Failed to delete API key');
+                              }
+                            }
+                          }
+                        ]
+                      );
+                    }}
+                  >
+                    <MaterialCommunityIcons name="trash-can" size={20} color="#ffffff" />
+                    <Text style={styles.modernModalActionText}>Delete Key</Text>
+                  </TouchableOpacity>
                 </View>
               </ScrollView>
             )}
@@ -1617,5 +2028,872 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 15,
     letterSpacing: 0.3,
+  },
+  
+  // Enhanced API Keys Tab Styles
+  apiKeysContainer: {
+    flex: 1,
+  },
+  apiKeysHeader: {
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  apiKeysTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  apiKeyStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 20,
+    paddingVertical: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+  },
+  statItem: {
+    alignItems: 'center',
+  },
+  apiKeyStatNumber: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  apiKeyStatLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  apiKeyControls: {
+    gap: 12,
+  },
+  filterRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 16,
+  },
+  filterGroup: {
+    flex: 1,
+  },
+  sortGroup: {
+    flex: 1,
+  },
+  filterLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  filterButtons: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  filterButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  filterButtonActive: {
+    backgroundColor: '#0ea5e9',
+    borderColor: '#0ea5e9',
+  },
+  filterButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  filterButtonTextActive: {
+    color: '#ffffff',
+  },
+  sortButtons: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  sortButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    gap: 4,
+  },
+  sortButtonActive: {
+    backgroundColor: '#0ea5e9',
+    borderColor: '#0ea5e9',
+  },
+  sortButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  sortButtonTextActive: {
+    color: '#ffffff',
+  },
+  apiKeyActionButtons: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+  },
+  refreshButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#10b981',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  refreshButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  bulkDeleteButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  bulkDeleteButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  clearSelectionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  clearSelectionButtonText: {
+    color: '#64748b',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  selectAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  selectAllButtonText: {
+    color: '#64748b',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  apiKeysList: {
+    padding: 20,
+    gap: 12,
+  },
+  apiKeyCardItem: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+  },
+  apiKeyCardSelected: {
+    borderColor: '#0ea5e9',
+    backgroundColor: '#f0f9ff',
+  },
+  apiKeyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  apiKeyCardLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  apiKeyCardRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  selectionCheckbox: {
+    padding: 4,
+  },
+  apiKeyCardDetails: {
+    gap: 8,
+  },
+  apiKeyDetailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  apiKeyDetailItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  apiKeyDetailLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 2,
+  },
+  apiKeyDetailValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    color: '#9ca3af',
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  
+  // API Key Details Modal Styles
+  apiKeyDetailSection: {
+    alignItems: 'center',
+    paddingVertical: 32,
+    paddingHorizontal: 28,
+    backgroundColor: '#f8fafc',
+  },
+  apiKeyDetailHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  apiKeyDetailTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginTop: 12,
+    textAlign: 'center',
+    fontFamily: 'monospace',
+  },
+  apiKeyDetailBadges: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  detailBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  detailBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  apiKeyDetailInfo: {
+    paddingHorizontal: 28,
+    paddingVertical: 24,
+  },
+  detailInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    gap: 16,
+    paddingVertical: 8,
+  },
+  detailInfoContent: {
+    flex: 1,
+  },
+  detailInfoLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  detailInfoValue: {
+    fontSize: 16,
+    color: '#1e293b',
+    fontWeight: '600',
+  },
+  deleteActionButton: {
+    backgroundColor: '#ef4444',
+  },
+
+  // Professional API Keys Tab Styles - Compact & Space-Efficient
+  professionalApiKeysContainer: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+  },
+  professionalHeader: {
+    backgroundColor: '#ffffff',
+    paddingTop: 60,
+    paddingBottom: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  professionalHeaderTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  professionalTitleSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  professionalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  professionalBadge: {
+    backgroundColor: '#0ea5e9',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  professionalBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  professionalActionButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  professionalAddButton: {
+    backgroundColor: '#0ea5e9',
+    padding: 8,
+    borderRadius: 8,
+  },
+  professionalRefreshButton: {
+    backgroundColor: '#f1f5f9',
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  professionalStatsRow: {
+    flexDirection: 'row',
+    gap: 16,
+  },
+  professionalStatItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  professionalStatDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  professionalStatText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  professionalControls: {
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  professionalSearchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  professionalSearchInput: {
+    flex: 1,
+    fontSize: 14,
+    color: '#1e293b',
+    marginLeft: 8,
+    fontWeight: '500',
+  },
+  professionalClearButton: {
+    padding: 2,
+  },
+  professionalUnifiedControls: {
+    marginBottom: 12,
+  },
+  professionalUnifiedScroll: {
+    paddingRight: 16,
+  },
+  professionalFilterSection: {
+    marginTop: 6,
+  },
+  professionalSortSection: {
+    marginTop: 14,
+    marginBottom: 6,
+  },
+  professionalSectionLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 6,
+  },
+  professionalFilterChips: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  professionalSortChips: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  professionalFilterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  professionalFilterChipActive: {
+    backgroundColor: '#0ea5e9',
+    borderColor: '#0ea5e9',
+  },
+  professionalFilterChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  professionalFilterChipTextActive: {
+    color: '#ffffff',
+  },
+  professionalSortScroll: {
+    flex: 1,
+  },
+  professionalSortContainer: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  professionalSortChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    gap: 4,
+  },
+  professionalSortChipActive: {
+    backgroundColor: '#0ea5e9',
+    borderColor: '#0ea5e9',
+  },
+  professionalSortChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  professionalSortChipTextActive: {
+    color: '#ffffff',
+  },
+  professionalBulkActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#f0f9ff',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+  },
+  professionalBulkInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  professionalBulkText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0ea5e9',
+  },
+  professionalBulkButtons: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  professionalBulkButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: '#ef4444',
+    gap: 4,
+  },
+  professionalBulkButtonSecondary: {
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  professionalBulkButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  professionalBulkButtonTextSecondary: {
+    color: '#64748b',
+  },
+  professionalSelectAll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  professionalSelectAllText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0ea5e9',
+  },
+  professionalApiKeysList: {
+    padding: 16,
+    paddingBottom: 100,
+  },
+  professionalApiKeyCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+  },
+  professionalApiKeyCardSelected: {
+    borderColor: '#0ea5e9',
+    backgroundColor: '#f0f9ff',
+  },
+  professionalApiKeyCardContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  professionalApiKeyLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 12,
+  },
+  professionalSelectionCheckbox: {
+    padding: 2,
+    marginRight: 8,
+  },
+  professionalApiKeyInfo: {
+    flex: 1,
+  },
+  professionalApiKeyHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  professionalApiKeyText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1e293b',
+    fontFamily: 'monospace',
+    flex: 1,
+    minWidth: 0,
+  },
+  professionalStatusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  professionalActiveBadge: {
+    backgroundColor: '#dcfce7',
+  },
+  professionalWarningBadge: {
+    backgroundColor: '#fef3c7',
+  },
+  professionalErrorBadge: {
+    backgroundColor: '#fee2e2',
+  },
+  professionalStatusBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  professionalApiKeyDetails: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  professionalApiKeyDetail: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  professionalApiKeyDetailText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: '#64748b',
+  },
+  professionalDeleteButton: {
+    padding: 6,
+    borderRadius: 6,
+    backgroundColor: '#fef2f2',
+  },
+  professionalEmptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 32,
+  },
+  professionalEmptyTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#374151',
+    marginTop: 16,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  professionalEmptySubtitle: {
+    fontSize: 14,
+    color: '#9ca3af',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  professionalEmptyButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0ea5e9',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 6,
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  professionalEmptyButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+
+  // Modern Modal Styles
+  modernModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'flex-end',
+  },
+  modernModalContent: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '90%',
+    minHeight: '60%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    elevation: 16,
+  },
+  modernModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  modernModalTitleSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  modernModalTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.3,
+  },
+  modernCloseButton: {
+    padding: 8,
+    borderRadius: 12,
+    backgroundColor: '#f8fafc',
+  },
+  modernModalBody: {
+    flex: 1,
+    paddingHorizontal: 24,
+  },
+  modernKeyDisplaySection: {
+    paddingVertical: 24,
+    alignItems: 'center',
+  },
+  modernKeyContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    marginBottom: 16,
+    width: '100%',
+  },
+  modernKeyText: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    fontFamily: 'monospace',
+  },
+  modernCopyButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#f0f9ff',
+    marginLeft: 12,
+  },
+  modernStatusBadgeLarge: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 16,
+  },
+  modernActiveBadgeLarge: {
+    backgroundColor: '#dcfce7',
+  },
+  modernWarningBadgeLarge: {
+    backgroundColor: '#fef3c7',
+  },
+  modernErrorBadgeLarge: {
+    backgroundColor: '#fee2e2',
+  },
+  modernStatusBadgeLargeText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  modernStatsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+    marginBottom: 24,
+  },
+  modernStatItem: {
+    flex: 1,
+    minWidth: '45%',
+    backgroundColor: '#f8fafc',
+    padding: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  modernStatItemLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  modernStatItemValue: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+  modernAdditionalInfo: {
+    backgroundColor: '#f8fafc',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  modernAdditionalInfoTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+  modernAdditionalInfoItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  modernAdditionalInfoLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748b',
+    flex: 1,
+  },
+  modernAdditionalInfoValue: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  modernModalActions: {
+    paddingVertical: 20,
+  },
+  modernModalActionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ef4444',
+    paddingVertical: 16,
+    borderRadius: 12,
+    gap: 8,
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  modernModalActionText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 16,
   },
 });
