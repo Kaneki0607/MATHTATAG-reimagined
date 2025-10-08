@@ -1,10 +1,10 @@
-import { AntDesign } from '@expo/vector-icons';
+import { AntDesign, MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts } from 'expo-font';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Alert, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, BackHandler, Dimensions, Image, ImageBackground, KeyboardAvoidingView, Linking, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import TermsAndConditions from '../components/TermsAndConditions';
 import { resendVerificationEmail, resetPassword, signInUser, signUpUser } from '../lib/firebase-auth';
 import { readData, writeData } from '../lib/firebase-database';
@@ -58,6 +58,15 @@ export default function TeacherLogin() {
   });
   const [signUpLoading, setSignUpLoading] = useState(false);
 
+  // Version checking state
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{
+    message: string;
+    version: string;
+    downloadUrl: string;
+  } | null>(null);
+  const [maintenanceMode, setMaintenanceMode] = useState(false);
+
   useEffect(() => {
     // Load saved credentials and check terms agreement
     (async () => {
@@ -77,12 +86,49 @@ export default function TeacherLogin() {
           // Show terms modal only if they haven't agreed yet
           setShowTermsModal(true);
         }
+
+        // Check maintenance status and version
+        await checkMaintenanceAndVersion();
       } catch {
         // ignore storage errors, show terms modal as fallback
         setShowTermsModal(true);
       }
     })();
   }, []);
+
+  const checkMaintenanceAndVersion = async () => {
+    try {
+      const [maintenanceResult, updateResult] = await Promise.all([
+        readData('/maintenanceStatus'),
+        readData('/updateNotification')
+      ]);
+      
+      // Check maintenance mode first - this blocks all access
+      if (maintenanceResult.data && maintenanceResult.data.isEnabled) {
+        setMaintenanceMode(true);
+        setUpdateInfo({ 
+          message: maintenanceResult.data.message, 
+          version: '', 
+          downloadUrl: '' 
+        });
+        setShowUpdateModal(true);
+        return;
+      }
+
+      // Check if app version is outdated - this forces update
+      const currentVersion = '1.0.0'; // This should be the current app version
+      if (updateResult.data && updateResult.data.isEnabled) {
+        const { message, version, downloadUrl } = updateResult.data;
+        if (version && version !== currentVersion) {
+          setMaintenanceMode(false); // Ensure maintenance mode is false
+          setUpdateInfo({ message, version, downloadUrl });
+          setShowUpdateModal(true);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to check maintenance and version status:', error);
+    }
+  };
 
 
   const handleLogin = async () => {
@@ -864,6 +910,109 @@ export default function TeacherLogin() {
           </View>
         </View>
       </Modal>
+
+      {/* Update Notification Modal */}
+      <Modal 
+        visible={showUpdateModal} 
+        animationType="fade" 
+        transparent
+        onRequestClose={() => {
+          // Only allow closing if not in maintenance mode
+          if (!maintenanceMode) {
+            setShowUpdateModal(false);
+          }
+        }}
+      >
+        <View style={styles.updateModalOverlay}>
+          <View style={styles.updateModalContent}>
+            <View style={styles.updateModalHeader}>
+              <MaterialIcons 
+                name={maintenanceMode ? "build" : "system-update"} 
+                size={32} 
+                color={maintenanceMode ? "#ef4444" : "#0ea5e9"} 
+              />
+              <Text style={styles.updateModalTitle}>
+                {maintenanceMode ? "Maintenance Mode" : "Update Available"}
+              </Text>
+            </View>
+            
+            <Text style={styles.updateModalMessage}>
+              {maintenanceMode 
+                ? "The app is currently under maintenance. Please try again later."
+                : "A new version of the app is available and required. Please update to continue using the app."
+              }
+            </Text>
+            
+            {!maintenanceMode && updateInfo?.version && (
+              <View style={styles.versionInfo}>
+                <Text style={styles.versionLabel}>Latest Version:</Text>
+                <Text style={styles.versionText}>{updateInfo.version}</Text>
+              </View>
+            )}
+
+            <View style={styles.updateModalButtons}>
+              {maintenanceMode ? (
+                // Maintenance mode - only close button, no access allowed
+                <TouchableOpacity
+                  style={[styles.updateModalButton, styles.maintenanceCloseButton]}
+                  onPress={() => {
+                    // Show alert and try to exit
+                    Alert.alert(
+                      'App Maintenance',
+                      'The app is under maintenance. The app will now close.',
+                      [
+                        {
+                          text: 'OK',
+                          onPress: () => {
+                            // Force close the app
+                            if (Platform.OS === 'android') {
+                              BackHandler.exitApp();
+                            } else {
+                              // For iOS, we can't programmatically close, but we can show instructions
+                              Alert.alert(
+                                'Close App Manually',
+                                'Please close this app manually by swiping up from the bottom and swiping the app away.',
+                                [{ text: 'OK' }],
+                                { cancelable: false }
+                              );
+                            }
+                          },
+                          style: 'destructive'
+                        }
+                      ],
+                      { cancelable: false }
+                    );
+                  }}
+                >
+                  <Text style={styles.updateModalButtonText}>OK</Text>
+                </TouchableOpacity>
+              ) : (
+                // Update mode - force update, no continue option
+                <>
+                  {updateInfo?.downloadUrl && (
+                    <TouchableOpacity
+                      style={[styles.updateModalButton, styles.forceUpdateButton]}
+                      onPress={() => {
+                        Linking.openURL(updateInfo.downloadUrl);
+                      }}
+                    >
+                      <MaterialIcons name="download" size={20} color="#ffffff" />
+                      <Text style={styles.updateModalButtonText}>Update Now</Text>
+                    </TouchableOpacity>
+                  )}
+                  
+                  <TouchableOpacity
+                    style={[styles.updateModalButton, styles.updateCloseButton]}
+                    onPress={() => setShowUpdateModal(false)}
+                  >
+                    <Text style={styles.updateModalButtonText}>Close App</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ImageBackground>
   );
 }
@@ -1466,5 +1615,124 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     backgroundColor: '#64748b',
     minWidth: 100,
+  },
+
+  // Update Modal Styles
+  updateModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  updateModalContent: {
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    padding: 32,
+    width: '100%',
+    maxWidth: 380,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 20 },
+    shadowOpacity: 0.3,
+    shadowRadius: 30,
+    elevation: 15,
+  },
+  updateModalHeader: {
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  updateModalTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginTop: 16,
+    textAlign: 'center',
+  },
+  updateModalMessage: {
+    fontSize: 16,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 24,
+    marginBottom: 24,
+  },
+  versionInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 32,
+    padding: 16,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    width: '100%',
+    justifyContent: 'center',
+  },
+  versionLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#64748b',
+    marginRight: 8,
+  },
+  versionText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0ea5e9',
+  },
+  downloadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0ea5e9',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    marginBottom: 20,
+    gap: 8,
+  },
+  downloadButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  updateModalButtons: {
+    flexDirection: 'row',
+    gap: 16,
+    width: '100%',
+  },
+  updateModalButton: {
+    flex: 1,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  continueButton: {
+    backgroundColor: '#f3f4f6',
+  },
+  continueButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  updateCloseButton: {
+    backgroundColor: '#6b7280',
+  },
+  maintenanceCloseButton: {
+    backgroundColor: '#ef4444',
+    flex: 1,
+  },
+  forceUpdateButton: {
+    backgroundColor: '#0ea5e9',
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  updateModalButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
   },
 }); 
