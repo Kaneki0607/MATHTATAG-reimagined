@@ -23,18 +23,9 @@ interface Teacher {
   isBlocked?: boolean;
 }
 
-interface ErrorLog {
-  id: string;
-  timestamp: string;
-  message: string;
-  severity: 'error' | 'warning' | 'info';
-  source?: string;
-  userId?: string;
-  userEmail?: string;
-}
-
 interface TechnicalReport {
   id: string;
+  ticketId: string; // Human-readable ticket ID
   reportedBy: string;
   reportedByEmail: string;
   reportedByName?: string;
@@ -43,6 +34,10 @@ interface TechnicalReport {
   description: string;
   screenshots: string[];
   status: 'pending' | 'in_progress' | 'resolved';
+  priority?: 'low' | 'medium' | 'high' | 'critical';
+  category?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
 }
 
 export default function AdminDashboard() {
@@ -71,12 +66,13 @@ export default function AdminDashboard() {
   const [annMessage, setAnnMessage] = useState('');
   const [sendingAnn, setSendingAnn] = useState(false);
 
-  // Error logs and technical reports state
-  const [errorLogs, setErrorLogs] = useState<ErrorLog[]>([]);
+  // Technical reports state
   const [technicalReports, setTechnicalReports] = useState<TechnicalReport[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
-  const [logSearchQuery, setLogSearchQuery] = useState('');
-  const [logSeverityFilter, setLogSeverityFilter] = useState<'all' | 'error' | 'warning' | 'info'>('all');
+  
+  // Report details modal state
+  const [showReportDetailsModal, setShowReportDetailsModal] = useState(false);
+  const [selectedReport, setSelectedReport] = useState<TechnicalReport | null>(null);
   
   // Technical Report Modal state
   const [showTechReportModal, setShowTechReportModal] = useState(false);
@@ -312,36 +308,10 @@ export default function AdminDashboard() {
     if (activeTab === 'reports') {
       setRefreshing(true);
       try {
-        await Promise.all([fetchErrorLogs(), fetchTechnicalReports()]);
+        await fetchTechnicalReports();
       } finally {
         setRefreshing(false);
       }
-    }
-  };
-
-  // Fetch error logs from Firebase
-  const fetchErrorLogs = async () => {
-    setLogsLoading(true);
-    try {
-      const { data, error } = await readData('/errorLogs');
-      if (error) {
-        console.error('Error fetching logs:', error);
-        return;
-      }
-      
-      if (data) {
-        const logsList: ErrorLog[] = Object.entries(data).map(([id, logData]: [string, any]) => ({
-          id,
-          ...logData,
-        })).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-        setErrorLogs(logsList);
-      } else {
-        setErrorLogs([]);
-      }
-    } catch (error) {
-      console.error('Error fetching logs:', error);
-    } finally {
-      setLogsLoading(false);
     }
   };
 
@@ -373,25 +343,11 @@ export default function AdminDashboard() {
     }
   };
 
-  // Load logs with real-time updates when Reports tab is selected
+  // Load technical reports with real-time updates when Reports tab is selected
   useEffect(() => {
     if (activeTab === 'reports') {
       setLogsLoading(true);
       
-      // Set up real-time listener for error logs
-      const unsubscribeErrorLogs = listenToData('/errorLogs', (data) => {
-        if (data) {
-          const logsList: ErrorLog[] = Object.entries(data).map(([id, logData]: [string, any]) => ({
-            id,
-            ...logData,
-          })).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-          setErrorLogs(logsList);
-        } else {
-          setErrorLogs([]);
-        }
-        setLogsLoading(false);
-      });
-
       // Set up real-time listener for technical reports
       const unsubscribeTechnicalReports = listenToData('/technicalReports', (data) => {
         if (data) {
@@ -407,11 +363,11 @@ export default function AdminDashboard() {
         } else {
           setTechnicalReports([]);
         }
+        setLogsLoading(false);
       });
 
-      // Cleanup listeners when leaving Reports tab
+      // Cleanup listener when leaving Reports tab
       return () => {
-        stopListening('/errorLogs');
         stopListening('/technicalReports');
       };
     }
@@ -504,6 +460,12 @@ export default function AdminDashboard() {
     setReportScreenshots(prev => prev.filter(s => s !== uri));
   };
 
+  // Generate ticket ID
+  const generateTicketId = () => {
+    const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return random;
+  };
+
   // Submit technical report
   const submitTechnicalReport = async () => {
     if (!reportDescription.trim()) {
@@ -516,6 +478,7 @@ export default function AdminDashboard() {
       const user = getCurrentUser();
       const timestamp = new Date().toISOString();
       const reportId = `report_${Date.now()}`;
+      const ticketId = generateTicketId();
 
       // Upload screenshots to Firebase Storage
       const uploadedUrls: string[] = [];
@@ -532,20 +495,31 @@ export default function AdminDashboard() {
         }
       }
 
+      // Determine user role based on current user context
+      const userRole: 'teacher' | 'parent' | 'admin' = 'admin'; // Admin dashboard context
+
       const report: TechnicalReport = {
         id: reportId,
+        ticketId: ticketId,
         reportedBy: user?.uid || 'unknown',
         reportedByEmail: user?.email || 'unknown',
-        timestamp,
+        reportedByName: user?.displayName || user?.email?.split('@')[0] || 'Admin User',
+        userRole: userRole,
+        timestamp: timestamp,
         description: reportDescription.trim(),
         screenshots: uploadedUrls,
         status: 'pending',
+        priority: 'medium', // Default priority
+        category: 'technical', // Default category
       };
 
       const { success, error } = await writeData(`/technicalReports/${reportId}`, report);
       
       if (success) {
-        Alert.alert('Success', 'Your technical report has been submitted to the Super Admin.');
+        Alert.alert(
+          'Success', 
+          `Technical report submitted successfully!\n\nTicket ID: ${ticketId}\n\nYour report has been sent to the Super Admin for review.`
+        );
         setShowTechReportModal(false);
         setReportDescription('');
         setReportScreenshots([]);
@@ -564,16 +538,23 @@ export default function AdminDashboard() {
   // Mark technical report as done (resolved)
   const handleMarkReportAsDone = async (reportId: string) => {
     try {
+      const user = getCurrentUser();
       const { success, error } = await updateData(`/technicalReports/${reportId}`, {
         status: 'resolved',
         resolvedAt: new Date().toISOString(),
+        resolvedBy: user?.uid || 'admin',
       });
 
       if (success) {
         // Update local state immediately
         setTechnicalReports(prev => 
           prev.map(report => 
-            report.id === reportId ? { ...report, status: 'resolved' } : report
+            report.id === reportId ? { 
+              ...report, 
+              status: 'resolved',
+              resolvedAt: new Date().toISOString(),
+              resolvedBy: user?.uid || 'admin'
+            } : report
           )
         );
         Alert.alert('Success', 'Technical report marked as resolved.');
@@ -585,6 +566,11 @@ export default function AdminDashboard() {
       console.error('Error marking report as done:', error);
       Alert.alert('Error', 'Failed to update report status.');
     }
+  };
+
+  const handleOpenReportDetails = (report: TechnicalReport) => {
+    setSelectedReport(report);
+    setShowReportDetailsModal(true);
   };
 
   // Remove resolved technical report
@@ -618,18 +604,6 @@ export default function AdminDashboard() {
       ]
     );
   };
-
-  // Filter error logs
-  const filteredErrorLogs = errorLogs.filter(log => {
-    const matchesSearch = !logSearchQuery || 
-      log.message.toLowerCase().includes(logSearchQuery.toLowerCase()) ||
-      log.source?.toLowerCase().includes(logSearchQuery.toLowerCase()) ||
-      log.userEmail?.toLowerCase().includes(logSearchQuery.toLowerCase());
-    
-    const matchesSeverity = logSeverityFilter === 'all' || log.severity === logSeverityFilter;
-    
-    return matchesSearch && matchesSeverity;
-  });
 
   return (
     <View style={styles.container}>
@@ -745,11 +719,14 @@ export default function AdminDashboard() {
       {activeTab === 'teacher' && (
         loading ? (
           <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#0ea5e9" />
             <Text style={styles.loadingText}>Loading teachers...</Text>
           </View>
         ) : activeTeachers.length === 0 ? (
           <View style={styles.emptyContainer}>
-            <MaterialCommunityIcons name="account-group-outline" size={48} color="#9ca3af" />
+            <View style={styles.emptyIconCircle}>
+              <MaterialCommunityIcons name="account-group-outline" size={64} color="#0ea5e9" />
+            </View>
             <Text style={styles.emptyTitle}>No Active Teachers</Text>
             <Text style={styles.emptySubtitle}>Active (unblocked) teachers will appear here.</Text>
           </View>
@@ -759,15 +736,23 @@ export default function AdminDashboard() {
             keyExtractor={(t) => t.uid}
             refreshing={refreshing}
             onRefresh={onRefresh}
-            contentContainerStyle={[styles.teacherList, { padding: 20, paddingBottom: 100 }]}
+            contentContainerStyle={[styles.teacherList, { padding: 20, paddingTop: 30, paddingBottom: 100 }]}
             ListHeaderComponent={
               <View>
-                <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionTitle}>Teacher Management</Text>
+                <View style={styles.teacherPageHeader}>
+                  <View style={styles.teacherPageHeaderIcon}>
+                    <MaterialCommunityIcons name="account-group" size={32} color="#0ea5e9" />
+                  </View>
+                  <View style={styles.teacherPageHeaderText}>
+                    <Text style={styles.teacherPageTitle}>Teacher Management</Text>
+                    <Text style={styles.teacherPageSubtitle}>{filteredActiveTeachers.length} {filteredActiveTeachers.length === 1 ? 'teacher' : 'teachers'} found</Text>
+                  </View>
                 </View>
                 <View style={styles.filtersWrap}>
                   <View style={styles.searchBox}>
-                    <MaterialIcons name="search" size={18} color="#94a3b8" />
+                    <View style={styles.searchIconWrapper}>
+                      <MaterialIcons name="search" size={20} color="#0ea5e9" />
+                    </View>
                     <TextInput
                       style={styles.searchInput}
                       placeholder="Search by name, email, or school"
@@ -776,6 +761,11 @@ export default function AdminDashboard() {
                       onChangeText={setSearchQuery}
                       returnKeyType="search"
                     />
+                    {searchQuery.length > 0 && (
+                      <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.clearSearchButton}>
+                        <MaterialIcons name="close" size={18} color="#64748b" />
+                      </TouchableOpacity>
+                    )}
                   </View>
                   <View style={styles.filterChips}>
                     <TouchableOpacity
@@ -788,12 +778,14 @@ export default function AdminDashboard() {
                       style={[styles.filterChip, statusFilter === 'verified' && styles.filterChipActive]}
                       onPress={() => setStatusFilter('verified')}
                     >
+                      <MaterialCommunityIcons name="check-decagram" size={14} color={statusFilter === 'verified' ? '#ffffff' : '#10b981'} />
                       <Text style={[styles.filterChipText, statusFilter === 'verified' && styles.filterChipTextActive]}>Verified</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.filterChip, statusFilter === 'pending' && styles.filterChipActive]}
                       onPress={() => setStatusFilter('pending')}
                     >
+                      <MaterialCommunityIcons name="clock-outline" size={14} color={statusFilter === 'pending' ? '#ffffff' : '#f59e0b'} />
                       <Text style={[styles.filterChipText, statusFilter === 'pending' && styles.filterChipTextActive]}>Pending</Text>
                     </TouchableOpacity>
                   </View>
@@ -815,12 +807,17 @@ export default function AdminDashboard() {
                           style={styles.avatar} 
                         />
                       ) : (
-                        <View style={styles.avatarPlaceholder}>
+                        <View style={[styles.avatarPlaceholder, !teacher.isVerified && styles.avatarPlaceholderPending]}>
                           <MaterialCommunityIcons 
                             name="account" 
-                            size={24} 
+                            size={28} 
                             color="#ffffff" 
                           />
+                        </View>
+                      )}
+                      {teacher.isVerified && (
+                        <View style={styles.verifiedCheckmark}>
+                          <MaterialCommunityIcons name="check-decagram" size={18} color="#10b981" />
                         </View>
                       )}
                     </View>
@@ -828,38 +825,40 @@ export default function AdminDashboard() {
                       <Text style={styles.teacherName}>
                         {teacher.firstName} {teacher.lastName}
                       </Text>
-                      <Text style={styles.teacherEmail}>{teacher.email}</Text>
-                      <Text style={styles.teacherSchool}>{teacher.school}</Text>
+                      <View style={styles.teacherMetaRow}>
+                        <MaterialIcons name="email" size={14} color="#64748b" />
+                        <Text style={styles.teacherEmail}>{teacher.email}</Text>
+                      </View>
+                      <View style={styles.teacherMetaRow}>
+                        <MaterialIcons name="school" size={14} color="#64748b" />
+                        <Text style={styles.teacherSchool}>{teacher.school}</Text>
+                      </View>
                     </View>
                   </TouchableOpacity>
                   <View style={styles.statusBadges}>
                     {teacher.isVerified ? (
                       <View style={[styles.badge, styles.verifiedBadge]}>
-                        <MaterialCommunityIcons name="check-circle" size={12} color="#ffffff" />
+                        <MaterialCommunityIcons name="check-circle" size={14} color="#ffffff" />
                         <Text style={styles.badgeText}>Verified</Text>
                       </View>
                     ) : (
                       <View style={[styles.badge, styles.unverifiedBadge]}>
-                        <MaterialCommunityIcons name="clock-outline" size={12} color="#ffffff" />
+                        <MaterialCommunityIcons name="clock-outline" size={14} color="#ffffff" />
                         <Text style={styles.badgeText}>Pending</Text>
-                      </View>
-                    )}
-                    {teacher.isBlocked && (
-                      <View style={[styles.badge, styles.blockedBadge]}>
-                        <AntDesign name="stop" size={12} color="#ffffff" />
-                        <Text style={styles.badgeText}>Blocked</Text>
                       </View>
                     )}
                   </View>
                 </View>
+                
+                <View style={styles.teacherCardDivider} />
                 
                 <View style={styles.teacherActions}>
                   <TouchableOpacity 
                     style={[styles.actionButton, styles.viewButton]}
                     onPress={() => openTeacherProfile(teacher)}
                   >
-                    <MaterialIcons name="visibility" size={16} color="#ffffff" />
-                    <Text style={styles.actionButtonText}>View</Text>
+                    <MaterialIcons name="visibility" size={18} color="#ffffff" />
+                    <Text style={styles.actionButtonText}>View Profile</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -871,13 +870,16 @@ export default function AdminDashboard() {
       {activeTab === 'blocklist' && (
         loading ? (
           <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#ef4444" />
             <Text style={styles.loadingText}>Loading blocked teachers...</Text>
           </View>
         ) : blockedTeachers.length === 0 ? (
           <View style={styles.emptyContainer}>
-            <MaterialIcons name="block" size={48} color="#9ca3af" />
+            <View style={[styles.emptyIconCircle, styles.emptyIconCircleSuccess]}>
+              <MaterialCommunityIcons name="shield-check" size={64} color="#10b981" />
+            </View>
             <Text style={styles.emptyTitle}>No Blocked Teachers</Text>
-            <Text style={styles.emptySubtitle}>Blocked teachers will appear here.</Text>
+            <Text style={styles.emptySubtitle}>All teachers are currently active. Blocked accounts will appear here.</Text>
           </View>
         ) : (
           <FlatList
@@ -885,14 +887,27 @@ export default function AdminDashboard() {
             keyExtractor={(t) => t.uid}
             refreshing={refreshing}
             onRefresh={onRefresh}
-            contentContainerStyle={[styles.teacherList, { padding: 20, paddingBottom: 100 }]}
+            contentContainerStyle={[styles.teacherList, { padding: 20, paddingTop: 30, paddingBottom: 100 }]}
             ListHeaderComponent={
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>Blocked Teachers</Text>
+              <View>
+                <View style={styles.blocklistPageHeader}>
+                  <View style={styles.blocklistPageHeaderIcon}>
+                    <MaterialIcons name="block" size={32} color="#ef4444" />
+                  </View>
+                  <View style={styles.blocklistPageHeaderText}>
+                    <Text style={styles.blocklistPageTitle}>Blocked Teachers</Text>
+                    <Text style={styles.blocklistPageSubtitle}>{blockedTeachers.length} blocked {blockedTeachers.length === 1 ? 'account' : 'accounts'}</Text>
+                  </View>
+                </View>
               </View>
             }
             renderItem={({ item: teacher }) => (
-              <View style={styles.teacherCard}>
+              <View style={[styles.teacherCard, styles.blockedTeacherCard]}>
+                <View style={styles.blockedBanner}>
+                  <MaterialIcons name="block" size={16} color="#ef4444" />
+                  <Text style={styles.blockedBannerText}>Account Blocked</Text>
+                </View>
+                
                 <View style={styles.teacherHeader}>
                   <TouchableOpacity 
                     style={styles.teacherInfo}
@@ -903,40 +918,51 @@ export default function AdminDashboard() {
                       {teacher.profilePictureUrl ? (
                         <Image 
                           source={{ uri: teacher.profilePictureUrl }} 
-                          style={styles.avatar} 
+                          style={[styles.avatar, styles.avatarBlocked]} 
                         />
                       ) : (
-                        <View style={styles.avatarPlaceholder}>
+                        <View style={[styles.avatarPlaceholder, styles.avatarPlaceholderBlocked]}>
                           <MaterialCommunityIcons 
-                            name="account" 
-                            size={24} 
+                            name="account-off" 
+                            size={28} 
                             color="#ffffff" 
                           />
                         </View>
                       )}
+                      <View style={styles.blockedOverlay}>
+                        <MaterialIcons name="block" size={20} color="#ef4444" />
+                      </View>
                     </View>
                     <View style={styles.teacherDetails}>
                       <Text style={styles.teacherName}>
                         {teacher.firstName} {teacher.lastName}
                       </Text>
-                      <Text style={styles.teacherEmail}>{teacher.email}</Text>
-                      <Text style={styles.teacherSchool}>{teacher.school}</Text>
+                      <View style={styles.teacherMetaRow}>
+                        <MaterialIcons name="email" size={14} color="#64748b" />
+                        <Text style={styles.teacherEmail}>{teacher.email}</Text>
+                      </View>
+                      <View style={styles.teacherMetaRow}>
+                        <MaterialIcons name="school" size={14} color="#64748b" />
+                        <Text style={styles.teacherSchool}>{teacher.school}</Text>
+                      </View>
                     </View>
                   </TouchableOpacity>
                   <View style={styles.statusBadges}>
                     <View style={[styles.badge, styles.blockedBadge]}>
-                      <AntDesign name="stop" size={12} color="#ffffff" />
+                      <AntDesign name="stop" size={14} color="#ffffff" />
                       <Text style={styles.badgeText}>Blocked</Text>
                     </View>
                   </View>
                 </View>
+
+                <View style={styles.teacherCardDivider} />
 
                 <View style={styles.teacherActions}>
                   <TouchableOpacity 
                     style={[styles.actionButton, styles.unblockButton]}
                     onPress={() => confirmToggleBlock(teacher.uid, true)}
                   >
-                    <MaterialIcons name="lock-open" size={16} color="#ffffff" />
+                    <MaterialIcons name="lock-open" size={18} color="#ffffff" />
                     <Text style={styles.actionButtonText}>Unblock</Text>
                   </TouchableOpacity>
 
@@ -944,8 +970,8 @@ export default function AdminDashboard() {
                     style={[styles.actionButton, styles.removeButton]}
                     onPress={() => confirmRemoveTeacher(teacher.uid)}
                   >
-                    <MaterialCommunityIcons name="delete-outline" size={16} color="#ffffff" />
-                    <Text style={styles.actionButtonText}>Remove</Text>
+                    <MaterialCommunityIcons name="delete-outline" size={18} color="#ffffff" />
+                    <Text style={styles.actionButtonText}>Remove Forever</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -957,7 +983,7 @@ export default function AdminDashboard() {
       {activeTab === 'reports' && (
         <ScrollView
           style={styles.scrollArea}
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={[styles.scrollContent, { paddingTop: 30 }]}
           showsVerticalScrollIndicator={false}
           refreshControl={
             <RefreshControl
@@ -970,20 +996,26 @@ export default function AdminDashboard() {
         >
           {/* Page Header */}
           <View style={styles.reportsPageHeader}>
-            <View>
-              <Text style={styles.reportsPageTitle}>Reports & Logs</Text>
-              <Text style={styles.reportsPageSubtitle}>Monitor system health and technical issues</Text>
+            <View style={styles.reportsPageHeaderIcon}>
+              <MaterialCommunityIcons name="chart-box" size={32} color="#0ea5e9" />
+            </View>
+            <View style={styles.reportsPageHeaderText}>
+              <Text style={styles.reportsPageTitle}>Reports & Analytics</Text>
+              <Text style={styles.reportsPageSubtitle}>Monitor technical issues and user reports</Text>
             </View>
           </View>
 
           {/* Shake to report hint */}
           <View style={styles.shakeHintCard}>
             <View style={styles.shakeHintIconContainer}>
-              <MaterialCommunityIcons name="cellphone" size={28} color="#0ea5e9" />
+              <MaterialCommunityIcons name="cellphone" size={32} color="#0ea5e9" />
             </View>
             <View style={styles.shakeHintTextContainer}>
               <Text style={styles.shakeHintTitle}>Quick Report</Text>
-              <Text style={styles.shakeHintText}>Shake your device to report a technical problem</Text>
+              <Text style={styles.shakeHintText}>Shake your device anytime to quickly report a technical problem</Text>
+            </View>
+            <View style={styles.shakeHintBadge}>
+              <MaterialCommunityIcons name="lightning-bolt" size={16} color="#ffffff" />
             </View>
           </View>
 
@@ -992,11 +1024,11 @@ export default function AdminDashboard() {
             <View style={styles.reportsHeader}>
               <View style={styles.reportsHeaderLeft}>
                 <View style={styles.reportsIconContainer}>
-                  <MaterialCommunityIcons name="bug" size={24} color="#ef4444" />
+                  <MaterialCommunityIcons name="bug-outline" size={26} color="#ef4444" />
                 </View>
-                <View>
+                <View style={styles.reportsHeaderTextContainer}>
                   <Text style={styles.reportsTitle}>Technical Reports</Text>
-                  <Text style={styles.reportsSubtitle}>User-submitted issues</Text>
+                  <Text style={styles.reportsSubtitle}>User-submitted technical issues</Text>
                 </View>
               </View>
               <View style={styles.reportsBadge}>
@@ -1020,228 +1052,43 @@ export default function AdminDashboard() {
             ) : (
               <View style={styles.reportsList}>
                 {technicalReports.map(report => (
-                  <View key={report.id} style={styles.reportItem}>
-                    <View style={styles.reportItemHeader}>
-                      <View style={styles.reportItemLeft}>
-                        <View style={styles.reportItemUserRow}>
-                          <MaterialCommunityIcons 
-                            name={report.userRole === 'teacher' ? 'account-tie' : 
-                                  report.userRole === 'parent' ? 'account-heart' : 'account-circle'} 
-                            size={16} 
-                            color="#64748b" 
-                          />
-                          <Text style={styles.reportItemUser}>
-                            {report.reportedByName || report.reportedByEmail}
-                          </Text>
-                          {report.userRole && (
-                            <View style={[
-                              styles.reportUserRoleBadge,
-                              report.userRole === 'teacher' && styles.reportUserRoleTeacher,
-                              report.userRole === 'parent' && styles.reportUserRoleParent,
-                              report.userRole === 'admin' && styles.reportUserRoleAdmin,
-                            ]}>
-                              <Text style={styles.reportUserRoleText}>
-                                {report.userRole === 'teacher' ? 'Teacher' : 
-                                 report.userRole === 'parent' ? 'Parent' : 'Admin'}
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-                        <View style={styles.reportItemTimeRow}>
-                          <MaterialIcons name="access-time" size={14} color="#94a3b8" />
-                          <Text style={styles.reportItemTime}>
-                            {new Date(report.timestamp).toLocaleString()}
-                          </Text>
-                        </View>
+                  <TouchableOpacity 
+                    key={report.id} 
+                    style={[
+                      styles.reportListItem,
+                      report.status === 'resolved' && styles.reportListItemResolved,
+                    ]}
+                    onPress={() => handleOpenReportDetails(report)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.reportListItemContent}>
+                      <View style={styles.reportListItemLeft}>
+                        <MaterialIcons name="confirmation-number" size={20} color="#0ea5e9" />
+                        <Text style={styles.reportListItemId}>
+                          {report.ticketId || report.id}
+                        </Text>
                       </View>
-                      <View style={[
-                        styles.reportStatusBadge,
-                        report.status === 'resolved' && styles.reportStatusResolved,
-                        report.status === 'in_progress' && styles.reportStatusInProgress,
-                      ]}>
+                      <View style={styles.reportListItemRight}>
                         <View style={[
-                          styles.reportStatusDot,
-                          report.status === 'resolved' && styles.reportStatusDotResolved,
-                          report.status === 'in_progress' && styles.reportStatusDotInProgress,
-                        ]} />
-                        <Text style={styles.reportStatusText}>
-                          {report.status === 'pending' ? 'Pending' : 
-                           report.status === 'in_progress' ? 'In Progress' : 'Resolved'}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.reportItemDescriptionContainer}>
-                      <Text style={styles.reportItemDescription}>{report.description}</Text>
-                    </View>
-                    {report.screenshots && report.screenshots.length > 0 && (
-                      <View style={styles.reportScreenshotsContainer}>
-                        <View style={styles.reportScreenshotsHeader}>
-                          <MaterialIcons name="photo-library" size={16} color="#64748b" />
-                          <Text style={styles.reportScreenshotsLabel}>
-                            {report.screenshots.length} screenshot{report.screenshots.length > 1 ? 's' : ''} attached
+                          styles.reportListItemStatus,
+                          report.status === 'resolved' && styles.reportListItemStatusResolved,
+                          report.status === 'in_progress' && styles.reportListItemStatusInProgress,
+                        ]}>
+                          <MaterialCommunityIcons 
+                            name={report.status === 'pending' ? 'clock-outline' : 
+                                  report.status === 'in_progress' ? 'progress-clock' : 'check-circle'} 
+                            size={14} 
+                            color="#ffffff" 
+                          />
+                          <Text style={styles.reportListItemStatusText}>
+                            {report.status === 'pending' ? 'Pending' : 
+                             report.status === 'in_progress' ? 'In Progress' : 'Resolved'}
                           </Text>
                         </View>
-                        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportScreenshotsScroll}>
-                          {report.screenshots.map((url, idx) => (
-                            <View key={idx} style={styles.reportScreenshotWrapper}>
-                              <Image source={{ uri: url }} style={styles.reportScreenshotThumb} />
-                            </View>
-                          ))}
-                        </ScrollView>
-                      </View>
-                    )}
-                    
-                    {/* Action Buttons */}
-                    <View style={styles.reportActionsContainer}>
-                      {report.status !== 'resolved' ? (
-                        <TouchableOpacity 
-                          style={styles.markDoneButton}
-                          onPress={() => handleMarkReportAsDone(report.id)}
-                        >
-                          <MaterialCommunityIcons name="check-circle" size={18} color="#ffffff" />
-                          <Text style={styles.markDoneButtonText}>Mark as Done</Text>
-                        </TouchableOpacity>
-                      ) : (
-                        <TouchableOpacity 
-                          style={styles.removeReportButton}
-                          onPress={() => handleRemoveReport(report.id)}
-                        >
-                          <MaterialCommunityIcons name="delete-outline" size={18} color="#ffffff" />
-                          <Text style={styles.removeReportButtonText}>Remove</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  </View>
-                ))}
-              </View>
-            )}
-          </View>
-
-          {/* Error Logs Section */}
-          <View style={styles.reportsCard}>
-            <View style={styles.reportsHeader}>
-              <View style={styles.reportsHeaderLeft}>
-                <View style={[styles.reportsIconContainer, styles.reportsIconContainerWarning]}>
-                  <MaterialIcons name="error-outline" size={24} color="#f59e0b" />
-                </View>
-                <View>
-                  <Text style={styles.reportsTitle}>Error Logs</Text>
-                  <Text style={styles.reportsSubtitle}>System diagnostics</Text>
-                </View>
-              </View>
-              <View style={[styles.reportsBadge, styles.reportsBadgeWarning]}>
-                <Text style={styles.reportsBadgeText}>{errorLogs.length}</Text>
-              </View>
-            </View>
-
-            {/* Search and filter */}
-            <View style={styles.logsFiltersWrap}>
-              <View style={styles.searchBox}>
-                <MaterialIcons name="search" size={20} color="#94a3b8" />
-                <TextInput
-                  style={styles.searchInput}
-                  placeholder="Search logs by message, source, or user..."
-                  placeholderTextColor="#94a3b8"
-                  value={logSearchQuery}
-                  onChangeText={setLogSearchQuery}
-                  returnKeyType="search"
-                />
-              </View>
-              <View style={styles.filterChips}>
-                <TouchableOpacity
-                  style={[styles.filterChip, logSeverityFilter === 'all' && styles.filterChipActive]}
-                  onPress={() => setLogSeverityFilter('all')}
-                >
-                  <Text style={[styles.filterChipText, logSeverityFilter === 'all' && styles.filterChipTextActive]}>All</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.filterChip, logSeverityFilter === 'error' && styles.filterChipActive]}
-                  onPress={() => setLogSeverityFilter('error')}
-                >
-                  <Text style={[styles.filterChipText, logSeverityFilter === 'error' && styles.filterChipTextActive]}>Errors</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.filterChip, logSeverityFilter === 'warning' && styles.filterChipActive]}
-                  onPress={() => setLogSeverityFilter('warning')}
-                >
-                  <Text style={[styles.filterChipText, logSeverityFilter === 'warning' && styles.filterChipTextActive]}>Warnings</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.filterChip, logSeverityFilter === 'info' && styles.filterChipActive]}
-                  onPress={() => setLogSeverityFilter('info')}
-                >
-                  <Text style={[styles.filterChipText, logSeverityFilter === 'info' && styles.filterChipTextActive]}>Info</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {logsLoading ? (
-              <View style={styles.logsLoadingContainer}>
-                <ActivityIndicator size="small" color="#0ea5e9" />
-                <Text style={styles.logsLoadingText}>Loading logs...</Text>
-              </View>
-            ) : filteredErrorLogs.length === 0 ? (
-              <View style={styles.emptyLogsContainer}>
-                <View style={styles.emptyLogsIconContainer}>
-                  <MaterialCommunityIcons name="check-circle-outline" size={48} color="#10b981" />
-                </View>
-                <Text style={styles.emptyLogsTitle}>
-                  {errorLogs.length === 0 ? 'All Clear!' : 'No Matches'}
-                </Text>
-                <Text style={styles.emptyLogsText}>
-                  {errorLogs.length === 0 ? 'No error logs found' : 'Try adjusting your filters'}
-                </Text>
-              </View>
-            ) : (
-              <View style={styles.logsList}>
-                {filteredErrorLogs.map(log => (
-                  <View key={log.id} style={[
-                    styles.logItem,
-                    log.severity === 'error' && styles.logItemError,
-                    log.severity === 'warning' && styles.logItemWarning,
-                    log.severity === 'info' && styles.logItemInfo,
-                  ]}>
-                    <View style={styles.logItemHeader}>
-                      <View style={[
-                        styles.logSeverityBadge,
-                        log.severity === 'error' && styles.logSeverityError,
-                        log.severity === 'warning' && styles.logSeverityWarning,
-                        log.severity === 'info' && styles.logSeverityInfo,
-                      ]}>
-                        <MaterialIcons 
-                          name={log.severity === 'error' ? 'error' : log.severity === 'warning' ? 'warning' : 'info'} 
-                          size={12} 
-                          color="#ffffff" 
-                        />
-                        <Text style={styles.logSeverityText}>
-                          {log.severity.toUpperCase()}
-                        </Text>
-                      </View>
-                      <View style={styles.logItemTimeContainer}>
-                        <MaterialIcons name="access-time" size={12} color="#94a3b8" />
-                        <Text style={styles.logItemTime}>
-                          {new Date(log.timestamp).toLocaleString()}
-                        </Text>
+                        <MaterialIcons name="chevron-right" size={20} color="#94a3b8" />
                       </View>
                     </View>
-                    <Text style={styles.logItemMessage}>{log.message}</Text>
-                    {(log.source || log.userEmail) && (
-                      <View style={styles.logItemMeta}>
-                        {log.source && (
-                          <View style={styles.logItemMetaRow}>
-                            <MaterialIcons name="code" size={12} color="#64748b" />
-                            <Text style={styles.logItemSource}>{log.source}</Text>
-                          </View>
-                        )}
-                        {log.userEmail && (
-                          <View style={styles.logItemMetaRow}>
-                            <MaterialCommunityIcons name="account" size={12} color="#64748b" />
-                            <Text style={styles.logItemUser}>{log.userEmail}</Text>
-                          </View>
-                        )}
-                      </View>
-                    )}
-                  </View>
+                  </TouchableOpacity>
                 ))}
               </View>
             )}
@@ -1734,6 +1581,170 @@ export default function AdminDashboard() {
           </View>
         </View>
       </Modal>
+
+      {/* Report Details Modal */}
+      <Modal visible={showReportDetailsModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.reportDetailsModal}>
+            <View style={styles.reportDetailsModalHeader}>
+              <View style={styles.reportDetailsModalTitleRow}>
+                <MaterialIcons name="confirmation-number" size={24} color="#0ea5e9" />
+                <Text style={styles.reportDetailsModalTitle}>
+                  {selectedReport?.ticketId || selectedReport?.id}
+                </Text>
+              </View>
+              <TouchableOpacity 
+                style={styles.reportDetailsModalCloseButton}
+                onPress={() => setShowReportDetailsModal(false)}
+              >
+                <MaterialIcons name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.reportDetailsModalContent} showsVerticalScrollIndicator={false}>
+              {/* Reporter Information */}
+              <View style={styles.reportDetailsSection}>
+                <Text style={styles.reportDetailsSectionTitle}>Reporter Information</Text>
+                <View style={styles.reportDetailsUserRow}>
+                  <View style={styles.reportDetailsUserIconContainer}>
+                    <MaterialCommunityIcons 
+                      name={selectedReport?.userRole === 'teacher' ? 'account-tie' : 
+                            selectedReport?.userRole === 'parent' ? 'account-heart' : 'shield-account'} 
+                      size={20} 
+                      color={selectedReport?.userRole === 'teacher' ? '#3b82f6' : 
+                             selectedReport?.userRole === 'parent' ? '#ec4899' : '#8b5cf6'} 
+                    />
+                  </View>
+                  <View style={styles.reportDetailsUserInfo}>
+                    <Text style={styles.reportDetailsUserName}>
+                      {selectedReport?.reportedByName || selectedReport?.reportedByEmail}
+                    </Text>
+                    {selectedReport?.userRole && (
+                      <View style={[
+                        styles.reportDetailsUserRoleBadge,
+                        selectedReport.userRole === 'teacher' && styles.reportDetailsUserRoleTeacher,
+                        selectedReport.userRole === 'parent' && styles.reportDetailsUserRoleParent,
+                        selectedReport.userRole === 'admin' && styles.reportDetailsUserRoleAdmin,
+                      ]}>
+                        <Text style={styles.reportDetailsUserRoleText}>
+                          {selectedReport.userRole === 'teacher' ? 'Teacher' : 
+                           selectedReport.userRole === 'parent' ? 'Parent' : 'Admin'}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              </View>
+
+              {/* Timestamp */}
+              <View style={styles.reportDetailsSection}>
+                <Text style={styles.reportDetailsSectionTitle}>Timestamp</Text>
+                <View style={styles.reportDetailsTimeCard}>
+                  <View style={styles.reportDetailsTimeIconContainer}>
+                    <MaterialIcons name="schedule" size={24} color="#0ea5e9" />
+                  </View>
+                  <View style={styles.reportDetailsTimeContent}>
+                    <Text style={styles.reportDetailsTimeLabel}>Reported on</Text>
+                    <Text style={styles.reportDetailsTime}>
+                      {selectedReport?.timestamp && new Date(selectedReport.timestamp).toLocaleDateString('en-US', { 
+                        weekday: 'long',
+                        month: 'long', 
+                        day: 'numeric', 
+                        year: 'numeric', 
+                        hour: '2-digit', 
+                        minute: '2-digit' 
+                      })}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Description */}
+              <View style={styles.reportDetailsSection}>
+                <Text style={styles.reportDetailsSectionTitle}>Description</Text>
+                <View style={styles.reportDetailsDescriptionContainer}>
+                  <Text style={styles.reportDetailsDescription}>
+                    {selectedReport?.description}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Screenshots */}
+              {selectedReport?.screenshots && selectedReport.screenshots.length > 0 && (
+                <View style={styles.reportDetailsSection}>
+                  <Text style={styles.reportDetailsSectionTitle}>
+                    Screenshots ({selectedReport.screenshots.length})
+                  </Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportDetailsScreenshotsScroll}>
+                    {selectedReport.screenshots.map((url, idx) => (
+                      <View key={idx} style={styles.reportDetailsScreenshotWrapper}>
+                        <Image source={{ uri: url }} style={styles.reportDetailsScreenshot} />
+                      </View>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+
+              {/* Resolution Info */}
+              {selectedReport?.status === 'resolved' && selectedReport.resolvedAt && (
+                <View style={styles.reportDetailsSection}>
+                  <Text style={styles.reportDetailsSectionTitle}>Resolution Information</Text>
+                  <View style={styles.reportDetailsResolutionInfo}>
+                    <View style={styles.reportDetailsResolutionRow}>
+                      <MaterialIcons name="check-circle" size={16} color="#10b981" />
+                      <Text style={styles.reportDetailsResolutionText}>
+                        Resolved on {new Date(selectedReport.resolvedAt).toLocaleDateString('en-US', { 
+                          month: 'short', 
+                          day: 'numeric', 
+                          year: 'numeric', 
+                          hour: '2-digit', 
+                          minute: '2-digit' 
+                        })}
+                      </Text>
+                    </View>
+                    {selectedReport.resolvedBy && (
+                      <View style={styles.reportDetailsResolutionRow}>
+                        <MaterialIcons name="person" size={16} color="#64748b" />
+                        <Text style={styles.reportDetailsResolutionBy}>
+                          Resolved by: {selectedReport.resolvedBy}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
+            </ScrollView>
+
+            {/* Action Buttons */}
+            <View style={styles.reportDetailsModalActions}>
+              {selectedReport?.status !== 'resolved' ? (
+                <TouchableOpacity 
+                  style={styles.reportDetailsMarkDoneButton}
+                  onPress={() => {
+                    handleMarkReportAsDone(selectedReport!.id);
+                    setShowReportDetailsModal(false);
+                  }}
+                >
+                  <MaterialCommunityIcons name="check-circle" size={18} color="#ffffff" />
+                  <Text style={styles.reportDetailsMarkDoneButtonText}>Send Report</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity 
+                  style={styles.reportDetailsRemoveButton}
+                  onPress={() => {
+                    handleRemoveReport(selectedReport!.id);
+                    setShowReportDetailsModal(false);
+                  }}
+                >
+                  <MaterialCommunityIcons name="delete-outline" size={18} color="#ffffff" />
+                  <Text style={styles.reportDetailsRemoveButtonText}>Remove</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
     </View>
   );
 }
@@ -1973,6 +1984,38 @@ const styles = StyleSheet.create({
   teacherSection: {
     flex: 1,
   },
+  teacherPageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 20,
+    paddingHorizontal: 4,
+  },
+  teacherPageHeaderIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#eff6ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 3,
+    borderColor: '#bfdbfe',
+  },
+  teacherPageHeaderText: {
+    flex: 1,
+  },
+  teacherPageTitle: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.5,
+    marginBottom: 4,
+  },
+  teacherPageSubtitle: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '600',
+  },
   sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1995,6 +2038,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: 60,
+    paddingTop: 100,
     backgroundColor: '#ffffff',
     borderRadius: 20,
     marginHorizontal: 4,
@@ -2015,6 +2059,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: 80,
+    paddingTop: 120,
     backgroundColor: '#ffffff',
     borderRadius: 20,
     marginHorizontal: 4,
@@ -2024,63 +2069,104 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 4,
   },
+  emptyIconCircle: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#eff6ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+    borderWidth: 3,
+    borderColor: '#bfdbfe',
+  },
+  emptyIconCircleSuccess: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#bbf7d0',
+  },
   emptyTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#374151',
-    marginTop: 20,
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginTop: 8,
   },
   emptySubtitle: {
     fontSize: 15,
-    color: '#9ca3af',
+    color: '#64748b',
     marginTop: 8,
     textAlign: 'center',
     lineHeight: 22,
+    paddingHorizontal: 20,
   },
   teacherList: {
     gap: 20,
   },
   filtersWrap: {
     backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 12,
-    marginBottom: 12,
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 16,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 3,
-    gap: 10,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 6,
+    gap: 14,
   },
   searchBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 12,
     backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+  searchIconWrapper: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#eff6ff',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   searchInput: {
     flex: 1,
-    fontSize: 14,
+    fontSize: 15,
     color: '#0f172a',
+    fontWeight: '500',
+  },
+  clearSearchButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#e2e8f0',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   filterChips: {
     flexDirection: 'row',
-    gap: 8,
+    gap: 10,
   },
   filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     backgroundColor: '#f1f5f9',
     borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
   filterChipActive: {
     backgroundColor: '#0ea5e9',
+    borderColor: '#0284c7',
   },
   filterChipText: {
-    fontSize: 12,
+    fontSize: 13,
     color: '#64748b',
     fontWeight: '700',
   },
@@ -2134,27 +2220,74 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 4,
   },
+  avatarPlaceholderPending: {
+    backgroundColor: '#f59e0b',
+    shadowColor: '#f59e0b',
+  },
+  avatarPlaceholderBlocked: {
+    backgroundColor: '#64748b',
+    shadowColor: '#64748b',
+    opacity: 0.6,
+  },
+  avatarBlocked: {
+    opacity: 0.5,
+  },
+  verifiedCheckmark: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 2,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  blockedOverlay: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 3,
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
   teacherDetails: {
     flex: 1,
     justifyContent: 'center',
+    gap: 6,
+  },
+  teacherMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   teacherName: {
-    fontSize: 20,
+    fontSize: 19,
     fontWeight: '800',
     color: '#1e293b',
-    marginBottom: 6,
     letterSpacing: -0.3,
   },
   teacherEmail: {
-    fontSize: 15,
+    fontSize: 14,
     color: '#64748b',
-    marginBottom: 4,
     fontWeight: '500',
   },
   teacherSchool: {
     fontSize: 14,
-    color: '#94a3b8',
+    color: '#64748b',
     fontWeight: '500',
+  },
+  teacherCardDivider: {
+    height: 1,
+    backgroundColor: '#f1f5f9',
+    marginVertical: 18,
   },
   statusBadges: {
     flexDirection: 'row',
@@ -2165,14 +2298,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 7,
     borderRadius: 16,
     gap: 6,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.12,
     shadowRadius: 4,
-    elevation: 2,
+    elevation: 3,
   },
   verifiedBadge: {
     backgroundColor: '#10b981',
@@ -2184,10 +2317,66 @@ const styles = StyleSheet.create({
     backgroundColor: '#ef4444',
   },
   badgeText: {
-    fontSize: 13,
-    fontWeight: '700',
+    fontSize: 12,
+    fontWeight: '800',
     color: '#ffffff',
-    letterSpacing: 0.2,
+    letterSpacing: 0.3,
+  },
+  // Blocklist Styles
+  blocklistPageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 20,
+    paddingHorizontal: 4,
+  },
+  blocklistPageHeaderIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#fef2f2',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 3,
+    borderColor: '#fecaca',
+  },
+  blocklistPageHeaderText: {
+    flex: 1,
+  },
+  blocklistPageTitle: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.5,
+    marginBottom: 4,
+  },
+  blocklistPageSubtitle: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  blockedTeacherCard: {
+    borderLeftWidth: 4,
+    borderLeftColor: '#ef4444',
+    backgroundColor: '#fefefe',
+  },
+  blockedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#fef2f2',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+  },
+  blockedBannerText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#ef4444',
+    letterSpacing: 0.3,
   },
   teacherActions: {
     flexDirection: 'row',
@@ -2256,7 +2445,9 @@ const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'flex-end',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
   },
   modalContent: {
     backgroundColor: '#ffffff',
@@ -2687,19 +2878,35 @@ const styles = StyleSheet.create({
   },
   // Reports Tab Styles
   reportsPageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
     marginBottom: 24,
   },
+  reportsPageHeaderIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#eff6ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 3,
+    borderColor: '#bfdbfe',
+  },
+  reportsPageHeaderText: {
+    flex: 1,
+  },
   reportsPageTitle: {
-    fontSize: 32,
+    fontSize: 26,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
     marginBottom: 4,
   },
   reportsPageSubtitle: {
-    fontSize: 15,
+    fontSize: 14,
     color: '#64748b',
-    fontWeight: '500',
+    fontWeight: '600',
   },
   shakeHintCard: {
     backgroundColor: '#eff6ff',
@@ -2709,41 +2916,57 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 16,
     marginBottom: 24,
-    borderWidth: 2,
+    borderWidth: 3,
     borderColor: '#bfdbfe',
     shadowColor: '#0ea5e9',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 6,
   },
   shakeHintIconContainer: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     backgroundColor: '#ffffff',
     justifyContent: 'center',
     alignItems: 'center',
     shadowColor: '#0ea5e9',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+    borderWidth: 2,
+    borderColor: '#bfdbfe',
   },
   shakeHintTextContainer: {
     flex: 1,
   },
   shakeHintTitle: {
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: '800',
     color: '#1e40af',
     marginBottom: 4,
+    letterSpacing: -0.3,
   },
   shakeHintText: {
-    fontSize: 14,
-    color: '#1e40af',
-    fontWeight: '500',
-    lineHeight: 20,
+    fontSize: 13,
+    color: '#3b82f6',
+    fontWeight: '600',
+    lineHeight: 19,
+  },
+  shakeHintBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#0ea5e9',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
   reportsCard: {
     backgroundColor: '#ffffff',
@@ -2762,38 +2985,50 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 20,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
+    paddingBottom: 18,
+    borderBottomWidth: 2,
     borderBottomColor: '#f1f5f9',
   },
   reportsHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 14,
     flex: 1,
   },
   reportsIconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     backgroundColor: '#fee2e2',
     justifyContent: 'center',
     alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#fecaca',
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 3,
   },
   reportsIconContainerWarning: {
     backgroundColor: '#fef3c7',
+    borderColor: '#fde68a',
+    shadowColor: '#f59e0b',
+  },
+  reportsHeaderTextContainer: {
+    flex: 1,
   },
   reportsTitle: {
-    fontSize: 18,
+    fontSize: 19,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
+    marginBottom: 2,
   },
   reportsSubtitle: {
     fontSize: 13,
     color: '#64748b',
-    fontWeight: '500',
-    marginTop: 2,
+    fontWeight: '600',
   },
   reportsBadge: {
     backgroundColor: '#ef4444',
@@ -2853,35 +3088,76 @@ const styles = StyleSheet.create({
   },
   reportItem: {
     backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 18,
+    borderRadius: 18,
+    padding: 20,
     borderWidth: 2,
     borderColor: '#e2e8f0',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  reportItemResolved: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#bbf7d0',
   },
   reportItemHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 12,
+    alignItems: 'center',
+    marginBottom: 14,
   },
   reportItemLeft: {
     flex: 1,
-    gap: 6,
+    gap: 8,
+    marginRight: 12,
+  },
+  reportItemTicketRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  reportItemTicketId: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0ea5e9',
+    letterSpacing: 0.5,
+    backgroundColor: '#eff6ff',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
   },
   reportItemUserRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 10,
+  },
+  reportUserIconContainer: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#f8fafc',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+  reportUserInfo: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
   },
   reportItemUser: {
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 15,
+    fontWeight: '800',
     color: '#1e293b',
+    letterSpacing: -0.2,
   },
   reportUserRoleBadge: {
     paddingHorizontal: 8,
@@ -2916,18 +3192,25 @@ const styles = StyleSheet.create({
   },
   reportStatusBadge: {
     backgroundColor: '#f59e0b',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 14,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    shadowColor: '#f59e0b',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
   },
   reportStatusResolved: {
     backgroundColor: '#10b981',
+    shadowColor: '#10b981',
   },
   reportStatusInProgress: {
     backgroundColor: '#3b82f6',
+    shadowColor: '#3b82f6',
   },
   reportStatusDot: {
     width: 6,
@@ -2945,15 +3228,20 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     color: '#ffffff',
-    letterSpacing: 0.3,
+    letterSpacing: 0.4,
   },
   reportItemDescriptionContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
     backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 12,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   reportItemDescription: {
+    flex: 1,
     fontSize: 14,
     color: '#1e293b',
     lineHeight: 21,
@@ -3314,6 +3602,308 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '700',
     fontSize: 15,
+  },
+
+  // Simplified Report List Styles
+  reportListItem: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+    elevation: 1,
+  },
+  reportListItemResolved: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#bbf7d0',
+  },
+  reportListItemContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+  },
+  reportListItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+    marginRight: 8,
+  },
+  reportListItemRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  reportListItemId: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0ea5e9',
+    letterSpacing: 0.3,
+    flex: 1,
+    flexWrap: 'wrap',
+  },
+  reportListItemStatus: {
+    backgroundColor: '#f59e0b',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    minWidth: 80,
+    justifyContent: 'center',
+  },
+  reportListItemStatusResolved: {
+    backgroundColor: '#10b981',
+  },
+  reportListItemStatusInProgress: {
+    backgroundColor: '#3b82f6',
+  },
+  reportListItemStatusText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#ffffff',
+    letterSpacing: 0.2,
+  },
+
+  // Report Details Modal Styles
+  reportDetailsModal: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    maxHeight: '85%',
+    minHeight: '60%',
+    width: '100%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  reportDetailsModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  reportDetailsModalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  reportDetailsModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  reportDetailsModalCloseButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#f8fafc',
+  },
+  reportDetailsModalContent: {
+    flex: 1,
+    padding: 20,
+    minHeight: 200,
+  },
+  reportDetailsSection: {
+    marginBottom: 24,
+  },
+  reportDetailsSectionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 12,
+  },
+  reportDetailsUserRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  reportDetailsUserIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#f8fafc',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reportDetailsUserInfo: {
+    flex: 1,
+  },
+  reportDetailsUserName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  reportDetailsUserRoleBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  reportDetailsUserRoleTeacher: {
+    backgroundColor: '#dbeafe',
+  },
+  reportDetailsUserRoleParent: {
+    backgroundColor: '#fce7f3',
+  },
+  reportDetailsUserRoleAdmin: {
+    backgroundColor: '#ede9fe',
+  },
+  reportDetailsUserRoleText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  reportDetailsStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  reportDetailsStatusBadge: {
+    backgroundColor: '#f59e0b',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  reportDetailsStatusResolved: {
+    backgroundColor: '#10b981',
+  },
+  reportDetailsStatusInProgress: {
+    backgroundColor: '#3b82f6',
+  },
+  reportDetailsStatusText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  reportDetailsTimeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+    gap: 12,
+  },
+  reportDetailsTimeIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#dbeafe',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  reportDetailsTimeContent: {
+    flex: 1,
+  },
+  reportDetailsTimeLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  reportDetailsTime: {
+    fontSize: 15,
+    color: '#1e293b',
+    fontWeight: '600',
+  },
+  reportDetailsDescriptionContainer: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reportDetailsDescription: {
+    fontSize: 15,
+    color: '#374151',
+    lineHeight: 22,
+  },
+  reportDetailsScreenshotsScroll: {
+    marginTop: 8,
+  },
+  reportDetailsScreenshotWrapper: {
+    marginRight: 12,
+  },
+  reportDetailsScreenshot: {
+    width: 120,
+    height: 120,
+    borderRadius: 12,
+    backgroundColor: '#f1f5f9',
+  },
+  reportDetailsResolutionInfo: {
+    backgroundColor: '#f0fdf4',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#bbf7d0',
+  },
+  reportDetailsResolutionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  reportDetailsResolutionText: {
+    fontSize: 14,
+    color: '#059669',
+    fontWeight: '500',
+  },
+  reportDetailsResolutionBy: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  reportDetailsModalActions: {
+    padding: 20,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+  reportDetailsMarkDoneButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#10b981',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 8,
+  },
+  reportDetailsMarkDoneButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  reportDetailsRemoveButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ef4444',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 8,
+  },
+  reportDetailsRemoveButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
   },
 });
 
