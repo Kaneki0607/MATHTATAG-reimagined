@@ -25,7 +25,7 @@ interface Class {
 interface AssignExerciseFormProps {
   visible: boolean;
   onClose: () => void;
-  onAssign: (classIds: string[], deadline: string, acceptLateSubmissions: boolean) => void;
+  onAssign: (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => void;
   exerciseTitle: string;
   currentUserId: string | null;
 }
@@ -44,6 +44,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
   const [deadlineTime, setDeadlineTime] = useState('');
   const [loading, setLoading] = useState(false);
   const [acceptLateSubmissions, setAcceptLateSubmissions] = useState(true);
+  const [selectedQuarter, setSelectedQuarter] = useState<'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4'>('Quarter 1');
 
   useEffect(() => {
     if (visible && currentUserId) {
@@ -136,7 +137,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
       return;
     }
 
-    onAssign(selectedClasses, deadline.toISOString(), acceptLateSubmissions);
+    onAssign(selectedClasses, deadline.toISOString(), acceptLateSubmissions, selectedQuarter);
     onClose();
   };
 
@@ -210,6 +211,31 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                   ))}
                 </View>
               )}
+            </View>
+
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Select Quarter</Text>
+              <View style={styles.quarterContainer}>
+                {(['Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4'] as const).map((quarter) => (
+                  <TouchableOpacity
+                    key={quarter}
+                    style={[
+                      styles.quarterButton,
+                      selectedQuarter === quarter && styles.quarterButtonSelected,
+                    ]}
+                    onPress={() => setSelectedQuarter(quarter)}
+                  >
+                    <Text
+                      style={[
+                        styles.quarterButtonText,
+                        selectedQuarter === quarter && styles.quarterButtonTextSelected,
+                      ]}
+                    >
+                      {quarter}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
             </View>
 
             <View style={styles.section}>
@@ -689,5 +715,43 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
     color: '#1e40af',
+  },
+  
+  // Quarter Selection Styles
+  quarterContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+  },
+  quarterButton: {
+    flex: 1,
+    minWidth: '45%',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quarterButtonSelected: {
+    backgroundColor: '#eff6ff',
+    borderColor: '#3b82f6',
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  quarterButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  quarterButtonTextSelected: {
+    color: '#3b82f6',
+    fontWeight: '700',
   },
 });

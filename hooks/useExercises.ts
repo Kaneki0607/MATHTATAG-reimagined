@@ -31,6 +31,7 @@ export interface AssignedExercise {
   manuallyUpdated?: boolean;
   exercise?: Exercise;
   className?: string;
+  quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4';
 }
 
 export const useExercises = (currentUserId: string | null) => {
@@ -196,7 +197,7 @@ export const useExercises = (currentUserId: string | null) => {
     }
   };
 
-  const assignExercise = async (exerciseId: string, classIds: string[], deadline: string, assignedBy: string, acceptLateSubmissions: boolean = true, acceptingStatus: 'open' | 'closed' = 'open') => {
+  const assignExercise = async (exerciseId: string, classIds: string[], deadline: string, assignedBy: string, acceptLateSubmissions: boolean = true, acceptingStatus: 'open' | 'closed' = 'open', quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => {
     try {
       const assignments = classIds.map(classId => ({
         exerciseId,
@@ -205,6 +206,7 @@ export const useExercises = (currentUserId: string | null) => {
         assignedBy,
         acceptLateSubmissions,
         acceptingStatus,
+        quarter,
         createdAt: new Date().toISOString(),
       }));
 

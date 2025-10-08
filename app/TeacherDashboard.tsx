@@ -3223,7 +3223,7 @@ export default function TeacherDashboard() {
 
 
 
-  const handleAssignExercise = async (classIds: string[], deadline: string, acceptLateSubmissions: boolean) => {
+  const handleAssignExercise = async (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => {
 
     try {
 
@@ -3239,7 +3239,9 @@ export default function TeacherDashboard() {
 
         acceptLateSubmissions, 
 
-        'open' // Default to open status
+        'open', // Default to open status
+
+        quarter
 
       );
 
@@ -6756,29 +6758,97 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                      </View>
 
-                   ) : (
+                  ) : (
 
-                     assignedExercises
+                    (() => {
 
-                       .filter((assignment) => {
+                      // Group assignments by quarter
 
-                         // Only show assignments for currently active classes
+                      const filteredAssignments = assignedExercises.filter((assignment) => {
 
-                         return activeClasses.some(activeClass => activeClass.id === assignment.classId);
+                        return activeClasses.some(activeClass => activeClass.id === assignment.classId);
 
-                       })
+                      });
 
-                       .map((assignment) => {
+                      
 
-                       const timeRemaining = getTimeRemaining(assignment.deadline);
+                      const groupedByQuarter: Record<string, typeof assignedExercises> = {
 
-                       const completionStats = getStudentCompletionStats(assignment);
+                        'Quarter 1': [],
 
-                       
+                        'Quarter 2': [],
 
-                       return (
+                        'Quarter 3': [],
 
-                         <View key={assignment.id} style={styles.assignmentCard}>
+                        'Quarter 4': [],
+
+                        'No Quarter': [], // For assignments without a quarter
+
+                      };
+
+                      
+
+                      filteredAssignments.forEach((assignment) => {
+
+                        const quarter = assignment.quarter || 'No Quarter';
+
+                        groupedByQuarter[quarter].push(assignment);
+
+                      });
+
+                      
+
+                      const quarters = ['Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4', 'No Quarter'].filter(
+
+                        (quarter) => groupedByQuarter[quarter].length > 0
+
+                      );
+
+                      
+
+                      return quarters.map((quarter) => (
+
+                        <View key={quarter} style={styles.quarterSection}>
+
+                          <View style={styles.quarterHeader}>
+
+                            <MaterialCommunityIcons 
+
+                              name="calendar-range" 
+
+                              size={20} 
+
+                              color="#3b82f6" 
+
+                            />
+
+                            <Text style={styles.quarterHeaderText}>{quarter}</Text>
+
+                            <View style={styles.quarterBadge}>
+
+                              <Text style={styles.quarterBadgeText}>
+
+                                {groupedByQuarter[quarter].length} {groupedByQuarter[quarter].length === 1 ? 'assignment' : 'assignments'}
+
+                              </Text>
+
+                            </View>
+
+                          </View>
+
+                          
+
+                          {groupedByQuarter[quarter].map((assignment) => {
+
+                            const timeRemaining = getTimeRemaining(assignment.deadline);
+
+                            const completionStats = getStudentCompletionStats(assignment);
+
+                            
+
+                            return (
+
+                              <View key={assignment.id} style={styles.assignmentCard}>
 
                            <View style={styles.assignmentHeader}>
 
@@ -6984,15 +7054,21 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                              </View>
 
-                           </View>
+                          </View>
 
-                         </View>
+                        </View>
 
-                       );
+                              );
 
-                     })
+                            })}
 
-                   )}
+                        </View>
+
+                      ));
+
+                    })()
+
+                  )}
 
                  </>
 
@@ -11623,11 +11699,11 @@ const styles = StyleSheet.create({
 
     flex: 1,
 
-    paddingHorizontal: Math.min(8, width * 0.02),
+    paddingHorizontal: Math.min(12, width * 0.03),
 
-    paddingTop: Math.min(40, height * 0.05),
+    paddingTop: Math.min(20, height * 0.025),
 
-    paddingBottom: Math.min(120, height * 0.15),
+    paddingBottom: Math.min(100, height * 0.12),
 
   },
 
@@ -11641,11 +11717,11 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    marginBottom: 24,
+    marginBottom: Math.min(16, height * 0.02),
 
     paddingHorizontal: 0,
 
-    paddingVertical: 12,
+    paddingVertical: Math.min(8, height * 0.01),
 
   },
 
@@ -11657,11 +11733,11 @@ const styles = StyleSheet.create({
 
   avatar: {
 
-    width: 64,
+    width: Math.min(48, width * 0.12),
 
-    height: 64,
+    height: Math.min(48, width * 0.12),
 
-    borderRadius: 32,
+    borderRadius: Math.min(24, width * 0.06),
 
     backgroundColor: '#f1f5f9',
 
@@ -11669,19 +11745,19 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    borderWidth: 3,
+    borderWidth: 2,
 
     borderColor: '#e2e8f0',
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 1 },
 
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.08,
 
-    shadowRadius: 4,
+    shadowRadius: 2,
 
-    elevation: 3,
+    elevation: 2,
 
   },
 
@@ -11693,11 +11769,11 @@ const styles = StyleSheet.create({
 
   welcomeLabel: {
 
-    fontSize: 14,
+    fontSize: Math.min(12, width * 0.03),
 
     color: '#64748b',
 
-    marginBottom: 4,
+    marginBottom: 2,
 
     fontWeight: '500',
 
@@ -11705,7 +11781,7 @@ const styles = StyleSheet.create({
 
   welcomeTitle: {
 
-    fontSize: 22,
+    fontSize: Math.min(18, width * 0.045),
 
     fontWeight: '700',
 
@@ -11727,21 +11803,21 @@ const styles = StyleSheet.create({
 
   announcementCard: {
 
-    borderRadius: 20,
+    borderRadius: Math.min(16, width * 0.04),
 
-    marginBottom: 24,
+    marginBottom: Math.min(16, height * 0.02),
 
-    marginHorizontal: 4,
+    marginHorizontal: 2,
 
     shadowColor: '#3b82f6',
 
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 2 },
 
-    shadowOpacity: 0.12,
+    shadowOpacity: 0.08,
 
-    shadowRadius: 16,
+    shadowRadius: 8,
 
-    elevation: 6,
+    elevation: 3,
 
     overflow: 'hidden',
 
@@ -11755,7 +11831,7 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#EFF6FF',
 
-    padding: 24,
+    padding: Math.min(16, width * 0.04),
 
     position: 'relative',
 
@@ -11767,29 +11843,29 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    marginBottom: 16,
+    marginBottom: Math.min(12, height * 0.015),
 
   },
 
   megaphoneIcon: {
 
-    marginRight: 14,
+    marginRight: Math.min(10, width * 0.025),
 
-    padding: 14,
+    padding: Math.min(10, width * 0.025),
 
-    borderRadius: 18,
+    borderRadius: Math.min(12, width * 0.03),
 
     backgroundColor: '#DBEAFE',
 
     shadowColor: '#3b82f6',
 
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 1 },
 
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.1,
 
-    shadowRadius: 4,
+    shadowRadius: 2,
 
-    elevation: 3,
+    elevation: 2,
 
   },
 
@@ -11807,7 +11883,7 @@ const styles = StyleSheet.create({
 
   announcementTitle: {
 
-    fontSize: 24,
+    fontSize: Math.min(18, width * 0.045),
 
     fontWeight: '800',
 
@@ -11815,7 +11891,7 @@ const styles = StyleSheet.create({
 
     flex: 1,
 
-    letterSpacing: -0.5,
+    letterSpacing: -0.3,
 
   },
 
@@ -11823,29 +11899,29 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#10B981',
 
-    paddingHorizontal: 14,
+    paddingHorizontal: Math.min(10, width * 0.025),
 
-    paddingVertical: 7,
+    paddingVertical: Math.min(5, height * 0.006),
 
-    borderRadius: 24,
+    borderRadius: Math.min(16, width * 0.04),
 
-    marginLeft: 12,
+    marginLeft: Math.min(8, width * 0.02),
 
     shadowColor: '#10B981',
 
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 1 },
 
-    shadowOpacity: 0.25,
+    shadowOpacity: 0.2,
 
-    shadowRadius: 4,
+    shadowRadius: 2,
 
-    elevation: 3,
+    elevation: 2,
 
   },
 
   announcementBadgeText: {
 
-    fontSize: 11,
+    fontSize: Math.min(9, width * 0.022),
 
     fontWeight: '800',
 
@@ -11853,19 +11929,19 @@ const styles = StyleSheet.create({
 
     textTransform: 'uppercase',
 
-    letterSpacing: 1,
+    letterSpacing: 0.5,
 
   },
 
   announcementText: {
 
-    fontSize: 15,
+    fontSize: Math.min(13, width * 0.032),
 
     color: '#64748b',
 
-    lineHeight: 22,
+    lineHeight: Math.min(18, width * 0.045),
 
-    marginBottom: 20,
+    marginBottom: Math.min(12, height * 0.015),
 
     fontWeight: '500',
 
@@ -11875,9 +11951,9 @@ const styles = StyleSheet.create({
 
     flexDirection: 'row',
 
-    marginBottom: 20,
+    marginBottom: Math.min(12, height * 0.015),
 
-    gap: 16,
+    gap: Math.min(10, width * 0.025),
 
     flexWrap: 'wrap',
 
@@ -11925,29 +12001,29 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#3b82f6',
 
-    paddingVertical: 18,
+    paddingVertical: Math.min(12, height * 0.015),
 
-    paddingHorizontal: 28,
+    paddingHorizontal: Math.min(20, width * 0.05),
 
-    borderRadius: 14,
+    borderRadius: Math.min(10, width * 0.025),
 
     shadowColor: '#3b82f6',
 
-    shadowOffset: { width: 0, height: 6 },
+    shadowOffset: { width: 0, height: 3 },
 
-    shadowOpacity: 0.35,
+    shadowOpacity: 0.25,
 
-    shadowRadius: 10,
+    shadowRadius: 6,
 
-    elevation: 8,
+    elevation: 4,
 
-    gap: 10,
+    gap: Math.min(6, width * 0.015),
 
   },
 
   announcementButtonText: {
 
-    fontSize: 17,
+    fontSize: Math.min(14, width * 0.035),
 
     fontWeight: '700',
 
@@ -12381,7 +12457,9 @@ const styles = StyleSheet.create({
 
     justifyContent: 'space-between',
 
-    marginBottom: 28,
+    marginBottom: Math.min(20, height * 0.025),
+
+    gap: Math.min(8, width * 0.02),
 
   },
 
@@ -12389,19 +12467,19 @@ const styles = StyleSheet.create({
 
     flex: 1,
 
-    borderRadius: 20,
+    borderRadius: Math.min(16, width * 0.04),
 
-    marginHorizontal: 8,
+    marginHorizontal: Math.min(4, width * 0.01),
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 2 },
 
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.06,
 
-    shadowRadius: 12,
+    shadowRadius: 8,
 
-    elevation: 4,
+    elevation: 3,
 
     overflow: 'hidden',
 
@@ -12411,7 +12489,7 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#f0f9ff',
 
-    padding: 24,
+    padding: Math.min(16, width * 0.04),
 
     alignItems: 'center',
 
@@ -12421,7 +12499,7 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#f8fafc',
 
-    padding: 24,
+    padding: Math.min(16, width * 0.04),
 
     alignItems: 'center',
 
@@ -12429,13 +12507,13 @@ const styles = StyleSheet.create({
 
   actionIcon: {
 
-    marginBottom: 16,
+    marginBottom: Math.min(10, height * 0.012),
 
   },
 
   actionText: {
 
-    fontSize: 16,
+    fontSize: Math.min(13, width * 0.032),
 
     fontWeight: '700',
 
@@ -12451,7 +12529,7 @@ const styles = StyleSheet.create({
 
   classroomsSection: {
 
-    marginBottom: 140, // Space for bottom nav
+    marginBottom: Math.min(100, height * 0.12), // Space for bottom nav
 
   },
 
@@ -13427,11 +13505,11 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    paddingVertical: 12,
+    paddingVertical: Math.min(8, height * 0.01),
 
-    paddingHorizontal: 16,
+    paddingHorizontal: Math.min(12, width * 0.03),
 
-    paddingBottom: 16,
+    paddingBottom: Math.min(12, height * 0.015),
 
     borderTopWidth: 1,
 
@@ -13439,13 +13517,13 @@ const styles = StyleSheet.create({
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: -2 },
+    shadowOffset: { width: 0, height: -1 },
 
-    shadowOpacity: 0.06,
+    shadowOpacity: 0.05,
 
-    shadowRadius: 8,
+    shadowRadius: 4,
 
-    elevation: 6,
+    elevation: 4,
 
   },
 
@@ -13455,7 +13533,7 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    paddingVertical: 6,
+    paddingVertical: Math.min(4, height * 0.005),
 
     justifyContent: 'center',
 
@@ -13469,11 +13547,11 @@ const styles = StyleSheet.create({
 
   navText: {
 
-    fontSize: 11,
+    fontSize: Math.min(9, width * 0.022),
 
     color: '#9ca3af',
 
-    marginTop: 4,
+    marginTop: Math.min(2, height * 0.002),
 
     fontWeight: '600',
 
@@ -14739,21 +14817,21 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    borderRadius: 16,
+    borderRadius: Math.min(12, width * 0.03),
 
-    padding: 16,
+    padding: Math.min(12, width * 0.03),
 
-    marginBottom: 12,
+    marginBottom: Math.min(8, height * 0.01),
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 1 },
 
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.06,
 
-    shadowRadius: 12,
+    shadowRadius: 8,
 
-    elevation: 3,
+    elevation: 2,
 
     borderWidth: 1,
 
@@ -14791,7 +14869,7 @@ const styles = StyleSheet.create({
 
   exerciseDescription: {
 
-    fontSize: 14,
+    fontSize: Math.min(12, width * 0.03),
 
     color: '#64748b',
 
@@ -15192,6 +15270,74 @@ const styles = StyleSheet.create({
     fontWeight: '600',
 
     marginLeft: 4,
+
+  },
+
+  
+
+  // Quarter Section Styles
+
+  quarterSection: {
+
+    marginBottom: 24,
+
+  },
+
+  quarterHeader: {
+
+    flexDirection: 'row',
+
+    alignItems: 'center',
+
+    paddingHorizontal: 16,
+
+    paddingVertical: 12,
+
+    backgroundColor: '#eff6ff',
+
+    borderRadius: 12,
+
+    marginBottom: 12,
+
+    borderLeftWidth: 4,
+
+    borderLeftColor: '#3b82f6',
+
+  },
+
+  quarterHeaderText: {
+
+    fontSize: 18,
+
+    fontWeight: '700',
+
+    color: '#1e40af',
+
+    marginLeft: 8,
+
+    flex: 1,
+
+  },
+
+  quarterBadge: {
+
+    backgroundColor: '#3b82f6',
+
+    paddingHorizontal: 12,
+
+    paddingVertical: 4,
+
+    borderRadius: 12,
+
+  },
+
+  quarterBadgeText: {
+
+    fontSize: 12,
+
+    fontWeight: '600',
+
+    color: '#ffffff',
 
   },
 

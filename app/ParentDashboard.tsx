@@ -46,6 +46,7 @@ interface AssignedExercise {
   score?: number;
   timeSpent?: number;
   resultId?: string;
+  quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4';
   exercise?: {
     id: string;
     title: string;
@@ -87,6 +88,7 @@ interface Task {
   score?: number;
   timeSpent?: number;
   resultId?: string;
+  quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4';
 }
 
 const { width, height } = Dimensions.get('window');
@@ -1432,7 +1434,8 @@ Focus on:
               assignedExerciseId: assignedExercise.id,
               score: completionData?.scorePercentage,
               timeSpent: completionData?.totalTimeSpent,
-              resultId: completionData?.resultId
+              resultId: completionData?.resultId,
+              quarter: assignedExercise.quarter
             };
           })
       );
@@ -2290,7 +2293,38 @@ Focus on:
                 contentContainerStyle={styles.tasksScrollContainer}
                 showsVerticalScrollIndicator={false}
               >
-                {tasks.filter(t => t.isAssignedExercise).map((task, index) => {
+                {(() => {
+                  // Group tasks by quarter
+                  const filteredTasks = tasks.filter(t => t.isAssignedExercise);
+                  const groupedByQuarter: Record<string, Task[]> = {
+                    'Quarter 1': [],
+                    'Quarter 2': [],
+                    'Quarter 3': [],
+                    'Quarter 4': [],
+                    'No Quarter': [],
+                  };
+                  
+                  filteredTasks.forEach((task) => {
+                    const quarter = task.quarter || 'No Quarter';
+                    groupedByQuarter[quarter].push(task);
+                  });
+                  
+                  const quarters = ['Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4', 'No Quarter'].filter(
+                    (quarter) => groupedByQuarter[quarter].length > 0
+                  );
+                  
+                  return quarters.map((quarter) => (
+                    <View key={quarter}>
+                      <View style={styles.quarterHeader}>
+                        <MaterialCommunityIcons name="calendar-range" size={20} color="#3b82f6" />
+                        <Text style={styles.quarterHeaderText}>{quarter}</Text>
+                        <View style={styles.quarterBadge}>
+                          <Text style={styles.quarterBadgeText}>
+                            {groupedByQuarter[quarter].length} {groupedByQuarter[quarter].length === 1 ? 'task' : 'tasks'}
+                          </Text>
+                        </View>
+                      </View>
+                      {groupedByQuarter[quarter].map((task, index) => {
                   const isOverdue = new Date(task.dueDate) < new Date() && task.status !== 'completed';
                   const dueDate = new Date(task.dueDate);
                   const now = new Date();
@@ -2481,7 +2515,10 @@ Focus on:
                       )}
                     </View>
                   );
-                })}
+                      })}
+                    </View>
+                  ));
+                })()}
               </ScrollView>
             ) : (
               <View style={styles.emptyTasksCard}>
@@ -3525,16 +3562,16 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContentContainer: {
-    paddingHorizontal: 20,
-    paddingTop: 60,
-    paddingBottom: 120, // Extra padding to prevent content from being covered by bottom nav
+    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingTop: Math.min(40, height * 0.05),
+    paddingBottom: Math.min(100, height * 0.12), // Extra padding to prevent content from being covered by bottom nav
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: Math.min(16, height * 0.02),
     paddingHorizontal: 0,
-    paddingVertical: 12,
+    paddingVertical: Math.min(8, height * 0.01),
   },
   profileSection: {
     flexDirection: 'row',
@@ -3544,17 +3581,17 @@ const styles = StyleSheet.create({
     marginRight: 16,
   },
   profileImage: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: Math.min(48, width * 0.12),
+    height: Math.min(48, width * 0.12),
+    borderRadius: Math.min(24, width * 0.06),
     backgroundColor: '#f1f5f9',
-    borderWidth: 3,
+    borderWidth: 2,
     borderColor: '#e2e8f0',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 2,
   },
   profileImagePlaceholder: {
     width: 64,
@@ -3595,19 +3632,19 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   announcementTitle: {
-    fontSize: 20,
+    fontSize: Math.min(16, width * 0.04),
     fontWeight: '700',
     color: '#1e293b',
   },
   announcementCard: {
     backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 20,
+    borderRadius: Math.min(12, width * 0.03),
+    padding: Math.min(16, width * 0.04),
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
@@ -4169,6 +4206,36 @@ const styles = StyleSheet.create({
   },
   tasksScrollContainer: {
     paddingBottom: 20, // Ensure last task card is fully accessible
+  },
+  quarterHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#eff6ff',
+    borderRadius: 12,
+    marginBottom: 12,
+    marginTop: 16,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+  },
+  quarterHeaderText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e40af',
+    marginLeft: 8,
+    flex: 1,
+  },
+  quarterBadge: {
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  quarterBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#ffffff',
   },
   tasksHeader: {
     flexDirection: 'row',
