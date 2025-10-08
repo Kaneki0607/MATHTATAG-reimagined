@@ -343,3 +343,31 @@ export const performMaintenanceCleanup = (): void => {
   
   console.log(`🧹 Maintenance completed: removed ${removedCount} low/failed keys, ${expiredCount} expired keys`);
 };
+
+/**
+ * Delete a specific API key
+ * @param keyToDelete - The API key to delete
+ * @returns true if deleted, false if not found
+ */
+export const deleteApiKey = (keyToDelete: string): boolean => {
+  const initialLength = apiKeys.length;
+  apiKeys = apiKeys.filter(k => k.key !== keyToDelete);
+  const deleted = apiKeys.length < initialLength;
+  
+  if (deleted) {
+    console.log(`🗑️ Deleted API key: ${keyToDelete.substring(0, 10)}...`);
+  }
+  
+  return deleted;
+};
+
+/**
+ * Delete all API keys
+ * @returns number of keys deleted
+ */
+export const deleteAllApiKeys = (): number => {
+  const count = apiKeys.length;
+  apiKeys = [];
+  console.log(`🗑️ Deleted all ${count} API keys`);
+  return count;
+};
