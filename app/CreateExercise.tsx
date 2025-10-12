@@ -6085,7 +6085,11 @@ Please respond with a JSON object in this exact format:
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
       <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
-       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+        <ScrollView 
+          style={styles.scrollView} 
+          contentContainerStyle={{ paddingBottom: 20 }}
+          showsVerticalScrollIndicator={false}
+        >
         {/* Header */}
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.push('/TeacherDashboard')} style={styles.backButton}>
@@ -6143,59 +6147,19 @@ Please respond with a JSON object in this exact format:
           {/* Category Dropdown */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Category *</Text>
-            <View style={styles.dropdownContainer}>
-              <TouchableOpacity
-                style={styles.dropdownButton}
-                onPress={() => setShowCategoryDropdown(!showCategoryDropdown)}
-              >
-                <Text style={[styles.dropdownButtonText, !exerciseCategory && styles.placeholderText]}>
-                  {exerciseCategory || 'Select a category...'}
-                </Text>
-                <MaterialCommunityIcons 
-                  name={showCategoryDropdown ? "chevron-up" : "chevron-down"} 
-                  size={20} 
-                  color="#64748b" 
-                />
-              </TouchableOpacity>
-              
-              {showCategoryDropdown && (
-                <>
-                  <TouchableOpacity
-                    style={styles.dropdownOverlay}
-                    onPress={() => setShowCategoryDropdown(false)}
-                    activeOpacity={1}
-                  />
-                  <View style={styles.dropdownList}>
-                    <ScrollView 
-                      style={styles.dropdownScrollView}
-                      showsVerticalScrollIndicator={true}
-                      nestedScrollEnabled={true}
-                    >
-                      {categoryOptions.map((category) => (
-                        <TouchableOpacity
-                          key={category}
-                          style={styles.dropdownItem}
-                          onPress={() => {
-                            if (category === 'Custom') {
-                              setShowCategoryDropdown(false);
-                              setShowCustomCategoryModal(true);
-                            } else {
-                              setExerciseCategory(category);
-                              setShowCategoryDropdown(false);
-                            }
-                          }}
-                        >
-                          <Text style={styles.dropdownItemText}>{category}</Text>
-                          {exerciseCategory === category && (
-                            <MaterialCommunityIcons name="check" size={20} color="#3b82f6" />
-                          )}
-                        </TouchableOpacity>
-                      ))}
-                    </ScrollView>
-                  </View>
-                </>
-              )}
-            </View>
+            <TouchableOpacity
+              style={styles.dropdownButton}
+              onPress={() => setShowCategoryDropdown(!showCategoryDropdown)}
+            >
+              <Text style={[styles.dropdownButtonText, !exerciseCategory && styles.placeholderText]}>
+                {exerciseCategory || 'Select a category...'}
+              </Text>
+              <MaterialCommunityIcons 
+                name={showCategoryDropdown ? "chevron-up" : "chevron-down"} 
+                size={20} 
+                color="#64748b" 
+              />
+            </TouchableOpacity>
           </View>
           
           {/* Time Limit Per Item */}
@@ -6477,17 +6441,6 @@ Please respond with a JSON object in this exact format:
               </View>
               
               <View style={styles.aiModalContent}>
-                <Text style={styles.aiModalLabel}>Exercise Details</Text>
-                <View style={styles.aiExerciseInfo}>
-                  <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Title:</Text> {exerciseTitle}</Text>
-                  <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Category:</Text> {exerciseCategory}</Text>
-                  <View style={styles.aiDescriptionContainer}>
-                    <Text style={styles.aiExerciseText}><Text style={styles.aiExerciseLabel}>Description:</Text></Text>
-                    <ScrollView style={styles.aiDescriptionScroll} showsVerticalScrollIndicator={true}>
-                      <Text style={styles.aiExerciseText}>{exerciseDescription}</Text>
-                    </ScrollView>
-                  </View>
-                </View>
                 
                 <Text style={styles.aiModalLabel}>Additional Requirements (Optional)</Text>
                 <TextInput
@@ -7735,6 +7688,62 @@ Please respond with a JSON object in this exact format:
         </View>
       </Modal>
 
+      {/* Category Dropdown Modal */}
+      <Modal
+        visible={showCategoryDropdown}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowCategoryDropdown(false)}
+      >
+        <View style={styles.categoryDropdownModalOverlay}>
+          <TouchableOpacity
+            style={styles.categoryDropdownModalBackdrop}
+            activeOpacity={1}
+            onPress={() => setShowCategoryDropdown(false)}
+          />
+          
+          <View style={styles.categoryDropdownModalContent}>
+            <View style={styles.categoryDropdownModalHeader}>
+              <Text style={styles.categoryDropdownModalTitle}>Select Category</Text>
+              <TouchableOpacity 
+                onPress={() => setShowCategoryDropdown(false)}
+                style={styles.categoryDropdownModalClose}
+              >
+                <AntDesign name="close" size={20} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+            
+            <ScrollView 
+              style={styles.categoryDropdownModalScroll}
+              showsVerticalScrollIndicator={true}
+              bounces={false}
+            >
+              {categoryOptions.map((category) => (
+                <TouchableOpacity
+                  key={category}
+                  style={styles.categoryDropdownModalItem}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    if (category === 'Custom') {
+                      setShowCategoryDropdown(false);
+                      setShowCustomCategoryModal(true);
+                    } else {
+                      setExerciseCategory(category);
+                      setShowCategoryDropdown(false);
+                    }
+                  }}
+                >
+                  <Text style={styles.categoryDropdownModalItemText}>{category}</Text>
+                  {exerciseCategory === category && (
+                    <MaterialCommunityIcons name="check" size={20} color="#3b82f6" />
+                  )}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
       {/* Custom Category Modal */}
       <Modal
         visible={showCustomCategoryModal}
@@ -7817,7 +7826,6 @@ const styles = StyleSheet.create({
   },
   scrollView: {
     flex: 1,
-    paddingHorizontal: 20,
   },
   
   // Header Styles
@@ -7825,12 +7833,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 20,
-    marginBottom: 24,
+    paddingVertical: 12,
+    marginBottom: 16,
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
-    marginHorizontal: -20,
     paddingHorizontal: 20,
   },
   backButton: {
@@ -7847,13 +7854,14 @@ const styles = StyleSheet.create({
   
   // Section Styles
   section: {
-    marginBottom: 32,
+    paddingHorizontal: 20,
+    marginBottom: 16,
   },
   sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 8,
   },
   sectionTitle: {
     fontSize: 18,
@@ -8121,7 +8129,7 @@ const styles = StyleSheet.create({
     left: -1000,
     right: -1000,
     bottom: -1000,
-    zIndex: 999,
+    zIndex: 998,
   },
   dropdownButton: {
     borderWidth: 2,
@@ -8170,6 +8178,9 @@ const styles = StyleSheet.create({
   dropdownScrollView: {
     maxHeight: 200,
   },
+  dropdownScrollContent: {
+    flexGrow: 1,
+  },
   dropdownItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -8178,6 +8189,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
+    backgroundColor: '#ffffff',
   },
   dropdownItemText: {
     fontSize: 16,
@@ -9311,6 +9323,71 @@ const styles = StyleSheet.create({
     color: '#ffffff',
   },
   
+  // Category Dropdown Modal Styles
+  categoryDropdownModalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  categoryDropdownModalBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  categoryDropdownModalContent: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    width: '100%',
+    maxWidth: 400,
+    maxHeight: '70%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 12,
+    overflow: 'hidden',
+  },
+  categoryDropdownModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+  },
+  categoryDropdownModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  categoryDropdownModalClose: {
+    padding: 4,
+  },
+  categoryDropdownModalScroll: {
+    maxHeight: 400,
+  },
+  categoryDropdownModalItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+    backgroundColor: '#ffffff',
+  },
+  categoryDropdownModalItemText: {
+    fontSize: 16,
+    color: '#1e293b',
+    flex: 1,
+  },
+  
   // Custom Category Modal Styles
   customCategoryModalOverlay: {
     flex: 1,
@@ -9786,15 +9863,15 @@ const styles = StyleSheet.create({
   aiExerciseInfo: {
     backgroundColor: '#f8fafc',
     borderRadius: 12,
-    padding: 16,
+    padding: 12,
     marginBottom: 8,
   },
   aiDescriptionContainer: {
-    marginTop: 8,
+    marginTop: 4,
   },
   aiDescriptionScroll: {
-    maxHeight: 120,
-    marginTop: 4,
+    maxHeight: 40,
+    marginTop: 2,
   },
   aiExerciseText: {
     fontSize: 14,
@@ -9815,13 +9892,14 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#1e293b',
     backgroundColor: '#ffffff',
-    minHeight: 100,
+    minHeight: 80,
+    maxHeight: 120,
     textAlignVertical: 'top',
   },
   aiModalRow: {
     flexDirection: 'row',
     gap: 12,
-    marginTop: 16,
+    marginTop: 8,
   },
   aiModalInputGroup: {
     flex: 1,
