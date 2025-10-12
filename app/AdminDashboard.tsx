@@ -1,8 +1,9 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { Accelerometer } from 'expo-sensors';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Animated, Easing, FlatList, Image, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useResponsive } from '../hooks/useResponsive';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
 import { deleteData, listenToData, readData, stopListening, updateData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -25,7 +26,8 @@ interface Teacher {
 
 interface TechnicalReport {
   id: string;
-  ticketId: string; // Human-readable ticket ID
+  ticketId?: string; // Legacy field for backward compatibility
+  ticketNumber: string; // Numeric-only ticket number
   reportedBy: string;
   reportedByEmail: string;
   reportedByName?: string;
@@ -41,6 +43,9 @@ interface TechnicalReport {
 }
 
 export default function AdminDashboard() {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const responsive = useResponsive();
+  
   const [activeTab, setActiveTab] = useState<TabKey>('home');
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [loading, setLoading] = useState(false);
@@ -70,10 +75,6 @@ export default function AdminDashboard() {
   const [technicalReports, setTechnicalReports] = useState<TechnicalReport[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   
-  // Report details modal state
-  const [showReportDetailsModal, setShowReportDetailsModal] = useState(false);
-  const [selectedReport, setSelectedReport] = useState<TechnicalReport | null>(null);
-  
   // Technical Report Modal state
   const [showTechReportModal, setShowTechReportModal] = useState(false);
   const [reportDescription, setReportDescription] = useState('');
@@ -97,6 +98,16 @@ export default function AdminDashboard() {
     const unsub = onAuthChange(() => setFromUser());
     return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
+
+  // Bottom navigation animation
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 350,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [fadeAnim]);
 
   // Teacher stats (sections and student counts)
   const [teacherStats, setTeacherStats] = useState<Record<string, { sectionCount: number; studentCount: number }>>({});
@@ -460,12 +471,6 @@ export default function AdminDashboard() {
     setReportScreenshots(prev => prev.filter(s => s !== uri));
   };
 
-  // Generate ticket ID
-  const generateTicketId = () => {
-    const random = Math.random().toString(36).substring(2, 8).toUpperCase();
-    return random;
-  };
-
   // Submit technical report
   const submitTechnicalReport = async () => {
     if (!reportDescription.trim()) {
@@ -477,8 +482,11 @@ export default function AdminDashboard() {
     try {
       const user = getCurrentUser();
       const timestamp = new Date().toISOString();
-      const reportId = `report_${Date.now()}`;
-      const ticketId = generateTicketId();
+      // Generate a unique numeric-only ticket number (15 digits)
+      const now = Date.now(); // 13 digits
+      const random = Math.floor(Math.random() * 100); // 2 digits
+      const ticketNumber = `${now}${random.toString().padStart(2, '0')}`;
+      const reportId = ticketNumber;
 
       // Upload screenshots to Firebase Storage
       const uploadedUrls: string[] = [];
@@ -500,7 +508,7 @@ export default function AdminDashboard() {
 
       const report: TechnicalReport = {
         id: reportId,
-        ticketId: ticketId,
+        ticketNumber: ticketNumber,
         reportedBy: user?.uid || 'unknown',
         reportedByEmail: user?.email || 'unknown',
         reportedByName: user?.displayName || user?.email?.split('@')[0] || 'Admin User',
@@ -518,7 +526,7 @@ export default function AdminDashboard() {
       if (success) {
         Alert.alert(
           'Success', 
-          `Technical report submitted successfully!\n\nTicket ID: ${ticketId}\n\nYour report has been sent to the Super Admin for review.`
+          `Report submitted successfully!\n\nYour Ticket Number:\n${ticketNumber}\n\nPlease save this number for reference. Your report has been sent to the Super Admin for review.`
         );
         setShowTechReportModal(false);
         setReportDescription('');
@@ -557,20 +565,15 @@ export default function AdminDashboard() {
             } : report
           )
         );
-        Alert.alert('Success', 'Technical report marked as resolved.');
+        Alert.alert('Success', 'Technical report sent to Super Admin successfully.');
       } else {
         console.error('Failed to mark report as done:', error);
-        Alert.alert('Error', 'Failed to update report status.');
+        Alert.alert('Error', 'Failed to send report.');
       }
     } catch (error) {
       console.error('Error marking report as done:', error);
       Alert.alert('Error', 'Failed to update report status.');
     }
-  };
-
-  const handleOpenReportDetails = (report: TechnicalReport) => {
-    setSelectedReport(report);
-    setShowReportDetailsModal(true);
   };
 
   // Remove resolved technical report
@@ -1052,43 +1055,45 @@ export default function AdminDashboard() {
             ) : (
               <View style={styles.reportsList}>
                 {technicalReports.map(report => (
-                  <TouchableOpacity 
+                  <View 
                     key={report.id} 
                     style={[
                       styles.reportListItem,
                       report.status === 'resolved' && styles.reportListItemResolved,
                     ]}
-                    onPress={() => handleOpenReportDetails(report)}
-                    activeOpacity={0.7}
                   >
                     <View style={styles.reportListItemContent}>
                       <View style={styles.reportListItemLeft}>
-                        <MaterialIcons name="confirmation-number" size={20} color="#0ea5e9" />
-                        <Text style={styles.reportListItemId}>
-                          {report.ticketId || report.id}
-                        </Text>
-                      </View>
-                      <View style={styles.reportListItemRight}>
-                        <View style={[
-                          styles.reportListItemStatus,
-                          report.status === 'resolved' && styles.reportListItemStatusResolved,
-                          report.status === 'in_progress' && styles.reportListItemStatusInProgress,
-                        ]}>
-                          <MaterialCommunityIcons 
-                            name={report.status === 'pending' ? 'clock-outline' : 
-                                  report.status === 'in_progress' ? 'progress-clock' : 'check-circle'} 
-                            size={14} 
-                            color="#ffffff" 
-                          />
-                          <Text style={styles.reportListItemStatusText}>
-                            {report.status === 'pending' ? 'Pending' : 
-                             report.status === 'in_progress' ? 'In Progress' : 'Resolved'}
+                        <MaterialIcons name="confirmation-number" size={22} color="#0ea5e9" />
+                        <View style={styles.reportTicketInfo}>
+                          <Text style={styles.reportListItemId}>
+                            Ticket: {report.ticketNumber || report.ticketId || report.id}
+                          </Text>
+                          <Text style={styles.reportListItemMeta}>
+                            {report.reportedByName || report.reportedByEmail}
                           </Text>
                         </View>
-                        <MaterialIcons name="chevron-right" size={20} color="#94a3b8" />
+                      </View>
+                      <View style={styles.reportListItemActions}>
+                        {report.status !== 'resolved' ? (
+                          <TouchableOpacity 
+                            style={styles.sendToSuperAdminButton}
+                            onPress={() => {
+                              handleMarkReportAsDone(report.id);
+                            }}
+                          >
+                            <MaterialCommunityIcons name="send" size={16} color="#ffffff" />
+                            <Text style={styles.sendToSuperAdminButtonText}>Send</Text>
+                          </TouchableOpacity>
+                        ) : (
+                          <View style={styles.sentBadge}>
+                            <MaterialCommunityIcons name="check-circle" size={14} color="#10b981" />
+                            <Text style={styles.sentBadgeText}>Sent</Text>
+                          </View>
+                        )}
                       </View>
                     </View>
-                  </TouchableOpacity>
+                  </View>
                 ))}
               </View>
             )}
@@ -1098,31 +1103,27 @@ export default function AdminDashboard() {
         </ScrollView>
       )}
 
-      <View style={styles.bottomNav}>
+      <Animated.View style={[styles.bottomNav, { opacity: fadeAnim }]}>
         <TouchableOpacity style={[styles.navItem, activeTab === 'home' && styles.activeNavItem]} onPress={() => setActiveTab('home')}>
-          <View style={[styles.activeIndicator, activeTab === 'home' ? styles.activeIndicatorOn : undefined]} />
-          <AntDesign name="home" size={26} color={activeTab === 'home' ? '#0f172a' : '#9ca3af'} />
+          <AntDesign name="home" size={24} color={activeTab === 'home' ? '#1e293b' : '#9ca3af'} />
           <Text style={[styles.navText, activeTab === 'home' && styles.activeNavText]}>Home</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={[styles.navItem, activeTab === 'teacher' && styles.activeNavItem]} onPress={() => setActiveTab('teacher')}>
-          <View style={[styles.activeIndicator, activeTab === 'teacher' ? styles.activeIndicatorOn : undefined]} />
-          <MaterialCommunityIcons name="account-group" size={26} color={activeTab === 'teacher' ? '#0f172a' : '#9ca3af'} />
+          <MaterialCommunityIcons name="account-group" size={24} color={activeTab === 'teacher' ? '#1e293b' : '#9ca3af'} />
           <Text style={[styles.navText, activeTab === 'teacher' && styles.activeNavText]}>Teacher</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={[styles.navItem, activeTab === 'blocklist' && styles.activeNavItem]} onPress={() => setActiveTab('blocklist')}>
-          <View style={[styles.activeIndicator, activeTab === 'blocklist' ? styles.activeIndicatorOn : undefined]} />
-          <MaterialIcons name="block" size={26} color={activeTab === 'blocklist' ? '#0f172a' : '#9ca3af'} />
+          <MaterialIcons name="block" size={24} color={activeTab === 'blocklist' ? '#1e293b' : '#9ca3af'} />
           <Text style={[styles.navText, activeTab === 'blocklist' && styles.activeNavText]}>Blocklist</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={[styles.navItem, activeTab === 'reports' && styles.activeNavItem]} onPress={() => setActiveTab('reports')}>
-          <View style={[styles.activeIndicator, activeTab === 'reports' ? styles.activeIndicatorOn : undefined]} />
-          <MaterialIcons name="assessment" size={26} color={activeTab === 'reports' ? '#0f172a' : '#9ca3af'} />
+          <MaterialIcons name="assessment" size={24} color={activeTab === 'reports' ? '#1e293b' : '#9ca3af'} />
           <Text style={[styles.navText, activeTab === 'reports' && styles.activeNavText]}>Reports</Text>
         </TouchableOpacity>
-      </View>
+      </Animated.View>
 
       {/* Teacher Profile Modal */}
       <Modal
@@ -1582,174 +1583,9 @@ export default function AdminDashboard() {
         </View>
       </Modal>
 
-      {/* Report Details Modal */}
-      <Modal visible={showReportDetailsModal} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.reportDetailsModal}>
-            <View style={styles.reportDetailsModalHeader}>
-              <View style={styles.reportDetailsModalTitleRow}>
-                <MaterialIcons name="confirmation-number" size={24} color="#0ea5e9" />
-                <Text style={styles.reportDetailsModalTitle}>
-                  {selectedReport?.ticketId || selectedReport?.id}
-                </Text>
-              </View>
-              <TouchableOpacity 
-                style={styles.reportDetailsModalCloseButton}
-                onPress={() => setShowReportDetailsModal(false)}
-              >
-                <MaterialIcons name="close" size={24} color="#64748b" />
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView style={styles.reportDetailsModalContent} showsVerticalScrollIndicator={false}>
-              {/* Reporter Information */}
-              <View style={styles.reportDetailsSection}>
-                <Text style={styles.reportDetailsSectionTitle}>Reporter Information</Text>
-                <View style={styles.reportDetailsUserRow}>
-                  <View style={styles.reportDetailsUserIconContainer}>
-                    <MaterialCommunityIcons 
-                      name={selectedReport?.userRole === 'teacher' ? 'account-tie' : 
-                            selectedReport?.userRole === 'parent' ? 'account-heart' : 'shield-account'} 
-                      size={20} 
-                      color={selectedReport?.userRole === 'teacher' ? '#3b82f6' : 
-                             selectedReport?.userRole === 'parent' ? '#ec4899' : '#8b5cf6'} 
-                    />
-                  </View>
-                  <View style={styles.reportDetailsUserInfo}>
-                    <Text style={styles.reportDetailsUserName}>
-                      {selectedReport?.reportedByName || selectedReport?.reportedByEmail}
-                    </Text>
-                    {selectedReport?.userRole && (
-                      <View style={[
-                        styles.reportDetailsUserRoleBadge,
-                        selectedReport.userRole === 'teacher' && styles.reportDetailsUserRoleTeacher,
-                        selectedReport.userRole === 'parent' && styles.reportDetailsUserRoleParent,
-                        selectedReport.userRole === 'admin' && styles.reportDetailsUserRoleAdmin,
-                      ]}>
-                        <Text style={styles.reportDetailsUserRoleText}>
-                          {selectedReport.userRole === 'teacher' ? 'Teacher' : 
-                           selectedReport.userRole === 'parent' ? 'Parent' : 'Admin'}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                </View>
-              </View>
-
-              {/* Timestamp */}
-              <View style={styles.reportDetailsSection}>
-                <Text style={styles.reportDetailsSectionTitle}>Timestamp</Text>
-                <View style={styles.reportDetailsTimeCard}>
-                  <View style={styles.reportDetailsTimeIconContainer}>
-                    <MaterialIcons name="schedule" size={24} color="#0ea5e9" />
-                  </View>
-                  <View style={styles.reportDetailsTimeContent}>
-                    <Text style={styles.reportDetailsTimeLabel}>Reported on</Text>
-                    <Text style={styles.reportDetailsTime}>
-                      {selectedReport?.timestamp && new Date(selectedReport.timestamp).toLocaleDateString('en-US', { 
-                        weekday: 'long',
-                        month: 'long', 
-                        day: 'numeric', 
-                        year: 'numeric', 
-                        hour: '2-digit', 
-                        minute: '2-digit' 
-                      })}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-
-              {/* Description */}
-              <View style={styles.reportDetailsSection}>
-                <Text style={styles.reportDetailsSectionTitle}>Description</Text>
-                <View style={styles.reportDetailsDescriptionContainer}>
-                  <Text style={styles.reportDetailsDescription}>
-                    {selectedReport?.description}
-                  </Text>
-                </View>
-              </View>
-
-              {/* Screenshots */}
-              {selectedReport?.screenshots && selectedReport.screenshots.length > 0 && (
-                <View style={styles.reportDetailsSection}>
-                  <Text style={styles.reportDetailsSectionTitle}>
-                    Screenshots ({selectedReport.screenshots.length})
-                  </Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportDetailsScreenshotsScroll}>
-                    {selectedReport.screenshots.map((url, idx) => (
-                      <View key={idx} style={styles.reportDetailsScreenshotWrapper}>
-                        <Image source={{ uri: url }} style={styles.reportDetailsScreenshot} />
-                      </View>
-                    ))}
-                  </ScrollView>
-                </View>
-              )}
-
-              {/* Resolution Info */}
-              {selectedReport?.status === 'resolved' && selectedReport.resolvedAt && (
-                <View style={styles.reportDetailsSection}>
-                  <Text style={styles.reportDetailsSectionTitle}>Resolution Information</Text>
-                  <View style={styles.reportDetailsResolutionInfo}>
-                    <View style={styles.reportDetailsResolutionRow}>
-                      <MaterialIcons name="check-circle" size={16} color="#10b981" />
-                      <Text style={styles.reportDetailsResolutionText}>
-                        Resolved on {new Date(selectedReport.resolvedAt).toLocaleDateString('en-US', { 
-                          month: 'short', 
-                          day: 'numeric', 
-                          year: 'numeric', 
-                          hour: '2-digit', 
-                          minute: '2-digit' 
-                        })}
-                      </Text>
-                    </View>
-                    {selectedReport.resolvedBy && (
-                      <View style={styles.reportDetailsResolutionRow}>
-                        <MaterialIcons name="person" size={16} color="#64748b" />
-                        <Text style={styles.reportDetailsResolutionBy}>
-                          Resolved by: {selectedReport.resolvedBy}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                </View>
-              )}
-            </ScrollView>
-
-            {/* Action Buttons */}
-            <View style={styles.reportDetailsModalActions}>
-              {selectedReport?.status !== 'resolved' ? (
-                <TouchableOpacity 
-                  style={styles.reportDetailsMarkDoneButton}
-                  onPress={() => {
-                    handleMarkReportAsDone(selectedReport!.id);
-                    setShowReportDetailsModal(false);
-                  }}
-                >
-                  <MaterialCommunityIcons name="check-circle" size={18} color="#ffffff" />
-                  <Text style={styles.reportDetailsMarkDoneButtonText}>Send Report</Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity 
-                  style={styles.reportDetailsRemoveButton}
-                  onPress={() => {
-                    handleRemoveReport(selectedReport!.id);
-                    setShowReportDetailsModal(false);
-                  }}
-                >
-                  <MaterialCommunityIcons name="delete-outline" size={18} color="#ffffff" />
-                  <Text style={styles.reportDetailsRemoveButtonText}>Remove</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
-        </View>
-      </Modal>
-
     </View>
   );
 }
-
-const { width } = Dimensions.get('window');
 
 const styles = StyleSheet.create({
   container: {
@@ -2391,7 +2227,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     gap: 8,
     flex: 1,
-    minWidth: (width - 120) / 2, // Responsive button width for 2 buttons
+    minWidth: 140, // Minimum width for responsive layout
     justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
@@ -2841,6 +2677,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     paddingVertical: 16,
     paddingHorizontal: 20,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
     borderTopWidth: 1,
     borderTopColor: '#f1f5f9',
     shadowColor: '#000',
@@ -2854,7 +2691,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 8,
   },
-  activeNavItem: {},
+  activeNavItem: {
+    // Active state styling handled by text and icon color
+  },
   navText: {
     fontSize: 12,
     color: '#9ca3af',
@@ -2864,17 +2703,6 @@ const styles = StyleSheet.create({
   activeNavText: {
     color: '#1e293b',
     fontWeight: '700',
-  },
-  activeIndicator: {
-    position: 'absolute',
-    top: -8,
-    width: 28,
-    height: 3,
-    borderRadius: 999,
-    backgroundColor: 'transparent',
-  },
-  activeIndicatorOn: {
-    backgroundColor: '#0ea5e9',
   },
   // Reports Tab Styles
   reportsPageHeader: {
@@ -3633,20 +3461,69 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     flex: 1,
-    marginRight: 8,
+    marginRight: 12,
+  },
+  reportTicketInfo: {
+    flex: 1,
+    gap: 4,
+  },
+  reportListItemId: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#1e293b',
+    letterSpacing: 0.2,
+  },
+  reportListItemMeta: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#64748b',
+  },
+  reportListItemActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  sendToSuperAdminButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0ea5e9',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 12,
+    gap: 6,
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+    minWidth: 80,
+  },
+  sendToSuperAdminButtonText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#ffffff',
+    letterSpacing: 0.3,
+  },
+  sentBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#f0fdf4',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#bbf7d0',
+  },
+  sentBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#10b981',
   },
   reportListItemRight: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-  },
-  reportListItemId: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#0ea5e9',
-    letterSpacing: 0.3,
-    flex: 1,
-    flexWrap: 'wrap',
   },
   reportListItemStatus: {
     backgroundColor: '#f59e0b',

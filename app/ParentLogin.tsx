@@ -651,7 +651,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     alignItems: 'center',
     shadowColor: '#00aaff', // Blue spatial glow
-    shadowOpacity: 0.,
+    shadowOpacity: 0.5,
     shadowRadius: 40,
     shadowOffset: { width: 0, height: 15 },
     elevation: 25,

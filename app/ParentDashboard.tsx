@@ -3,7 +3,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Dimensions, Easing, Image, KeyboardAvoidingView, Modal, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Animated, Dimensions, Easing, Image, KeyboardAvoidingView, Modal, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
+import { useResponsive } from '../hooks/useResponsive';
 import { logError, logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -91,7 +92,7 @@ interface Task {
   quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4';
 }
 
-const { width, height } = Dimensions.get('window');
+const { width: staticWidth, height: staticHeight } = Dimensions.get('window');
 
 interface CustomAlertProps {
   visible: boolean;
@@ -207,6 +208,8 @@ const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, butt
 
 export default function ParentDashboard() {
   const router = useRouter();
+  const { width, height } = useWindowDimensions();
+  const responsive = useResponsive();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const translateAnim = useRef(new Animated.Value(16)).current;
   
@@ -3562,16 +3565,16 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContentContainer: {
-    paddingHorizontal: Math.min(12, width * 0.03),
-    paddingTop: Math.min(40, height * 0.05),
-    paddingBottom: Math.min(100, height * 0.12), // Extra padding to prevent content from being covered by bottom nav
+    paddingHorizontal: Math.min(12, staticWidth * 0.03),
+    paddingTop: Math.min(40, staticHeight * 0.05),
+    paddingBottom: Math.min(100, staticHeight * 0.12), // Extra padding to prevent content from being covered by bottom nav
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: Math.min(16, height * 0.02),
+    marginBottom: Math.min(16, staticHeight * 0.02),
     paddingHorizontal: 0,
-    paddingVertical: Math.min(8, height * 0.01),
+    paddingVertical: Math.min(8, staticHeight * 0.01),
   },
   profileSection: {
     flexDirection: 'row',
@@ -3581,9 +3584,9 @@ const styles = StyleSheet.create({
     marginRight: 16,
   },
   profileImage: {
-    width: Math.min(48, width * 0.12),
-    height: Math.min(48, width * 0.12),
-    borderRadius: Math.min(24, width * 0.06),
+    width: Math.min(48, staticWidth * 0.12),
+    height: Math.min(48, staticWidth * 0.12),
+    borderRadius: Math.min(24, staticWidth * 0.06),
     backgroundColor: '#f1f5f9',
     borderWidth: 2,
     borderColor: '#e2e8f0',
@@ -3632,14 +3635,14 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   announcementTitle: {
-    fontSize: Math.min(16, width * 0.04),
+    fontSize: Math.min(16, staticWidth * 0.04),
     fontWeight: '700',
     color: '#1e293b',
   },
   announcementCard: {
     backgroundColor: '#ffffff',
-    borderRadius: Math.min(12, width * 0.03),
-    padding: Math.min(16, width * 0.04),
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    padding: Math.min(16, staticWidth * 0.04),
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.06,

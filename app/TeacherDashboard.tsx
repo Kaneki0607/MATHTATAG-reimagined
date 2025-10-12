@@ -38,8 +38,12 @@ import {
 
   TouchableWithoutFeedback,
 
-  View
+  View,
+  useWindowDimensions
 } from 'react-native';
+
+import { ResponsiveCards } from '../components/ResponsiveGrid';
+import { useResponsive } from '../hooks/useResponsive';
 
 import * as XLSX from 'xlsx';
 
@@ -56,7 +60,9 @@ import { uploadFile } from '../lib/firebase-storage';
 
 
 
-const { width, height } = Dimensions.get('window');
+// Note: Using static dimensions for StyleSheet creation
+// Dynamic dimensions are handled via useWindowDimensions hook in component
+const { width: staticWidth, height: staticHeight } = Dimensions.get('window');
 
 
 
@@ -1629,6 +1635,8 @@ function generateYearOptions() {
 export default function TeacherDashboard() {
 
   const router = useRouter();
+  const { width, height } = useWindowDimensions();
+  const responsive = useResponsive();
 
   const [teacherData, setTeacherData] = useState<TeacherData | null>(null);
 
@@ -5572,7 +5580,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       const timestamp = new Date().toISOString();
 
-      const reportId = `report_${Date.now()}`;
+      // Generate a unique numeric-only ticket number (15 digits)
+
+      const now = Date.now(); // 13 digits
+
+      const random = Math.floor(Math.random() * 100); // 2 digits
+
+      const ticketNumber = `${now}${random.toString().padStart(2, '0')}`;
+
+      const reportId = ticketNumber;
 
 
 
@@ -5608,6 +5624,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         id: reportId,
 
+        ticketNumber: ticketNumber,
+
         reportedBy: currentUserId || 'unknown',
 
         reportedByEmail: teacherData?.email || 'unknown',
@@ -5640,7 +5658,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         setReportScreenshots([]);
 
-        showAlert('Success', 'Your technical report has been submitted to the Admin. Thank you for helping us improve!', undefined, 'success');
+        showAlert('Success', `Report submitted successfully!\n\nYour Ticket Number:\n${ticketNumber}\n\nPlease save this number for reference. Thank you for helping us improve!`, undefined, 'success');
 
       } else {
 
@@ -5889,45 +5907,48 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
 
-             {/* Action Buttons */}
+            {/* Action Buttons */}
 
-             <View style={styles.actionButtons}>
+            <ResponsiveCards 
+              cardsPerRow={{ xs: 2, sm: 2, md: 3, lg: 4, xl: 4 }}
+              style={styles.actionButtons}
+            >
 
-               <TouchableOpacity style={styles.actionCard} onPress={() => setShowAddClassModal(true)}>
+              <TouchableOpacity style={styles.actionCard} onPress={() => setShowAddClassModal(true)}>
 
-                <View style={styles.actionGradient1}>
+               <View style={styles.actionGradient1}>
 
-                  <View style={styles.actionIcon}>
+                 <View style={styles.actionIcon}>
 
-                    <MaterialCommunityIcons name="google-classroom" size={28} color="#3182ce" />
-
-                  </View>
-
-                  <Text style={styles.actionText}>Add Class</Text>
+                   <MaterialCommunityIcons name="google-classroom" size={responsive.scale(28)} color="#3182ce" />
 
                  </View>
 
-               </TouchableOpacity>
-
-               
-
-              <TouchableOpacity style={styles.actionCard} onPress={() => setActiveTab('exercises')}>
-
-                <View style={styles.actionGradient2}>
-
-                  <View style={styles.actionIcon}>
-
-                    <MaterialCommunityIcons name="abacus" size={28} color="#38a169" />
-
-                  </View>
-
-                  <Text style={styles.actionText}>Exercises</Text>
+                 <Text style={styles.actionText}>Add Class</Text>
 
                 </View>
 
               </TouchableOpacity>
 
-             </View>
+              
+
+             <TouchableOpacity style={styles.actionCard} onPress={() => setActiveTab('exercises')}>
+
+               <View style={styles.actionGradient2}>
+
+                 <View style={styles.actionIcon}>
+
+                   <MaterialCommunityIcons name="abacus" size={responsive.scale(28)} color="#38a169" />
+
+                 </View>
+
+                 <Text style={styles.actionText}>Exercises</Text>
+
+               </View>
+
+             </TouchableOpacity>
+
+            </ResponsiveCards>
 
 
 
@@ -6047,77 +6068,80 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                        </View>
 
-                       <View style={styles.analyticsCards}>
+                      <ResponsiveCards 
+                        cardsPerRow={{ xs: 1, sm: 2, md: 3, lg: 3, xl: 3 }}
+                        style={styles.analyticsCards}
+                      >
 
-                         <View style={styles.analyticsCard}>
+                        <View style={styles.analyticsCard}>
 
-                           <View style={styles.analyticsIcon}>
+                          <View style={styles.analyticsIcon}>
 
-                             <MaterialCommunityIcons name="repeat" size={24} color="#10b981" />
+                            <MaterialCommunityIcons name="repeat" size={responsive.scale(24)} color="#10b981" />
+
+                          </View>
+
+                          <View style={styles.analyticsContent}>
+
+                            <Text style={styles.analyticsLabel}>Avg Attempts per Item</Text>
+
+                            <Text style={styles.analyticsValue}>{
+
+                              (() => {
+
+                                const ca = classAnalytics[cls.id] as any;
+
+                                if (!ca || !ca.averageAttempts) return '—';
+
+                                return ca.averageAttempts.toFixed(1);
+
+                              })()
+
+                            }</Text>
+
+                            <Text style={styles.analyticsChange}>Per question average</Text>
+
+                          </View>
+
+                        </View>
+
+                        <View style={styles.analyticsCard}>
+
+                          <View style={styles.analyticsIcon}>
+
+                            <MaterialCommunityIcons name="clock-outline" size={responsive.scale(24)} color="#3b82f6" />
 
                            </View>
 
                            <View style={styles.analyticsContent}>
 
-                             <Text style={styles.analyticsLabel}>Avg Attempts per Item</Text>
+                            <Text style={styles.analyticsLabel}>Average Time</Text>
 
-                             <Text style={styles.analyticsValue}>{
+                            <Text style={styles.analyticsValue}>{
 
-                               (() => {
+                              (() => {
 
-                                 const ca = classAnalytics[cls.id] as any;
+                                const ca = classAnalytics[cls.id] as any;
 
-                                 if (!ca || !ca.averageAttempts) return '—';
+                                if (!ca || !ca.averageTime) return '—';
 
-                                 return ca.averageAttempts.toFixed(1);
+                                const minutes = Math.floor(ca.averageTime / 60000);
 
-                               })()
+                                const seconds = Math.floor((ca.averageTime % 60000) / 1000);
 
-                             }</Text>
+                                return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 
-                             <Text style={styles.analyticsChange}>Per question average</Text>
+                              })()
 
-                           </View>
+                            }</Text>
 
-                         </View>
+                            <Text style={styles.analyticsChange}>Per exercise average</Text>
 
-                         <View style={styles.analyticsCard}>
+                          </View>
 
-                           <View style={styles.analyticsIcon}>
+                        </View>
 
-                             <MaterialCommunityIcons name="clock-outline" size={24} color="#3b82f6" />
-
-                           </View>
-
-                           <View style={styles.analyticsContent}>
-
-                             <Text style={styles.analyticsLabel}>Average Time</Text>
-
-                             <Text style={styles.analyticsValue}>{
-
-                               (() => {
-
-                                 const ca = classAnalytics[cls.id] as any;
-
-                                 if (!ca || !ca.averageTime) return '—';
-
-                                 const minutes = Math.floor(ca.averageTime / 60000);
-
-                                 const seconds = Math.floor((ca.averageTime % 60000) / 1000);
-
-                                 return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-
-                               })()
-
-                             }</Text>
-
-                             <Text style={styles.analyticsChange}>Per exercise average</Text>
-
-                           </View>
-
-                         </View>
-
-                       </View>
+                      </ResponsiveCards>
 
                        <View style={styles.quickStats}>
 
@@ -11676,7 +11700,7 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    minHeight: height,
+    minHeight: '100%',
 
   },
 
@@ -11702,11 +11726,11 @@ const styles = StyleSheet.create({
 
     flex: 1,
 
-    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingHorizontal: Math.min(12, staticWidth * 0.03),
 
-    paddingTop: Math.min(20, height * 0.025),
+    paddingTop: Math.min(20, staticHeight * 0.025),
 
-    paddingBottom: Math.min(100, height * 0.12),
+    paddingBottom: Math.min(100, staticHeight * 0.12),
 
   },
 
@@ -11720,11 +11744,11 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    marginBottom: Math.min(16, height * 0.02),
+    marginBottom: Math.min(16, staticHeight * 0.02),
 
     paddingHorizontal: 0,
 
-    paddingVertical: Math.min(8, height * 0.01),
+    paddingVertical: Math.min(8, staticHeight * 0.01),
 
   },
 
@@ -11736,11 +11760,11 @@ const styles = StyleSheet.create({
 
   avatar: {
 
-    width: Math.min(48, width * 0.12),
+    width: Math.min(48, staticWidth * 0.12),
 
-    height: Math.min(48, width * 0.12),
+    height: Math.min(48, staticWidth * 0.12),
 
-    borderRadius: Math.min(24, width * 0.06),
+    borderRadius: Math.min(24, staticWidth * 0.06),
 
     backgroundColor: '#f1f5f9',
 
@@ -11772,7 +11796,7 @@ const styles = StyleSheet.create({
 
   welcomeLabel: {
 
-    fontSize: Math.min(12, width * 0.03),
+    fontSize: Math.min(12, staticWidth * 0.03),
 
     color: '#64748b',
 
@@ -11784,7 +11808,7 @@ const styles = StyleSheet.create({
 
   welcomeTitle: {
 
-    fontSize: Math.min(18, width * 0.045),
+    fontSize: Math.min(18, staticWidth * 0.045),
 
     fontWeight: '700',
 
@@ -11806,9 +11830,9 @@ const styles = StyleSheet.create({
 
   announcementCard: {
 
-    borderRadius: Math.min(16, width * 0.04),
+    borderRadius: Math.min(16, staticWidth * 0.04),
 
-    marginBottom: Math.min(16, height * 0.02),
+    marginBottom: Math.min(16, staticHeight * 0.02),
 
     marginHorizontal: 2,
 
@@ -11834,7 +11858,7 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#EFF6FF',
 
-    padding: Math.min(16, width * 0.04),
+    padding: Math.min(16, staticWidth * 0.04),
 
     position: 'relative',
 
@@ -11846,17 +11870,17 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    marginBottom: Math.min(12, height * 0.015),
+    marginBottom: Math.min(12, staticHeight * 0.015),
 
   },
 
   megaphoneIcon: {
 
-    marginRight: Math.min(10, width * 0.025),
+    marginRight: Math.min(10, staticWidth * 0.025),
 
-    padding: Math.min(10, width * 0.025),
+    padding: Math.min(10, staticWidth * 0.025),
 
-    borderRadius: Math.min(12, width * 0.03),
+    borderRadius: Math.min(12, staticWidth * 0.03),
 
     backgroundColor: '#DBEAFE',
 
@@ -11886,7 +11910,7 @@ const styles = StyleSheet.create({
 
   announcementTitle: {
 
-    fontSize: Math.min(18, width * 0.045),
+    fontSize: Math.min(18, staticWidth * 0.045),
 
     fontWeight: '800',
 
@@ -11902,13 +11926,13 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#10B981',
 
-    paddingHorizontal: Math.min(10, width * 0.025),
+    paddingHorizontal: Math.min(10, staticWidth * 0.025),
 
-    paddingVertical: Math.min(5, height * 0.006),
+    paddingVertical: Math.min(5, staticHeight * 0.006),
 
-    borderRadius: Math.min(16, width * 0.04),
+    borderRadius: Math.min(16, staticWidth * 0.04),
 
-    marginLeft: Math.min(8, width * 0.02),
+    marginLeft: Math.min(8, staticWidth * 0.02),
 
     shadowColor: '#10B981',
 
@@ -11924,7 +11948,7 @@ const styles = StyleSheet.create({
 
   announcementBadgeText: {
 
-    fontSize: Math.min(9, width * 0.022),
+    fontSize: Math.min(9, staticWidth * 0.022),
 
     fontWeight: '800',
 
@@ -11938,13 +11962,13 @@ const styles = StyleSheet.create({
 
   announcementText: {
 
-    fontSize: Math.min(13, width * 0.032),
+    fontSize: Math.min(13, staticWidth * 0.032),
 
     color: '#64748b',
 
-    lineHeight: Math.min(18, width * 0.045),
+    lineHeight: Math.min(18, staticWidth * 0.045),
 
-    marginBottom: Math.min(12, height * 0.015),
+    marginBottom: Math.min(12, staticHeight * 0.015),
 
     fontWeight: '500',
 
@@ -11954,9 +11978,9 @@ const styles = StyleSheet.create({
 
     flexDirection: 'row',
 
-    marginBottom: Math.min(12, height * 0.015),
+    marginBottom: Math.min(12, staticHeight * 0.015),
 
-    gap: Math.min(10, width * 0.025),
+    gap: Math.min(10, staticWidth * 0.025),
 
     flexWrap: 'wrap',
 
@@ -12004,11 +12028,11 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#3b82f6',
 
-    paddingVertical: Math.min(12, height * 0.015),
+    paddingVertical: Math.min(12, staticHeight * 0.015),
 
-    paddingHorizontal: Math.min(20, width * 0.05),
+    paddingHorizontal: Math.min(20, staticWidth * 0.05),
 
-    borderRadius: Math.min(10, width * 0.025),
+    borderRadius: Math.min(10, staticWidth * 0.025),
 
     shadowColor: '#3b82f6',
 
@@ -12020,13 +12044,13 @@ const styles = StyleSheet.create({
 
     elevation: 4,
 
-    gap: Math.min(6, width * 0.015),
+    gap: Math.min(6, staticWidth * 0.015),
 
   },
 
   announcementButtonText: {
 
-    fontSize: Math.min(14, width * 0.035),
+    fontSize: Math.min(14, staticWidth * 0.035),
 
     fontWeight: '700',
 
@@ -12048,7 +12072,7 @@ const styles = StyleSheet.create({
 
     margin: 20,
 
-    maxHeight: height * 0.85,
+    maxHeight: staticHeight * 0.85,
 
     shadowColor: '#000',
 
@@ -12456,13 +12480,7 @@ const styles = StyleSheet.create({
 
   actionButtons: {
 
-    flexDirection: 'row',
-
-    justifyContent: 'space-between',
-
-    marginBottom: Math.min(20, height * 0.025),
-
-    gap: Math.min(8, width * 0.02),
+    marginBottom: Math.min(20, staticHeight * 0.025),
 
   },
 
@@ -12470,9 +12488,7 @@ const styles = StyleSheet.create({
 
     flex: 1,
 
-    borderRadius: Math.min(16, width * 0.04),
-
-    marginHorizontal: Math.min(4, width * 0.01),
+    borderRadius: Math.min(16, staticWidth * 0.04),
 
     shadowColor: '#000',
 
@@ -12492,9 +12508,11 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#f0f9ff',
 
-    padding: Math.min(16, width * 0.04),
+    padding: Math.min(16, staticWidth * 0.04),
 
     alignItems: 'center',
+    minHeight: 100,
+    justifyContent: 'center',
 
   },
 
@@ -12502,21 +12520,23 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#f8fafc',
 
-    padding: Math.min(16, width * 0.04),
+    padding: Math.min(16, staticWidth * 0.04),
 
     alignItems: 'center',
+    minHeight: 100,
+    justifyContent: 'center',
 
   },
 
   actionIcon: {
 
-    marginBottom: Math.min(10, height * 0.012),
+    marginBottom: Math.min(10, staticHeight * 0.012),
 
   },
 
   actionText: {
 
-    fontSize: Math.min(13, width * 0.032),
+    fontSize: Math.min(13, staticWidth * 0.032),
 
     fontWeight: '700',
 
@@ -12532,7 +12552,7 @@ const styles = StyleSheet.create({
 
   classroomsSection: {
 
-    marginBottom: Math.min(100, height * 0.12), // Space for bottom nav
+    marginBottom: Math.min(100, staticHeight * 0.12), // Space for bottom nav
 
   },
 
@@ -12568,15 +12588,15 @@ const styles = StyleSheet.create({
 
   sectionTitle: {
 
-    fontSize: Math.max(16, Math.min(20, width * 0.05)),
+    fontSize: Math.max(16, Math.min(20, staticWidth * 0.05)),
 
     fontWeight: '700',
 
     color: '#1e293b',
 
-    marginBottom: Math.min(12, height * 0.015),
+    marginBottom: Math.min(12, staticHeight * 0.015),
 
-    paddingHorizontal: Math.min(8, width * 0.02),
+    paddingHorizontal: Math.min(8, staticWidth * 0.02),
 
   },
 
@@ -12584,13 +12604,13 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    borderRadius: Math.min(16, width * 0.04),
+    borderRadius: Math.min(16, staticWidth * 0.04),
 
-    padding: Math.min(20, width * 0.05),
+    padding: Math.min(20, staticWidth * 0.05),
 
-    marginHorizontal: Math.min(8, width * 0.02),
+    marginHorizontal: Math.min(8, staticWidth * 0.02),
 
-    marginBottom: Math.min(16, height * 0.02),
+    marginBottom: Math.min(16, staticHeight * 0.02),
 
     shadowColor: '#000',
 
@@ -12606,7 +12626,7 @@ const styles = StyleSheet.create({
 
     borderColor: '#e2e8f0',
 
-    width: width - Math.min(32, width * 0.08),
+    width: staticWidth - Math.min(32, staticWidth * 0.08),
 
     alignSelf: 'center',
 
@@ -12620,23 +12640,23 @@ const styles = StyleSheet.create({
 
   classroomTitle: {
 
-    fontSize: Math.max(16, Math.min(20, width * 0.05)),
+    fontSize: Math.max(16, Math.min(20, staticWidth * 0.05)),
 
     fontWeight: '700',
 
     color: '#1e293b',
 
-    marginBottom: Math.min(6, height * 0.008),
+    marginBottom: Math.min(6, staticHeight * 0.008),
 
   },
 
   classroomSubtitle: {
 
-    fontSize: Math.max(12, Math.min(14, width * 0.035)),
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
 
     color: '#64748b',
 
-    marginBottom: Math.min(4, height * 0.005),
+    marginBottom: Math.min(4, staticHeight * 0.005),
 
     fontWeight: '500',
 
@@ -12644,7 +12664,7 @@ const styles = StyleSheet.create({
 
   classroomYear: {
 
-    fontSize: Math.max(11, Math.min(13, width * 0.032)),
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
 
     color: '#64748b',
 
@@ -12760,7 +12780,7 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    padding: Math.min(12, width * 0.03),
+    padding: Math.min(12, staticWidth * 0.03),
 
     borderBottomWidth: 1,
 
@@ -12788,7 +12808,7 @@ const styles = StyleSheet.create({
 
   exerciseTitle: {
 
-    fontSize: Math.max(14, Math.min(18, width * 0.045)),
+    fontSize: Math.max(14, Math.min(18, staticWidth * 0.045)),
 
     fontWeight: '700',
 
@@ -12808,7 +12828,7 @@ const styles = StyleSheet.create({
 
     marginTop: 8,
 
-    gap: Math.min(6, width * 0.015),
+    gap: Math.min(6, staticWidth * 0.015),
 
   },
 
@@ -12820,7 +12840,7 @@ const styles = StyleSheet.create({
 
     marginTop: 8,
 
-    gap: Math.min(6, width * 0.015),
+    gap: Math.min(6, staticWidth * 0.015),
 
   },
 
@@ -12832,9 +12852,9 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#f8fafc',
 
-    paddingHorizontal: Math.min(8, width * 0.02),
+    paddingHorizontal: Math.min(8, staticWidth * 0.02),
 
-    paddingVertical: Math.min(4, height * 0.005),
+    paddingVertical: Math.min(4, staticHeight * 0.005),
 
     borderRadius: 6,
 
@@ -12850,7 +12870,7 @@ const styles = StyleSheet.create({
 
   exerciseDetailText: {
 
-    fontSize: Math.max(9, Math.min(11, width * 0.025)),
+    fontSize: Math.max(9, Math.min(11, staticWidth * 0.025)),
 
     color: '#64748b',
 
@@ -12868,7 +12888,7 @@ const styles = StyleSheet.create({
 
     borderRadius: 6,
 
-    padding: Math.min(8, width * 0.02),
+    padding: Math.min(8, staticWidth * 0.02),
 
     borderWidth: 1,
 
@@ -12890,23 +12910,23 @@ const styles = StyleSheet.create({
 
     elevation: 1,
 
-    marginTop: Math.min(4, height * 0.005),
+    marginTop: Math.min(4, staticHeight * 0.005),
 
-    marginHorizontal: Math.min(8, width * 0.02),
+    marginHorizontal: Math.min(8, staticWidth * 0.02),
 
-    marginBottom: Math.min(4, height * 0.005),
+    marginBottom: Math.min(4, staticHeight * 0.005),
 
   },
 
   performanceSummaryTitle: {
 
-    fontSize: Math.max(11, Math.min(13, width * 0.03)),
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.03)),
 
     fontWeight: '700',
 
     color: '#1e293b',
 
-    marginBottom: Math.min(4, height * 0.005),
+    marginBottom: Math.min(4, staticHeight * 0.005),
 
     textAlign: 'center',
 
@@ -12918,7 +12938,7 @@ const styles = StyleSheet.create({
 
     justifyContent: 'space-between',
 
-    gap: Math.min(4, width * 0.01),
+    gap: Math.min(4, staticWidth * 0.01),
 
   },
 
@@ -12930,7 +12950,7 @@ const styles = StyleSheet.create({
 
     borderRadius: 6,
 
-    padding: Math.min(6, width * 0.015),
+    padding: Math.min(6, staticWidth * 0.015),
 
     borderWidth: 1,
 
@@ -12982,7 +13002,7 @@ const styles = StyleSheet.create({
 
   metricLabel: {
 
-    fontSize: Math.max(8, Math.min(10, width * 0.02)),
+    fontSize: Math.max(8, Math.min(10, staticWidth * 0.02)),
 
     color: '#64748b',
 
@@ -12996,7 +13016,7 @@ const styles = StyleSheet.create({
 
   metricValue: {
 
-    fontSize: Math.max(10, Math.min(11, width * 0.035)),
+    fontSize: Math.max(10, Math.min(11, staticWidth * 0.035)),
 
     color: '#1e293b',
 
@@ -13064,15 +13084,15 @@ const styles = StyleSheet.create({
 
     borderRadius: 6,
 
-    padding: Math.min(8, width * 0.02),
+    padding: Math.min(8, staticWidth * 0.02),
 
     borderWidth: 1,
 
     borderColor: '#e2e8f0',
 
-    marginHorizontal: Math.min(8, width * 0.02),
+    marginHorizontal: Math.min(8, staticWidth * 0.02),
 
-    marginBottom: Math.min(8, height * 0.01),
+    marginBottom: Math.min(8, staticHeight * 0.01),
 
   },
 
@@ -13090,7 +13110,7 @@ const styles = StyleSheet.create({
 
   studentResultsTitle: {
 
-    fontSize: Math.max(11, Math.min(13, width * 0.03)),
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.03)),
 
     fontWeight: '700',
 
@@ -13106,9 +13126,9 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#10b981',
 
-    paddingHorizontal: Math.min(16, width * 0.04),
+    paddingHorizontal: Math.min(16, staticWidth * 0.04),
 
-    paddingVertical: Math.min(8, height * 0.01),
+    paddingVertical: Math.min(8, staticHeight * 0.01),
 
     borderRadius: 8,
 
@@ -13136,7 +13156,7 @@ const styles = StyleSheet.create({
 
     color: '#ffffff',
 
-    fontSize: Math.max(11, Math.min(13, width * 0.032)),
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
 
     fontWeight: '600',
 
@@ -13275,10 +13295,6 @@ const styles = StyleSheet.create({
   },
 
   analyticsCards: {
-
-    flexDirection: 'row',
-
-    justifyContent: 'space-between',
 
     marginBottom: 20,
 
@@ -13508,11 +13524,11 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    paddingVertical: 2,
+    paddingVertical: 16,
 
     paddingHorizontal: 20,
 
-    paddingBottom: Platform.OS === 'ios' ? 6 : 2,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
 
     borderTopWidth: 1,
 
@@ -13542,7 +13558,7 @@ const styles = StyleSheet.create({
 
   activeNavItem: {
 
-    // Active state styling
+    // Active state styling handled by text and icon color
 
   },
 
@@ -14818,11 +14834,11 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    borderRadius: Math.min(12, width * 0.03),
+    borderRadius: Math.min(12, staticWidth * 0.03),
 
-    padding: Math.min(12, width * 0.03),
+    padding: Math.min(12, staticWidth * 0.03),
 
-    marginBottom: Math.min(8, height * 0.01),
+    marginBottom: Math.min(8, staticHeight * 0.01),
 
     shadowColor: '#000',
 
@@ -14870,7 +14886,7 @@ const styles = StyleSheet.create({
 
   exerciseDescription: {
 
-    fontSize: Math.min(12, width * 0.03),
+    fontSize: Math.min(12, staticWidth * 0.03),
 
     color: '#64748b',
 
@@ -17314,15 +17330,15 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingHorizontal: Math.min(12, staticWidth * 0.03),
 
-    paddingVertical: Math.min(10, height * 0.012),
+    paddingVertical: Math.min(10, staticHeight * 0.012),
 
     borderBottomWidth: 1,
 
     borderBottomColor: '#e2e8f0',
 
-    minWidth: width < 400 ? width * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
 
     borderRadius: 6,
 
@@ -17348,7 +17364,7 @@ const styles = StyleSheet.create({
 
   tableHeaderText: {
 
-    fontSize: Math.max(11, Math.min(13, width * 0.03)),
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.03)),
 
     fontWeight: '700',
 
@@ -17390,15 +17406,15 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    paddingHorizontal: Math.min(12, width * 0.03),
+    paddingHorizontal: Math.min(12, staticWidth * 0.03),
 
-    paddingVertical: Math.min(10, height * 0.012),
+    paddingVertical: Math.min(10, staticHeight * 0.012),
 
     borderBottomWidth: 1,
 
     borderBottomColor: '#f1f5f9',
 
-    minWidth: width < 400 ? width * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
 
     backgroundColor: '#ffffff',
 
@@ -17426,7 +17442,7 @@ const styles = StyleSheet.create({
 
   tableRowText: {
 
-    fontSize: Math.max(11, Math.min(13, width * 0.03)),
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.03)),
 
     color: '#1e293b',
 
@@ -17456,13 +17472,13 @@ const styles = StyleSheet.create({
 
   tableScrollContainer: {
 
-    maxHeight: height * 0.35,
+    maxHeight: staticHeight * 0.35,
 
   },
 
   tableContainer: {
 
-    minWidth: width < 400 ? width * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
 
   },
 

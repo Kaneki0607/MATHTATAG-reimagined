@@ -827,7 +827,7 @@ export default function TeacherLogin() {
               <View style={styles.eulaContainer}>
                 <TouchableOpacity
                   style={styles.eulaCheckbox}
-                  onPress={() => handleSignUpInputChange('agreedToEULA', String(!signUpData.agreedToEULA))}
+                  onPress={() => setSignUpData(prev => ({ ...prev, agreedToEULA: !prev.agreedToEULA }))}
                 >
                   <View style={[styles.eulaCheckboxView, signUpData.agreedToEULA && styles.eulaCheckboxChecked]}>
                     {signUpData.agreedToEULA && (
@@ -1048,7 +1048,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     alignItems: 'center',
     shadowColor: '#00aaff', // Blue spatial glow
-    shadowOpacity: 0.,
+    shadowOpacity: 0.5,
     shadowRadius: 40,
     shadowOffset: { width: 0, height: 15 },
     elevation: 25,

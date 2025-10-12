@@ -1,12 +1,13 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
+import { useResponsive } from '../hooks/useResponsive';
 import { addApiKey, deleteApiKey, getApiKeyStatus } from '../lib/elevenlabs-keys';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
 import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
 
-type TabKey = 'home' | 'teachers' | 'apikeys' | 'logs';
+type TabKey = 'home' | 'teachers' | 'apikeys' | 'updates' | 'reports';
 
 interface Admin {
   uid: string;
@@ -51,12 +52,33 @@ interface ElevenKey {
   totalTtsTimeMs?: number;
 }
 
+interface TechnicalReport {
+  id: string;
+  ticketId?: string; // Legacy field for backward compatibility
+  ticketNumber?: string; // Numeric-only ticket number
+  reportedBy?: string; // Make optional
+  reportedByEmail?: string; // Make optional
+  reportedByName?: string;
+  userRole?: 'teacher' | 'parent' | 'admin';
+  timestamp?: string; // Make optional
+  description?: string; // Make optional
+  screenshots?: string[]; // Make optional
+  status?: 'pending' | 'in_progress' | 'resolved'; // Make optional
+  priority?: 'low' | 'medium' | 'high' | 'critical';
+  category?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+}
+
 export default function SuperAdminDashboard() {
+  const { width, height } = useWindowDimensions();
+  const responsive = useResponsive();
   const [activeTab, setActiveTab] = useState<TabKey>('home');
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [admins, setAdmins] = useState<Admin[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
   const [apiKeys, setApiKeys] = useState<ElevenKey[]>([]);
+  const [technicalReports, setTechnicalReports] = useState<TechnicalReport[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -108,6 +130,10 @@ export default function SuperAdminDashboard() {
     version: '1.0.0',
     downloadUrl: ''
   });
+
+  // Technical reports state
+  const [showReportDetailsModal, setShowReportDetailsModal] = useState(false);
+  const [selectedReport, setSelectedReport] = useState<TechnicalReport | null>(null);
   
   // Modal state
   const [showTeacherModal, setShowTeacherModal] = useState(false);
@@ -201,11 +227,12 @@ export default function SuperAdminDashboard() {
   const fetchAll = async () => {
     setLoading(true);
     try {
-      const [teachersRes, adminsRes, logsRes, keysRes] = await Promise.all([
+      const [teachersRes, adminsRes, logsRes, keysRes, reportsRes] = await Promise.all([
         readData('/teachers'),
         readData('/admins'),
         readData('/teacherLogs'),
         readData('/elevenlabsKeys'),
+        readData('/technicalReports'),
       ]);
 
       // Teachers
@@ -242,8 +269,41 @@ export default function SuperAdminDashboard() {
       // API Keys - Use the new getApiKeyStatus function
       const apiKeyStatus = await getApiKeyStatus();
       setApiKeys(apiKeyStatus.keys);
+
+      // Technical Reports
+      if (reportsRes.data) {
+        const reportsList: TechnicalReport[] = Object.entries(reportsRes.data).map(([id, data]: [string, any]) => ({
+          id,
+          ticketNumber: data.ticketNumber || data.id, // Use ticketNumber or fallback to id
+          ticketId: data.ticketId, // Keep for backward compatibility
+          reportedBy: data.reportedBy || 'Unknown',
+          reportedByEmail: data.reportedByEmail || 'unknown@example.com',
+          reportedByName: data.reportedByName,
+          userRole: data.userRole || 'admin',
+          timestamp: data.timestamp || new Date().toISOString(),
+          description: data.description || 'No description provided',
+          screenshots: data.screenshots || [], // Ensure screenshots is always an array
+          status: data.status || 'pending', // Default to pending
+          priority: data.priority,
+          category: data.category,
+          resolvedAt: data.resolvedAt,
+          resolvedBy: data.resolvedBy,
+        })).sort((a, b) => {
+          const aTime = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+          const bTime = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+          return bTime - aTime;
+        });
+        setTechnicalReports(reportsList);
+      } else {
+        setTechnicalReports([]); // Set empty array if no data
+      }
     } catch (error) {
       console.error('Error fetching data:', error);
+      // Ensure arrays are properly initialized even on error
+      setTeachers([]);
+      setAdmins([]);
+      setLogs([]);
+      setTechnicalReports([]);
     } finally {
       setLoading(false);
     }
@@ -340,6 +400,51 @@ export default function SuperAdminDashboard() {
     setSelectedTeacher(null);
   };
 
+  const openReportDetails = (report: TechnicalReport) => {
+    setSelectedReport(report);
+    setShowReportDetailsModal(true);
+  };
+
+  const closeReportDetails = () => {
+    setShowReportDetailsModal(false);
+    setSelectedReport(null);
+  };
+
+  const handleMarkReportAsDone = async (reportId: string) => {
+    try {
+      await updateData(`/technicalReports/${reportId}`, {
+        status: 'resolved',
+        resolvedAt: new Date().toISOString(),
+        resolvedBy: getCurrentUser()?.email || 'Super Admin'
+      });
+      Alert.alert('Success', 'Report marked as resolved');
+      await fetchAll();
+      closeReportDetails();
+    } catch (error) {
+      Alert.alert('Error', 'Failed to mark report as resolved');
+    }
+  };
+
+  const handleRemoveReport = async (reportId: string) => {
+    Alert.alert(
+      'Delete Report',
+      'Are you sure you want to delete this report? This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: async () => {
+          try {
+            await deleteData(`/technicalReports/${reportId}`);
+            Alert.alert('Success', 'Report deleted');
+            await fetchAll();
+            closeReportDetails();
+          } catch (error) {
+            Alert.alert('Error', 'Failed to delete report');
+          }
+        }}
+      ]
+    );
+  };
+
   const normalized = (v: string | undefined | null) => (v || '').toString().trim().toLowerCase();
   const matchesSearch = (item: any) => {
     const q = normalized(searchQuery);
@@ -392,7 +497,7 @@ export default function SuperAdminDashboard() {
   };
 
   const selectAllKeys = () => {
-    setSelectedKeys(new Set(filteredKeys.map(k => k.id)));
+    setSelectedKeys(new Set((filteredKeys || []).map(k => k.id)));
   };
 
   const clearSelection = () => {
@@ -457,12 +562,12 @@ export default function SuperAdminDashboard() {
     );
   };
 
-  const filteredTeachers = teachers.filter(matchesSearch);
-  const filteredAdmins = admins.filter(matchesSearch);
-  const filteredLogs = logs.filter(matchesSearch);
+  const filteredTeachers = (teachers || []).filter(matchesSearch);
+  const filteredAdmins = (admins || []).filter(matchesSearch);
+  const filteredLogs = (logs || []).filter(matchesSearch);
   
   // Enhanced API key filtering and sorting
-  const filteredKeys = apiKeys
+  const filteredKeys = (apiKeys || [])
     .filter(matchesSearch)
     .filter(key => filterStatus === 'all' || key.status === filterStatus)
     .sort((a, b) => {
@@ -570,7 +675,7 @@ export default function SuperAdminDashboard() {
                 </TouchableOpacity>
                 
                 <TouchableOpacity style={styles.adminToolButton} onPress={() => {
-                  setActiveTab('logs');
+                  setActiveTab('updates');
                 }}>
                   <MaterialIcons name="system-update" size={20} color="#f59e0b" />
                   <Text style={styles.adminToolLabel}>Updates</Text>
@@ -793,7 +898,7 @@ export default function SuperAdminDashboard() {
 
           {/* Teachers List */}
           <FlatList
-            data={filteredTeachers}
+            data={filteredTeachers || []}
             keyExtractor={(t) => t.uid}
             refreshing={refreshing}
             onRefresh={onRefresh}
@@ -1053,7 +1158,7 @@ export default function SuperAdminDashboard() {
 
           {/* Compact API Keys List */}
           <FlatList
-            data={filteredKeys}
+            data={filteredKeys || []}
             keyExtractor={(k) => k.id}
             refreshing={refreshing}
             onRefresh={onRefresh}
@@ -1163,7 +1268,7 @@ export default function SuperAdminDashboard() {
       )}
 
       {/* Updates Tab - App Version Management */}
-      {activeTab === 'logs' && (
+      {activeTab === 'updates' && (
         <View style={styles.logsContainer}>
           <View style={styles.logsHeader}>
             <View style={styles.logsHeaderTop}>
@@ -1178,7 +1283,7 @@ export default function SuperAdminDashboard() {
             <Text style={styles.logsSubtitle}>Manage app version and update notifications</Text>
           </View>
 
-          <ScrollView style={styles.logsList} showsVerticalScrollIndicator={false}>
+          <ScrollView contentContainerStyle={styles.logsList} showsVerticalScrollIndicator={false}>
             {/* Maintenance Status Card */}
             <View style={styles.updateCard}>
               <View style={styles.updateHeader}>
@@ -1264,14 +1369,203 @@ export default function SuperAdminDashboard() {
         </View>
       )}
 
+      {/* Reports Tab - Technical Reports from Admins */}
+      {activeTab === 'reports' && (
+        <View style={styles.reportsContainer}>
+          <View style={styles.reportsHeader}>
+            <View style={styles.reportsHeaderTop}>
+              <View style={styles.reportsTitleSection}>
+                <View style={styles.reportsIconContainer}>
+                  <MaterialCommunityIcons name="bug-outline" size={28} color="#ffffff" />
+                </View>
+                <View>
+                  <Text style={styles.reportsTitle}>Technical Reports</Text>
+                  <Text style={styles.reportsSubtitle}>Admin & Teacher Submissions</Text>
+                </View>
+              </View>
+              
+              <TouchableOpacity
+                style={styles.reportsRefreshButton}
+                onPress={onRefresh}
+              >
+                <MaterialIcons name="refresh" size={22} color="#0ea5e9" />
+              </TouchableOpacity>
+            </View>
+            
+            {/* Reports Stats */}
+            <View style={styles.reportsStatsContainer}>
+              <View style={styles.reportsStatCard}>
+                <View style={[styles.reportsStatIcon, { backgroundColor: '#fef3c7' }]}>
+                  <MaterialIcons name="schedule" size={18} color="#f59e0b" />
+                </View>
+                <View style={styles.reportsStatInfo}>
+                  <Text style={styles.reportsStatNumber}>
+                    {technicalReports.filter(r => r.status === 'pending' || !r.status).length}
+                  </Text>
+                  <Text style={styles.reportsStatLabel}>Pending</Text>
+                </View>
+              </View>
+              
+              <View style={styles.reportsStatCard}>
+                <View style={[styles.reportsStatIcon, { backgroundColor: '#dbeafe' }]}>
+                  <MaterialIcons name="hourglass-empty" size={18} color="#3b82f6" />
+                </View>
+                <View style={styles.reportsStatInfo}>
+                  <Text style={styles.reportsStatNumber}>
+                    {technicalReports.filter(r => r.status === 'in_progress').length}
+                  </Text>
+                  <Text style={styles.reportsStatLabel}>In Progress</Text>
+                </View>
+              </View>
+              
+              <View style={styles.reportsStatCard}>
+                <View style={[styles.reportsStatIcon, { backgroundColor: '#d1fae5' }]}>
+                  <MaterialIcons name="check-circle" size={18} color="#10b981" />
+                </View>
+                <View style={styles.reportsStatInfo}>
+                  <Text style={styles.reportsStatNumber}>
+                    {technicalReports.filter(r => r.status === 'resolved').length}
+                  </Text>
+                  <Text style={styles.reportsStatLabel}>Resolved</Text>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          <FlatList
+            data={technicalReports || []}
+            keyExtractor={(item) => item.id}
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            contentContainerStyle={styles.reportsList}
+            showsVerticalScrollIndicator={false}
+            renderItem={({ item: report }) => (
+              <TouchableOpacity
+                style={styles.reportCard}
+                onPress={() => openReportDetails(report)}
+                activeOpacity={0.85}
+              >
+                {/* Status Stripe */}
+                <View style={[
+                  styles.reportStatusStripe,
+                  (report.status === 'pending' || !report.status) && { backgroundColor: '#f59e0b' },
+                  report.status === 'in_progress' && { backgroundColor: '#3b82f6' },
+                  report.status === 'resolved' && { backgroundColor: '#10b981' }
+                ]} />
+                
+                <View style={styles.reportCardContent}>
+                  {/* Header Section */}
+                  <View style={styles.reportCardHeader}>
+                    <View style={styles.reportTicketSection}>
+                      <MaterialIcons name="confirmation-number" size={20} color="#0ea5e9" />
+                      <Text style={styles.reportTicketNumber}>
+                        {report.ticketNumber || report.ticketId || 'N/A'}
+                      </Text>
+                    </View>
+                    
+                    <View style={[
+                      styles.reportStatusBadge,
+                      (report.status === 'pending' || !report.status) && styles.reportStatusBadgePending,
+                      report.status === 'in_progress' && styles.reportStatusBadgeInProgress,
+                      report.status === 'resolved' && styles.reportStatusBadgeResolved
+                    ]}>
+                      <MaterialIcons 
+                        name={
+                          report.status === 'pending' ? 'schedule' :
+                          report.status === 'in_progress' ? 'hourglass-empty' :
+                          report.status === 'resolved' ? 'check-circle' :
+                          'schedule'
+                        } 
+                        size={12} 
+                        color={
+                          report.status === 'pending' ? '#f59e0b' :
+                          report.status === 'in_progress' ? '#3b82f6' :
+                          report.status === 'resolved' ? '#10b981' :
+                          '#f59e0b'
+                        }
+                      />
+                      <Text style={[
+                        styles.reportStatusBadgeText,
+                        (report.status === 'pending' || !report.status) && { color: '#f59e0b' },
+                        report.status === 'in_progress' && { color: '#3b82f6' },
+                        report.status === 'resolved' && { color: '#10b981' }
+                      ]}>
+                        {(report.status || 'pending').replace('_', ' ').toUpperCase()}
+                      </Text>
+                    </View>
+                  </View>
+                  
+                  {/* Description */}
+                  <Text style={styles.reportDescription} numberOfLines={2}>
+                    {report.description || 'No description provided'}
+                  </Text>
+                  
+                  {/* Footer Section */}
+                  <View style={styles.reportCardFooter}>
+                    <View style={styles.reportUserSection}>
+                      <View style={styles.reportUserAvatar}>
+                        <MaterialCommunityIcons name="account" size={14} color="#ffffff" />
+                      </View>
+                      <View style={styles.reportUserInfo}>
+                        <Text style={styles.reportUserName} numberOfLines={1}>
+                          {report.reportedByName || report.reportedByEmail || 'Unknown'}
+                        </Text>
+                        <Text style={styles.reportUserRole}>
+                          {report.userRole?.toUpperCase() || 'ADMIN'}
+                        </Text>
+                      </View>
+                    </View>
+                    
+                    <View style={styles.reportMetaSection}>
+                      {report.screenshots && report.screenshots.length > 0 && (
+                        <View style={styles.reportScreenshotBadge}>
+                          <MaterialIcons name="image" size={14} color="#64748b" />
+                          <Text style={styles.reportScreenshotCount}>{report.screenshots.length}</Text>
+                        </View>
+                      )}
+                      
+                      <View style={styles.reportTimeSection}>
+                        <MaterialIcons name="access-time" size={14} color="#94a3b8" />
+                        <Text style={styles.reportTimestamp}>
+                          {report.timestamp ? new Date(report.timestamp).toLocaleDateString('en-US', { 
+                            month: 'short', 
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          }) : 'Unknown'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                </View>
+                
+                <View style={styles.reportCardArrow}>
+                  <MaterialIcons name="chevron-right" size={24} color="#cbd5e1" />
+                </View>
+              </TouchableOpacity>
+            )}
+            ListEmptyComponent={
+              <View style={styles.reportsEmptyContainer}>
+                <View style={styles.reportsEmptyIconContainer}>
+                  <MaterialCommunityIcons name="bug-outline" size={64} color="#cbd5e1" />
+                </View>
+                <Text style={styles.reportsEmptyTitle}>No Technical Reports</Text>
+                <Text style={styles.reportsEmptySubtitle}>
+                  Reports submitted by admins and teachers will appear here
+                </Text>
+              </View>
+            }
+          />
+        </View>
+      )}
+
       {/* Bottom Navigation */}
       <View style={styles.bottomNav}>
         <TouchableOpacity
           style={[styles.navItem, activeTab === 'home' && styles.activeNavItem]}
           onPress={() => setActiveTab('home')}
         >
-          <View style={[styles.activeIndicator, activeTab === 'home' ? styles.activeIndicatorOn : undefined]} />
-          <AntDesign name="home" size={26} color={activeTab === 'home' ? '#0ea5e9' : '#9ca3af'} />
+          <AntDesign name="home" size={26} color={activeTab === 'home' ? '#1e293b' : '#9ca3af'} />
           <Text style={[styles.navText, activeTab === 'home' && styles.activeNavText]}>Home</Text>
         </TouchableOpacity>
 
@@ -1279,8 +1573,7 @@ export default function SuperAdminDashboard() {
           style={[styles.navItem, activeTab === 'teachers' && styles.activeNavItem]}
           onPress={() => setActiveTab('teachers')}
         >
-          <View style={[styles.activeIndicator, activeTab === 'teachers' ? styles.activeIndicatorOn : undefined]} />
-          <MaterialCommunityIcons name="account-group" size={26} color={activeTab === 'teachers' ? '#0ea5e9' : '#9ca3af'} />
+          <MaterialCommunityIcons name="account-group" size={26} color={activeTab === 'teachers' ? '#1e293b' : '#9ca3af'} />
           <Text style={[styles.navText, activeTab === 'teachers' && styles.activeNavText]}>Teachers</Text>
         </TouchableOpacity>
 
@@ -1288,18 +1581,24 @@ export default function SuperAdminDashboard() {
           style={[styles.navItem, activeTab === 'apikeys' && styles.activeNavItem]}
           onPress={() => setActiveTab('apikeys')}
         >
-          <View style={[styles.activeIndicator, activeTab === 'apikeys' ? styles.activeIndicatorOn : undefined]} />
-          <MaterialCommunityIcons name="key" size={26} color={activeTab === 'apikeys' ? '#0ea5e9' : '#9ca3af'} />
+          <MaterialCommunityIcons name="key" size={26} color={activeTab === 'apikeys' ? '#1e293b' : '#9ca3af'} />
           <Text style={[styles.navText, activeTab === 'apikeys' && styles.activeNavText]}>API Keys</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.navItem, activeTab === 'logs' && styles.activeNavItem]}
-          onPress={() => setActiveTab('logs')}
+          style={[styles.navItem, activeTab === 'updates' && styles.activeNavItem]}
+          onPress={() => setActiveTab('updates')}
         >
-          <View style={[styles.activeIndicator, activeTab === 'logs' ? styles.activeIndicatorOn : undefined]} />
-          <MaterialIcons name="analytics" size={26} color={activeTab === 'logs' ? '#0ea5e9' : '#9ca3af'} />
-          <Text style={[styles.navText, activeTab === 'logs' && styles.activeNavText]}>Logs</Text>
+          <MaterialIcons name="system-update" size={26} color={activeTab === 'updates' ? '#1e293b' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'updates' && styles.activeNavText]}>Updates</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.navItem, activeTab === 'reports' && styles.activeNavItem]}
+          onPress={() => setActiveTab('reports')}
+        >
+          <MaterialIcons name="assessment" size={26} color={activeTab === 'reports' ? '#1e293b' : '#9ca3af'} />
+          <Text style={[styles.navText, activeTab === 'reports' && styles.activeNavText]}>Reports</Text>
         </TouchableOpacity>
         </View>
 
@@ -1518,6 +1817,167 @@ export default function SuperAdminDashboard() {
                 </View>
               </ScrollView>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Report Details Modal */}
+      <Modal
+        visible={showReportDetailsModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={closeReportDetails}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Report Details</Text>
+              <TouchableOpacity style={styles.closeButton} onPress={closeReportDetails}>
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            {selectedReport && (
+              <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+                {/* Report Header */}
+                <View style={styles.reportDetailsHeader}>
+                  <View style={styles.reportDetailsHeaderTop}>
+                    <View style={[
+                      styles.reportDetailsStatusBadge,
+                      (selectedReport.status === 'pending' || !selectedReport.status) && styles.reportDetailsStatusPending,
+                      selectedReport.status === 'in_progress' && styles.reportDetailsStatusInProgress,
+                      selectedReport.status === 'resolved' && styles.reportDetailsStatusResolved
+                    ]}>
+                      <MaterialIcons 
+                        name={
+                          selectedReport.status === 'pending' ? 'schedule' :
+                          selectedReport.status === 'in_progress' ? 'hourglass-empty' :
+                          selectedReport.status === 'resolved' ? 'check-circle' :
+                          'schedule' // Default to pending icon
+                        } 
+                        size={16} 
+                        color="#ffffff" 
+                      />
+                      <Text style={styles.reportDetailsStatusText}>
+                        {(selectedReport.status || 'pending').toUpperCase().replace('_', ' ')}
+                      </Text>
+                    </View>
+                    
+                    <Text style={styles.reportDetailsTicketId}>#{selectedReport.ticketNumber || selectedReport.ticketId || 'N/A'}</Text>
+                  </View>
+                </View>
+
+                {/* Report Information */}
+                <View style={styles.reportDetailsInfo}>
+                  <View style={styles.reportDetailsInfoRow}>
+                    <View style={styles.reportDetailsInfoIconContainer}>
+                      <MaterialIcons name="person" size={20} color="#0ea5e9" />
+                    </View>
+                    <View style={styles.reportDetailsInfoContent}>
+                      <Text style={styles.reportDetailsInfoLabel}>Reported By</Text>
+                      <Text style={styles.reportDetailsInfoValue}>
+                        {selectedReport.reportedByName || selectedReport.reportedByEmail || 'Unknown User'}
+                      </Text>
+                      <Text style={styles.reportDetailsInfoSubtext}>
+                        {selectedReport.userRole?.toUpperCase() || 'ADMIN'} • {selectedReport.reportedByEmail || 'Unknown Email'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.reportDetailsInfoRow}>
+                    <View style={styles.reportDetailsInfoIconContainer}>
+                      <MaterialIcons name="schedule" size={20} color="#0ea5e9" />
+                    </View>
+                    <View style={styles.reportDetailsInfoContent}>
+                      <Text style={styles.reportDetailsInfoLabel}>Reported At</Text>
+                      <Text style={styles.reportDetailsInfoValue}>
+                        {selectedReport.timestamp ? new Date(selectedReport.timestamp).toLocaleString() : 'Unknown date'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {selectedReport.category && (
+                    <View style={styles.reportDetailsInfoRow}>
+                      <View style={styles.reportDetailsInfoIconContainer}>
+                        <MaterialIcons name="category" size={20} color="#0ea5e9" />
+                      </View>
+                      <View style={styles.reportDetailsInfoContent}>
+                        <Text style={styles.reportDetailsInfoLabel}>Category</Text>
+                        <Text style={styles.reportDetailsInfoValue}>{selectedReport.category}</Text>
+                      </View>
+                    </View>
+                  )}
+
+                  {selectedReport.priority && (
+                    <View style={styles.reportDetailsInfoRow}>
+                      <View style={styles.reportDetailsInfoIconContainer}>
+                        <MaterialIcons name="priority-high" size={20} color="#0ea5e9" />
+                      </View>
+                      <View style={styles.reportDetailsInfoContent}>
+                        <Text style={styles.reportDetailsInfoLabel}>Priority</Text>
+                        <Text style={styles.reportDetailsInfoValue}>{selectedReport.priority.toUpperCase()}</Text>
+                      </View>
+                    </View>
+                  )}
+                </View>
+
+                {/* Description */}
+                <View style={styles.reportDetailsDescriptionContainer}>
+                  <Text style={styles.reportDetailsDescription}>{selectedReport.description || 'No description provided'}</Text>
+                </View>
+
+                {/* Screenshots */}
+                {selectedReport.screenshots && selectedReport.screenshots.length > 0 && (
+                  <View style={styles.reportDetailsScreenshotsContainer}>
+                    <Text style={styles.reportDetailsScreenshotsTitle}>Screenshots</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportDetailsScreenshotsScroll}>
+                      {selectedReport.screenshots.map((screenshot, index) => (
+                        <View key={index} style={styles.reportDetailsScreenshotWrapper}>
+                          <Image source={{ uri: screenshot }} style={styles.reportDetailsScreenshot} />
+                        </View>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
+
+                {/* Resolution Info */}
+                {selectedReport.status === 'resolved' && selectedReport.resolvedAt && (
+                  <View style={styles.reportDetailsResolutionInfo}>
+                    <View style={styles.reportDetailsResolutionRow}>
+                      <MaterialIcons name="check-circle" size={20} color="#059669" />
+                      <Text style={styles.reportDetailsResolutionText}>Resolved</Text>
+                    </View>
+                    <Text style={styles.reportDetailsResolutionBy}>
+                      Resolved by: {selectedReport.resolvedBy || 'Unknown'}
+                    </Text>
+                    <Text style={styles.reportDetailsResolutionBy}>
+                      Resolved at: {selectedReport.resolvedAt ? new Date(selectedReport.resolvedAt).toLocaleString() : 'Unknown'}
+                    </Text>
+                  </View>
+                )}
+              </ScrollView>
+            )}
+
+            {/* Modal Actions */}
+            <View style={styles.reportDetailsModalActions}>
+              {selectedReport && selectedReport.status !== 'resolved' && selectedReport.id && (
+                <TouchableOpacity
+                  style={styles.reportDetailsMarkDoneButton}
+                  onPress={() => handleMarkReportAsDone(selectedReport.id)}
+                >
+                  <MaterialIcons name="check-circle" size={20} color="#ffffff" />
+                  <Text style={styles.reportDetailsMarkDoneButtonText}>Mark as Resolved</Text>
+                </TouchableOpacity>
+              )}
+              
+              <TouchableOpacity
+                style={styles.reportDetailsRemoveButton}
+                onPress={() => selectedReport && selectedReport.id && handleRemoveReport(selectedReport.id)}
+              >
+                <MaterialIcons name="delete" size={20} color="#ffffff" />
+                <Text style={styles.reportDetailsRemoveButtonText}>Delete Report</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1903,7 +2363,7 @@ export default function SuperAdminDashboard() {
   );
 }
 
-const { width } = Dimensions.get('window');
+const { width: staticWidth, height: staticHeight } = Dimensions.get('window');
 
 const styles = StyleSheet.create({
   container: {
@@ -1967,7 +2427,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   statCard: {
-    width: (width - 64) / 2,
+    width: (staticWidth - 64) / 2,
     backgroundColor: '#0ea5e9',
     borderRadius: 20,
     padding: 20,
@@ -2359,8 +2819,9 @@ const styles = StyleSheet.create({
     right: 0,
     flexDirection: 'row',
     backgroundColor: '#ffffff',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
     borderTopWidth: 1,
     borderTopColor: '#f1f5f9',
     shadowColor: '#000',
@@ -2409,13 +2870,13 @@ const styles = StyleSheet.create({
   },
   activeNavItem: {},
   navText: {
-    fontSize: 11,
+    fontSize: 12,
     color: '#9ca3af',
-    marginTop: 4,
+    marginTop: 6,
     fontWeight: '500',
   },
   activeNavText: {
-    color: '#0ea5e9',
+    color: '#1e293b',
     fontWeight: '700',
   },
   activeIndicator: {
@@ -3518,7 +3979,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   teacherStatCard: {
-    width: (width - 56) / 2, // Fixed width for 2 columns
+    width: (staticWidth - 56) / 2, // Fixed width for 2 columns
     backgroundColor: '#f8fafc',
     borderRadius: 12,
     padding: 12,
@@ -3594,7 +4055,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   adminToolButton: {
-    width: (width - 15) / 4, // 4 buttons per row
+    width: (staticWidth - 15) / 4, // 4 buttons per row
     backgroundColor: '#f8fafc',
     borderRadius: 12,
     padding: 12,
@@ -3763,7 +4224,7 @@ const styles = StyleSheet.create({
   },
   logsList: {
     padding: 16,
-    paddingBottom: 150,
+    paddingBottom: 400,
   },
   logCardHeader: {
     flexDirection: 'row',
@@ -4300,12 +4761,13 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 1,
     borderColor: '#e2e8f0',
+    marginBottom: 20,
   },
   infoTitle: {
     fontSize: 16,
     fontWeight: '700',
     color: '#1e293b',
-    marginBottom: 12,
+    marginBottom: 12,     
   },
   infoText: {
     fontSize: 14,
@@ -4316,5 +4778,555 @@ const styles = StyleSheet.create({
   boldText: {
     fontWeight: '700',
     color: '#1e293b',
+  },
+
+  // Report Details Modal Styles
+  reportDetailsHeader: {
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  reportDetailsHeaderTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  reportDetailsStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 6,
+  },
+  reportDetailsStatusPending: {
+    backgroundColor: '#fef3c7',
+  },
+  reportDetailsStatusInProgress: {
+    backgroundColor: '#dbeafe',
+  },
+  reportDetailsStatusResolved: {
+    backgroundColor: '#d1fae5',
+  },
+  reportDetailsStatusText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1f2937',
+  },
+  reportDetailsTicketId: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  reportDetailsInfo: {
+    padding: 20,
+    gap: 16,
+  },
+  reportDetailsInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  reportDetailsInfoIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#f0f9ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  reportDetailsInfoContent: {
+    flex: 1,
+  },
+  reportDetailsInfoLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '600',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  reportDetailsInfoValue: {
+    fontSize: 16,
+    color: '#1e293b',
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  reportDetailsInfoSubtext: {
+    fontSize: 14,
+    color: '#64748b',
+  },
+  reportDetailsDescriptionContainer: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    margin: 20,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reportDetailsDescription: {
+    fontSize: 15,
+    color: '#374151',
+    lineHeight: 22,
+  },
+  reportDetailsScreenshotsContainer: {
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+  },
+  reportDetailsScreenshotsTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+  reportDetailsScreenshotsScroll: {
+    marginTop: 8,
+  },
+  reportDetailsScreenshotWrapper: {
+    marginRight: 12,
+  },
+  reportDetailsScreenshot: {
+    width: 120,
+    height: 120,
+    borderRadius: 12,
+    backgroundColor: '#f1f5f9',
+  },
+  reportDetailsResolutionInfo: {
+    backgroundColor: '#f0fdf4',
+    borderRadius: 12,
+    padding: 16,
+    margin: 20,
+    borderWidth: 1,
+    borderColor: '#bbf7d0',
+  },
+  reportDetailsResolutionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  reportDetailsResolutionText: {
+    fontSize: 14,
+    color: '#059669',
+    fontWeight: '600',
+  },
+  reportDetailsResolutionBy: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  reportDetailsModalActions: {
+    padding: 20,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    gap: 12,
+  },
+  reportDetailsMarkDoneButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#10b981',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 8,
+  },
+  reportDetailsMarkDoneButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  reportDetailsRemoveButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ef4444',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 8,
+  },
+  reportDetailsRemoveButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  // Reports Tab Styles
+  logsRefreshButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#f0f9ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  logCardContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+  },
+  logStatusIndicator: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  logStatusPending: {
+    backgroundColor: '#f59e0b',
+  },
+  logStatusInProgress: {
+    backgroundColor: '#3b82f6',
+  },
+  logStatusResolved: {
+    backgroundColor: '#10b981',
+  },
+  logInfo: {
+    flex: 1,
+  },
+  logTicketId: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  logDescription: {
+    fontSize: 14,
+    color: '#64748b',
+    lineHeight: 18,
+    marginBottom: 4,
+  },
+  logTimestamp: {
+    fontSize: 12,
+    color: '#9ca3af',
+  },
+  logCardRight: {
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  logUserInfo: {
+    alignItems: 'flex-end',
+  },
+  logUserRole: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#0ea5e9',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  logUserName: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  logScreenshotIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  logScreenshotCount: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+
+  // Enhanced Reports Tab Styles
+  reportsContainer: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+  },
+  reportsHeader: {
+    backgroundColor: '#ffffff',
+    paddingTop: 60,
+    paddingBottom: 20,
+    paddingHorizontal: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  reportsHeaderTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  reportsTitleSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  reportsIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#ef4444',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  reportsTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.5,
+  },
+  reportsSubtitle: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  reportsRefreshButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#f0f9ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e0f2fe',
+  },
+  reportsStatsContainer: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  reportsStatCard: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 12,
+    gap: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  reportsStatIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  reportsStatInfo: {
+    flex: 1,
+  },
+  reportsStatNumber: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1e293b',
+    lineHeight: 24,
+  },
+  reportsStatLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748b',
+    marginTop: 2,
+  },
+  reportsList: {
+    padding: 16,
+    paddingBottom: 150,
+    gap: 12,
+  },
+  reportCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reportStatusStripe: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 5,
+  },
+  reportCardContent: {
+    paddingLeft: 16,
+    paddingRight: 12,
+    paddingVertical: 16,
+  },
+  reportCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  reportTicketSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#f0f9ff',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+  },
+  reportTicketNumber: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0ea5e9',
+    letterSpacing: 0.5,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  reportStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    gap: 5,
+    borderWidth: 1,
+  },
+  reportStatusBadgePending: {
+    backgroundColor: '#fffbeb',
+    borderColor: '#fef3c7',
+  },
+  reportStatusBadgeInProgress: {
+    backgroundColor: '#eff6ff',
+    borderColor: '#dbeafe',
+  },
+  reportStatusBadgeResolved: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#d1fae5',
+  },
+  reportStatusBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  reportDescription: {
+    fontSize: 15,
+    color: '#475569',
+    lineHeight: 21,
+    marginBottom: 14,
+    fontWeight: '500',
+  },
+  reportCardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  reportUserSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  reportUserAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#0ea5e9',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  reportUserInfo: {
+    flex: 1,
+  },
+  reportUserName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+  reportUserRole: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#0ea5e9',
+    letterSpacing: 0.5,
+  },
+  reportMetaSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  reportScreenshotBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reportScreenshotCount: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  reportTimeSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  reportTimestamp: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#94a3b8',
+  },
+  reportCardArrow: {
+    position: 'absolute',
+    right: 8,
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  reportsEmptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 80,
+    paddingHorizontal: 40,
+  },
+  reportsEmptyIconContainer: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#f8fafc',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 24,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    borderStyle: 'dashed',
+  },
+  reportsEmptyTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  reportsEmptySubtitle: {
+    fontSize: 15,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 22,
   },
 });

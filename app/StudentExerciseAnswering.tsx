@@ -295,7 +295,10 @@ export default function StudentExerciseAnswering() {
   const [answers, setAnswers] = useState<StudentAnswer[]>([]);
   const [currentAnswer, setCurrentAnswer] = useState<string | string[] | {[key: string]: any}>('');
   const [loading, setLoading] = useState(true);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [loadingMessage, setLoadingMessage] = useState('Get ready for math fun!');
   const [submitting, setSubmitting] = useState(false);
+  const [imagesReady, setImagesReady] = useState(false);
   const [startTime, setStartTime] = useState<number>(Date.now());
   const [elapsedTime, setElapsedTime] = useState<number>(0);
   const [timerInterval, setTimerInterval] = useState<NodeJS.Timeout | null>(null);
@@ -306,6 +309,8 @@ export default function StudentExerciseAnswering() {
   const rafIdRef = useRef<number | null>(null);
   const questionElapsedRef = useRef<number>(0);
   const frozenElapsedRef = useRef<number | null>(null);
+  const timeoutRefs = useRef<NodeJS.Timeout[]>([]);
+  const ttsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [backgroundImage, setBackgroundImage] = useState<string>('map1.1.png');
   const [showSettings, setShowSettings] = useState(false);
   const [matchingSelections, setMatchingSelections] = useState<{[key: string]: {[key: string]: string}}>({});
@@ -355,6 +360,20 @@ export default function StudentExerciseAnswering() {
   const currentTTSRef = useRef<any | null>(null);
 
   // Layout transitions will be handled by React Native automatically
+  
+  // Helper to track and clean timeouts
+  const addTimeout = (timeout: NodeJS.Timeout) => {
+    timeoutRefs.current.push(timeout);
+  };
+  
+  const clearAllTimeouts = () => {
+    timeoutRefs.current.forEach(timeout => clearTimeout(timeout));
+    timeoutRefs.current = [];
+    if (ttsTimeoutRef.current) {
+      clearTimeout(ttsTimeoutRef.current);
+      ttsTimeoutRef.current = null;
+    }
+  };
   
   // Load exercise data
   useEffect(() => {
@@ -414,9 +433,10 @@ export default function StudentExerciseAnswering() {
           }
           
           // Show "Times Up" briefly before advancing
-          setTimeout(() => {
+          const timeoutId = setTimeout(() => {
             handleNext();
-          }, 1500); // Show "Times Up" for 1.5 seconds
+          }, 1500) as unknown as NodeJS.Timeout; // Show "Times Up" for 1.5 seconds
+          addTimeout(timeoutId);
         }
       } else {
         setTimeRemaining(null);
@@ -431,7 +451,7 @@ export default function StudentExerciseAnswering() {
         rafIdRef.current = null;
       }
     };
-  }, [exercise, startTime, submitting, questionStartTime]);
+  }, [exercise, startTime, submitting, questionStartTime, currentQuestionIndex]);
 
   // Keep a ref of the latest per-question elapsed to avoid race conditions during index changes
   useEffect(() => {
@@ -444,6 +464,9 @@ export default function StudentExerciseAnswering() {
       if (timerInterval) {
         clearInterval(timerInterval);
       }
+      
+      // Clear all pending timeouts
+      clearAllTimeouts();
       
       // Stop any TTS audio on unmount - ensure complete cleanup
       try {
@@ -506,15 +529,18 @@ export default function StudentExerciseAnswering() {
       easing: Easing.out(Easing.cubic),
       useNativeDriver: false,
     }).start();
-    // Prefetch upcoming images (next two questions) for snappier transitions
+    // Prefetch upcoming images (next 3 questions) for instant transitions
     if (exercise) {
       const urls: string[] = [];
-      const nextIndex = currentQuestionIndex + 1;
-      const nextQ = exercise.questions[nextIndex];
-      const nextNextQ = exercise.questions[nextIndex + 1];
-      if (nextQ) urls.push(...collectImageUrls(nextQ));
-      if (nextNextQ) urls.push(...collectImageUrls(nextNextQ));
-      if (urls.length) prefetchUrls(urls);
+      for (let i = 1; i <= 3; i++) {
+        const nextIndex = currentQuestionIndex + i;
+        const nextQ = exercise.questions[nextIndex];
+        if (nextQ) urls.push(...collectImageUrls(nextQ));
+      }
+      if (urls.length) {
+        // Prefetch in background without blocking UI
+        prefetchUrlsWithPriority(urls, 'high');
+      }
     }
   }, [currentQuestionIndex, exercise]);
 
@@ -522,6 +548,9 @@ export default function StudentExerciseAnswering() {
   useEffect(() => {
     // CRITICAL: Stop TTS when question index changes
     stopCurrentTTS();
+    
+    // Clear all pending timeouts when changing questions
+    clearAllTimeouts();
     
     // Accumulate time for the previous question, then reset timer for the new one
     if (exercise) {
@@ -600,7 +629,7 @@ export default function StudentExerciseAnswering() {
     }
   };
 
-  // Prefetch helpers to make images load faster without heavy upfront cost
+  // Enhanced prefetch helpers with progress tracking
   const collectImageUrls = (q?: Question | null): string[] => {
     if (!q) return [];
     const urls: string[] = [];
@@ -615,6 +644,11 @@ export default function StudentExerciseAnswering() {
       urls.push(...q.questionImages.filter(Boolean));
     }
     if (q.optionImages && q.optionImages.length) q.optionImages.forEach((u) => { if (u) urls.push(u); });
+    if (q.optionMultipleImages && q.optionMultipleImages.length) {
+      q.optionMultipleImages.forEach((imgArray) => {
+        if (imgArray) imgArray.forEach((u) => { if (u) urls.push(u); });
+      });
+    }
     if (q.reorderItems && q.reorderItems.length) q.reorderItems.forEach((it) => { if (it.imageUrl) urls.push(it.imageUrl); });
     if (q.pairs && q.pairs.length) q.pairs.forEach((p) => { if (p.leftImage) urls.push(p.leftImage); if (p.rightImage) urls.push(p.rightImage); });
     if (q.subQuestions && q.subQuestions.length) q.subQuestions.forEach((sq) => {
@@ -623,70 +657,90 @@ export default function StudentExerciseAnswering() {
     return urls;
   };
 
-  const prefetchUrls = async (urls: string[]) => {
+  // Fast prefetch with progress tracking
+  const prefetchUrls = async (urls: string[], onProgress?: (progress: number) => void) => {
     try {
       const unique = Array.from(new Set(urls.filter(Boolean)));
-      await Promise.all(unique.map((u) => Image.prefetch(u)));
-    } catch {
-      // ignore prefetch failures (network, etc.)
+      if (unique.length === 0) return;
+      
+      let completed = 0;
+      const promises = unique.map(async (url) => {
+        try {
+          await Image.prefetch(url);
+          completed++;
+          if (onProgress) {
+            onProgress(completed / unique.length);
+          }
+        } catch (error) {
+          console.warn(`Failed to prefetch: ${url}`);
+          completed++;
+          if (onProgress) {
+            onProgress(completed / unique.length);
+          }
+        }
+      });
+      
+      await Promise.all(promises);
+    } catch (error) {
+      console.warn('Prefetch error:', error);
     }
   };
 
-  // Enhanced image preloading with priority and caching
-  const prefetchUrlsWithPriority = async (urls: string[], priority: 'high' | 'normal' | 'low' = 'normal') => {
-    if (!urls.length) return;
+  // Enhanced image preloading with priority and progress tracking
+  const prefetchUrlsWithPriority = async (
+    urls: string[], 
+    priority: 'high' | 'normal' | 'low' = 'normal',
+    onProgress?: (progress: number) => void
+  ) => {
+    if (!urls.length) {
+      onProgress?.(1);
+      return;
+    }
     
     try {
-      const uniqueUrls = [...new Set(urls.filter(Boolean))]; // Remove duplicates and null/undefined
+      const uniqueUrls = [...new Set(urls.filter(Boolean))];
       
-      // Cache source objects immediately for faster access
+      // Cache source objects immediately
       uniqueUrls.forEach(url => {
         if (!imageCache.has(url)) {
           imageCache.set(url, { uri: url });
         }
       });
       
-      // Prioritize critical images
-      const criticalCount = priority === 'high' ? 5 : priority === 'normal' ? 3 : 1;
-      const criticalImages = uniqueUrls.slice(0, criticalCount);
-      const remainingImages = uniqueUrls.slice(criticalCount);
+      let completed = 0;
+      const totalImages = uniqueUrls.length;
       
-      // Load critical images first with higher concurrency
-      if (criticalImages.length > 0) {
-        const criticalPromises = criticalImages.map(url => {
-          return ExpoImage.prefetch(url, {
-            cachePolicy: 'disk'
-          }).catch(error => {
-            console.warn(`Failed to prefetch critical image: ${url}`, error);
-          });
-        });
-        await Promise.allSettled(criticalPromises);
-      }
+      const updateProgress = () => {
+        completed++;
+        onProgress?.(completed / totalImages);
+      };
       
-      // Load remaining images in smaller chunks to prevent memory issues
-      if (remainingImages.length > 0) {
-        const batchSize = priority === 'high' ? 3 : priority === 'normal' ? 2 : 1;
-        
-        for (let i = 0; i < remainingImages.length; i += batchSize) {
-          const batch = remainingImages.slice(i, i + batchSize);
-          const batchPromises = batch.map(url => {
-            return ExpoImage.prefetch(url, {
-              cachePolicy: 'disk'
-            }).catch(error => {
-              console.warn(`Failed to prefetch image: ${url}`, error);
-            });
-          });
-          
-          await Promise.allSettled(batchPromises);
-          
-          // Small delay between batches to prevent overwhelming the system
-          if (i + batchSize < remainingImages.length) {
-            await new Promise(resolve => setTimeout(resolve, priority === 'low' ? 150 : 100));
+      // Load all images with high concurrency for better performance
+      const concurrency = priority === 'high' ? 10 : priority === 'normal' ? 6 : 3;
+      
+      for (let i = 0; i < uniqueUrls.length; i += concurrency) {
+        const batch = uniqueUrls.slice(i, i + concurrency);
+        const batchPromises = batch.map(async (url) => {
+          try {
+            // Use both ExpoImage prefetch and Image.prefetch for better caching
+            await Promise.all([
+              ExpoImage.prefetch(url, { cachePolicy: 'memory-disk' }),
+              Image.prefetch(url)
+            ]);
+          } catch (error) {
+            console.warn(`Failed to prefetch: ${url}`);
+          } finally {
+            updateProgress();
           }
-        }
+        });
+        
+        await Promise.allSettled(batchPromises);
       }
+      
+      onProgress?.(1);
     } catch (error) {
       console.warn('Error in prefetchUrlsWithPriority:', error);
+      onProgress?.(1);
     }
   };
 
@@ -702,78 +756,58 @@ export default function StudentExerciseAnswering() {
     return source;
   };
 
-  // Optimized Image Component with lazy loading and error handling
-  const OptimizedImage = ({ source, style, contentFit = "contain", priority = "normal", lazy = false, ...props }: any) => {
+  // Optimized Image Component with smooth loading and error handling
+  const OptimizedImage = ({ source, style, contentFit = "contain", priority = "high", ...props }: any) => {
     const [isLoaded, setIsLoaded] = useState(false);
     const [hasError, setHasError] = useState(false);
-    const [shouldLoad, setShouldLoad] = useState(!lazy);
-    const [retryCount, setRetryCount] = useState(0);
-
-    // For lazy loading, start loading when component mounts
-    useEffect(() => {
-      if (lazy && !shouldLoad) {
-        const timer = setTimeout(() => setShouldLoad(true), 100);
-        return () => clearTimeout(timer);
-      }
-    }, [lazy, shouldLoad]);
+    const imageOpacity = useRef(new Animated.Value(0)).current;
 
     // Reset state when source changes
     useEffect(() => {
       setIsLoaded(false);
       setHasError(false);
-      setRetryCount(0);
+      imageOpacity.setValue(0);
     }, [source?.uri]);
 
-    const handleError = () => {
-      if (retryCount < 2) {
-        // Retry loading the image up to 2 times
-        setTimeout(() => {
-          setRetryCount(prev => prev + 1);
-          setHasError(false);
-        }, 1000 * (retryCount + 1)); // Exponential backoff
-      } else {
-        setHasError(true);
-        setIsLoaded(true);
-        console.warn(`Image failed to load after ${retryCount + 1} attempts:`, source?.uri);
-      }
+    const handleLoad = () => {
+      setIsLoaded(true);
+      setHasError(false);
+      // Smooth fade-in animation
+      Animated.timing(imageOpacity, {
+        toValue: 1,
+        duration: 200,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }).start();
     };
 
-    if (lazy && !shouldLoad) {
-      return (
-        <View style={[style, { backgroundColor: '#f0f0f0', opacity: 0.3, justifyContent: 'center', alignItems: 'center' }]}>
-          {/* Placeholder while loading */}
-        </View>
-      );
-    }
+    const handleError = (error: any) => {
+      setHasError(true);
+      console.warn('Image load error:', source?.uri, error);
+    };
 
-    if (hasError && retryCount >= 2) {
+    if (hasError) {
       return (
-        <View style={[style, { backgroundColor: '#f8f9fa', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#dee2e6' }]}>
-          <Text style={{ color: '#6c757d', fontSize: 12 }}>Image unavailable</Text>
+        <View style={[style, { backgroundColor: '#f8f9fa', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#dee2e6', borderRadius: 8 }]}>
+          <MaterialIcons name="image-not-supported" size={24} color="#9ca3af" />
         </View>
       );
     }
 
     return (
-      <ExpoImage
-        key={`${source?.uri}-${retryCount}`} // Force re-render on retry
-        source={source}
-        style={[
-          style,
-          !isLoaded && { opacity: 0.3 }, // Show loading state
-          hasError && retryCount < 2 && { opacity: 0.1 }   // Show retry state
-        ]}
-        contentFit={contentFit}
-        transition={isLoaded ? 120 : 0} // Only animate on successful load
-        cachePolicy="memory-disk"
-        priority={priority}
-        onLoad={() => {
-          setIsLoaded(true);
-          setHasError(false);
-        }}
-        onError={handleError}
-        {...props}
-      />
+      <Animated.View style={[style, { opacity: imageOpacity }]}>
+        <ExpoImage
+          source={source}
+          style={style}
+          contentFit={contentFit}
+          transition={0} // We handle animation manually
+          cachePolicy="memory-disk"
+          priority={priority}
+          onLoad={handleLoad}
+          onError={handleError}
+          {...props}
+        />
+      </Animated.View>
     );
   };
 
@@ -929,6 +963,12 @@ export default function StudentExerciseAnswering() {
     // CRITICAL: Stop any previous audio IMMEDIATELY
     stopCurrentTTS();
     
+    // Clear any pending TTS timeout
+    if (ttsTimeoutRef.current) {
+      clearTimeout(ttsTimeoutRef.current);
+      ttsTimeoutRef.current = null;
+    }
+    
     if (!isFocused) return; // only auto-play when screen is focused
     if (lastAutoPlayedQuestionIdRef.current === q.id) return;
     
@@ -937,10 +977,18 @@ export default function StudentExerciseAnswering() {
     
     if (q.ttsAudioUrl) {
       // Increased delay to ensure smooth transition between questions
-      setTimeout(() => {
+      ttsTimeoutRef.current = setTimeout(() => {
         playTTS(q.ttsAudioUrl!);
-      }, 800);
+      }, 800) as unknown as NodeJS.Timeout;
     }
+    
+    // Cleanup function
+    return () => {
+      if (ttsTimeoutRef.current) {
+        clearTimeout(ttsTimeoutRef.current);
+        ttsTimeoutRef.current = null;
+      }
+    };
   }, [exercise, currentQuestionIndex, isFocused]);
 
   // Stop any TTS if screen loses focus
@@ -1198,18 +1246,14 @@ export default function StudentExerciseAnswering() {
   const loadExercise = async () => {
     try {
       setLoading(true);
+      setLoadingProgress(0);
+      setLoadingMessage('Starting your math adventure...');
       
-      // Set random background with optimization
+      // Set random background
       const bgImage = getRandomBackground();
       setBackgroundImage(bgImage);
       
-      // Preload background image
-      try {
-        const bgUrl = getOptimizedBackground(bgImage);
-        prefetchUrlsWithPriority([bgUrl], 'high');
-      } catch (error) {
-        console.warn('Failed to preload background:', error);
-      }
+      setLoadingProgress(0.05);
       
       // Always enable TTS autoplay for all contexts
       
@@ -1385,32 +1429,64 @@ export default function StudentExerciseAnswering() {
             }
           }
           
+          setLoadingProgress(0.3);
+          setLoadingMessage('Preparing your questions...');
+          
+          // Preload ALL images for the exercise before showing UI
+          const exerciseData = result.data;
+          const allQuestions: Question[] = exerciseData.questions || [];
+          const startIdx = levelMode ? levelIndex : 0;
+          
+          // High priority: Current question and next 2 questions
+          const highPriorityQuestions = allQuestions.slice(startIdx, startIdx + 3);
+          const highPriorityUrls: string[] = [];
+          highPriorityQuestions.forEach(q => {
+            highPriorityUrls.push(...collectImageUrls(q));
+          });
+          
+          // Normal priority: Questions 4-10
+          const normalPriorityQuestions = allQuestions.slice(startIdx + 3, startIdx + 10);
+          const normalPriorityUrls: string[] = [];
+          normalPriorityQuestions.forEach(q => {
+            normalPriorityUrls.push(...collectImageUrls(q));
+          });
+          
+          // Low priority: Remaining questions
+          const lowPriorityQuestions = allQuestions.slice(startIdx + 10);
+          const lowPriorityUrls: string[] = [];
+          lowPriorityQuestions.forEach(q => {
+            lowPriorityUrls.push(...collectImageUrls(q));
+          });
+          
+          setLoadingMessage('Loading pictures and puzzles...');
+          
+          // Load high priority images first (current + next 2 questions)
+          if (highPriorityUrls.length > 0) {
+            await prefetchUrlsWithPriority(highPriorityUrls, 'high', (progress) => {
+              setLoadingProgress(0.3 + (progress * 0.5)); // 30% to 80%
+            });
+          } else {
+            setLoadingProgress(0.8);
+          }
+          
+          // Set exercise data - now ready to display
           setExercise({
-            ...result.data,
+            ...exerciseData,
             id: actualExerciseId,
           });
-          // Warm cache for first questions (current and next two)
-          try {
-            const questions: Question[] = result.data.questions || [];
-            const batchUrls: string[] = [];
-            const startIdx = levelMode ? levelIndex : 0;
-            for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
-              batchUrls.push(...collectImageUrls(questions[i]));
+          
+          setLoadingMessage('Polishing everything up...');
+          setLoadingProgress(0.9);
+          
+          // Preload normal and low priority images in background
+          setTimeout(() => {
+            if (normalPriorityUrls.length > 0) {
+              prefetchUrlsWithPriority(normalPriorityUrls, 'normal');
             }
-            if (batchUrls.length) {
-              // Prefetch current and next questions with high priority
-              const currentAndNext = batchUrls.slice(0, Math.min(batchUrls.length, 10));
-              const remaining = batchUrls.slice(10);
-              
-              // High priority for current and next questions
-              prefetchUrlsWithPriority(currentAndNext, 'high');
-              
-              // Low priority for remaining questions
-              if (remaining.length) {
-                prefetchUrlsWithPriority(remaining, 'low');
-              }
+            if (lowPriorityUrls.length > 0) {
+              prefetchUrlsWithPriority(lowPriorityUrls, 'low');
             }
-          } catch {}
+          }, 100);
           if (levelMode) {
             setCurrentQuestionIndex(levelIndex);
           }
@@ -1467,32 +1543,64 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
+          setLoadingProgress(0.3);
+          setLoadingMessage('Preparing your questions...');
+          
+          // Preload ALL images for the exercise before showing UI
+          const exerciseData = result.data;
+          const exerciseQuestions: Question[] = exerciseData.questions || [];
+          const startIdx = levelMode ? levelIndex : 0;
+          
+          // High priority: Current question and next 2 questions
+          const highPriorityQuestions = exerciseQuestions.slice(startIdx, startIdx + 3);
+          const highPriorityUrls: string[] = [];
+          highPriorityQuestions.forEach(q => {
+            highPriorityUrls.push(...collectImageUrls(q));
+          });
+          
+          // Normal priority: Questions 4-10
+          const normalPriorityQuestions = exerciseQuestions.slice(startIdx + 3, startIdx + 10);
+          const normalPriorityUrls: string[] = [];
+          normalPriorityQuestions.forEach(q => {
+            normalPriorityUrls.push(...collectImageUrls(q));
+          });
+          
+          // Low priority: Remaining questions
+          const lowPriorityQuestions = exerciseQuestions.slice(startIdx + 10);
+          const lowPriorityUrls: string[] = [];
+          lowPriorityQuestions.forEach(q => {
+            lowPriorityUrls.push(...collectImageUrls(q));
+          });
+          
+          setLoadingMessage('Loading pictures and puzzles...');
+          
+          // Load high priority images first (current + next 2 questions)
+          if (highPriorityUrls.length > 0) {
+            await prefetchUrlsWithPriority(highPriorityUrls, 'high', (progress) => {
+              setLoadingProgress(0.3 + (progress * 0.5)); // 30% to 80%
+            });
+          } else {
+            setLoadingProgress(0.8);
+          }
+          
+          // Set exercise data - now ready to display
           setExercise({
-            ...result.data,
+            ...exerciseData,
             id: exerciseId as string,
           });
-          // Warm cache for first questions (current and next two)
-          try {
-            const questions: Question[] = result.data.questions || [];
-            const batchUrls: string[] = [];
-            const startIdx = levelMode ? levelIndex : 0;
-            for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
-              batchUrls.push(...collectImageUrls(questions[i]));
+          
+          setLoadingMessage('Polishing everything up...');
+          setLoadingProgress(0.9);
+          
+          // Preload normal and low priority images in background
+          setTimeout(() => {
+            if (normalPriorityUrls.length > 0) {
+              prefetchUrlsWithPriority(normalPriorityUrls, 'normal');
             }
-            if (batchUrls.length) {
-              // Prefetch current and next questions with high priority
-              const currentAndNext = batchUrls.slice(0, Math.min(batchUrls.length, 10));
-              const remaining = batchUrls.slice(10);
-              
-              // High priority for current and next questions
-              prefetchUrlsWithPriority(currentAndNext, 'high');
-              
-              // Low priority for remaining questions
-              if (remaining.length) {
-                prefetchUrlsWithPriority(remaining, 'low');
-              }
+            if (lowPriorityUrls.length > 0) {
+              prefetchUrlsWithPriority(lowPriorityUrls, 'low');
             }
-          } catch {}
+          }, 100);
           if (levelMode) {
             setCurrentQuestionIndex(levelIndex);
           }
@@ -1539,7 +1647,11 @@ export default function StudentExerciseAnswering() {
       console.error('Failed to load exercise:', error);
       showCustomAlert('Error', 'Failed to load exercise', () => router.back(), 'error');
     } finally {
+      setLoadingProgress(1);
+      setLoadingMessage('Ready to learn!');
+      // Images are fully loaded, show immediately
       setLoading(false);
+      setImagesReady(true);
     }
   };
   
@@ -1602,6 +1714,7 @@ export default function StudentExerciseAnswering() {
   const handleNext = () => {
     if (!exercise) return;
     const q = exercise.questions[currentQuestionIndex];
+    if (!q) return;
     const currentAns = answers.find(a => a.questionId === q.id)?.answer;
     const correct = isAnswerCorrect(q, currentAns);
     if (!correct) {
@@ -1646,9 +1759,12 @@ export default function StudentExerciseAnswering() {
       }
     } else {
       // Finishing: accumulate the current question's elapsed time before stopping
-      const qid = exercise.questions[currentQuestionIndex].id;
-      const delta = (frozenElapsedRef.current ?? questionElapsedRef.current);
-      setAnswers(prev => prev.map(a => a.questionId === qid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+      const currentQ = exercise.questions[currentQuestionIndex];
+      if (currentQ) {
+        const qid = currentQ.id;
+        const delta = (frozenElapsedRef.current ?? questionElapsedRef.current);
+        setAnswers(prev => prev.map(a => a.questionId === qid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+      }
       frozenElapsedRef.current = null;
       if (timerInterval) {
         clearInterval(timerInterval);
@@ -1667,12 +1783,13 @@ export default function StudentExerciseAnswering() {
     setShowCorrect(true);
     correctAnim.setValue(0);
     Animated.timing(correctAnim, { toValue: 1, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(() => {
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         Animated.timing(correctAnim, { toValue: 0, duration: 180, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => {
           setShowCorrect(false);
           onComplete && onComplete();
         });
-      }, 500);
+      }, 500) as unknown as NodeJS.Timeout;
+      addTimeout(timeoutId);
     });
   };
   
@@ -1680,11 +1797,12 @@ export default function StudentExerciseAnswering() {
     setShowWrong(true);
     wrongAnim.setValue(0);
     Animated.timing(wrongAnim, { toValue: 1, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(() => {
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         Animated.timing(wrongAnim, { toValue: 0, duration: 180, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => {
           setShowWrong(false);
         });
-      }, 500);
+      }, 500) as unknown as NodeJS.Timeout;
+      addTimeout(timeoutId);
     });
   };
 
@@ -2010,12 +2128,15 @@ export default function StudentExerciseAnswering() {
       // Calculate final answers with time spent
       let finalAnswers = answers;
       if (exercise) {
-        const currentQid = exercise.questions[currentQuestionIndex].id;
-        const currentDelta = Date.now() - questionStartTime;
-        finalAnswers = answers.map(a => ({
-          ...a,
-          timeSpent: a.questionId === currentQid ? (a.timeSpent || 0) + currentDelta : (a.timeSpent || 0),
-        }));
+        const currentQ = exercise.questions[currentQuestionIndex];
+        if (currentQ) {
+          const currentQid = currentQ.id;
+          const currentDelta = Date.now() - questionStartTime;
+          finalAnswers = answers.map(a => ({
+            ...a,
+            timeSpent: a.questionId === currentQid ? (a.timeSpent || 0) + currentDelta : (a.timeSpent || 0),
+          }));
+        }
       }
 
       // Calculate results
@@ -2227,6 +2348,10 @@ export default function StudentExerciseAnswering() {
       // Validate last question on submit and show feedback
       if (exercise) {
         const q = exercise.questions[currentQuestionIndex];
+        if (!q) {
+          setSubmitting(false);
+          return;
+        }
         const currentAns = answers.find(a => a.questionId === q.id)?.answer;
         const correct = isAnswerCorrect(q, currentAns);
         
@@ -2295,6 +2420,7 @@ export default function StudentExerciseAnswering() {
     // Stop TTS when finishing a level
     stopCurrentTTS();
     const q = exercise.questions[currentQuestionIndex];
+    if (!q) return;
     const currentAns = answers.find(a => a.questionId === q.id)?.answer;
     const correct = isAnswerCorrect(q, currentAns);
     if (correct) {
@@ -3545,9 +3671,60 @@ export default function StudentExerciseAnswering() {
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>Loading exercise...</Text>
-      </View>
+      <ImageBackground
+        source={getBackgroundSource(backgroundImage)}
+        style={styles.backgroundImage}
+        blurRadius={2}
+      >
+        <View style={styles.overlay} />
+        <View style={styles.loadingContainer}>
+          <Animated.View style={[
+            styles.loadingCard,
+            {
+              opacity: fadeAnim,
+              transform: [{
+                scale: fadeAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.98, 1]
+                })
+              }]
+            }
+          ]}>
+            <MaterialIcons name="school" size={80} color="#ffa500" />
+            <Text style={styles.loadingTitle}>MathTatag</Text>
+            <Text style={styles.loadingSubtitle}>Loading your adventure...</Text>
+            <Text style={styles.loadingText}>{loadingMessage}</Text>
+            
+            {/* Progress Bar */}
+            <View style={styles.loadingProgressContainer}>
+              <View style={styles.loadingProgressBar}>
+                <Animated.View 
+                  style={[
+                    styles.loadingProgressFill,
+                    { width: `${loadingProgress * 100}%` }
+                  ]} 
+                />
+              </View>
+              <Text style={styles.loadingPercentText}>{Math.round(loadingProgress * 100)}%</Text>
+            </View>
+            
+            {/* Loading spinner for visual feedback */}
+            <Animated.View style={[
+              styles.loadingSpinnerContainer,
+              {
+                transform: [{
+                  rotate: fadeAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ['0deg', '360deg']
+                  })
+                }]
+              }
+            ]}>
+              <MaterialIcons name="autorenew" size={32} color="#ffa500" />
+            </Animated.View>
+          </Animated.View>
+        </View>
+      </ImageBackground>
     );
   }
   
@@ -3842,7 +4019,7 @@ export default function StudentExerciseAnswering() {
                               <View style={{ 
                                 marginLeft: 8, 
                                 width: 12, 
-                                height: 12, 
+                                height: 24, 
                                 borderRadius: 6, 
                                 backgroundColor: isCorrect ? '#10b981' : '#ef4444' 
                               }} />
@@ -4044,12 +4221,71 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
+    padding: 20,
+  },
+  loadingCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 20,
+    padding: 40,
+    alignItems: 'center',
+    minWidth: 300,
+    maxWidth: 400,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  loadingTitle: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  loadingSubtitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#475569',
+    marginBottom: 12,
+    textAlign: 'center',
   },
   loadingText: {
-    fontSize: 18,
+    fontSize: 16,
     color: '#64748b',
-    fontWeight: '500',
+    fontWeight: '600',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  loadingProgressContainer: {
+    width: '100%',
+    marginTop: 10,
+  },
+  loadingProgressBar: {
+    width: '100%',
+    height: 24,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 6,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  loadingProgressFill: {
+    height: '100%',
+    backgroundColor: '#ffa500',
+    borderRadius: 6,
+    shadowColor: '#ffa500',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+  },
+  loadingPercentText: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  loadingSpinnerContainer: {
+    marginTop: 20,
   },
   errorContainer: {
     flex: 1,
@@ -4781,7 +5017,7 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   progressBarBackground: {
-    height: 12,
+    height: 24,
     backgroundColor: 'rgba(0, 0, 0, 0.1)',
     borderRadius: 6,
     overflow: 'hidden',

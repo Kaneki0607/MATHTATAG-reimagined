@@ -23,8 +23,12 @@ export default function RootLayout() {
           <Stack.Screen name="ParentLogin" />
           <Stack.Screen name="TeacherLogin" />
           <Stack.Screen name="AdminLogin" />
+          <Stack.Screen name="ParentDashboard" />
           <Stack.Screen name="TeacherDashboard" />
           <Stack.Screen name="AdminDashboard" />
+          <Stack.Screen name="SuperAdminDashboard" />
+          <Stack.Screen name="CreateExercise" />
+          <Stack.Screen name="StudentExerciseAnswering" />
         </Stack>
         <StatusBar style="light" hidden={false} translucent={true} />
       </ThemeProvider>
