@@ -13,33 +13,33 @@ import * as Sharing from 'expo-sharing';
 import { useEffect, useRef, useState } from 'react';
 
 import {
-  ActivityIndicator,
+    ActivityIndicator,
 
-  Animated,
-  Dimensions,
+    Animated,
+    Dimensions,
 
-  Image,
+    Image,
 
-  Modal,
+    Modal,
 
-  PanResponder,
-  Platform,
-  RefreshControl,
+    PanResponder,
+    Platform,
+    RefreshControl,
 
-  ScrollView,
+    ScrollView,
 
-  StyleSheet,
+    StyleSheet,
 
-  Text,
+    Text,
 
-  TextInput,
+    TextInput,
 
-  TouchableOpacity,
+    TouchableOpacity,
 
-  TouchableWithoutFeedback,
+    TouchableWithoutFeedback,
 
-  View,
-  useWindowDimensions
+    View,
+    useWindowDimensions
 } from 'react-native';
 
 import { ResponsiveCards } from '../components/ResponsiveGrid';
@@ -1950,7 +1950,7 @@ export default function TeacherDashboard() {
 
   const [selectedClassForStudent, setSelectedClassForStudent] = useState<{ id: string; name: string } | null>(null);
 
-  const [studentNickname, setStudentNickname] = useState('');
+  const [studentFullName, setStudentFullName] = useState('');
 
   const [studentGender, setStudentGender] = useState<'male' | 'female'>('male');
 
@@ -1963,6 +1963,10 @@ export default function TeacherDashboard() {
   const [studentMenuVisible, setStudentMenuVisible] = useState<string | null>(null);
 
   const [showParentInfoModal, setShowParentInfoModal] = useState(false);
+
+  // Export menu state
+
+  const [exportMenuVisible, setExportMenuVisible] = useState<string | null>(null);
 
   const [selectedParentInfo, setSelectedParentInfo] = useState<any>(null);
 
@@ -4428,7 +4432,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         const student = students.find((s: any) => s.studentId === result.studentId);
 
-        const studentNickname = student?.nickname || 'Unknown Student';
+        const studentNickname = student ? formatStudentName(student) : 'Unknown Student';
 
         
 
@@ -4594,106 +4598,112 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
 
-  const exportClassListToPdf = async (cls: { id: string; name: string }) => {
-
+  const exportClassListToExcel = async (cls: { id: string; name: string }) => {
     try {
-
       const students = [...(studentsByClass[cls.id] || [])].sort((a, b) =>
+        formatStudentName(a).localeCompare(formatStudentName(b))
+      );
 
-        String(a.nickname || '').localeCompare(String(b.nickname || ''))
+      // Create CSV content
+      const csvHeaders = ['No.', 'Student Name', 'Parent Access Code'];
+      const csvRows = students.map((s: any, idx: number) => {
+        const loginCode = s.parentId ? (parentsById[s.parentId]?.loginCode || '—') : '—';
+        return [idx + 1, formatStudentName(s), loginCode];
+      });
 
+      // Convert to CSV format
+      const csvContent = [
+        csvHeaders.join(','),
+        ...csvRows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      ].join('\n');
+
+      // Create filename
+      const timestamp = new Date().toISOString().split('T')[0];
+      const filename = `${cls.name.replace(/[^a-zA-Z0-9]/g, '_')}_StudentList_${timestamp}.csv`;
+      const fileUri = `${FileSystem.documentDirectory}${filename}`;
+
+      // Write file
+      await FileSystem.writeAsStringAsync(fileUri, csvContent, { encoding: FileSystem.EncodingType.UTF8 });
+
+      // Share the file
+      const sharingAvailable = await Sharing.isAvailableAsync();
+      if (sharingAvailable) {
+        await Sharing.shareAsync(fileUri, { 
+          dialogTitle: `Export ${cls.name} Student List`,
+          mimeType: 'text/csv'
+        });
+      } else {
+        showAlert('Export Complete', `Excel file saved to: ${fileUri}`, undefined, 'success');
+      }
+
+      // Cleanup after 5 seconds
+      setTimeout(async () => {
+        try {
+          await FileSystem.deleteAsync(fileUri, { idempotent: true });
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temporary Excel file:', cleanupError);
+        }
+      }, 5000);
+
+    } catch (error) {
+      console.error('Excel export error:', error);
+      showAlert('Export Failed', 'Unable to export Excel file.', undefined, 'error');
+    }
+  };
+
+  const exportClassListToPdf = async (cls: { id: string; name: string }) => {
+    try {
+      const students = [...(studentsByClass[cls.id] || [])].sort((a, b) =>
+        formatStudentName(a).localeCompare(formatStudentName(b))
       );
 
       const rows = students
-
         .map((s: any, idx: number) => {
-
           const loginCode = s.parentId ? (parentsById[s.parentId]?.loginCode || '—') : '—';
-
           return `<tr>
-
             <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;">${idx + 1}</td>
-
-            <td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(String(s.nickname || ''))}</td>
-
+            <td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(formatStudentName(s))}</td>
             <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;">${escapeHtml(String(loginCode))}</td>
-
           </tr>`;
-
         })
-
         .join('');
 
-
-
       const html = `<!DOCTYPE html>
-
         <html>
-
           <head>
-
             <meta charset="utf-8" />
-
             <title>${escapeHtml(cls.name)} — Student List</title>
-
           </head>
-
           <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji','Segoe UI Emoji','Segoe UI Symbol','Noto Color Emoji'; color:#111827;">
-
             <h1 style="font-size:20px;">${escapeHtml(cls.name)} — Student List</h1>
-
             <p style="color:#6b7280;">Generated on ${new Date().toLocaleString()}</p>
-
             <table style="border-collapse:collapse;width:100%;font-size:12px;">
-
               <thead>
-
                 <tr>
-
                   <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;width:60px;">#</th>
-
                   <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;text-align:left;">Student</th>
-
                   <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;width:140px;">Parent Code</th>
-
                 </tr>
-
               </thead>
-
               <tbody>
-
                 ${rows || `<tr><td colspan="3" style="padding:12px;text-align:center;border:1px solid #e5e7eb;">No students yet.</td></tr>`}
-
               </tbody>
-
             </table>
-
           </body>
-
         </html>`;
 
-
-
       const file = await Print.printToFileAsync({ html });
-
       const sharingAvailable = await Sharing.isAvailableAsync();
 
       if (sharingAvailable) {
-
         await Sharing.shareAsync(file.uri, { dialogTitle: `Export ${cls.name} Student List` });
-
       } else {
-
         showAlert('Export Complete', `PDF saved to: ${file.uri}`, undefined, 'success');
-
       }
 
     } catch (e) {
-
       showAlert('Export Failed', 'Unable to export PDF.', undefined, 'error');
-
     }
-
   };
 
 
@@ -4820,11 +4830,78 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
 
+  // Parse full name into First Name, MI, and Surname
+  const parseFullName = (fullName: string): { firstName: string; middleInitial: string; surname: string } => {
+    const trimmed = fullName.trim();
+    if (!trimmed) return { firstName: '', middleInitial: '', surname: '' };
+
+    const parts = trimmed.split(/\s+/); // Split by whitespace
+    
+    if (parts.length === 1) {
+      // Only one word - treat as first name
+      return { firstName: parts[0], middleInitial: '', surname: '' };
+    } else if (parts.length === 2) {
+      // Two words - First Name and Surname
+      return { firstName: parts[0], middleInitial: '', surname: parts[1] };
+    } else {
+      // Three or more words - First Name, Middle Initial (from middle name), and Surname
+      const firstName = parts[0];
+      const surname = parts[parts.length - 1];
+      // Extract middle initial from the second word
+      const middleInitial = parts[1].charAt(0).toUpperCase() + '.';
+      
+      return { firstName, middleInitial, surname };
+    }
+  };
+
+  // Format student name for display
+  const formatStudentName = (student: any): string => {
+    if (!student) return 'Unknown Student';
+    
+    // If fullName exists, use it
+    if (student.fullName && student.fullName.trim()) {
+      return student.fullName.trim();
+    }
+    
+    // If firstName and surname exist, format them
+    if (student.firstName && student.surname) {
+      const firstName = student.firstName.trim();
+      const surname = student.surname.trim();
+      const mi = student.middleInitial && student.middleInitial.trim() ? ` ${student.middleInitial.trim()}` : '';
+      return `${firstName}${mi} ${surname}`;
+    }
+    
+    // Fallback to nickname if it exists (for backwards compatibility)
+    if (student.nickname && student.nickname.trim()) {
+      return student.nickname.trim();
+    }
+    
+    return 'Unknown Student';
+  };
+
+  // Get student initials for avatar
+  const getStudentInitials = (student: any): string => {
+    if (student.firstName && student.surname) {
+      return `${student.firstName.charAt(0)}${student.surname.charAt(0)}`.toUpperCase();
+    }
+    if (student.fullName) {
+      const parts = student.fullName.split(/\s+/);
+      if (parts.length >= 2) {
+        return `${parts[0].charAt(0)}${parts[parts.length - 1].charAt(0)}`.toUpperCase();
+      }
+      return parts[0].charAt(0).toUpperCase();
+    }
+    if (student.nickname) {
+      return student.nickname.charAt(0).toUpperCase();
+    }
+    return 'S';
+  };
+
   const handleOpenAddStudent = (cls: { id: string; name: string }) => {
 
     setSelectedClassForStudent(cls);
 
-    setStudentNickname('');
+    setStudentFullName('');
 
     setStudentGender('male');
 
@@ -4838,13 +4915,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     if (!selectedClassForStudent) return;
 
-    if (!studentNickname.trim()) { showAlert('Error', 'Please enter a student nickname.', undefined, 'error'); return; }
+    if (!studentFullName.trim()) { showAlert('Error', 'Please enter student full name.', undefined, 'error'); return; }
 
     try {
 
       setSavingStudent(true);
 
       const loginCode = await generateUniqueLoginCode();
+
+      // Parse full name
+      const { firstName, middleInitial, surname } = parseFullName(studentFullName);
+
+      if (!firstName || !surname) {
+        showAlert('Error', 'Please enter at least a first name and surname (e.g., "Juan Dela Cruz").', undefined, 'error');
+        setSavingStudent(false);
+        return;
+      }
 
       // Create parent placeholder (details will be collected on first login)
 
@@ -4864,7 +4950,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       await writeData(`/parentLoginCodes/${loginCode}`, parentId);
 
-      // Create student
+      // Create student with parsed name components
 
       const studentPayload = {
 
@@ -4872,7 +4958,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         parentId,
 
-        nickname: studentNickname.trim(),
+        firstName: firstName,
+
+        middleInitial: middleInitial,
+
+        surname: surname,
+
+        fullName: studentFullName.trim(),
 
         gender: studentGender,
 
@@ -4910,7 +5002,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           'Student Created',
 
-          `Share this Parent Login Code with the guardian: ${loginCode}`,
+          `Student: ${firstName} ${middleInitial} ${surname}\n\nShare this Parent Login Code with the guardian: ${loginCode}`,
 
           [
 
@@ -4920,7 +5012,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
               onPress: () => {
 
-                setStudentNickname('');
+                setStudentFullName('');
 
                 setShowAddStudentModal(true);
 
@@ -4962,7 +5054,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     setSelectedClassForStudent(classInfo);
 
-    setStudentNickname(String(student.nickname || ''));
+    // Reconstruct full name from stored components, or use fullName if available
+    const fullName = student.fullName || 
+      `${student.firstName || ''} ${student.middleInitial || ''} ${student.surname || ''}`.trim();
+
+    setStudentFullName(fullName);
 
     setStudentGender(String(student.gender || 'male') === 'female' ? 'female' : 'male');
 
@@ -4980,7 +5076,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       'Delete Student',
 
-      `Remove "${student.nickname}" from this class? This cannot be undone.`,
+      `Remove "${formatStudentName(student)}" from this class? This cannot be undone.`,
 
       [
 
@@ -7143,7 +7239,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
              activeClasses.map((cls) => (
 
-               <View key={cls.id} style={styles.classTabCard}>
+               <TouchableWithoutFeedback key={cls.id} onPress={() => setExportMenuVisible(null)}>
+                 <View style={styles.classTabCard}>
 
                  <View style={styles.classCardHeader}>
 
@@ -7159,13 +7256,40 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                        <Text style={styles.classroomTitle}>{cls.name}</Text>
 
-                       <TouchableOpacity style={styles.exportBtn} onPress={() => exportClassListToPdf(cls)}>
+                       <TouchableOpacity 
+                         style={styles.exportMenuBtn} 
+                         onPress={() => setExportMenuVisible(exportMenuVisible === cls.id ? null : cls.id)}
+                         activeOpacity={0.7}
+                       >
 
-                         <MaterialCommunityIcons name="file-pdf-box" size={14} color="#ffffff" />
-
-                         <Text style={styles.exportBtnText}>Export PDF</Text>
+                         <MaterialIcons name="more-vert" size={20} color="#64748b" />
 
                        </TouchableOpacity>
+
+                       {exportMenuVisible === cls.id && (
+                         <View style={styles.exportMenuDropdown}>
+                           <TouchableOpacity 
+                             style={styles.exportMenuItem}
+                             onPress={() => {
+                               setExportMenuVisible(null);
+                               exportClassListToPdf(cls);
+                             }}
+                           >
+                             <MaterialCommunityIcons name="file-pdf-box" size={18} color="#ef4444" />
+                             <Text style={styles.exportMenuText}>Export PDF</Text>
+                           </TouchableOpacity>
+                           <TouchableOpacity 
+                             style={styles.exportMenuItem}
+                             onPress={() => {
+                               setExportMenuVisible(null);
+                               exportClassListToExcel(cls);
+                             }}
+                           >
+                             <MaterialCommunityIcons name="file-excel-box" size={18} color="#10b981" />
+                             <Text style={styles.exportMenuText}>Export Excel</Text>
+                           </TouchableOpacity>
+                         </View>
+                       )}
 
                      </View>
 
@@ -7241,7 +7365,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <Text style={styles.studentIndex}>{idx + 1}.</Text>
 
-                          <Text style={styles.studentName}>{s.nickname}</Text>
+                          <Text style={styles.studentName}>{formatStudentName(s)}</Text>
 
                           <Text style={styles.studentCode}>{loginCode}</Text>
 
@@ -7325,7 +7449,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                 )}
 
-               </View>
+                 </View>
+               </TouchableWithoutFeedback>
 
              ))
 
@@ -8003,7 +8128,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
 
-                                       const studentNickname = student?.nickname || 'Unknown Student';
+                                       const studentNickname = student ? formatStudentName(student) : 'Unknown Student';
 
                                        
 
@@ -9429,23 +9554,50 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                 <View style={styles.field}>
 
-                  <Text style={styles.fieldLabel}>Student Nickname</Text>
+                  <Text style={styles.fieldLabel}>Full Name</Text>
 
                   <TextInput
 
                     style={styles.fieldInput}
 
-                    value={studentNickname}
+                    value={studentFullName}
 
-                    onChangeText={setStudentNickname}
+                    onChangeText={setStudentFullName}
 
-                    placeholder="e.g., Ken"
+                    placeholder="e.g., Juan Santos, Maria Garcia, Pedro Rizal"
 
                     placeholderTextColor="#6b7280"
 
                   />
 
                 </View>
+
+                {studentFullName.trim() && (() => {
+                  const parsed = parseFullName(studentFullName);
+                  return (
+                    <View style={{ 
+                      backgroundColor: '#f1f5f9', 
+                      padding: 12, 
+                      borderRadius: 8, 
+                      marginBottom: 16,
+                      borderWidth: 1,
+                      borderColor: '#e2e8f0'
+                    }}>
+                      <Text style={{ fontSize: 12, fontWeight: '600', color: '#475569', marginBottom: 6 }}>
+                        Preview:
+                      </Text>
+                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
+                        First Name: <Text style={{ fontWeight: '600' }}>{parsed.firstName || '—'}</Text>
+                      </Text>
+                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
+                        M.I.: <Text style={{ fontWeight: '600' }}>{parsed.middleInitial || '—'}</Text>
+                      </Text>
+                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
+                        Surname: <Text style={{ fontWeight: '600' }}>{parsed.surname || '—'}</Text>
+                      </Text>
+                    </View>
+                  );
+                })()}
 
                 <View style={styles.field}>
 
@@ -9483,7 +9635,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                 <Text style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
 
-                  Disclaimer: For student privacy, use only a nickname or a unique identifier. Parent details will be collected securely when they first log in.
+                  Note: Enter full name in format "First Name Middle Name Surname" or "First Name Surname". Parent details will be collected securely when they first log in.
 
                 </Text>
 
@@ -9569,7 +9721,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         <View key={s.studentId} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}>
 
-                          <Text style={{ color: '#111827' }}>{s.nickname}</Text>
+                          <Text style={{ color: '#111827' }}>{formatStudentName(s)}</Text>
 
                           <Text style={{ color: '#2563eb', fontWeight: '600' }}>{p?.loginCode || '—'}</Text>
 
@@ -10223,7 +10375,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <Text style={styles.studentAvatarText}>
 
-                            {student.nickname?.charAt(0)?.toUpperCase() || 'S'}
+                            {getStudentInitials(student)}
 
                           </Text>
 
@@ -10231,7 +10383,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         <View style={styles.studentDetails}>
 
-                          <Text style={styles.studentStatusName}>{student.nickname || 'Unknown Student'}</Text>
+                          <Text style={styles.studentStatusName}>{formatStudentName(student)}</Text>
 
                           <Text style={styles.studentId}>ID: {student.studentId}</Text>
 
@@ -10373,7 +10525,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     <Text style={styles.parentInfoLabel}>Student Name:</Text>
 
-                    <Text style={styles.parentInfoValue}>{selectedParentInfo.student?.nickname || 'N/A'}</Text>
+                    <Text style={styles.parentInfoValue}>{selectedParentInfo.student ? formatStudentName(selectedParentInfo.student) : 'N/A'}</Text>
 
                   </View>
 
@@ -10551,7 +10703,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                 <Text style={styles.studentPerformanceStudentName}>
 
-                  {selectedStudentPerformance.nickname || selectedStudentPerformance.firstName}
+                  {formatStudentName(selectedStudentPerformance)}
 
                 </Text>
 
@@ -10607,7 +10759,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     <Text style={styles.studentPerformanceName}>
 
-                      {selectedStudentPerformance?.nickname || 'Unknown Student'}
+                      {selectedStudentPerformance ? formatStudentName(selectedStudentPerformance) : 'Unknown Student'}
 
                     </Text>
 
@@ -14045,6 +14197,82 @@ const styles = StyleSheet.create({
     fontSize: 10,
 
     fontWeight: '700',
+
+  },
+
+  // Export Menu Styles
+
+  exportMenuBtn: {
+
+    padding: 8,
+
+    borderRadius: 6,
+
+    backgroundColor: '#f8fafc',
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+  },
+
+  exportMenuDropdown: {
+
+    position: 'absolute',
+
+    top: 40,
+
+    right: 0,
+
+    backgroundColor: '#ffffff',
+
+    borderRadius: 8,
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+    shadowColor: '#000',
+
+    shadowOffset: { width: 0, height: 2 },
+
+    shadowOpacity: 0.1,
+
+    shadowRadius: 8,
+
+    elevation: 5,
+
+    zIndex: 1000,
+
+    minWidth: 140,
+
+  },
+
+  exportMenuItem: {
+
+    flexDirection: 'row',
+
+    alignItems: 'center',
+
+    gap: 8,
+
+    paddingHorizontal: 12,
+
+    paddingVertical: 10,
+
+    borderBottomWidth: 1,
+
+    borderBottomColor: '#f1f5f9',
+
+  },
+
+  exportMenuText: {
+
+    fontSize: 14,
+
+    fontWeight: '500',
+
+    color: '#374151',
 
   },
 

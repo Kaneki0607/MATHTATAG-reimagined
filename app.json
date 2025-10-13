@@ -45,8 +45,18 @@
       "typedRoutes": true,
       "reactCompiler": true
     },
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 30000,
+      "url": "https://u.expo.dev/ff1c6743-8bce-4a8e-bf19-1eb7d6c5afa6"
+    },
     "extra": {
-      "router": {}
-    }
+      "router": {},
+      "eas": {
+        "projectId": "ff1c6743-8bce-4a8e-bf19-1eb7d6c5afa6"
+      }
+    },
+    "owner": "cedtech"
   }
 }
