@@ -13,33 +13,33 @@ import * as Sharing from 'expo-sharing';
 import { useEffect, useRef, useState } from 'react';
 
 import {
-    ActivityIndicator,
+  ActivityIndicator,
 
-    Animated,
-    Dimensions,
+  Animated,
+  Dimensions,
 
-    Image,
+  Image,
 
-    Modal,
+  Modal,
 
-    PanResponder,
-    Platform,
-    RefreshControl,
+  PanResponder,
+  Platform,
+  RefreshControl,
 
-    ScrollView,
+  ScrollView,
 
-    StyleSheet,
+  StyleSheet,
 
-    Text,
+  Text,
 
-    TextInput,
+  TextInput,
 
-    TouchableOpacity,
+  TouchableOpacity,
 
-    TouchableWithoutFeedback,
+  TouchableWithoutFeedback,
 
-    View,
-    useWindowDimensions
+  View,
+  useWindowDimensions
 } from 'react-native';
 
 import { ResponsiveCards } from '../components/ResponsiveGrid';
@@ -1968,8 +1968,6 @@ export default function TeacherDashboard() {
 
   const [exportMenuVisible, setExportMenuVisible] = useState<string | null>(null);
 
-  const [selectedParentInfo, setSelectedParentInfo] = useState<any>(null);
-
   
 
   // Results sorting state
@@ -1981,6 +1979,16 @@ export default function TeacherDashboard() {
   // List modal state
 
   const [showListModal, setShowListModal] = useState(false);
+
+  // Parents list modal state
+
+  const [showParentsListModal, setShowParentsListModal] = useState(false);
+
+  const [selectedClassForParentsList, setSelectedClassForParentsList] = useState<string | null>(null);
+
+  // Parent info modal state
+
+  const [selectedParentForInfo, setSelectedParentForInfo] = useState<any>(null);
 
   const [studentsByClass, setStudentsByClass] = useState<Record<string, any[]>>({});
 
@@ -4804,7 +4812,23 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
   };
 
+  const handleShowParentsList = (classId: string) => {
 
+    setSelectedClassForParentsList(classId);
+
+    setShowParentsListModal(true);
+
+  };
+
+  const handleShowParentInfo = (student: any, parent: any) => {
+
+    setSelectedParentForInfo({ student, parent });
+
+    setShowParentsListModal(false);
+
+    setShowParentInfoModal(true);
+
+  };
 
   const generateLoginCode = () => String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
 
@@ -4877,6 +4901,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     }
     
     return 'Unknown Student';
+  };
+
+  const getParentStatus = (parent: any) => {
+
+    if (!parent) {
+
+      return { text: 'No Parent', color: '#ef4444' };
+
+    }
+
+    if (parent.infoStatus === 'completed') {
+
+      return { text: 'Registered', color: '#10b981' };
+
+    }
+
+    if (parent.infoStatus === 'pending') {
+
+      return { text: 'Pending', color: '#f59e0b' };
+
+    }
+
+    return { text: 'Pending', color: '#f59e0b' };
+
   };
 
   // Get student initials for avatar
@@ -5126,13 +5174,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     if (parentData) {
 
-      setSelectedParentInfo({
-
-        ...parentData,
+      setSelectedParentForInfo({
 
         student: student,
 
-        loginCode: parentData.loginCode || 'N/A'
+        parent: parentData
 
       });
 
@@ -6075,6 +6121,14 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                       <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
 
                       <TouchableOpacity
+                        style={styles.parentsListButton}
+                        onPress={() => handleShowParentsList(cls.id)}
+                      >
+                        <MaterialCommunityIcons name="account-group-outline" size={18} color="#3b82f6" />
+                        <Text style={styles.parentsListButtonText}>Parents List</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
 
                         accessibilityLabel="More actions"
 
@@ -6138,6 +6192,32 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                       )}
 
+                    </View>
+
+                    {/* Student Statistics Section */}
+                    <View style={styles.studentStatsContainer}>
+                      <Text style={styles.studentStatsTitle}>Student Statistics</Text>
+                      <View style={styles.studentStatsGrid}>
+                        <View style={styles.studentStatCard}>
+                          <MaterialCommunityIcons name="account-group" size={responsive.scale(20)} color="#3b82f6" />
+                          <Text style={styles.studentStatValue}>{studentsByClass[cls.id]?.length ?? 0}</Text>
+                          <Text style={styles.studentStatLabel}>Total</Text>
+                        </View>
+                        <View style={styles.studentStatCard}>
+                          <MaterialCommunityIcons name="account" size={responsive.scale(20)} color="#10b981" />
+                          <Text style={styles.studentStatValue}>
+                            {studentsByClass[cls.id]?.filter(s => s.gender === 'male').length ?? 0}
+                          </Text>
+                          <Text style={styles.studentStatLabel}>Male</Text>
+                        </View>
+                        <View style={styles.studentStatCard}>
+                          <MaterialCommunityIcons name="account" size={responsive.scale(20)} color="#f59e0b" />
+                          <Text style={styles.studentStatValue}>
+                            {studentsByClass[cls.id]?.filter(s => s.gender === 'female').length ?? 0}
+                          </Text>
+                          <Text style={styles.studentStatLabel}>Female</Text>
+                        </View>
+                      </View>
                     </View>
 
                     {/* Analytics Section (placeholder/demo) */}
@@ -9755,7 +9835,185 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       </Modal>
 
+      {/* Parents List Modal */}
+      <Modal visible={showParentsListModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.profileModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Parents List</Text>
+              <TouchableOpacity onPress={() => setShowParentsListModal(false)} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView 
+              style={styles.profileContent}
+              contentContainerStyle={{ paddingBottom: 20 }}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {selectedClassForParentsList && studentsByClass[selectedClassForParentsList] && (
+                <>
+                  <Text style={{ fontSize: 16, fontWeight: '700', color: '#1e293b', marginBottom: 16 }}>
+                    {activeClasses.find(c => c.id === selectedClassForParentsList)?.name || 'Class'}
+                  </Text>
+                  {(studentsByClass[selectedClassForParentsList] || []).length === 0 ? (
+                    <Text style={{ color: '#64748b' }}>No students in this class.</Text>
+                  ) : (
+                    (studentsByClass[selectedClassForParentsList] || []).map((s) => {
+                      const p = s.parentId ? parentsById[s.parentId] : undefined;
+                      const parentStatus = getParentStatus(p);
+                      
+                      return (
+                        <View key={s.studentId} style={styles.parentListItem}>
+                          <View style={styles.parentInfo}>
+                            <Text style={styles.nonClickableStudentName}>{formatStudentName(s)}</Text>
+                            {p ? (
+                              <TouchableOpacity onPress={() => handleShowParentInfo(s, p)}>
+                                <Text style={styles.clickableParentCode}>Code: {p.loginCode || '—'}</Text>
+                              </TouchableOpacity>
+                            ) : (
+                              <Text style={styles.parentCode}>Code: —</Text>
+                            )}
+                          </View>
+                          <View style={styles.parentStatusContainer}>
+                            <View style={[styles.parentStatusBadge, { backgroundColor: parentStatus.color }]}>
+                              <Text style={styles.parentStatusText}>{parentStatus.text}</Text>
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
+                </>
+              )}
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.saveButton} onPress={() => setShowParentsListModal(false)}>
+                <Text style={styles.saveButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
+      {/* Parent Information Modal */}
+      <Modal visible={showParentInfoModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.profileModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Parent Information</Text>
+              <TouchableOpacity onPress={() => setShowParentInfoModal(false)} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView 
+              style={styles.profileContent}
+              contentContainerStyle={{ paddingBottom: 20 }}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {selectedParentForInfo && (
+                <>
+                  {/* Student Information */}
+                  <View style={styles.parentDetailsSection}>
+                    <Text style={styles.parentDetailsSectionTitle}>Student Information</Text>
+                    <View style={styles.parentDetailsRow}>
+                      <Text style={styles.parentDetailsLabel}>Name:</Text>
+                      <Text style={styles.parentDetailsValue}>{formatStudentName(selectedParentForInfo.student)}</Text>
+                    </View>
+                    <View style={styles.parentDetailsRow}>
+                      <Text style={styles.parentDetailsLabel}>Gender:</Text>
+                      <Text style={styles.parentDetailsValue}>{selectedParentForInfo.student?.gender || 'N/A'}</Text>
+                    </View>
+                    <View style={styles.parentDetailsRow}>
+                      <Text style={styles.parentDetailsLabel}>Student ID:</Text>
+                      <Text style={styles.parentDetailsValue}>{selectedParentForInfo.student?.studentId || 'N/A'}</Text>
+                    </View>
+                  </View>
+
+                  {/* Parent Information */}
+                  <View style={styles.parentDetailsSection}>
+                    <Text style={styles.parentDetailsSectionTitle}>Parent Information</Text>
+                    
+                    {selectedParentForInfo.parent ? (
+                      <>
+                        <View style={styles.parentDetailsRow}>
+                          <Text style={styles.parentDetailsLabel}>Access Code:</Text>
+                          <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.loginCode || 'N/A'}</Text>
+                        </View>
+                        
+                        <View style={styles.parentDetailsRow}>
+                          <Text style={styles.parentDetailsLabel}>Registration Status:</Text>
+                          <View style={styles.parentInfoValueContainer}>
+                            <View style={[styles.parentStatusBadge, { backgroundColor: getParentStatus(selectedParentForInfo.parent).color }]}>
+                              <Text style={styles.parentStatusText}>{getParentStatus(selectedParentForInfo.parent).text}</Text>
+                            </View>
+                          </View>
+                        </View>
+
+                        {selectedParentForInfo.parent?.infoStatus === 'completed' && (
+                          <>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>First Name:</Text>
+                              <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.firstName || 'N/A'}</Text>
+                            </View>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>Last Name:</Text>
+                              <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.lastName || 'N/A'}</Text>
+                            </View>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>Email:</Text>
+                              <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.email || 'N/A'}</Text>
+                            </View>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>Mobile:</Text>
+                              <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.mobile || 'N/A'}</Text>
+                            </View>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>Registration Date:</Text>
+                              <Text style={styles.parentDetailsValue}>
+                                {selectedParentForInfo.parent?.createdAt 
+                                  ? new Date(selectedParentForInfo.parent.createdAt).toLocaleDateString() 
+                                  : 'N/A'}
+                              </Text>
+                            </View>
+                          </>
+                        )}
+
+                        {selectedParentForInfo.parent?.infoStatus === 'pending' && (
+                          <View style={styles.parentDetailsRow}>
+                            <Text style={styles.parentDetailsLabel}>Status:</Text>
+                            <Text style={styles.parentDetailsValue}>Parent registration is pending. They have not completed their registration yet.</Text>
+                          </View>
+                        )}
+
+                        {!selectedParentForInfo.parent?.infoStatus && (
+                          <View style={styles.parentDetailsRow}>
+                            <Text style={styles.parentDetailsLabel}>Status:</Text>
+                            <Text style={styles.parentDetailsValue}>Parent registration is pending. They have not used their access code yet.</Text>
+                          </View>
+                        )}
+                      </>
+                    ) : (
+                      <View style={styles.parentDetailsRow}>
+                        <Text style={styles.parentDetailsLabel}>Status:</Text>
+                        <Text style={styles.parentDetailsValue}>No parent account assigned to this student.</Text>
+                      </View>
+                    )}
+                  </View>
+                </>
+              )}
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.saveButton} onPress={() => setShowParentInfoModal(false)}>
+                <Text style={styles.saveButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Assign Exercise Form */}
 
@@ -10470,221 +10728,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         </View>
 
       </Modal>
-
-
-
-      {/* Parent Info Modal */}
-
-      <Modal visible={showParentInfoModal} animationType="slide" transparent>
-
-        <View style={styles.modalOverlay}>
-
-          <View style={styles.parentInfoModal}>
-
-            <View style={styles.parentInfoHeader}>
-
-              <TouchableOpacity
-
-                onPress={() => setShowParentInfoModal(false)}
-
-                style={styles.parentInfoCloseButton}
-
-              >
-
-                <MaterialIcons name="close" size={24} color="#1e293b" />
-
-              </TouchableOpacity>
-
-              <Text style={styles.parentInfoTitle}>Parent Information</Text>
-
-              <View style={styles.parentInfoPlaceholder} />
-
-            </View>
-
-
-
-            {selectedParentInfo && (
-
-              <ScrollView 
-
-                style={styles.parentInfoContent} 
-
-                showsVerticalScrollIndicator={false}
-
-                nestedScrollEnabled={true}
-
-                keyboardShouldPersistTaps="handled"
-
-              >
-
-                <View style={styles.parentInfoSection}>
-
-                  <Text style={styles.parentInfoSectionTitle}>Student Information</Text>
-
-                  <View style={styles.parentInfoRow}>
-
-                    <Text style={styles.parentInfoLabel}>Student Name:</Text>
-
-                    <Text style={styles.parentInfoValue}>{selectedParentInfo.student ? formatStudentName(selectedParentInfo.student) : 'N/A'}</Text>
-
-                  </View>
-
-                  <View style={styles.parentInfoRow}>
-
-                    <Text style={styles.parentInfoLabel}>Gender:</Text>
-
-                    <Text style={styles.parentInfoValue}>{selectedParentInfo.student?.gender || 'N/A'}</Text>
-
-                  </View>
-
-                </View>
-
-
-
-                <View style={styles.parentInfoSection}>
-
-                  <Text style={styles.parentInfoSectionTitle}>Access Information</Text>
-
-                  <View style={styles.parentInfoRow}>
-
-                    <Text style={styles.parentInfoLabel}>Parent Access Code:</Text>
-
-                    <Text style={[styles.parentInfoValue, styles.parentInfoCodeValue]}>{selectedParentInfo.loginCode}</Text>
-
-                  </View>
-
-                  <View style={styles.parentInfoRow}>
-
-                    <Text style={styles.parentInfoLabel}>Account Status:</Text>
-
-                    <Text style={[styles.parentInfoValue, selectedParentInfo.infoStatus === 'completed' ? styles.parentInfoStatusCompleted : styles.parentInfoStatusPending]}>
-
-                      {selectedParentInfo.infoStatus === 'completed' ? 'Profile Complete' : 'Profile Pending'}
-
-                    </Text>
-
-                  </View>
-
-                </View>
-
-
-
-                {selectedParentInfo.infoStatus === 'completed' && (
-
-                  <View style={styles.parentInfoSection}>
-
-                    <Text style={styles.parentInfoSectionTitle}>Parent Details</Text>
-
-                    <View style={styles.parentInfoRow}>
-
-                      <Text style={styles.parentInfoLabel}>Name:</Text>
-
-                      <Text style={styles.parentInfoValue}>
-
-                        {selectedParentInfo.firstName && selectedParentInfo.lastName 
-
-                          ? `${selectedParentInfo.firstName} ${selectedParentInfo.lastName}`
-
-                          : 'Not provided'}
-
-                      </Text>
-
-                    </View>
-
-                    <View style={styles.parentInfoRow}>
-
-                      <Text style={styles.parentInfoLabel}>Email:</Text>
-
-                      <Text style={styles.parentInfoValue}>{selectedParentInfo.email || 'Not provided'}</Text>
-
-                    </View>
-
-                    <View style={styles.parentInfoRow}>
-
-                      <Text style={styles.parentInfoLabel}>Mobile:</Text>
-
-                      <Text style={styles.parentInfoValue}>{selectedParentInfo.mobile || 'Not provided'}</Text>
-
-                    </View>
-
-                    {selectedParentInfo.profilePictureUrl && (
-
-                      <View style={styles.parentInfoRow}>
-
-                        <Text style={styles.parentInfoLabel}>Profile Picture:</Text>
-
-                        <View style={styles.parentInfoImageContainer}>
-
-                          <Image 
-
-                            source={{ uri: selectedParentInfo.profilePictureUrl }} 
-
-                            style={styles.parentInfoImage}
-
-                            resizeMode="cover"
-
-                          />
-
-                        </View>
-
-                      </View>
-
-                    )}
-
-                  </View>
-
-                )}
-
-
-
-                {selectedParentInfo.infoStatus === 'pending' && (
-
-                  <View style={styles.parentInfoSection}>
-
-                    <View style={styles.parentInfoPendingContainer}>
-
-                      <MaterialIcons name="info" size={24} color="#f59e0b" />
-
-                      <Text style={styles.parentInfoPendingText}>
-
-                        Parent hasn't completed their profile yet. Share the access code with them to get started.
-
-                      </Text>
-
-                    </View>
-
-                  </View>
-
-                )}
-
-              </ScrollView>
-
-            )}
-
-
-
-            <View style={styles.parentInfoActions}>
-
-              <TouchableOpacity
-
-                style={styles.parentInfoCloseActionButton}
-
-                onPress={() => setShowParentInfoModal(false)}
-
-              >
-
-                <Text style={styles.parentInfoCloseActionButtonText}>Close</Text>
-
-              </TouchableOpacity>
-
-            </View>
-
-          </View>
-
-        </View>
-
-      </Modal>
-
 
 
       {/* Student Performance Modal */}
@@ -13360,6 +13403,183 @@ const styles = StyleSheet.create({
 
     zIndex: 10,
 
+  },
+
+  parentsListButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f9ff',
+    paddingHorizontal: Math.min(12, staticWidth * 0.03),
+    paddingVertical: Math.min(8, staticHeight * 0.01),
+    borderRadius: Math.min(8, staticWidth * 0.02),
+    marginTop: Math.min(8, staticHeight * 0.01),
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: '#3b82f6',
+  },
+
+  parentsListButtonText: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#3b82f6',
+    fontWeight: '600',
+    marginLeft: Math.min(6, staticWidth * 0.015),
+  },
+
+  studentStatsContainer: {
+    marginBottom: Math.min(16, staticHeight * 0.02),
+    padding: Math.min(16, staticWidth * 0.04),
+    backgroundColor: '#f8fafc',
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  studentStatsTitle: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: Math.min(12, staticHeight * 0.015),
+  },
+
+  studentStatsGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+
+  studentStatCard: {
+    flex: 1,
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    padding: Math.min(12, staticWidth * 0.03),
+    borderRadius: Math.min(8, staticWidth * 0.02),
+    marginHorizontal: Math.min(4, staticWidth * 0.01),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  studentStatValue: {
+    fontSize: Math.max(18, Math.min(22, staticWidth * 0.055)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginTop: Math.min(6, staticHeight * 0.008),
+  },
+
+  studentStatLabel: {
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
+    color: '#64748b',
+    fontWeight: '500',
+    marginTop: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentListItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: Math.min(12, staticHeight * 0.015),
+    paddingHorizontal: Math.min(16, staticWidth * 0.04),
+    backgroundColor: '#ffffff',
+    borderRadius: Math.min(8, staticWidth * 0.02),
+    marginBottom: Math.min(8, staticHeight * 0.01),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  parentInfo: {
+    flex: 1,
+  },
+
+  parentStudentName: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentCode: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#64748b',
+  },
+
+  clickableParentCode: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#3b82f6',
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+
+  parentStatusContainer: {
+    marginLeft: Math.min(12, staticWidth * 0.03),
+  },
+
+  parentStatusBadge: {
+    paddingHorizontal: Math.min(8, staticWidth * 0.02),
+    paddingVertical: Math.min(4, staticHeight * 0.005),
+    borderRadius: Math.min(12, staticWidth * 0.03),
+  },
+
+  parentStatusText: {
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  clickableStudentName: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#3b82f6',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+    textDecorationLine: 'underline',
+  },
+
+  nonClickableStudentName: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentDetailsSection: {
+    marginBottom: Math.min(20, staticHeight * 0.025),
+    padding: Math.min(16, staticWidth * 0.04),
+    backgroundColor: '#f8fafc',
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  parentDetailsSectionTitle: {
+    fontSize: Math.max(16, Math.min(18, staticWidth * 0.045)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: Math.min(12, staticHeight * 0.015),
+  },
+
+  parentDetailsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: Math.min(8, staticHeight * 0.01),
+    paddingVertical: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentDetailsLabel: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#64748b',
+    flex: 1,
+  },
+
+  parentDetailsValue: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '500',
+    color: '#1e293b',
+    flex: 2,
+    textAlign: 'right',
+  },
+
+  parentInfoValueContainer: {
+    flex: 2,
+    alignItems: 'flex-end',
   },
 
   moreMenuItem: {
