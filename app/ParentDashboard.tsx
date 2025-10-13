@@ -495,9 +495,24 @@ export default function ParentDashboard() {
 
   // Handle question result view
   const handleShowQuestionResult = async (task: Task) => {
-    if (!task.resultId) return;
+    console.log('handleShowQuestionResult called with task:', task);
+    console.log('task.resultId:', task.resultId);
+    console.log('task.exerciseId:', task.exerciseId);
+    
+    if (!task.resultId) {
+      console.log('No resultId found, returning early');
+      Alert.alert('No Results', 'No results available for this activity.');
+      return;
+    }
+    
+    // Set a timeout to prevent stuck loading state
+    const loadingTimeout = setTimeout(() => {
+      console.log('Loading timeout reached, clearing loading state');
+      setLoadingAnalysis(false);
+    }, 30000); // 30 second timeout
     
     try {
+      console.log('Starting to load result data...');
       setLoadingAnalysis(true);
       setSelectedResult(task);
       setShowQuestionResult(true);
@@ -510,19 +525,41 @@ export default function ParentDashboard() {
       ]);
       
       if (resultData.data && exerciseData.data) {
+        console.log('Successfully loaded result and exercise data');
+        console.log('resultData.data keys:', Object.keys(resultData.data));
+        console.log('exerciseData.data keys:', Object.keys(exerciseData.data));
+        
         // Enhance question results with original exercise data
-        const enhancedQuestionResults = resultData.data.questionResults?.map((qResult: any) => {
-          const originalQuestion = exerciseData.data.questions?.find((q: any) => q.id === qResult.questionId);
-          return {
-            ...qResult,
-            questionText: originalQuestion?.question || qResult.questionText || '',
-            questionImage: originalQuestion?.questionImage || qResult.questionImage || null,
-            options: originalQuestion?.options || qResult.options || [],
-            ttsAudioUrl: originalQuestion?.ttsAudioUrl || null,
-            // Ensure we have the full question data
-            originalQuestion: originalQuestion
-          };
-        }) || [];
+        const questionResults = resultData.data.questionResults || [];
+        const questions = exerciseData.data.questions || [];
+        
+        console.log('questionResults length:', questionResults.length);
+        console.log('questions length:', questions.length);
+        console.log('questionResults type:', typeof questionResults);
+        console.log('questions type:', typeof questions);
+        
+        let enhancedQuestionResults = [];
+        try {
+          enhancedQuestionResults = questionResults.map((qResult: any) => {
+            const originalQuestion = questions.find((q: any) => q.id === qResult.questionId);
+            return {
+              ...qResult,
+              questionText: originalQuestion?.question || qResult.questionText || '',
+              questionImage: originalQuestion?.questionImage || qResult.questionImage || null,
+              options: originalQuestion?.options || qResult.options || [],
+              ttsAudioUrl: originalQuestion?.ttsAudioUrl || null,
+              // Ensure we have the full question data
+              originalQuestion: originalQuestion
+            };
+          });
+          console.log('Successfully enhanced question results:', enhancedQuestionResults.length);
+        } catch (error) {
+          console.error('Error enhancing question results:', error);
+          console.log('questionResults:', questionResults);
+          console.log('questions:', questions);
+          // Fallback to empty array
+          enhancedQuestionResults = [];
+        }
         
         setSelectedResult({
           ...task,
@@ -539,48 +576,84 @@ export default function ParentDashboard() {
             performanceLevel: performanceData.data.performanceMetrics.performanceLevel
           });
         } else {
-          // Calculate class averages including per-question averages
-          await calculateClassAverages(resultData.data, exerciseData.data);
-          
-          // Calculate comprehensive performance metrics and ranking
-          await calculatePerformanceMetrics(resultData.data, exerciseData.data);
+          try {
+            console.log('Starting calculateClassAverages...');
+            // Calculate class averages including per-question averages
+            await calculateClassAverages(resultData.data, exerciseData.data);
+            console.log('calculateClassAverages completed successfully');
+            
+            console.log('Starting calculatePerformanceMetrics...');
+            // Calculate comprehensive performance metrics and ranking
+            await calculatePerformanceMetrics(resultData.data, exerciseData.data);
+            console.log('calculatePerformanceMetrics completed successfully');
+        } catch (error) {
+          console.error('Error calculating performance metrics:', error);
+          console.log('Error stack:', (error as Error).stack);
+            // Continue without performance metrics
+          }
         }
         
-        // Generate Gemini analysis
-        await generateGeminiAnalysis({
-          ...resultData.data,
-          questionResults: enhancedQuestionResults
-        });
+        // Generate analysis (try Gemini first, fallback to direct interpretation)
+        try {
+          console.log('Starting generateGeminiAnalysis...');
+          await generateGeminiAnalysis({
+            ...resultData.data,
+            questionResults: enhancedQuestionResults
+          });
+          console.log('generateGeminiAnalysis completed successfully');
+        } catch (error) {
+          console.error('Error generating Gemini analysis, using direct interpretation:', error);
+          console.log('Error stack:', (error as Error).stack);
+          try {
+            console.log('Starting generateDirectAnalysis...');
+            // Fallback to direct interpretation
+            await generateDirectAnalysis({
+              ...resultData.data,
+              questionResults: enhancedQuestionResults
+            });
+            console.log('generateDirectAnalysis completed successfully');
+          } catch (directError) {
+            console.error('Error in generateDirectAnalysis:', directError);
+            console.log('Direct error stack:', (directError as Error).stack);
+          }
+        }
+      } else {
+        console.log('Missing data - resultData:', !!resultData.data, 'exerciseData:', !!exerciseData.data);
+        Alert.alert('Data Not Found', 'Unable to load exercise results. The data may not be available yet.');
+        setShowQuestionResult(false);
       }
     } catch (error) {
       console.error('Failed to load question result:', error);
       Alert.alert('Error', 'Failed to load exercise results. Please try again.');
+      setShowQuestionResult(false);
     } finally {
+      clearTimeout(loadingTimeout);
       setLoadingAnalysis(false);
+      console.log('Loading analysis completed, state cleared');
     }
   };
 
   // Helper function to calculate individual student metrics
   const calculateStudentMetrics = (resultData: any) => {
     const questionResults = resultData.questionResults || [];
-    const totalQuestions = questionResults.length;
+    const totalQuestions = questionResults.length || 1; // Prevent division by zero
     
     // Calculate efficiency score (lower attempts and time = higher score)
     const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
     const totalTime = resultData.totalTimeSpent || 0;
-    const avgAttemptsPerQuestion = totalAttempts / totalQuestions;
-    const avgTimePerQuestion = totalTime / totalQuestions;
+    const avgAttemptsPerQuestion = totalQuestions > 0 ? totalAttempts / totalQuestions : 0;
+    const avgTimePerQuestion = totalQuestions > 0 ? totalTime / totalQuestions : 0;
     
     // Calculate consistency score (how consistent performance is across questions)
-    const attemptVariance = questionResults.reduce((sum: number, q: any) => {
+    const attemptVariance = totalQuestions > 0 ? questionResults.reduce((sum: number, q: any) => {
       const deviation = Math.abs((q.attempts || 1) - avgAttemptsPerQuestion);
       return sum + (deviation * deviation);
-    }, 0) / totalQuestions;
+    }, 0) / totalQuestions : 0;
     
-    const timeVariance = questionResults.reduce((sum: number, q: any) => {
+    const timeVariance = totalQuestions > 0 ? questionResults.reduce((sum: number, q: any) => {
       const deviation = Math.abs((q.timeSpent || 0) - avgTimePerQuestion);
       return sum + (deviation * deviation);
-    }, 0) / totalQuestions;
+    }, 0) / totalQuestions : 0;
     
     // Calculate mastery score based on actual performance
     const correctAnswers = questionResults.length; // All questions are correct since student completed
@@ -645,39 +718,66 @@ export default function ParentDashboard() {
   // Calculate comprehensive performance metrics for class ranking
   const calculatePerformanceMetrics = async (resultData: any, exerciseData: any) => {
     try {
+      console.log('calculatePerformanceMetrics: Starting with resultData keys:', Object.keys(resultData || {}));
+      console.log('calculatePerformanceMetrics: Starting with exerciseData keys:', Object.keys(exerciseData || {}));
+      
       const allResults = await readData('/ExerciseResults');
-      if (!allResults.data) return;
+      if (!allResults.data) {
+        console.log('calculatePerformanceMetrics: No allResults.data available');
+        return;
+      }
 
       const results = Object.values(allResults.data) as any[];
-      const sameExerciseResults = results.filter((result: any) =>
-        result.exerciseId === resultData.exerciseId &&
-        result.classId === resultData.classId &&
-        result.parentId !== resultData.parentId // Exclude current student's result
-      );
+      console.log('calculatePerformanceMetrics: Total results found:', results.length);
+      
+      const sameExerciseResults = results.filter((result: any) => {
+        // Handle new structure: get exerciseId from nested object
+        const resultExerciseId = result.exerciseInfo?.exerciseId || result.exerciseId;
+        const resultClassId = result.assignmentMetadata?.classId || result.classId;
+        const resultParentId = result.studentInfo?.studentId || result.parentId;
+        
+        return resultExerciseId === resultData.exerciseId &&
+               resultClassId === resultData.classId &&
+               resultParentId !== resultData.parentId; // Exclude current student's result
+      });
 
-      if (sameExerciseResults.length === 0) return;
+      console.log('calculatePerformanceMetrics: Same exercise results found:', sameExerciseResults.length);
+      if (sameExerciseResults.length === 0) {
+        console.log('calculatePerformanceMetrics: No same exercise results, returning early');
+        return;
+      }
 
       // Calculate performance metrics for each student
-      const studentMetrics = sameExerciseResults.map((result: any) => {
-        const questionResults = result.questionResults || [];
-        const totalQuestions = questionResults.length;
+      console.log('calculatePerformanceMetrics: Starting to process sameExerciseResults');
+      console.log('calculatePerformanceMetrics: sameExerciseResults type:', typeof sameExerciseResults);
+      console.log('calculatePerformanceMetrics: sameExerciseResults is array:', Array.isArray(sameExerciseResults));
+      
+      let studentMetrics: any[] = [];
+      try {
+        studentMetrics = sameExerciseResults.map((result: any, index: number) => {
+          console.log(`calculatePerformanceMetrics: Processing result ${index + 1}/${sameExerciseResults.length}`);
+          console.log('calculatePerformanceMetrics: Result keys:', Object.keys(result || {}));
+          
+          const questionResults = result.questionResults || [];
+          console.log('calculatePerformanceMetrics: questionResults length:', questionResults.length);
+          const totalQuestions = questionResults.length || 1; // Prevent division by zero
         
         // Calculate efficiency score (lower attempts and time = higher score)
         const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
         const totalTime = result.totalTimeSpent || 0;
-        const avgAttemptsPerQuestion = totalAttempts / totalQuestions;
-        const avgTimePerQuestion = totalTime / totalQuestions;
+        const avgAttemptsPerQuestion = totalQuestions > 0 ? totalAttempts / totalQuestions : 0;
+        const avgTimePerQuestion = totalQuestions > 0 ? totalTime / totalQuestions : 0;
         
         // Calculate consistency score (how consistent performance is across questions)
-        const attemptVariance = questionResults.reduce((sum: number, q: any) => {
+        const attemptVariance = totalQuestions > 0 ? questionResults.reduce((sum: number, q: any) => {
           const deviation = Math.abs((q.attempts || 1) - avgAttemptsPerQuestion);
           return sum + (deviation * deviation);
-        }, 0) / totalQuestions;
+        }, 0) / totalQuestions : 0;
         
-        const timeVariance = questionResults.reduce((sum: number, q: any) => {
+        const timeVariance = totalQuestions > 0 ? questionResults.reduce((sum: number, q: any) => {
           const deviation = Math.abs((q.timeSpent || 0) - avgTimePerQuestion);
           return sum + (deviation * deviation);
-        }, 0) / totalQuestions;
+        }, 0) / totalQuestions : 0;
         
         // Calculate mastery score based on actual performance
         const correctAnswers = questionResults.length; // All questions are correct since student completed
@@ -738,7 +838,14 @@ export default function ParentDashboard() {
           timeVariance,
           questionResults: questionResults
         };
-      });
+        });
+        console.log('calculatePerformanceMetrics: Successfully processed all results');
+      } catch (mapError) {
+        console.error('calculatePerformanceMetrics: Error in map operation:', mapError);
+        console.log('calculatePerformanceMetrics: Map error stack:', (mapError as Error).stack);
+        console.log('calculatePerformanceMetrics: sameExerciseResults at error:', sameExerciseResults);
+        studentMetrics = [];
+      }
 
       // Sort students by multiple criteria for more consistent ranking
       studentMetrics.sort((a, b) => {
@@ -837,11 +944,11 @@ export default function ParentDashboard() {
       // Save performance metrics to the database
       try {
         const performanceData = {
-          resultId: resultData.resultId,
-          exerciseId: resultData.exerciseId,
-          studentId: resultData.studentId,
-          parentId: resultData.parentId,
-          classId: resultData.classId,
+          resultId: resultData.exerciseResultId || resultData.resultId,
+          exerciseId: resultData.exerciseInfo?.exerciseId || resultData.exerciseId,
+          studentId: resultData.studentInfo?.studentId || resultData.studentId,
+          parentId: resultData.assignmentMetadata?.parentId || resultData.parentId,
+          classId: resultData.assignmentMetadata?.classId || resultData.classId,
           performanceMetrics: {
             overallScore: currentStudent.overallScore,
             efficiencyScore: currentStudent.efficiencyScore,
@@ -869,12 +976,14 @@ export default function ParentDashboard() {
 
         // Save to PerformanceMetrics table
         await writeData(`/PerformanceMetrics/${resultData.resultId}`, performanceData);
+        console.log('calculatePerformanceMetrics: Performance metrics saved successfully');
       } catch (error) {
         console.error('Failed to save performance metrics:', error);
+        console.log('calculatePerformanceMetrics: Save error stack:', (error as Error).stack);
       }
-
     } catch (error) {
-      console.error('Failed to calculate performance metrics:', error);
+      console.error('calculatePerformanceMetrics: Error in function:', error);
+      console.log('calculatePerformanceMetrics: Error stack:', (error as Error).stack);
     }
   };
 
@@ -924,39 +1033,65 @@ export default function ParentDashboard() {
 
   const calculateClassAverages = async (resultData: any, exerciseData: any) => {
     try {
+      console.log('calculateClassAverages called with:', { 
+        resultDataKeys: Object.keys(resultData || {}), 
+        exerciseDataKeys: Object.keys(exerciseData || {}) 
+      });
+      
       // Get all results for the same exercise and class (excluding current student for comparison)
       const allResults = await readData('/ExerciseResults');
       if (allResults.data) {
         const results = Object.values(allResults.data) as any[];
-        const sameExerciseResults = results.filter((result: any) => 
-          result.exerciseId === resultData.exerciseId && 
-          result.classId === resultData.classId &&
-          result.parentId !== resultData.parentId // Exclude current student's result
-        );
+        console.log('Total results found:', results.length);
+        
+        const sameExerciseResults = results.filter((result: any) => {
+          // Handle new structure: get exerciseId from nested object
+          const resultExerciseId = result.exerciseInfo?.exerciseId || result.exerciseId;
+          const resultClassId = result.assignmentMetadata?.classId || result.classId;
+          const resultParentId = result.studentInfo?.studentId || result.parentId;
+          
+          return resultExerciseId === resultData.exerciseId && 
+                 resultClassId === resultData.classId &&
+                 resultParentId !== resultData.parentId; // Exclude current student's result
+        });
+        
+        console.log('Same exercise results found:', sameExerciseResults.length);
         
         if (sameExerciseResults.length > 0) {
-          const totalTime = sameExerciseResults.reduce((sum, r) => sum + (r.totalTimeSpent || 0), 0);
+          const totalTime = (sameExerciseResults || []).reduce((sum, r) => sum + (r.totalTimeSpent || 0), 0);
           const avgTime = totalTime / sameExerciseResults.length;
-          const avgScore = sameExerciseResults.reduce((sum, r) => sum + (r.scorePercentage || 0), 0) / sameExerciseResults.length;
+          const avgScore = (sameExerciseResults || []).reduce((sum, r) => sum + (r.scorePercentage || 0), 0) / sameExerciseResults.length;
           
           // Calculate per-question averages
           const questionAverages: any = {};
-          if (exerciseData.questions) {
-            exerciseData.questions.forEach((question: any, index: number) => {
-              const questionTimes = sameExerciseResults
-                .map(r => r.questionResults?.find((qr: any) => qr.questionId === question.id)?.timeSpent || 0)
-                .filter(time => time > 0);
-              
-              const questionAttempts = sameExerciseResults
-                .map(r => r.questionResults?.find((qr: any) => qr.questionId === question.id)?.attempts || 1)
-                .filter(attempts => attempts > 0);
-              
-              questionAverages[question.id] = {
-                averageTime: questionTimes.length > 0 ? questionTimes.reduce((sum, time) => sum + time, 0) / questionTimes.length : 0,
-                averageAttempts: questionAttempts.length > 0 ? questionAttempts.reduce((sum, attempts) => sum + attempts, 0) / questionAttempts.length : 1,
-                totalStudents: questionTimes.length
-              };
-            });
+          const questions = exerciseData.questions || [];
+          console.log('Questions to process:', questions.length);
+          
+          if (questions.length > 0) {
+            try {
+              questions.forEach((question: any, index: number) => {
+                console.log(`Processing question ${index + 1}/${questions.length}:`, question.id);
+                
+                const questionTimes = (sameExerciseResults || [])
+                  .map(r => (r.questionResults || []).find((qr: any) => qr.questionId === question.id)?.timeSpent || 0)
+                  .filter(time => time > 0);
+                
+                const questionAttempts = (sameExerciseResults || [])
+                  .map(r => (r.questionResults || []).find((qr: any) => qr.questionId === question.id)?.attempts || 1)
+                  .filter(attempts => attempts > 0);
+                
+                questionAverages[question.id] = {
+                  averageTime: questionTimes.length > 0 ? questionTimes.reduce((sum, time) => sum + time, 0) / questionTimes.length : 0,
+                  averageAttempts: questionAttempts.length > 0 ? questionAttempts.reduce((sum, attempts) => sum + attempts, 0) / questionAttempts.length : 1,
+                  totalStudents: questionTimes.length
+                };
+              });
+              console.log('Successfully processed all questions');
+            } catch (error) {
+              console.error('Error processing questions in calculateClassAverages:', error);
+              console.log('Questions data:', questions);
+              console.log('SameExerciseResults data:', sameExerciseResults);
+            }
           }
           
           setClassAverages({
@@ -965,10 +1100,235 @@ export default function ParentDashboard() {
             totalStudents: sameExerciseResults.length,
             questionAverages: questionAverages
           });
+          console.log('Class averages set successfully');
+        } else {
+          console.log('No same exercise results found, skipping class averages');
         }
+      } else {
+        console.log('No allResults.data available');
       }
     } catch (error) {
       console.error('Failed to calculate class averages:', error);
+      console.log('Error details:', error);
+    }
+  };
+
+  // Generate direct analysis without Gemini dependency
+  const generateDirectAnalysis = async (resultData: any) => {
+    try {
+      console.log('Generating direct analysis for result:', resultData.exerciseResultId);
+      
+      const questionResults = resultData.questionResults || [];
+      const resultsSummary = resultData.resultsSummary || {};
+      const studentInfo = resultData.studentInfo || {};
+      const exerciseInfo = resultData.exerciseInfo || {};
+      
+      // Calculate basic metrics
+      const totalQuestions = questionResults.length;
+      const totalCorrect = resultsSummary.totalCorrect || 0;
+      const totalIncorrect = resultsSummary.totalIncorrect || 0;
+      const score = resultsSummary.meanPercentageScore || 0;
+      const totalAttempts = resultsSummary.totalAttempts || 0;
+      const totalTime = resultsSummary.totalTimeSpentSeconds || 0;
+      const avgAttemptsPerQuestion = resultsSummary.meanAttemptsPerItem || 0;
+      const avgTimePerQuestion = resultsSummary.meanTimePerItemSeconds || 0;
+      
+      // Determine performance level
+      let performanceLevel = 'Needs Improvement';
+      let performanceDescription = 'The student needs more practice with this topic.';
+      let grade = 'D';
+      
+      if (score >= 90) {
+        performanceLevel = 'Excellent';
+        performanceDescription = 'Outstanding performance! The student has mastered this topic.';
+        grade = 'A+';
+      } else if (score >= 80) {
+        performanceLevel = 'Very Good';
+        performanceDescription = 'Great work! The student shows strong understanding.';
+        grade = 'A';
+      } else if (score >= 70) {
+        performanceLevel = 'Good';
+        performanceDescription = 'Good progress! The student understands most concepts.';
+        grade = 'B';
+      } else if (score >= 60) {
+        performanceLevel = 'Satisfactory';
+        performanceDescription = 'The student is making progress but needs more practice.';
+        grade = 'C';
+      } else {
+        performanceLevel = 'Needs Improvement';
+        performanceDescription = 'The student needs additional support and practice.';
+        grade = 'D';
+      }
+      
+      // Calculate efficiency
+      const efficiencyScore = avgAttemptsPerQuestion <= 1.5 ? 90 : 
+                            avgAttemptsPerQuestion <= 2.5 ? 70 : 
+                            avgAttemptsPerQuestion <= 3.5 ? 50 : 30;
+      
+      // Calculate consistency
+      const correctRate = totalQuestions > 0 ? (totalCorrect / totalQuestions) * 100 : 0;
+      const consistencyScore = correctRate >= 80 ? 90 : 
+                              correctRate >= 60 ? 70 : 
+                              correctRate >= 40 ? 50 : 30;
+      
+      // Generate insights
+      const insights = {
+        accuracy: {
+          score: Math.round(correctRate),
+          description: correctRate >= 80 ? 'High accuracy' : 
+                      correctRate >= 60 ? 'Good accuracy' : 
+                      correctRate >= 40 ? 'Fair accuracy' : 'Low accuracy'
+        },
+        efficiency: {
+          score: efficiencyScore,
+          description: efficiencyScore >= 80 ? 'Very efficient' : 
+                      efficiencyScore >= 60 ? 'Efficient' : 
+                      efficiencyScore >= 40 ? 'Moderately efficient' : 'Needs improvement'
+        },
+        consistency: {
+          score: consistencyScore,
+          description: consistencyScore >= 80 ? 'Very consistent' : 
+                      consistencyScore >= 60 ? 'Consistent' : 
+                      consistencyScore >= 40 ? 'Somewhat consistent' : 'Inconsistent'
+        },
+        learningPace: {
+          score: Math.round((efficiencyScore + consistencyScore) / 2),
+          description: avgTimePerQuestion <= 10 ? 'Fast learner' : 
+                      avgTimePerQuestion <= 20 ? 'Normal pace' : 'Takes time to process'
+        }
+      };
+      
+      // Generate strengths and areas for improvement
+      const strengths = [];
+      const areasForImprovement = [];
+      
+      if (correctRate >= 80) {
+        strengths.push('Shows strong understanding of the concepts');
+      }
+      if (efficiencyScore >= 80) {
+        strengths.push('Completes tasks efficiently');
+      }
+      if (consistencyScore >= 80) {
+        strengths.push('Performs consistently across questions');
+      }
+      if (avgTimePerQuestion <= 15) {
+        strengths.push('Works at a good pace');
+      }
+      
+      if (correctRate < 70) {
+        areasForImprovement.push('Needs more practice with basic concepts');
+      }
+      if (efficiencyScore < 60) {
+        areasForImprovement.push('Should work on reducing attempts per question');
+      }
+      if (consistencyScore < 60) {
+        areasForImprovement.push('Needs to maintain consistent performance');
+      }
+      if (avgTimePerQuestion > 25) {
+        areasForImprovement.push('Should work on improving speed');
+      }
+      
+      // Generate recommendations
+      const recommendations = {
+        immediate: [
+          'Review incorrect answers with the student',
+          'Practice similar problems together',
+          'Encourage the student to take their time'
+        ],
+        shortTerm: [
+          'Continue practicing this topic daily',
+          'Use visual aids to reinforce concepts',
+          'Break down complex problems into smaller steps'
+        ],
+        longTerm: [
+          'Build a strong foundation in basic math skills',
+          'Develop problem-solving strategies',
+          'Encourage independent thinking and confidence'
+        ]
+      };
+      
+      // Generate parent guidance
+      const parentGuidance = {
+        howToHelp: [
+          'Create a quiet study space for practice',
+          'Use everyday objects to practice math concepts',
+          'Celebrate small victories and progress',
+          'Be patient and encouraging'
+        ],
+        whatToWatch: [
+          'Signs of frustration or giving up',
+          'Difficulty understanding basic concepts',
+          'Need for additional support or resources'
+        ],
+        whenToSeekHelp: [
+          'If the student consistently struggles with basic concepts',
+          'When frustration affects their confidence',
+          'If progress stalls for more than a week'
+        ]
+      };
+      
+      // Generate next steps
+      const nextSteps = [
+        'Review the exercise results together',
+        'Practice similar problems at home',
+        'Set small, achievable goals for improvement',
+        'Schedule regular practice sessions',
+        'Monitor progress and adjust approach as needed'
+      ];
+      
+      // Create the analysis object
+      const analysis = {
+        overallPerformance: {
+          level: performanceLevel,
+          description: performanceDescription,
+          score: Math.round(score),
+          grade: grade,
+          interpretation: `${studentInfo.name || 'The student'} scored ${Math.round(score)}% on ${exerciseInfo.title || 'this exercise'}. ${performanceDescription}`
+        },
+        performanceInsights: insights,
+        strengths: strengths.length > 0 ? strengths : ['Shows effort and determination'],
+        areasForImprovement: areasForImprovement.length > 0 ? areasForImprovement : ['Continue practicing regularly'],
+        learningRecommendations: recommendations,
+        parentGuidance: parentGuidance,
+        nextSteps: nextSteps,
+        callToAction: 'Work together to build confidence and improve math skills through regular practice and positive reinforcement.'
+      };
+      
+      console.log('Direct analysis generated successfully');
+      setGeminiAnalysis(analysis);
+      
+    } catch (error) {
+      console.error('Error generating direct analysis:', error);
+      // Set a basic fallback analysis
+      setGeminiAnalysis({
+        overallPerformance: {
+          level: 'Analysis Unavailable',
+          description: 'Unable to generate detailed analysis at this time.',
+          score: 0,
+          grade: 'N/A',
+          interpretation: 'Please try again later or contact support if the issue persists.'
+        },
+        performanceInsights: {
+          accuracy: { score: 0, description: 'Data unavailable' },
+          efficiency: { score: 0, description: 'Data unavailable' },
+          consistency: { score: 0, description: 'Data unavailable' },
+          learningPace: { score: 0, description: 'Data unavailable' }
+        },
+        strengths: ['Student completed the exercise'],
+        areasForImprovement: ['Continue practicing regularly'],
+        learningRecommendations: {
+          immediate: ['Review the exercise together'],
+          shortTerm: ['Practice similar problems'],
+          longTerm: ['Build strong math foundations']
+        },
+        parentGuidance: {
+          howToHelp: ['Encourage regular practice'],
+          whatToWatch: ['Monitor progress'],
+          whenToSeekHelp: ['If concerns arise']
+        },
+        nextSteps: ['Continue learning and practicing'],
+        callToAction: 'Keep encouraging your child\'s learning journey!'
+      });
     }
   };
 
@@ -976,22 +1336,49 @@ export default function ParentDashboard() {
     try {
       const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
       
-      // Prepare performance data for analysis
+      // Prepare comprehensive performance data for analysis
       const performanceData = {
-        score: resultData.scorePercentage,
-        totalQuestions: resultData.totalQuestions,
-        timeSpent: resultData.totalTimeSpent,
+        score: resultData.scorePercentage || resultData.resultsSummary?.meanPercentageScore || 0,
+        totalQuestions: resultData.totalQuestions || resultData.resultsSummary?.totalItems || 0,
+        timeSpent: resultData.totalTimeSpent || resultData.resultsSummary?.totalTimeSpentSeconds * 1000 || 0,
         questionResults: resultData.questionResults || [],
         classAverage: classAverages?.averageScore || 0,
-        classAverageTime: classAverages?.averageTime || 0
+        classAverageTime: classAverages?.averageTime || 0,
+        // Additional data from new structure
+        totalAttempts: resultData.resultsSummary?.totalAttempts || 0,
+        totalCorrect: resultData.resultsSummary?.totalCorrect || 0,
+        totalIncorrect: resultData.resultsSummary?.totalIncorrect || 0,
+        meanAttemptsPerItem: resultData.resultsSummary?.meanAttemptsPerItem || 0,
+        meanTimePerItemSeconds: resultData.resultsSummary?.meanTimePerItemSeconds || 0,
+        remarks: resultData.resultsSummary?.remarks || 'No remarks',
+        // Student and exercise info
+        studentName: resultData.studentInfo?.name || 'Student',
+        exerciseTitle: resultData.exerciseInfo?.title || 'Math Exercise',
+        exerciseCategory: resultData.exerciseInfo?.category || 'Mathematics',
+        // Device and session info
+        deviceInfo: resultData.deviceInfo || {},
+        exerciseSession: resultData.exerciseSession || {}
       };
       
       const prompt = `You are an expert educational psychologist analyzing a Grade 1 student's math exercise performance. Provide a comprehensive analysis in JSON format.
 
-STUDENT PERFORMANCE DATA:
-- Score: ${performanceData.score}%
+STUDENT INFORMATION:
+- Student Name: ${performanceData.studentName}
+- Exercise: ${performanceData.exerciseTitle}
+- Category: ${performanceData.exerciseCategory}
+
+PERFORMANCE SUMMARY:
+- Overall Score: ${performanceData.score}%
 - Total Questions: ${performanceData.totalQuestions}
-- Time Spent: ${Math.round(performanceData.timeSpent / 1000)} seconds
+- Questions Correct: ${performanceData.totalCorrect}
+- Questions Incorrect: ${performanceData.totalIncorrect}
+- Total Time Spent: ${Math.round(performanceData.timeSpent / 1000)} seconds
+- Total Attempts: ${performanceData.totalAttempts}
+- Average Attempts per Question: ${performanceData.meanAttemptsPerItem.toFixed(1)}
+- Average Time per Question: ${performanceData.meanTimePerItemSeconds.toFixed(1)} seconds
+- Performance Remarks: ${performanceData.remarks}
+
+CLASS COMPARISON:
 - Class Average Score: ${Math.round(performanceData.classAverage)}%
 - Class Average Time: ${Math.round(performanceData.classAverageTime / 1000)} seconds
 
@@ -1015,7 +1402,7 @@ CLASS COMPARISON:
 ` : '- Performance ranking data not available'}
 
 DETAILED QUESTION RESULTS:
-${performanceData.questionResults.map((q: any, idx: number) => {
+${(performanceData.questionResults || []).map((q: any, idx: number) => {
   const classAvg = classAverages?.questionAverages?.[q.questionId];
   return `Question ${q.questionNumber}: ${q.isCorrect ? 'CORRECT' : 'INCORRECT'} (${q.attempts} attempts, ${Math.round(q.timeSpent / 1000)}s)
    Question Text: "${q.questionText}"
@@ -1049,11 +1436,10 @@ ${performanceData.questionResults.map((q: any, idx: number) => {
    - Time to First Answer: ${Math.round((q.timeBreakdown?.timeToFirstAnswer || 0) / 1000)}s
    - Time to Final Answer: ${Math.round((q.timeBreakdown?.timeToFinalAnswer || 0) / 1000)}s
    
-   ${q.attemptHistory && q.attemptHistory.length > 0 ? `Attempt History: ${q.attemptHistory.map((a: any) => `"${a.answer || 'blank'}" (${Math.round((a.timeSpent || 0) / 1000)}s, ${a.attemptType}, ${a.questionPhase}, confidence: ${a.confidence})`).join(', ')}` : ''}
+   ${q.attemptHistory && q.attemptHistory.length > 0 ? `Attempt History: ${(q.attemptHistory || []).map((a: any) => `"${a.answer || 'blank'}" (${Math.round((a.timeSpent || 0) / 1000)}s, ${a.attemptType}, ${a.questionPhase}, confidence: ${a.confidence})`).join(', ')}` : ''}
    ${classAvg ? `Class Average Time: ${Math.round(classAvg.averageTime / 1000)}s, Class Average Attempts: ${Math.round(classAvg.averageAttempts)}` : ''}`;
 }).join('\n\n')}
 
-IMPORTANT: Since the student completed the exercise, ALL questions were answered correctly. Analyze the specific questions and provide tailored recommendations.
 
 ANALYSIS REQUIREMENTS:
 1. Analyze the student's performance ranking and percentile within the class
@@ -1074,13 +1460,21 @@ Please provide analysis in this JSON format:
   "overallPerformance": {
     "level": "excellent|good|needs_improvement|struggling",
     "description": "Brief overall assessment in Tagalog for parents based on specific questions answered",
-    "score": ${performanceData.score}
+    "score": ${performanceData.score},
+    "grade": "A+|A|B+|B|C+|C|D|F",
+    "interpretation": "Detailed interpretation of what this score means for the student's learning"
+  },
+  "performanceInsights": {
+    "accuracy": "Analysis of how many questions were answered correctly",
+    "efficiency": "Analysis of time spent vs attempts made",
+    "consistency": "Analysis of performance across different question types",
+    "learningPace": "Analysis of how quickly the student learns and applies concepts"
   },
   "strengths": [
-    "List 2-3 specific strengths in Tagalog based on the actual questions (e.g., 'Mahusay sa pagbibilang ng mga numero', 'Mabilis sa pag-identify ng mga hugis')"
+    "List 3-4 specific strengths in Tagalog based on the actual questions (e.g., 'Mahusay sa pagbibilang ng mga numero', 'Mabilis sa pag-identify ng mga hugis')"
   ],
-  "weaknesses": [
-    "List 2-3 specific areas needing improvement in Tagalog based on actual questions (e.g., 'Kailangan pa ng practice sa subtraction', 'Medyo mabagal sa word problems')"
+  "areasForImprovement": [
+    "List 3-4 specific areas needing improvement in Tagalog based on actual questions (e.g., 'Kailangan pa ng practice sa subtraction', 'Medyo mabagal sa word problems')"
   ],
   "questionAnalysis": [
     "For each question that took longer or more attempts, provide specific analysis in Tagalog"
@@ -1089,12 +1483,36 @@ Please provide analysis in this JSON format:
     "studentTime": ${Math.round(performanceData.timeSpent / 1000)},
     "classAverage": ${Math.round(performanceData.classAverageTime / 1000)},
     "comparison": "faster|slower|similar",
-    "description": "Analysis of time performance in Tagalog based on specific questions"
+    "description": "Analysis of time performance in Tagalog based on specific questions",
+    "efficiency": "How efficiently the student used their time"
   },
-  "recommendations": [
-    "List 3-4 specific, actionable recommendations in Tagalog for parents based on the actual questions (e.g., 'Practice more addition with objects', 'Work on reading word problems slowly')"
+  "learningRecommendations": {
+    "immediate": [
+      "2-3 immediate actions parents can take this week"
+    ],
+    "shortTerm": [
+      "2-3 goals for the next month"
+    ],
+    "longTerm": [
+      "2-3 long-term learning objectives"
+    ]
+  },
+  "parentGuidance": {
+    "howToHelp": [
+      "Specific ways parents can support their child's learning"
+    ],
+    "whatToWatch": [
+      "Signs to look for that indicate progress or struggles"
+    ],
+    "whenToSeekHelp": [
+      "When parents should consider additional support"
+    ]
+  },
+  "nextSteps": [
+    "Specific next steps for continued learning and improvement"
   ],
-  "encouragement": "A positive, encouraging message in Tagalog for the student based on their specific performance"
+  "encouragement": "A positive, encouraging message in Tagalog for the student based on their specific performance",
+  "callToAction": "A clear call to action for parents on what to do next"
 }
 
 Focus on:
@@ -1254,6 +1672,33 @@ Focus on:
     return null;
   };
 
+  // Helper function to get student ID
+  const getStudentId = async (): Promise<string | null> => {
+    if (!parentData?.parentKey) return null;
+    
+    try {
+      // Resolve parent key to actual parent ID
+      const parentIdResult = await readData(`/parentLoginCodes/${parentData.parentKey}`);
+      if (parentIdResult.data) {
+        const actualParentId = parentIdResult.data;
+        
+        // Find the student associated with this parent
+        const studentsData = await readData('/students');
+        if (studentsData.data) {
+          const student = Object.values(studentsData.data).find((s: any) => s.parentId === actualParentId) as any;
+          if (student && student.studentId) {
+            console.log('Found student ID:', student.studentId);
+            return student.studentId;
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Could not get student ID:', error);
+    }
+    
+    return null;
+  };
+
   const loadAssignedExercises = async () => {
     try {
       // Get the student's class information
@@ -1353,8 +1798,17 @@ Focus on:
     try {
       setTasksLoading(true);
       
-      // Get student class ID for filtering
-      const studentClassId = await getStudentClassId();
+      // Get student class ID and student ID for filtering
+      const [studentClassId, studentId] = await Promise.all([
+        getStudentClassId(),
+        getStudentId()
+      ]);
+      
+      if (!studentClassId || !studentId) {
+        console.warn('Could not determine student class or student ID, skipping task loading');
+        setTasksLoading(false);
+        return;
+      }
       
       // Load tasks, assigned exercises, and exercise results
       const [tasksResult, assignedExercises, exerciseResultsResult] = await Promise.all([
@@ -1411,11 +1865,33 @@ Focus on:
             let completionData = null;
             if (exerciseResultsResult.data) {
               const results = Object.values(exerciseResultsResult.data) as any[];
-              completionData = results.find((result: any) => 
-                result.exerciseId === assignedExercise.exerciseId && 
-                result.assignedExerciseId === assignedExercise.id &&
-                result.parentId === parentData?.parentKey
-              );
+              console.log(`Looking for completion data for exercise ${assignedExercise.exerciseId}, assignment ${assignedExercise.id}`);
+              console.log(`Available results:`, results.length);
+              
+              completionData = results.find((result: any) => {
+                // Handle new structure: get exerciseId and assignedExerciseId from nested objects
+                const resultExerciseId = result.exerciseInfo?.exerciseId || result.exerciseId;
+                const resultAssignedExerciseId = result.assignmentMetadata?.assignedExerciseId || result.assignedExerciseId;
+                
+                // Check if this result matches the assigned exercise
+                const exerciseMatches = resultExerciseId === assignedExercise.exerciseId;
+                const assignmentMatches = resultAssignedExerciseId === assignedExercise.id;
+                
+                // Check parent/student matching (try multiple approaches for compatibility)
+                const parentMatches = result.parentId === parentData?.parentKey || 
+                                    result.studentInfo?.studentId === studentId ||
+                                    result.assignedExerciseId === assignedExercise.id;
+                
+                console.log(`Result ${result.exerciseResultId || result.resultId}: exerciseMatches=${exerciseMatches}, assignmentMatches=${assignmentMatches}, parentMatches=${parentMatches}`);
+                
+                return exerciseMatches && assignmentMatches && parentMatches;
+              });
+              
+              if (completionData) {
+                console.log(`Found completion data:`, completionData.exerciseResultId || completionData.resultId);
+              } else {
+                console.log(`No completion data found for exercise ${assignedExercise.exerciseId}`);
+              }
             }
             
             return {
@@ -1435,9 +1911,9 @@ Focus on:
               points: assignedExercise.exercise!.questionCount,
               isAssignedExercise: true,
               assignedExerciseId: assignedExercise.id,
-              score: completionData?.scorePercentage,
-              timeSpent: completionData?.totalTimeSpent,
-              resultId: completionData?.resultId,
+              score: completionData?.resultsSummary?.meanPercentageScore || completionData?.scorePercentage,
+              timeSpent: completionData?.resultsSummary?.totalTimeSpentSeconds ? completionData.resultsSummary.totalTimeSpentSeconds * 1000 : completionData?.totalTimeSpent,
+              resultId: completionData?.exerciseResultId || completionData?.resultId,
               quarter: assignedExercise.quarter
             };
           })
@@ -2297,8 +2773,16 @@ Focus on:
                 showsVerticalScrollIndicator={false}
               >
                 {(() => {
-                  // Group tasks by quarter
-                  const filteredTasks = tasks.filter(t => t.isAssignedExercise);
+                  // Filter out completed tasks and group by quarter
+                  const filteredTasks = tasks.filter(t => t.isAssignedExercise && t.status !== 'completed');
+                  
+                  // Sort tasks by deadline (nearest first)
+                  const sortedTasks = filteredTasks.sort((a, b) => {
+                    const dateA = new Date(a.dueDate);
+                    const dateB = new Date(b.dueDate);
+                    return dateA.getTime() - dateB.getTime();
+                  });
+                  
                   const groupedByQuarter: Record<string, Task[]> = {
                     'Quarter 1': [],
                     'Quarter 2': [],
@@ -2307,7 +2791,7 @@ Focus on:
                     'No Quarter': [],
                   };
                   
-                  filteredTasks.forEach((task) => {
+                  sortedTasks.forEach((task) => {
                     const quarter = task.quarter || 'No Quarter';
                     groupedByQuarter[quarter].push(task);
                   });
@@ -2327,7 +2811,14 @@ Focus on:
                           </Text>
                         </View>
                       </View>
+                      {groupedByQuarter[quarter].length > 1 && (
+                        <View style={styles.sortIndicator}>
+                          <MaterialIcons name="sort" size={14} color="#64748b" />
+                          <Text style={styles.sortIndicatorText}>Sorted by nearest deadline</Text>
+                        </View>
+                      )}
                       {groupedByQuarter[quarter].map((task, index) => {
+                        const isFirstTask = index === 0;
                   const isOverdue = new Date(task.dueDate) < new Date() && task.status !== 'completed';
                   const dueDate = new Date(task.dueDate);
                   const now = new Date();
@@ -2335,25 +2826,46 @@ Focus on:
                   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
                   
                   let dueText = '';
-                  let dueIcon: 'event' | 'warning' | 'schedule' = 'event';
+                  let dueIcon: 'event' | 'warning' | 'schedule' | 'alarm' | 'access-time' = 'event';
                   let dueColor = '#3b82f6';
+                  let dueBgColor = '#eff6ff';
+                  let dueBorderColor = '#dbeafe';
+                  let isUrgent = false;
                   
                   if (diffDays < 0) {
                     dueText = `Overdue by ${Math.abs(diffDays)} day${Math.abs(diffDays) !== 1 ? 's' : ''}`;
-                    dueIcon = 'warning';
+                    dueIcon = 'alarm';
                     dueColor = '#ef4444';
+                    dueBgColor = '#fef2f2';
+                    dueBorderColor = '#fecaca';
+                    isUrgent = true;
                   } else if (diffDays === 0) {
                     dueText = 'Due today';
-                    dueIcon = 'schedule';
+                    dueIcon = 'access-time';
                     dueColor = '#f59e0b';
+                    dueBgColor = '#fffbeb';
+                    dueBorderColor = '#fed7aa';
+                    isUrgent = true;
                   } else if (diffDays === 1) {
                     dueText = 'Due tomorrow';
+                    dueIcon = 'access-time';
+                    dueColor = '#f59e0b';
+                    dueBgColor = '#fffbeb';
+                    dueBorderColor = '#fed7aa';
+                    isUrgent = true;
+                  } else if (diffDays <= 3) {
+                    dueText = `Due in ${diffDays} days`;
                     dueIcon = 'schedule';
                     dueColor = '#f59e0b';
+                    dueBgColor = '#fffbeb';
+                    dueBorderColor = '#fed7aa';
+                    isUrgent = true;
                   } else if (diffDays <= 7) {
                     dueText = `Due in ${diffDays} days`;
                     dueIcon = 'event';
                     dueColor = '#3b82f6';
+                    dueBgColor = '#eff6ff';
+                    dueBorderColor = '#dbeafe';
                   } else {
                     dueText = dueDate.toLocaleDateString('en-US', { 
                       month: 'short', 
@@ -2362,6 +2874,8 @@ Focus on:
                     });
                     dueIcon = 'event';
                     dueColor = '#64748b';
+                    dueBgColor = '#f8fafc';
+                    dueBorderColor = '#e2e8f0';
                   }
 
                   const getStatusInfo = (status: Task['status']) => {
@@ -2407,7 +2921,8 @@ Focus on:
                     <View key={task.id} style={[
                       styles.enhancedTaskItem,
                       isOverdue && styles.overdueTaskItem,
-                      task.status === 'completed' && styles.completedTaskItem
+                      task.status === 'completed' && styles.completedTaskItem,
+                      isFirstTask && styles.firstTaskItem
                     ]}>
                       {/* Task Header with Icon and Status */}
                       <View style={styles.taskHeaderRow}>
@@ -2451,14 +2966,40 @@ Focus on:
                       {/* Task Meta Information */}
                       <View style={styles.taskMetaContainer}>
                         <View style={styles.taskMetaRow}>
-                          <View style={[styles.metaIconContainer, { backgroundColor: `${dueColor}15` }]}>
+                          <View style={[
+                            styles.metaIconContainer, 
+                            { 
+                              backgroundColor: dueBgColor,
+                              borderColor: dueBorderColor,
+                              borderWidth: 1
+                            }
+                          ]}>
                             <MaterialIcons name={dueIcon} size={16} color={dueColor} />
                           </View>
-                          <View style={styles.dueDateContainer}>
-                            <Text style={[styles.metaText, { color: dueColor }]}>
-                              {dueText}
-                            </Text>
-                            <Text style={styles.dueDateTimeText}>
+                          <View style={[
+                            styles.dueDateContainer,
+                            isUrgent && styles.urgentDueDateContainer
+                          ]}>
+                            <View style={styles.dueDateHeader}>
+                              <Text style={[
+                                styles.metaText, 
+                                { color: dueColor },
+                                isUrgent && styles.urgentDueText
+                              ]}>
+                                {dueText}
+                              </Text>
+                              {isUrgent && (
+                                <View style={[styles.urgentBadge, { backgroundColor: dueColor }]}>
+                                  <Text style={styles.urgentBadgeText}>
+                                    {diffDays < 0 ? 'OVERDUE' : 'URGENT'}
+                                  </Text>
+                                </View>
+                              )}
+                            </View>
+                            <Text style={[
+                              styles.dueDateTimeText,
+                              isUrgent && styles.urgentDueDateTimeText
+                            ]}>
                               {dueDate.toLocaleDateString('en-US', {
                                 weekday: 'long',
                                 year: 'numeric',
@@ -2552,14 +3093,14 @@ Focus on:
                 <View style={styles.historyStatItem}>
                   <MaterialCommunityIcons name="check-circle" size={16} color="#10b981" />
                   <Text style={styles.historyStatText}>
-                    {tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length} Completed
+                    {tasks?.filter(t => t.isAssignedExercise && t.status === 'completed').length || 0} Completed
                   </Text>
                 </View>
                 <View style={styles.historyStatDivider} />
                 <View style={styles.historyStatItem}>
                   <MaterialCommunityIcons name="clock-outline" size={16} color="#3b82f6" />
                   <Text style={styles.historyStatText}>
-                    {tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length > 0 ? 
+                    {tasks?.filter(t => t.isAssignedExercise && t.status === 'completed').length > 0 ? 
                       Math.round(tasks.filter(t => t.isAssignedExercise && t.status === 'completed')
                         .reduce((sum, t) => sum + (t.timeSpent || 0), 0) / 1000) : 0}s Total Time
                   </Text>
@@ -2567,13 +3108,16 @@ Focus on:
               </View>
             </View>
             {tasksLoading ? (
-              <View style={styles.loadingContainer}>
-                <MaterialCommunityIcons name="loading" size={32} color="#3b82f6" />
-                <Text style={styles.loadingText}>Loading history...</Text>
+              <View style={styles.historyLoadingContainer}>
+                <View style={styles.historyLoadingCard}>
+                  <MaterialCommunityIcons name="loading" size={32} color="#3b82f6" />
+                  <Text style={styles.historyLoadingText}>Loading activity history...</Text>
+                  <Text style={styles.historyLoadingSubtext}>Fetching your completed exercises</Text>
+                </View>
               </View>
-            ) : tasks.filter(t => t.isAssignedExercise && t.status === 'completed').length > 0 ? (
+            ) : tasks?.filter(t => t.isAssignedExercise && t.status === 'completed').length > 0 ? (
               <ScrollView style={styles.historyScrollView} showsVerticalScrollIndicator={false}>
-                {tasks
+                {(tasks || [])
                   .filter(t => t.isAssignedExercise && t.status === 'completed')
                   .sort((a, b) => new Date(b.completedAt || b.createdAt).getTime() - new Date(a.completedAt || a.createdAt).getTime())
                   .map((task, index) => {
@@ -2607,32 +3151,81 @@ Focus on:
                     return (
                       <TouchableOpacity 
                         key={task.id} 
-                        style={styles.historyItem}
+                        style={[
+                          styles.historyItem,
+                          task.resultId && styles.historyItemClickable
+                        ]}
                         onPress={() => {
+                          console.log('History item clicked:', task);
+                          console.log('Task resultId:', task.resultId);
+                          console.log('Task status:', task.status);
+                          console.log('Task isAssignedExercise:', task.isAssignedExercise);
+                          
                           // Navigate to results view if resultId exists
                           if (task.resultId) {
+                            console.log('Calling handleShowQuestionResult...');
                             handleShowQuestionResult(task);
+                          } else {
+                            console.log('No resultId found for this task');
+                            Alert.alert('No Results', 'No results available for this activity yet.');
                           }
                         }}
+                        activeOpacity={task.resultId ? 0.7 : 1}
                       >
-                        <View style={styles.historyIcon}>
-                          <MaterialCommunityIcons 
-                            name="check-circle" 
-                            size={20} 
-                            color={task.score && task.score >= 80 ? "#10b981" : task.score && task.score >= 60 ? "#f59e0b" : "#ef4444"} 
-                          />
+                        <View style={styles.historyItemContent}>
+                          <View style={styles.historyItemLeft}>
+                            <View style={[
+                              styles.historyIcon,
+                              { backgroundColor: task.score && task.score >= 80 ? "#dcfce7" : 
+                                               task.score && task.score >= 60 ? "#fef3c7" : "#fef2f2" }
+                            ]}>
+                              <MaterialCommunityIcons 
+                                name="check-circle" 
+                                size={24} 
+                                color={task.score && task.score >= 80 ? "#10b981" : 
+                                       task.score && task.score >= 60 ? "#f59e0b" : "#ef4444"} 
+                              />
+                            </View>
+                            <View style={styles.historyItemInfo}>
+                              <Text style={styles.historyTitle}>{task.title}</Text>
+                              <View style={styles.historyMetaRow}>
+                                <View style={styles.historyMetaItem}>
+                                  <MaterialIcons name="quiz" size={14} color="#64748b" />
+                                  <Text style={styles.historyMetaText}>{task.points || 0} questions</Text>
+                                </View>
+                                {task.timeSpent && (
+                                  <View style={styles.historyMetaItem}>
+                                    <MaterialIcons name="schedule" size={14} color="#64748b" />
+                                    <Text style={styles.historyMetaText}>{formatTime(task.timeSpent)}</Text>
+                                  </View>
+                                )}
+                                {task.score && (
+                                  <View style={styles.historyMetaItem}>
+                                    <MaterialIcons name="star" size={14} color="#f59e0b" />
+                                    <Text style={styles.historyMetaText}>{task.score}%</Text>
+                                  </View>
+                                )}
+                              </View>
+                              <Text style={styles.historyDate}>{timeAgo}</Text>
+                            </View>
+                          </View>
+                          <View style={styles.historyItemRight}>
+                            {task.resultId ? (
+                              <View style={styles.resultAvailableIndicator}>
+                                <View style={styles.resultBadge}>
+                                  <MaterialIcons name="visibility" size={16} color="#ffffff" />
+                                </View>
+                                <MaterialIcons name="chevron-right" size={20} color="#9ca3af" />
+                              </View>
+                            ) : (
+                              <View style={styles.noResultIndicator}>
+                                <View style={styles.noResultBadge}>
+                                  <MaterialIcons name="visibility-off" size={16} color="#9ca3af" />
+                                </View>
+                              </View>
+                            )}
+                          </View>
                         </View>
-                        <View style={styles.historyContent}>
-                          <Text style={styles.historyTitle}>{task.title}</Text>
-                          <Text style={styles.historyDescription}>
-                            {task.score ? `Scored ${task.score}%` : 'Completed'} • {task.points || 0} questions
-                            {task.timeSpent && ` • ${formatTime(task.timeSpent)}`}
-                          </Text>
-                          <Text style={styles.historyDate}>{timeAgo}</Text>
-                        </View>
-                        {task.resultId && (
-                          <MaterialIcons name="chevron-right" size={20} color="#9ca3af" />
-                        )}
                       </TouchableOpacity>
                     );
                   })}
@@ -2678,6 +3271,43 @@ Focus on:
               </View>
             ) : (
               <ScrollView style={styles.questionResultContent} showsVerticalScrollIndicator={false}>
+                {/* Student & Exercise Info */}
+                <View style={styles.infoCard}>
+                  <Text style={styles.cardTitle}>Activity Information</Text>
+                  <View style={styles.infoRow}>
+                    <MaterialIcons name="person" size={20} color="#3b82f6" />
+                    <Text style={styles.infoLabel}>Student:</Text>
+                    <Text style={styles.infoValue}>{selectedResult.studentInfo?.name || 'Student'}</Text>
+                  </View>
+                  <View style={styles.infoRow}>
+                    <MaterialIcons name="book" size={20} color="#3b82f6" />
+                    <Text style={styles.infoLabel}>Exercise:</Text>
+                    <Text style={styles.infoValue}>{selectedResult.exerciseInfo?.title || selectedResult.title}</Text>
+                  </View>
+                  <View style={styles.infoRow}>
+                    <MaterialIcons name="category" size={20} color="#3b82f6" />
+                    <Text style={styles.infoLabel}>Category:</Text>
+                    <Text style={styles.infoValue}>{selectedResult.exerciseInfo?.category || 'Mathematics'}</Text>
+                  </View>
+                  <View style={styles.infoRow}>
+                    <MaterialIcons name="schedule" size={20} color="#3b82f6" />
+                    <Text style={styles.infoLabel}>Completed:</Text>
+                    <Text style={styles.infoValue}>
+                      {selectedResult.exerciseSession?.completedAt ? 
+                        new Date(selectedResult.exerciseSession.completedAt).toLocaleDateString('en-US', {
+                          weekday: 'long',
+                          year: 'numeric',
+                          month: 'long',
+                          day: 'numeric',
+                          hour: 'numeric',
+                          minute: '2-digit'
+                        }) : 
+                        'Unknown'
+                      }
+                    </Text>
+                  </View>
+                </View>
+
                 {/* Performance Overview */}
                 <View style={styles.performanceCard}>
                   <Text style={styles.cardTitle}>Performance Overview</Text>
@@ -2687,7 +3317,7 @@ Focus on:
                         (() => {
                           return Math.round(performanceRanking.currentStudent.overallScore);
                         })() : 
-                        (selectedResult.scorePercentage || 0)
+                        (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0)
                       }
                     </Text>
                     <Text style={styles.scoreLabel}>
@@ -2701,22 +3331,57 @@ Focus on:
                   </View>
                   <View style={styles.statsRow}>
                     <View style={styles.statItem}>
-                      <Text style={styles.statValue}>{selectedResult.totalQuestions || 0}</Text>
+                      <Text style={styles.statValue}>{selectedResult.totalQuestions || selectedResult.resultsSummary?.totalItems || 0}</Text>
                       <Text style={styles.statLabel}>Questions</Text>
                     </View>
                     <View style={styles.statItem}>
-                      <Text style={styles.statValue}>{Math.round((selectedResult.totalTimeSpent || 0) / 1000)}s</Text>
+                      <Text style={styles.statValue}>
+                        {Math.round((selectedResult.totalTimeSpent || selectedResult.resultsSummary?.totalTimeSpentSeconds * 1000 || 0) / 1000)}s
+                      </Text>
                       <Text style={styles.statLabel}>Time Spent</Text>
                     </View>
                     <View style={styles.statItem}>
                       <Text style={styles.statValue}>
-                        {selectedResult.questionResults ? 
-                          selectedResult.questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0) : 0
+                        {selectedResult.resultsSummary?.totalAttempts || 
+                         (selectedResult.questionResults ? 
+                           selectedResult.questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0) : 0)
                         }
                       </Text>
                       <Text style={styles.statLabel}>Total Attempts</Text>
                     </View>
                   </View>
+                  
+                  {/* Additional Performance Metrics */}
+                  {selectedResult.resultsSummary && (
+                    <View style={styles.additionalMetrics}>
+                      <View style={styles.metricRow}>
+                        <Text style={styles.additionalMetricLabel}>Correct Answers:</Text>
+                        <Text style={styles.additionalMetricValue}>{selectedResult.resultsSummary.totalCorrect}</Text>
+                      </View>
+                      <View style={styles.metricRow}>
+                        <Text style={styles.additionalMetricLabel}>Incorrect Answers:</Text>
+                        <Text style={styles.additionalMetricValue}>{selectedResult.resultsSummary.totalIncorrect}</Text>
+                      </View>
+                      <View style={styles.metricRow}>
+                        <Text style={styles.additionalMetricLabel}>Avg Attempts per Question:</Text>
+                        <Text style={styles.additionalMetricValue}>{selectedResult.resultsSummary.meanAttemptsPerItem.toFixed(1)}</Text>
+                      </View>
+                      <View style={styles.metricRow}>
+                        <Text style={styles.additionalMetricLabel}>Avg Time per Question:</Text>
+                        <Text style={styles.additionalMetricValue}>{selectedResult.resultsSummary.meanTimePerItemSeconds.toFixed(1)}s</Text>
+                      </View>
+                      <View style={styles.metricRow}>
+                        <Text style={styles.additionalMetricLabel}>Performance Remarks:</Text>
+                        <Text style={[styles.additionalMetricValue, { 
+                          color: selectedResult.resultsSummary.remarks === 'Excellent' ? '#10b981' :
+                                 selectedResult.resultsSummary.remarks === 'Good' ? '#3b82f6' :
+                                 selectedResult.resultsSummary.remarks === 'Needs Improvement' ? '#f59e0b' : '#ef4444'
+                        }]}>
+                          {selectedResult.resultsSummary.remarks}
+                        </Text>
+                      </View>
+                    </View>
+                  )}
                 </View>
 
                 {/* Performance Ranking */}
@@ -2830,28 +3495,69 @@ Focus on:
                     <View style={styles.analysisCard}>
                       <Text style={styles.cardTitle}>Performance Analysis</Text>
                       <View style={styles.performanceLevel}>
-                        <Text style={[
-                          styles.performanceLevelText,
-                          { color: 
-                            geminiAnalysis.overallPerformance.level === 'excellent' ? '#10b981' :
-                            geminiAnalysis.overallPerformance.level === 'good' ? '#3b82f6' :
-                            geminiAnalysis.overallPerformance.level === 'needs_improvement' ? '#f59e0b' : '#ef4444'
-                          }
-                        ]}>
-                          {geminiAnalysis.overallPerformance.level === 'excellent' ? 'MAHUSAY' :
-                           geminiAnalysis.overallPerformance.level === 'good' ? 'MABUTI' :
-                           geminiAnalysis.overallPerformance.level === 'needs_improvement' ? 'KAYLANGAN PAGBUTIHIN' : 'MAHIRAP'}
-                        </Text>
+                        <View style={styles.performanceHeader}>
+                          <Text style={[
+                            styles.performanceLevelText,
+                            { color: 
+                              geminiAnalysis.overallPerformance.level === 'excellent' ? '#10b981' :
+                              geminiAnalysis.overallPerformance.level === 'good' ? '#3b82f6' :
+                              geminiAnalysis.overallPerformance.level === 'needs_improvement' ? '#f59e0b' : '#ef4444'
+                            }
+                          ]}>
+                            {geminiAnalysis.overallPerformance.level === 'excellent' ? 'MAHUSAY' :
+                             geminiAnalysis.overallPerformance.level === 'good' ? 'MABUTI' :
+                             geminiAnalysis.overallPerformance.level === 'needs_improvement' ? 'KAYLANGAN PAGBUTIHIN' : 'MAHIRAP'}
+                          </Text>
+                          {geminiAnalysis.overallPerformance.grade && (
+                            <View style={[styles.gradeBadge, { 
+                              backgroundColor: geminiAnalysis.overallPerformance.level === 'excellent' ? '#10b981' :
+                                             geminiAnalysis.overallPerformance.level === 'good' ? '#3b82f6' :
+                                             geminiAnalysis.overallPerformance.level === 'needs_improvement' ? '#f59e0b' : '#ef4444'
+                            }]}>
+                              <Text style={styles.gradeText}>{geminiAnalysis.overallPerformance.grade}</Text>
+                            </View>
+                          )}
+                        </View>
                         <Text style={styles.performanceDescription}>
                           {geminiAnalysis.overallPerformance.description}
                         </Text>
+                        {geminiAnalysis.overallPerformance.interpretation && (
+                          <Text style={styles.performanceInterpretation}>
+                            {geminiAnalysis.overallPerformance.interpretation}
+                          </Text>
+                        )}
+                      </View>
+                    </View>
+
+                    {/* Simple Performance Summary */}
+                    <View style={styles.analysisCard}>
+                      <Text style={styles.cardTitle}>Performance Summary</Text>
+                      <View style={styles.simpleSummary}>
+                        <View style={styles.simpleSummaryItem}>
+                          <MaterialIcons name="check-circle" size={20} color="#10b981" />
+                          <Text style={styles.summaryText}>
+                            {selectedResult.resultsSummary?.totalCorrect || 0} out of {selectedResult.resultsSummary?.totalItems || 0} questions correct
+                          </Text>
+                        </View>
+                        <View style={styles.simpleSummaryItem}>
+                          <MaterialIcons name="schedule" size={20} color="#3b82f6" />
+                          <Text style={styles.summaryText}>
+                            Completed in {Math.round((selectedResult.resultsSummary?.totalTimeSpentSeconds || 0))} seconds
+                          </Text>
+                        </View>
+                        <View style={styles.simpleSummaryItem}>
+                          <MaterialIcons name="repeat" size={20} color="#f59e0b" />
+                          <Text style={styles.summaryText}>
+                            Average {Math.round((selectedResult.resultsSummary?.meanAttemptsPerItem || 0) * 10) / 10} attempts per question
+                          </Text>
+                        </View>
                       </View>
                     </View>
 
                     {/* Strengths */}
                     <View style={styles.analysisCard}>
                       <Text style={styles.cardTitle}>Strengths</Text>
-                      {geminiAnalysis.strengths.map((strength: string, index: number) => (
+                      {(geminiAnalysis.strengths || []).map((strength: string, index: number) => (
                         <View key={index} style={styles.analysisItem}>
                           <MaterialCommunityIcons name="check-circle" size={16} color="#10b981" />
                           <Text style={styles.analysisText}>{strength}</Text>
@@ -2862,7 +3568,7 @@ Focus on:
                     {/* Areas for Improvement */}
                     <View style={styles.analysisCard}>
                       <Text style={styles.cardTitle}>Areas for Improvement</Text>
-                      {geminiAnalysis.weaknesses.map((weakness: string, index: number) => (
+                      {(geminiAnalysis.areasForImprovement || geminiAnalysis.weaknesses || []).map((weakness: string, index: number) => (
                         <View key={index} style={styles.analysisItem}>
                           <MaterialCommunityIcons name="alert-circle" size={16} color="#f59e0b" />
                           <Text style={styles.analysisText}>{weakness}</Text>
@@ -2870,51 +3576,55 @@ Focus on:
                       ))}
                     </View>
 
-                    {/* Question-Specific Analysis */}
-                    {geminiAnalysis.questionAnalysis && Array.isArray(geminiAnalysis.questionAnalysis) && geminiAnalysis.questionAnalysis.length > 0 && (
-                      <View style={styles.analysisCard}>
-                        <Text style={styles.cardTitle}>Question Analysis</Text>
-                        {geminiAnalysis.questionAnalysis.map((analysis: any, index: number) => (
-                          <View key={index} style={styles.analysisItem}>
-                            <MaterialCommunityIcons name="help-circle" size={16} color="#3b82f6" />
-                            <Text style={styles.analysisText}>
-                              {typeof analysis === 'string' ? analysis : 
-                               typeof analysis === 'object' && analysis.analysis ? analysis.analysis :
-                               typeof analysis === 'object' && analysis.questionNumber ? 
-                                 `Tanong ${analysis.questionNumber}: ${analysis.analysis || analysis.concept || JSON.stringify(analysis)}` :
-                               JSON.stringify(analysis)}
-                            </Text>
+                    {/* Simple Recommendations */}
+                    <View style={styles.analysisCard}>
+                      <Text style={styles.cardTitle}>What You Can Do</Text>
+                      <View style={styles.simpleRecommendations}>
+                        {(geminiAnalysis.learningRecommendations?.immediate || []).slice(0, 3).map((rec: string, index: number) => (
+                          <View key={index} style={styles.recommendationItem}>
+                            <MaterialIcons name="lightbulb" size={16} color="#3b82f6" />
+                            <Text style={styles.recommendationText}>{rec}</Text>
                           </View>
                         ))}
                       </View>
-                    )}
+                    </View>
 
-                    {/* Time Analysis */}
-                    {geminiAnalysis.timeAnalysis && (
+                    {/* Simple Parent Tips */}
+                    <View style={styles.analysisCard}>
+                      <Text style={styles.cardTitle}>How to Help Your Child</Text>
+                      <View style={styles.simpleGuidance}>
+                        {(geminiAnalysis.parentGuidance?.howToHelp || []).slice(0, 2).map((guidance: string, index: number) => (
+                          <View key={index} style={styles.guidanceItem}>
+                            <MaterialIcons name="support" size={16} color="#10b981" />
+                            <Text style={styles.guidanceText}>{guidance}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+
+                    {/* Simple Next Steps */}
+                    {geminiAnalysis.nextSteps && geminiAnalysis.nextSteps.length > 0 && (
                       <View style={styles.analysisCard}>
-                        <Text style={styles.cardTitle}>Time Analysis</Text>
-                        <Text style={styles.timeAnalysisText}>
-                          {geminiAnalysis.timeAnalysis.description}
-                        </Text>
-                        <View style={styles.timeComparison}>
-                          <Text style={styles.timeComparisonText}>
-                            You: {geminiAnalysis.timeAnalysis.studentTime}s | 
-                            Class: {geminiAnalysis.timeAnalysis.classAverage}s
-                          </Text>
+                        <Text style={styles.cardTitle}>Next Steps</Text>
+                        <View style={styles.simpleNextSteps}>
+                          {(geminiAnalysis.nextSteps || []).slice(0, 3).map((step: string, index: number) => (
+                            <View key={index} style={styles.nextStepItem}>
+                              <Text style={styles.nextStepNumber}>{index + 1}.</Text>
+                              <Text style={styles.nextStepText}>{step}</Text>
+                            </View>
+                          ))}
                         </View>
                       </View>
                     )}
 
-                    {/* Recommendations */}
-                    <View style={styles.analysisCard}>
-                      <Text style={styles.cardTitle}>Recommendations</Text>
-                      {geminiAnalysis.recommendations.map((recommendation: string, index: number) => (
-                        <View key={index} style={styles.analysisItem}>
-                          <MaterialCommunityIcons name="lightbulb" size={16} color="#3b82f6" />
-                          <Text style={styles.analysisText}>{recommendation}</Text>
-                        </View>
-                      ))}
-                    </View>
+                    {/* Call to Action */}
+                    {geminiAnalysis.callToAction && (
+                      <View style={styles.callToActionCard}>
+                        <MaterialIcons name="campaign" size={24} color="#3b82f6" />
+                        <Text style={styles.callToActionText}>{geminiAnalysis.callToAction}</Text>
+                      </View>
+                    )}
+
 
                     {/* Encouragement */}
                     <View style={styles.encouragementCard}>
@@ -2926,114 +3636,6 @@ Focus on:
                   </>
                 )}
 
-                {/* Question Details */}
-                {selectedResult.questionResults && selectedResult.questionResults.length > 0 && (
-                  <View style={styles.questionDetailsCard}>
-                    <Text style={styles.cardTitle}>Question Details</Text>
-                    {selectedResult.questionResults.map((question: any, index: number) => (
-                      <View key={question.questionId} style={styles.questionDetailItem}>
-                        <View style={styles.questionDetailHeader}>
-                          <Text style={styles.questionNumber}>Tanong {question.questionNumber}</Text>
-                          <View style={[
-                            styles.questionStatus,
-                            { backgroundColor: '#10b981' } // All questions are correct since student completed
-                          ]}>
-                            <Text style={styles.questionStatusText}>
-                              TAMA
-                            </Text>
-                          </View>
-                        </View>
-                        
-                        {/* Show question text */}
-                        {question.questionText && (
-                          <View style={styles.questionInfo}>
-                            <Text style={styles.questionInfoLabel}>Tanong:</Text>
-                            <Text style={styles.questionInfoValue}>"{question.questionText}"</Text>
-                          </View>
-                        )}
-                        
-                        {/* Show question image if available */}
-                        {question.questionImage && (
-                          <View style={styles.questionInfo}>
-                            <Text style={styles.questionInfoLabel}>Larawan:</Text>
-                            <Text style={styles.questionInfoValue}>May kasamang larawan</Text>
-                          </View>
-                        )}
-                        
-                        {/* Show question type */}
-                        {question.questionType && (
-                          <View style={styles.questionInfo}>
-                            <Text style={styles.questionInfoLabel}>Uri ng Tanong:</Text>
-                            <Text style={styles.questionInfoValue}>{question.questionType}</Text>
-                          </View>
-                        )}
-                        
-                        {/* Show options if available */}
-                        {question.options && question.options.length > 0 && (
-                          <View style={styles.questionInfo}>
-                            <Text style={styles.questionInfoLabel}>Mga Pagpipilian:</Text>
-                            <Text style={styles.questionInfoValue}>{question.options.join(', ')}</Text>
-                          </View>
-                        )}
-                        
-                        {/* Show attempted answers history */}
-                        {question.attemptHistory && question.attemptHistory.length > 0 && (
-                          <View style={styles.questionInfo}>
-                            <Text style={styles.questionInfoLabel}>Attempted Answers:</Text>
-                            <Text style={styles.questionInfoValue}>
-                              {question.attemptHistory.map((attempt: any, idx: number) => {
-                                const timeSpent = attempt.timeSpent || 0;
-                                const timeInSeconds = Math.round(timeSpent / 1000);
-                                return `"${attempt.answer || 'blank'}" (${timeInSeconds}s)`;
-                              }).join(', ')}
-                            </Text>
-                          </View>
-                        )}
-                        
-                        {question.studentAnswer && (
-                          <View style={styles.questionInfo}>
-                            <Text style={styles.questionInfoLabel}>Huling Sagot:</Text>
-                            <Text style={styles.questionInfoValue}>"{question.studentAnswer}"</Text>
-                          </View>
-                        )}
-                        
-                        {question.correctAnswer && (
-                          <View style={styles.questionInfo}>
-                            <Text style={styles.questionInfoLabel}>Tamang Sagot:</Text>
-                            <Text style={styles.questionInfoValue}>"{question.correctAnswer}"</Text>
-                          </View>
-                        )}
-                        
-                        <View style={styles.questionDetailStats}>
-                          <Text style={styles.questionDetailStat}>
-                            Pagsubok: {question.attempts || 1}
-                          </Text>
-                          <Text style={styles.questionDetailStat}>
-                            Oras: {Math.round((question.timeSpent || 0) / 1000)}s
-                          </Text>
-                        </View>
-                        
-                        {/* Show class averages for this question */}
-                        {classAverages?.questionAverages?.[question.questionId] && (
-                          <View style={styles.questionClassAverages}>
-                            <Text style={styles.questionClassAveragesTitle}>Average Class Performance:</Text>
-                            <View style={styles.questionClassAveragesRow}>
-                              <Text style={styles.questionClassAveragesText}>
-                                Average Time: {Math.round(classAverages.questionAverages[question.questionId].averageTime / 1000)}s
-                              </Text>
-                              <Text style={styles.questionClassAveragesText}>
-                                Average Attempts: {Math.round(classAverages.questionAverages[question.questionId].averageAttempts)}
-                              </Text>
-                            </View>
-                            <Text style={styles.questionClassAveragesNote}>
-                              Batay sa {classAverages.questionAverages[question.questionId].totalStudents} mag-aaral
-                            </Text>
-                          </View>
-                        )}
-                      </View>
-                    ))}
-                  </View>
-                )}
               </ScrollView>
             )}
           </View>
@@ -4240,6 +4842,23 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#ffffff',
   },
+  sortIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    marginBottom: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#f8fafc',
+    borderRadius: 6,
+    alignSelf: 'flex-start',
+  },
+  sortIndicatorText: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '500',
+    marginLeft: 4,
+  },
   tasksHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -4360,8 +4979,15 @@ const styles = StyleSheet.create({
   completedTaskItem: {
     opacity: 0.8,
     backgroundColor: '#f8fafc',
-    borderColor: '#e2e8f0',
-    marginBottom: 12,
+  },
+  firstTaskItem: {
+    borderWidth: 2,
+    borderColor: '#3b82f6',
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 6,
   },
   taskHeaderRow: {
     flexDirection: 'row',
@@ -4460,6 +5086,41 @@ const styles = StyleSheet.create({
   },
   dueDateContainer: {
     flex: 1,
+  },
+  dueDateHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 2,
+  },
+  urgentDueDateContainer: {
+    backgroundColor: '#fffbeb',
+    borderRadius: 8,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: '#fed7aa',
+  },
+  urgentDueText: {
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  urgentBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: 8,
+  },
+  urgentBadgeText: {
+    color: '#ffffff',
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  urgentDueDateTimeText: {
+    fontSize: 11,
+    color: '#f59e0b',
+    fontWeight: '600',
+    marginTop: 2,
   },
   dueDateTimeText: {
     fontSize: 11,
@@ -4883,27 +5544,85 @@ const styles = StyleSheet.create({
     borderColor: '#e2e8f0',
   },
   historyItem: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+  },
+  historyItemClickable: {
+    borderColor: '#e2e8f0',
+  },
+  historyItemContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
+    padding: 16,
+  },
+  historyItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  historyItemInfo: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  historyItemRight: {
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   historyIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#f8fafc',
-    justifyContent: 'center',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: 'center',
-    marginRight: 16,
+    justifyContent: 'center',
+  },
+  historyMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    marginBottom: 6,
+  },
+  historyMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  historyMetaText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginLeft: 4,
+    fontWeight: '500',
+  },
+  resultBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  noResultBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#f3f4f6',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   historyContent: {
     flex: 1,
   },
   historyTitle: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
     color: '#1e293b',
     marginBottom: 4,
   },
@@ -5385,6 +6104,35 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     fontWeight: '500',
   },
+  simpleSummary: {
+    gap: 12,
+  },
+  simpleSummaryItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 8,
+  },
+  summaryText: {
+    fontSize: 16,
+    color: '#374151',
+    flex: 1,
+  },
+  simpleRecommendations: {
+    gap: 12,
+  },
+  simpleGuidance: {
+    gap: 12,
+  },
+  simpleNextSteps: {
+    gap: 12,
+  },
+  nextStepNumber: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#3b82f6',
+    marginRight: 8,
+  },
   questionDetailsCard: {
     backgroundColor: '#ffffff',
     borderRadius: 12,
@@ -5849,5 +6597,275 @@ const styles = StyleSheet.create({
   },
   alertButtonTextCancel: {
     color: '#ffffff',
+  },
+  // New comprehensive result display styles
+  infoCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  infoLabel: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '600',
+    marginLeft: 8,
+    marginRight: 8,
+    minWidth: 80,
+  },
+  infoValue: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '500',
+    flex: 1,
+  },
+  additionalMetrics: {
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+  metricRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  additionalMetricLabel: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  additionalMetricValue: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '600',
+  },
+  performanceHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  gradeBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  gradeText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  performanceInterpretation: {
+    fontSize: 13,
+    color: '#64748b',
+    fontStyle: 'italic',
+    marginTop: 8,
+    lineHeight: 18,
+  },
+  insightsCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  insightsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  insightItem: {
+    width: '48%',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 8,
+    alignItems: 'center',
+  },
+  insightLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '600',
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  insightText: {
+    fontSize: 11,
+    color: '#1e293b',
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  recommendationsCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  recommendationSection: {
+    marginBottom: 16,
+  },
+  recommendationSectionTitle: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  recommendationItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 6,
+  },
+  recommendationText: {
+    fontSize: 13,
+    color: '#374151',
+    marginLeft: 8,
+    flex: 1,
+    lineHeight: 18,
+  },
+  guidanceCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  guidanceSection: {
+    marginBottom: 16,
+  },
+  guidanceSectionTitle: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  guidanceItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 6,
+  },
+  guidanceText: {
+    fontSize: 13,
+    color: '#374151',
+    marginLeft: 8,
+    flex: 1,
+    lineHeight: 18,
+  },
+  nextStepsCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  nextStepItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  stepNumber: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  stepNumberText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  nextStepText: {
+    fontSize: 13,
+    color: '#374151',
+    flex: 1,
+    lineHeight: 18,
+  },
+  callToActionCard: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+  },
+  callToActionText: {
+    fontSize: 14,
+    color: '#1e40af',
+    fontWeight: '600',
+    marginLeft: 12,
+    flex: 1,
+    lineHeight: 20,
+  },
+  resultAvailableIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  noResultIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  historyLoadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  historyLoadingCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 32,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  historyLoadingText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginTop: 16,
+    marginBottom: 4,
+  },
+  historyLoadingSubtext: {
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
   },
 });

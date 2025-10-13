@@ -869,6 +869,7 @@ export default function CreateExercise() {
   const [exerciseCode, setExerciseCode] = useState('');
   const [exerciseCategory, setExerciseCategory] = useState('');
   const [timeLimitPerItem, setTimeLimitPerItem] = useState<number | null>(120); // Default 2 minutes (120 seconds)
+  const [maxAttemptsPerItem, setMaxAttemptsPerItem] = useState<number | null>(null); // null = unlimited attempts
   const [questions, setQuestions] = useState<Question[]>([]);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [showCustomCategoryModal, setShowCustomCategoryModal] = useState(false);
@@ -1286,6 +1287,7 @@ export default function CreateExercise() {
         setExerciseCode(data.exerciseCode || '');
         setExerciseCategory(data.category || '');
         setTimeLimitPerItem(data.timeLimitPerItem || 120);
+        setMaxAttemptsPerItem(data.maxAttemptsPerItem || null);
         // Migrate old order arrays to reorderItems structure
         const migratedQuestions = (data.questions || []).map((q: any) => {
           if (q.type === 're-order' && q.order && !q.reorderItems) {
@@ -4088,6 +4090,7 @@ Please respond with a JSON object in this exact format:
         exerciseCode: finalExerciseCode,
         category: exerciseCategory,
         timeLimitPerItem: timeLimitPerItem,
+        maxAttemptsPerItem: maxAttemptsPerItem,
         createdAt: new Date().toISOString(),
       };
       
@@ -6213,6 +6216,65 @@ Please respond with a JSON object in this exact format:
                 </View>
                 <Text style={styles.timeLimitHelperText}>
                   {timeLimitPerItem ? `${Math.floor(timeLimitPerItem / 60)}m ${timeLimitPerItem % 60}s` : 'No time limit'}
+                </Text>
+              </View>
+            )}
+          </View>
+          
+          {/* Attempt Limit Per Item */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Attempt Limit Per Item</Text>
+            <View style={styles.timeLimitContainer}>
+              <TouchableOpacity
+                style={[styles.timeLimitOption, maxAttemptsPerItem === null && styles.timeLimitOptionActive]}
+                onPress={() => setMaxAttemptsPerItem(null)}
+              >
+                <MaterialCommunityIcons name="infinity" size={20} color={maxAttemptsPerItem === null ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.timeLimitText, maxAttemptsPerItem === null && styles.timeLimitTextActive]}>Unlimited</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.timeLimitOption, maxAttemptsPerItem !== null && styles.timeLimitOptionActive]}
+                onPress={() => setMaxAttemptsPerItem(3)}
+              >
+                <MaterialCommunityIcons name="repeat" size={20} color={maxAttemptsPerItem !== null ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.timeLimitText, maxAttemptsPerItem !== null && styles.timeLimitTextActive]}>Set Limit</Text>
+              </TouchableOpacity>
+            </View>
+            
+            {maxAttemptsPerItem !== null && (
+              <View style={styles.timeLimitInputContainer}>
+                <Text style={styles.timeLimitInputLabel}>Maximum attempts per item</Text>
+                <View style={styles.timeLimitInputRow}>
+                  <TouchableOpacity
+                    style={styles.timeLimitButton}
+                    onPress={() => setMaxAttemptsPerItem(Math.max(1, maxAttemptsPerItem - 1))}
+                  >
+                    <AntDesign name="minus" size={16} color="#3b82f6" />
+                  </TouchableOpacity>
+                  <TextInput
+                    style={styles.timeLimitInput}
+                    value={maxAttemptsPerItem.toString()}
+                    onChangeText={(text) => {
+                      const value = parseInt(text);
+                      if (!isNaN(value) && value >= 1) {
+                        setMaxAttemptsPerItem(value);
+                      }
+                    }}
+                    keyboardType="numeric"
+                    placeholder="3"
+                  />
+                  <TouchableOpacity
+                    style={styles.timeLimitButton}
+                    onPress={() => setMaxAttemptsPerItem(Math.min(10, maxAttemptsPerItem + 1))}
+                  >
+                    <AntDesign name="plus" size={16} color="#3b82f6" />
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.timeLimitHelperText}>
+                  {maxAttemptsPerItem === 1 
+                    ? 'Students get only 1 attempt per question' 
+                    : `Students can try up to ${maxAttemptsPerItem} times per question`
+                  }
                 </Text>
               </View>
             )}

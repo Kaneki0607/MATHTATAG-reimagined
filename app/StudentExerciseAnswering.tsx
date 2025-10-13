@@ -1,10 +1,14 @@
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useIsFocused } from '@react-navigation/native';
 import { AudioSource, AudioStatus, createAudioPlayer } from 'expo-audio';
+import * as Haptics from 'expo-haptics';
 import { Image as ExpoImage } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
+// Note: expo-device and expo-network may need to be installed
+// import * as Device from 'expo-device';
+// import * as Network from 'expo-network';
 import { useEffect, useRef, useState } from 'react';
 import {
   Animated,
@@ -247,6 +251,7 @@ interface Exercise {
   originalAuthor?: string;
   originalExerciseId?: string;
   timeLimitPerItem?: number; // Time limit in seconds per question
+  maxAttemptsPerItem?: number | null; // Maximum attempts per question (null = unlimited)
 }
 
 interface StudentAnswer {
@@ -254,6 +259,110 @@ interface StudentAnswer {
   answer: string | string[] | {[key: string]: any};
   isCorrect?: boolean;
   timeSpent?: number;
+}
+
+// New interfaces for the restructured database format
+interface AssignmentMetadata {
+  assignmentId: string;
+  classId: string;
+  assignedAt: string;
+  deadline: string;
+  acceptLateSubmissions: boolean;
+  acceptingStatus: string;
+  isLateSubmission: boolean;
+}
+
+interface ExerciseInfo {
+  exerciseId: string;
+  title: string;
+  category: string;
+  description: string;
+  totalQuestions: number;
+  timeLimitPerItem?: number;
+}
+
+interface StudentInfo {
+  studentId: string;
+  name: string;
+  gradeSection: string;
+  sex: string;
+}
+
+interface DeviceInfo {
+  platform: string;
+  appVersion: string;
+  deviceModel: string;
+  networkType: string;
+}
+
+interface ExerciseSession {
+  startedAt: string;
+  completedAt: string;
+  totalDurationSeconds: number;
+  timestampSubmitted: number;
+}
+
+interface ResultsSummary {
+  totalItems: number;
+  totalAttempts: number;
+  totalCorrect: number;
+  totalIncorrect: number;
+  totalTimeSpentSeconds: number;
+  meanPercentageScore: number;
+  meanAttemptsPerItem: number;
+  meanTimePerItemSeconds: number;
+  score: number;
+  remarks: string;
+}
+
+interface AttemptHistory {
+  attemptNumber: number;
+  selectedAnswer: string;
+  isCorrect: boolean;
+  timeStamp: string;
+}
+
+interface QuestionResult {
+  questionNumber: number;
+  questionId: string;
+  questionText: string;
+  choices?: string[];
+  correctAnswer: string;
+  studentAnswer: string;
+  isCorrect: boolean;
+  attempts: number;
+  timeSpentSeconds: number;
+  ttsPlayed: boolean;
+  ttsPlayCount: number;
+  interactionTypes: string[];
+  attemptHistory: AttemptHistory[];
+}
+
+interface ExerciseResultData {
+  exerciseResultId: string;
+  assignedExerciseId: string;
+  assignmentMetadata: AssignmentMetadata;
+  exerciseInfo: ExerciseInfo;
+  studentInfo: StudentInfo;
+  deviceInfo: DeviceInfo;
+  exerciseSession: ExerciseSession;
+  resultsSummary: ResultsSummary;
+  questionResults: QuestionResult[];
+}
+
+// Resource preloading interfaces
+interface ResourceItem {
+  url: string;
+  type: 'image' | 'audio';
+  priority: 'high' | 'medium' | 'low';
+  questionId?: string;
+}
+
+interface PreloadResult {
+  success: boolean;
+  url: string;
+  error?: string;
+  loadTime: number;
 }
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
@@ -353,8 +462,145 @@ export default function StudentExerciseAnswering() {
   const lastAutoPlayedQuestionIdRef = useRef<string | null>(null);
   const currentTTSRef = useRef<any | null>(null);
 
+  // Session and device tracking for new database format
+  const [sessionStartTime, setSessionStartTime] = useState<string>('');
+  const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null);
+  const [studentInfo, setStudentInfo] = useState<StudentInfo | null>(null);
+
+  // Resource preloading state
+  const [isPreloadingResources, setIsPreloadingResources] = useState(false);
+  const [preloadProgress, setPreloadProgress] = useState(0);
+  const [preloadStatus, setPreloadStatus] = useState('');
+  const [preloadError, setPreloadError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [loadedResources, setLoadedResources] = useState<Set<string>>(new Set());
+  const [failedResources, setFailedResources] = useState<Set<string>>(new Set());
+  const [resourcesReady, setResourcesReady] = useState(false);
+  const [exerciseStarted, setExerciseStarted] = useState(false);
+  const [officialStartTime, setOfficialStartTime] = useState<number | null>(null);
+
+  // Animation states for loading screen
+  const [bounceAnim] = useState(new Animated.Value(0));
+  const [pulseAnim] = useState(new Animated.Value(1));
+  const [rotateAnim] = useState(new Animated.Value(0));
+
+  // Start loading screen animations
+  useEffect(() => {
+    // Bouncing animation
+    const bounceAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(bounceAnim, {
+          toValue: 1,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+        Animated.timing(bounceAnim, {
+          toValue: 0,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    // Pulse animation
+    const pulseAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.2,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    // Rotate animation
+    const rotateAnimation = Animated.loop(
+      Animated.timing(rotateAnim, {
+        toValue: 1,
+        duration: 2000,
+        useNativeDriver: true,
+      })
+    );
+
+    // Slide animation
+    const slideAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(slideAnim, {
+          toValue: 1,
+          duration: 1000,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 1000,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    bounceAnimation.start();
+    pulseAnimation.start();
+    rotateAnimation.start();
+    slideAnimation.start();
+
+    return () => {
+      bounceAnimation.stop();
+      pulseAnimation.stop();
+      rotateAnimation.stop();
+      slideAnimation.stop();
+    };
+  }, []);
+
   // Layout transitions will be handled by React Native automatically
   
+  // Initialize session and device information
+  useEffect(() => {
+    const initializeSessionData = async () => {
+      const now = new Date().toISOString();
+      setSessionStartTime(now);
+      
+      // Initialize device info
+      const { width, height } = Dimensions.get('window');
+      const deviceData: DeviceInfo = {
+        platform: Platform.OS,
+        appVersion: '1.0.0', // You can get this from app.json or package.json
+        deviceModel: Platform.OS === 'android' ? `Android ${Platform.Version}` : `iOS ${Platform.Version}`,
+        networkType: 'unknown' // Network detection would require additional setup
+      };
+      setDeviceInfo(deviceData);
+      
+      // Load student information
+      try {
+        const parentId = await AsyncStorage.getItem('parent_key');
+        const studentId = await AsyncStorage.getItem('student_id');
+        
+        if (parentId && studentId) {
+          const studentsData = await readData('/students');
+          if (studentsData.data) {
+            const student = Object.values(studentsData.data).find((s: any) => s.studentId === studentId) as any;
+            if (student) {
+              setStudentInfo({
+                studentId: student.studentId,
+                name: student.fullName || 'Unknown Student',
+                gradeSection: student.gradeSection || 'Unknown Grade',
+                sex: student.gender || 'Unknown'
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('Could not load student information:', error);
+      }
+    };
+    
+    initializeSessionData();
+  }, []);
+
   // Load exercise data
   useEffect(() => {
     loadExercise();
@@ -362,7 +608,7 @@ export default function StudentExerciseAnswering() {
   
   // Timer effect (requestAnimationFrame for smoother and accurate updates)
   useEffect(() => {
-    if (!exercise || submitting) {
+    if (!exercise || submitting || !exerciseStarted || showResults) { // Don't start timer until exercise is officially started or when results are shown
       if (timerInterval) {
         clearInterval(timerInterval);
         setTimerInterval(null);
@@ -414,7 +660,7 @@ export default function StudentExerciseAnswering() {
           
           // Show "Times Up" briefly before advancing
           setTimeout(() => {
-            handleNext();
+            advanceToNextOrFinish();
           }, 1500); // Show "Times Up" for 1.5 seconds
         }
       } else {
@@ -430,7 +676,7 @@ export default function StudentExerciseAnswering() {
         rafIdRef.current = null;
       }
     };
-  }, [exercise, startTime, submitting, questionStartTime]);
+  }, [exercise, startTime, submitting, questionStartTime, exerciseStarted, showResults]);
 
   // Keep a ref of the latest per-question elapsed to avoid race conditions during index changes
   useEffect(() => {
@@ -505,16 +751,7 @@ export default function StudentExerciseAnswering() {
       easing: Easing.out(Easing.cubic),
       useNativeDriver: false,
     }).start();
-    // Prefetch upcoming images (next two questions) for snappier transitions
-    if (exercise) {
-      const urls: string[] = [];
-      const nextIndex = currentQuestionIndex + 1;
-      const nextQ = exercise.questions[nextIndex];
-      const nextNextQ = exercise.questions[nextIndex + 1];
-      if (nextQ) urls.push(...collectImageUrls(nextQ));
-      if (nextNextQ) urls.push(...collectImageUrls(nextNextQ));
-      if (urls.length) prefetchUrls(urls);
-    }
+    // Note: Resource preloading is now handled comprehensively in loadExercise()
   }, [currentQuestionIndex, exercise]);
 
   // Reset question timer when index changes
@@ -538,11 +775,14 @@ export default function StudentExerciseAnswering() {
     setQuestionStartTime(Date.now());
     setQuestionElapsed(0);
     
-    // Log initial attempt when question is displayed
+    // Log initial attempt when question is displayed (only if there's an existing answer)
     if (exercise && exercise.questions[currentQuestionIndex]) {
       const currentQuestion = exercise.questions[currentQuestionIndex];
       const existingAnswer = answers.find(a => a.questionId === currentQuestion.id);
-      logAttempt(currentQuestion, existingAnswer?.answer || '', 'initial');
+      // Only log if there's an actual answer, not empty
+      if (existingAnswer?.answer && existingAnswer.answer !== '') {
+        logAttempt(currentQuestion, existingAnswer.answer, 'initial');
+      }
     }
   }, [currentQuestionIndex]);
   
@@ -596,36 +836,212 @@ export default function StudentExerciseAnswering() {
     }
   };
 
-  // Prefetch helpers to make images load faster without heavy upfront cost
-  const collectImageUrls = (q?: Question | null): string[] => {
-    if (!q) return [];
-    const urls: string[] = [];
-    if (q.questionImage) {
-      if (Array.isArray(q.questionImage)) {
-        urls.push(...q.questionImage.filter(Boolean) as string[]);
-      } else {
-        urls.push(q.questionImage);
+  // Enhanced resource collection and preloading system
+  const collectAllResources = (exercise: Exercise): ResourceItem[] => {
+    const resources: ResourceItem[] = [];
+    
+    exercise.questions.forEach((question, questionIndex) => {
+      const priority: 'high' | 'medium' | 'low' = 
+        questionIndex < 3 ? 'high' : 
+        questionIndex < 6 ? 'medium' : 'low';
+      
+      // Collect question images
+      if (question.questionImage) {
+        if (Array.isArray(question.questionImage)) {
+          question.questionImage.filter(Boolean).forEach(url => {
+            resources.push({ url, type: 'image', priority, questionId: question.id });
+          });
+        } else {
+          resources.push({ url: question.questionImage, type: 'image', priority, questionId: question.id });
+        }
       }
-    }
-    if (q.questionImages && q.questionImages.length) {
-      urls.push(...q.questionImages.filter(Boolean));
-    }
-    if (q.optionImages && q.optionImages.length) q.optionImages.forEach((u) => { if (u) urls.push(u); });
-    if (q.reorderItems && q.reorderItems.length) q.reorderItems.forEach((it) => { if (it.imageUrl) urls.push(it.imageUrl); });
-    if (q.pairs && q.pairs.length) q.pairs.forEach((p) => { if (p.leftImage) urls.push(p.leftImage); if (p.rightImage) urls.push(p.rightImage); });
-    if (q.subQuestions && q.subQuestions.length) q.subQuestions.forEach((sq) => {
-      urls.push(...collectImageUrls(sq as any));
+      
+      if (question.questionImages && question.questionImages.length) {
+        question.questionImages.filter(Boolean).forEach(url => {
+          resources.push({ url, type: 'image', priority, questionId: question.id });
+        });
+      }
+      
+      // Collect option images
+      if (question.optionImages && question.optionImages.length) {
+        question.optionImages.filter(Boolean).forEach(url => {
+          resources.push({ url: url!, type: 'image', priority, questionId: question.id });
+        });
+      }
+      
+      // Collect reorder item images
+      if (question.reorderItems && question.reorderItems.length) {
+        question.reorderItems.forEach(item => {
+          if (item.imageUrl) {
+            resources.push({ url: item.imageUrl, type: 'image', priority, questionId: question.id });
+          }
+        });
+      }
+      
+      // Collect pair images
+      if (question.pairs && question.pairs.length) {
+        question.pairs.forEach(pair => {
+          if (pair.leftImage) {
+            resources.push({ url: pair.leftImage, type: 'image', priority, questionId: question.id });
+          }
+          if (pair.rightImage) {
+            resources.push({ url: pair.rightImage, type: 'image', priority, questionId: question.id });
+          }
+        });
+      }
+      
+      // Collect TTS audio
+      if (question.ttsAudioUrl) {
+        resources.push({ url: question.ttsAudioUrl, type: 'audio', priority, questionId: question.id });
+      }
+      
+      // Collect sub-question resources
+      if (question.subQuestions && question.subQuestions.length) {
+        question.subQuestions.forEach(subQ => {
+          const subResources = collectAllResources({ ...exercise, questions: [subQ] });
+          resources.push(...subResources);
+        });
+      }
     });
-    return urls;
+    
+    return resources;
   };
 
-  const prefetchUrls = async (urls: string[]) => {
+  const preloadResource = async (resource: ResourceItem): Promise<PreloadResult> => {
+    const startTime = Date.now();
+    
     try {
-      const unique = Array.from(new Set(urls.filter(Boolean)));
-      await Promise.all(unique.map((u) => Image.prefetch(u)));
-    } catch {
-      // ignore prefetch failures (network, etc.)
+      if (resource.type === 'image') {
+        await Image.prefetch(resource.url);
+      } else if (resource.type === 'audio') {
+        // For audio, we'll just validate the URL exists
+        const response = await fetch(resource.url, { method: 'HEAD' });
+        if (!response.ok) {
+          throw new Error(`Audio resource failed: ${response.status}`);
+        }
+      }
+      
+      const loadTime = Date.now() - startTime;
+      return { success: true, url: resource.url, loadTime };
+    } catch (error) {
+      const loadTime = Date.now() - startTime;
+      return { 
+        success: false, 
+        url: resource.url, 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        loadTime 
+      };
     }
+  };
+
+  const preloadResourcesWithProgress = async (resources: ResourceItem[]): Promise<PreloadResult[]> => {
+    const results: PreloadResult[] = [];
+    const totalResources = resources.length;
+    
+    // Sort resources by priority
+    const sortedResources = resources.sort((a, b) => {
+      const priorityOrder = { high: 0, medium: 1, low: 2 };
+      return priorityOrder[a.priority] - priorityOrder[b.priority];
+    });
+    
+    // Process resources in batches for better performance
+    const batchSize = 5;
+    const batches = [];
+    for (let i = 0; i < sortedResources.length; i += batchSize) {
+      batches.push(sortedResources.slice(i, i + batchSize));
+    }
+    
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      
+      setPreloadStatus(`Loading resources ${batchIndex * batchSize + 1}-${Math.min((batchIndex + 1) * batchSize, totalResources)} of ${totalResources}...`);
+      
+      // Process batch in parallel
+      const batchPromises = batch.map(async (resource) => {
+        const result = await preloadResource(resource);
+        
+        // Update progress
+        const currentProgress = Math.round(((results.length + 1) / totalResources) * 100);
+        setPreloadProgress(currentProgress);
+        
+        // Update loaded/failed resources
+        if (result.success) {
+          setLoadedResources(prev => new Set([...prev, resource.url]));
+        } else {
+          setFailedResources(prev => new Set([...prev, resource.url]));
+        }
+        
+        return result;
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+      
+      // Small delay between batches to prevent overwhelming the network
+      if (batchIndex < batches.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    
+    return results;
+  };
+
+  const retryFailedResources = async (): Promise<void> => {
+    if (failedResources.size === 0) return;
+    
+    setRetryCount(prev => prev + 1);
+    setPreloadError(null);
+    setIsPreloadingResources(true);
+    setPreloadStatus(`Retrying failed resources (attempt ${retryCount + 1})...`);
+    
+    try {
+      const failedUrls = Array.from(failedResources);
+      const retryResources: ResourceItem[] = failedUrls.map(url => ({
+        url,
+        type: url.includes('.mp3') || url.includes('.wav') || url.includes('.m4a') ? 'audio' : 'image',
+        priority: 'high'
+      }));
+      
+      const retryResults = await preloadResourcesWithProgress(retryResources);
+      const successCount = retryResults.filter(r => r.success).length;
+      
+      if (successCount > 0) {
+        setPreloadStatus(`Retry successful! ${successCount} resources loaded.`);
+        // Remove successfully retried resources from failed set
+        const successfulUrls = retryResults.filter(r => r.success).map(r => r.url);
+        setFailedResources(prev => {
+          const newSet = new Set(prev);
+          successfulUrls.forEach(url => newSet.delete(url));
+          return newSet;
+        });
+      } else {
+        setPreloadStatus(`Retry failed. ${failedResources.size} resources still unavailable.`);
+      }
+    } catch (error) {
+      console.error('Retry failed:', error);
+      setPreloadError(error instanceof Error ? error.message : 'Retry failed');
+    } finally {
+      setIsPreloadingResources(false);
+    }
+  };
+
+  const handleStartExercise = () => {
+    const startTime = Date.now();
+    setOfficialStartTime(startTime);
+    setExerciseStarted(true);
+    setStartTime(startTime); // Update the main start time
+    setSessionStartTime(new Date(startTime).toISOString());
+    
+    // Reset question start time to now
+    setQuestionStartTime(startTime);
+    
+    // Start the timer
+    const interval = setInterval(() => {
+      setElapsedTime(Date.now() - startTime);
+    }, 100);
+    setTimerInterval(interval as any);
+    
+    console.log('Exercise officially started at:', new Date(startTime).toISOString());
   };
 
   // Helpers to present correct answers for all question types
@@ -748,6 +1164,7 @@ export default function StudentExerciseAnswering() {
   // Auto-play TTS on question change when available
   useEffect(() => {
     if (!exercise) return;
+    if (loading || isPreloadingResources || !exerciseStarted) return; // Don't auto-play during loading or before start
     const q = exercise.questions[currentQuestionIndex];
     if (!q) return;
     
@@ -766,7 +1183,7 @@ export default function StudentExerciseAnswering() {
         playTTS(q.ttsAudioUrl!);
       }, 800);
     }
-  }, [exercise, currentQuestionIndex, isFocused]);
+  }, [exercise, currentQuestionIndex, isFocused, loading, isPreloadingResources, exerciseStarted]);
 
   // Stop any TTS if screen loses focus
   useEffect(() => {
@@ -973,6 +1390,14 @@ export default function StudentExerciseAnswering() {
 
   const logAttempt = (question: Question, ans: any, attemptType: 'initial' | 'change' | 'final' = 'change') => {
     const text = serializeAnswer(question, ans);
+    
+    // Don't log empty answers unless it's a final attempt (timeout case)
+    if (!text || text.trim() === '') {
+      if (attemptType !== 'final') {
+        return; // Skip logging empty answers for initial/change attempts
+      }
+    }
+    
     const currentTime = Date.now();
     const timeSpent = currentTime - questionStartTime;
     
@@ -1111,20 +1536,49 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
-          setExercise({
+          const exerciseData = {
             ...result.data,
             id: actualExerciseId,
-          });
-          // Warm cache for first questions (current and next two)
+          };
+          
+          setExercise(exerciseData);
+          
+          // Start comprehensive resource preloading
+          setIsPreloadingResources(true);
+          setPreloadProgress(0);
+          setPreloadStatus('Preparing resources...');
+          setPreloadError(null);
+          
           try {
-            const questions: Question[] = result.data.questions || [];
-            const batchUrls: string[] = [];
-            const startIdx = levelMode ? levelIndex : 0;
-            for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
-              batchUrls.push(...collectImageUrls(questions[i]));
+            const allResources = collectAllResources(exerciseData);
+            console.log(`Found ${allResources.length} resources to preload`);
+            
+            if (allResources.length > 0) {
+              const preloadResults = await preloadResourcesWithProgress(allResources);
+              
+              const successCount = preloadResults.filter(r => r.success).length;
+              const failCount = preloadResults.filter(r => !r.success).length;
+              
+              console.log(`Preloading completed: ${successCount} successful, ${failCount} failed`);
+              
+              if (failCount > 0) {
+                console.warn('Some resources failed to load:', preloadResults.filter(r => !r.success));
+              }
+              
+              setPreloadStatus(`Preloading completed! ${successCount}/${allResources.length} resources loaded successfully.`);
+              setResourcesReady(true);
+            } else {
+              setPreloadStatus('No resources to preload.');
+              setResourcesReady(true);
             }
-            if (batchUrls.length) prefetchUrls(batchUrls);
-          } catch {}
+          } catch (error) {
+            console.error('Resource preloading failed:', error);
+            setPreloadError(error instanceof Error ? error.message : 'Failed to preload resources');
+            setResourcesReady(true); // Still allow starting even if preloading fails
+          } finally {
+            setIsPreloadingResources(false);
+            setPreloadProgress(100);
+          }
           if (levelMode) {
             setCurrentQuestionIndex(levelIndex);
           }
@@ -1186,15 +1640,6 @@ export default function StudentExerciseAnswering() {
             id: exerciseId as string,
           });
           // Warm cache for first questions (current and next two)
-          try {
-            const questions: Question[] = result.data.questions || [];
-            const batchUrls: string[] = [];
-            const startIdx = levelMode ? levelIndex : 0;
-            for (let i = startIdx; i < Math.min(questions.length, startIdx + 3); i++) {
-              batchUrls.push(...collectImageUrls(questions[i]));
-            }
-            if (batchUrls.length) prefetchUrls(batchUrls);
-          } catch {}
           if (levelMode) {
             setCurrentQuestionIndex(levelIndex);
           }
@@ -1287,9 +1732,43 @@ export default function StudentExerciseAnswering() {
     const q = exercise.questions[currentQuestionIndex];
     const currentAns = answers.find(a => a.questionId === q.id)?.answer;
     const correct = isAnswerCorrect(q, currentAns);
+    const currentAttempts = attemptCounts[q.id] || 0;
+    const maxAttempts = exercise?.maxAttemptsPerItem;
+    
     if (!correct) {
-      setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+      const newAttemptCount = currentAttempts + 1;
+      
+      // Check if attempt limit is reached
+      if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+        setAttemptCounts(prev => ({ ...prev, [q.id]: newAttemptCount }));
+        logAttempt(q, currentAns, 'change');
+        
+        // Show attempt limit reached message
+        showCustomAlert(
+          'Attempt Limit Reached', 
+          `You have reached the maximum number of attempts (${maxAttempts}) for this question. The correct answer will be shown.`,
+          () => {
+            // Mark as incorrect but allow progression
+            setAnswers(prev => prev.map(a => 
+              a.questionId === q.id ? { ...a, isCorrect: false } : a
+            ));
+            setCorrectQuestions(prev => ({ ...prev, [q.id]: false }));
+            advanceToNextOrFinish();
+          },
+          'warning'
+        );
+        return;
+      }
+      
+      setAttemptCounts(prev => ({ ...prev, [q.id]: newAttemptCount }));
       logAttempt(q, currentAns, 'change');
+      
+      // Show remaining attempts if limit is set
+      const remainingAttempts = maxAttempts !== null && maxAttempts !== undefined ? maxAttempts - newAttemptCount : null;
+      const attemptMessage = remainingAttempts 
+        ? `That is not correct yet. You have ${remainingAttempts} attempt${remainingAttempts > 1 ? 's' : ''} remaining.`
+        : 'That is not correct yet. Please try again.';
+      
       // Trigger global shake for non-selectable types
       Animated.sequence([
         Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
@@ -1299,12 +1778,17 @@ export default function StudentExerciseAnswering() {
         Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
       ]).start();
       triggerWrongFeedback();
-      showCustomAlert('Try again', 'That is not correct yet. Please try again.', undefined, 'warning');
+      showCustomAlert('Try again', attemptMessage, undefined, 'warning');
       return;
     }
     
     // Stop TTS immediately when answer is correct
     stopCurrentTTS();
+    
+    // Update the answer with isCorrect: true
+    setAnswers(prev => prev.map(a => 
+      a.questionId === q.id ? { ...a, isCorrect: true } : a
+    ));
     
     setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
     // Count the final successful attempt
@@ -1345,6 +1829,9 @@ export default function StudentExerciseAnswering() {
     // CRITICAL: Stop TTS immediately when answer is correct
     stopCurrentTTS();
     
+    // Trigger haptic feedback for correct answer
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    
     // Freeze UI timer at the moment of correctness; used when recording
     frozenElapsedRef.current = questionElapsedRef.current;
     setShowCorrect(true);
@@ -1360,6 +1847,9 @@ export default function StudentExerciseAnswering() {
   };
   
   const triggerWrongFeedback = () => {
+    // Trigger haptic feedback for wrong answer
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    
     setShowWrong(true);
     wrongAnim.setValue(0);
     Animated.timing(wrongAnim, { toValue: 1, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(() => {
@@ -1473,7 +1963,7 @@ export default function StudentExerciseAnswering() {
     const str = String(s ?? '').trim();
     return caseSensitive ? str : str.toLowerCase();
   };
-  const stripAccents = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '');
+  const stripAccents = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const normalizeWithSettings = (s: any, settings?: Question['fillSettings']) => {
     let out = normalize(s, !!settings?.caseSensitive);
     if (settings?.ignoreAccents) out = stripAccents(out);
@@ -1515,6 +2005,7 @@ export default function StudentExerciseAnswering() {
       if (question.type === 'multiple-choice') {
         // Normalize both expected and given; support letter-based keys (A,B,C...)
         const expectedRaw = question.answer;
+        
         if (Array.isArray(expectedRaw)) {
           const expectedValues = (expectedRaw as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
           const givenValues = (Array.isArray(ans) ? ans : [ans]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
@@ -1573,6 +2064,7 @@ export default function StudentExerciseAnswering() {
     
     try {
       setSubmitting(true);
+      
       // Get parent ID and student ID from storage
       let parentId: string | null = null;
       let studentId: string | null = null;
@@ -1613,15 +2105,199 @@ export default function StudentExerciseAnswering() {
       const totalQuestions = exercise?.questions.length || 0;
       const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
       const totalAttempts = Object.values(attemptCounts).reduce((sum, v) => sum + (v || 0), 0);
+      const totalTimeSpentSeconds = Math.floor(elapsedTime / 1000);
       
-      // Create normalized result record with unique ID
-      const resultId = `${exercise?.id || exerciseId}_${parentId || 'anonymous'}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      // Create unique result ID
+      const exerciseResultId = `${exercise?.id || exerciseId}_${parentId || 'anonymous'}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Get current timestamp for submission
+      const completedAt = new Date().toISOString();
+      const timestampSubmitted = Date.now();
+      
+      // Calculate session duration
+      const sessionDurationSeconds = sessionStartTime ? 
+        Math.floor((new Date(completedAt).getTime() - new Date(sessionStartTime).getTime()) / 1000) : 
+        totalTimeSpentSeconds;
+      
+      // Determine remarks based on score
+      const getRemarks = (score: number): string => {
+        if (score >= 90) return 'Excellent';
+        if (score >= 80) return 'Good';
+        if (score >= 70) return 'Satisfactory';
+        if (score >= 60) return 'Needs Improvement';
+        return 'Needs Improvement';
+      };
+      
+      // Create assignment metadata
+      const assignmentMetadata: AssignmentMetadata = assignedExercise ? {
+        assignmentId: assignedExerciseId as string,
+        classId: assignedExercise.classId || '',
+        assignedAt: assignedExercise.createdAt || '',
+        deadline: assignedExercise.deadline || '',
+        acceptLateSubmissions: assignedExercise.acceptLateSubmissions || false,
+        acceptingStatus: assignedExercise.acceptingStatus || 'open',
+        isLateSubmission: assignedExercise.deadline ? (() => {
+          try {
+            const deadlineDate = new Date(assignedExercise.deadline);
+            return !isNaN(deadlineDate.getTime()) && new Date() > deadlineDate;
+          } catch {
+            return false;
+          }
+        })() : false
+      } : {
+        assignmentId: '',
+        classId: '',
+        assignedAt: '',
+        deadline: '',
+        acceptLateSubmissions: false,
+        acceptingStatus: 'open',
+        isLateSubmission: false
+      };
+      
+      // Fetch exercise data to get category information
+      let exerciseData: any = null;
+      try {
+        const exerciseResult = await readData(`/exercises/${exercise?.id || exerciseId}`);
+        if (exerciseResult.data) {
+          exerciseData = exerciseResult.data;
+        }
+      } catch (error) {
+        console.warn('Could not fetch exercise data for category:', error);
+      }
+      
+      // Create exercise info
+      const exerciseInfo: ExerciseInfo = {
+        exerciseId: exercise?.id || exerciseId as string,
+        title: exercise?.title || exerciseData?.title || 'Unknown Exercise',
+        category: exerciseData?.category || 'Unknown Category',
+        description: exercise?.description || exerciseData?.description || '',
+        totalQuestions: totalQuestions,
+        timeLimitPerItem: exercise?.timeLimitPerItem || exerciseData?.timeLimitPerItem
+      };
+      
+      // Create student info (use state or fallback)
+      const studentInfoData: StudentInfo = studentInfo || {
+        studentId: studentId || 'unknown',
+        name: 'Unknown Student',
+        gradeSection: 'Unknown Grade',
+        sex: 'Unknown'
+      };
+      
+      // Create device info (use state or fallback)
+      const deviceInfoData: DeviceInfo = deviceInfo || {
+        platform: Platform.OS,
+        appVersion: '1.0.0',
+        deviceModel: 'Unknown',
+        networkType: 'unknown'
+      };
+      
+      // Create exercise session
+      const exerciseSession: ExerciseSession = {
+        startedAt: officialStartTime ? new Date(officialStartTime).toISOString() : sessionStartTime || completedAt,
+        completedAt: completedAt,
+        totalDurationSeconds: officialStartTime ? Math.floor((Date.now() - officialStartTime) / 1000) : sessionDurationSeconds,
+        timestampSubmitted: timestampSubmitted
+      };
+      
+      // Create results summary
+      const resultsSummary: ResultsSummary = {
+        totalItems: totalQuestions,
+        totalAttempts: totalAttempts,
+        totalCorrect: correctAnswers,
+        totalIncorrect: totalQuestions - correctAnswers,
+        totalTimeSpentSeconds: totalTimeSpentSeconds,
+        meanPercentageScore: scorePercentage,
+        meanAttemptsPerItem: totalQuestions > 0 ? totalAttempts / totalQuestions : 0,
+        meanTimePerItemSeconds: totalQuestions > 0 ? totalTimeSpentSeconds / totalQuestions : 0,
+        score: correctAnswers,
+        remarks: getRemarks(scorePercentage)
+      };
+      
+      // Create question results
+      const questionResults: QuestionResult[] = exercise?.questions.map((q, idx) => {
+        const questionAttempts = attemptLogs[q.id] || [];
+        // Get the student answer from the last attempt, or from answers state as fallback
+        const lastAttempt = questionAttempts[questionAttempts.length - 1];
+        const studentAnswer = lastAttempt?.answer || finalAnswers.find(a => a.questionId === q.id)?.answer || '';
+        const correctAnswer = formatCorrectAnswer(q);
+        const isCorrect = isAnswerCorrect(q, studentAnswer);
+        const attempts = attemptCounts[q.id] || 1;
+        const timeSpentSeconds = Math.floor(getTimeMsForQuestion(q) / 1000);
+        const ttsPlayed = helpUsage[q.id]?.ttsCount > 0;
+        const ttsPlayCount = helpUsage[q.id]?.ttsCount || 0;
+        
+        // Get interaction types
+        const interactions = interactionLogs[q.id] || [];
+        const interactionTypes = interactions.map(i => i.type).filter((value, index, self) => self.indexOf(value) === index);
+        
+        // Create attempt history
+        const attemptHistory: AttemptHistory[] = questionAttempts.map((attempt, attemptIdx) => {
+          // For attempt history, we need to deserialize the answer back to raw format for validation
+          let rawAnswer = attempt.answer;
+          
+          // If the answer is in display format (e.g., "C. 5"), extract the raw value
+          if (typeof rawAnswer === 'string' && rawAnswer.includes('. ')) {
+            const parts = rawAnswer.split('. ');
+            if (parts.length >= 2) {
+              // Extract the letter and convert back to raw format
+              const letter = parts[0];
+              const value = parts.slice(1).join('. ');
+              // Convert letter back to raw answer format
+              const letterIndex = letterToIndex(letter);
+              if (letterIndex >= 0 && q.options && q.options[letterIndex]) {
+                rawAnswer = q.options[letterIndex];
+              }
+            }
+          }
+          
+          return {
+            attemptNumber: attemptIdx + 1,
+            selectedAnswer: attempt.answer || '',
+            isCorrect: isAnswerCorrect(q, rawAnswer),
+            timeStamp: new Date(attempt.timestamp).toISOString()
+          };
+        });
+        
+        // Format choices for multiple choice questions
+        const choices = q.type === 'multiple-choice' && q.options ? 
+          q.options.map((option, optIdx) => `${String.fromCharCode(65 + optIdx)}. ${option}`) : 
+          undefined;
+        
+        return {
+          questionNumber: idx + 1,
+          questionId: q.id,
+          questionText: q.question || '',
+          choices: choices,
+          correctAnswer: Array.isArray(correctAnswer) ? correctAnswer.join(', ') : String(correctAnswer),
+          studentAnswer: Array.isArray(studentAnswer) ? studentAnswer.join(', ') : String(studentAnswer),
+          isCorrect: isCorrect,
+          attempts: attempts,
+          timeSpentSeconds: timeSpentSeconds,
+          ttsPlayed: ttsPlayed,
+          ttsPlayCount: ttsPlayCount,
+          interactionTypes: interactionTypes,
+          attemptHistory: attemptHistory
+        };
+      }) || [];
+      
+      // Create the complete result data
+      const resultData: ExerciseResultData = {
+        exerciseResultId,
+        assignedExerciseId: assignedExerciseId as string || '',
+        assignmentMetadata,
+        exerciseInfo,
+        studentInfo: studentInfoData,
+        deviceInfo: deviceInfoData,
+        exerciseSession,
+        resultsSummary,
+        questionResults
+      };
       
       // Debug logging
       console.log('Recording exercise result with:', {
         parentId,
         studentId,
-        resultId,
+        exerciseResultId,
         exerciseId
       });
       
@@ -1629,147 +2305,11 @@ export default function StudentExerciseAnswering() {
         console.warn('No parentId found - exercise result may not be properly tracked');
       }
       
-      const resultData = {
-        // Core identifiers
-        resultId,
-        exerciseId: exercise?.id || exerciseId as string, // Use the actual loaded exercise ID
-        assignedExerciseId: assignedExerciseId as string || null, // Reference to assigned exercise if applicable
-        parentId, // Parent ID for linking to parent account
-        studentId, // Student ID for tracking individual student performance
-        
-        // Exercise metadata
-        exerciseTitle: exercise?.title || 'Unknown Exercise',
-        classId: assignedExercise?.classId || (exercise as any)?.classId || null,
-        teacherId: assignedExercise?.assignedBy || (exercise as any)?.teacherId || null,
-        
-        // Performance metrics
-        scorePercentage,
-        totalQuestions,
-        totalTimeSpent: elapsedTime,
-        
-        // Submission info
-        submittedAt: new Date().toISOString(),
-        deviceInfo: {
-          platform: Platform.OS,
-          timestamp: Date.now()
-        },
-        
-        // Assignment-specific metadata (if applicable)
-        assignmentMetadata: assignedExercise ? {
-          assignedAt: assignedExercise.createdAt,
-          deadline: assignedExercise.deadline,
-          isLateSubmission: assignedExercise.deadline ? (() => {
-            try {
-              const deadlineDate = new Date(assignedExercise.deadline);
-              return !isNaN(deadlineDate.getTime()) && new Date() > deadlineDate;
-            } catch {
-              return false;
-            }
-          })() : false,
-          acceptingStatus: assignedExercise.acceptingStatus,
-          acceptLateSubmissions: assignedExercise.acceptLateSubmissions || false,
-          assignmentId: assignedExerciseId
-        } : null,
-        
-        // Student context and exercise metadata
-        studentContext: {
-          gradeLevel: 'Grade 1', // Could be dynamic based on student data
-          exerciseSequence: currentQuestionIndex + 1, // Current position in exercise
-          totalQuestions: exercise?.questions.length || 0,
-          completionRate: ((currentQuestionIndex + 1) / (exercise?.questions.length || 1)) * 100,
-          sessionStartTime: startTime,
-          sessionDuration: elapsedTime
-        },
-        
-        // Exercise metadata
-        exerciseMetadata: {
-          title: exercise?.title || '',
-          description: exercise?.description || '',
-          subject: 'Mathematics', // Default subject
-          difficulty: 'medium', // Default difficulty
-          totalQuestions: exercise?.questions.length || 0,
-          questionTypes: exercise?.questions.map(q => q.type) || [],
-          estimatedDuration: 0, // Default duration
-          learningObjectives: [] // Default empty array
-        },
-        
-        // Detailed question data (normalized)
-        questionResults: exercise?.questions.map((q, idx) => {
-          const metadata = getQuestionMetadata(q);
-          const questionAttempts = attemptLogs[q.id] || [];
-          const totalHesitationTime = questionAttempts.reduce((sum, attempt) => sum + (attempt.hesitationTime || 0), 0);
-          const averageConfidence = questionAttempts.length > 0 ? 
-            questionAttempts.reduce((sum, attempt) => {
-              const confValue = attempt.confidence === 'high' ? 3 : attempt.confidence === 'medium' ? 2 : 1;
-              return sum + confValue;
-            }, 0) / questionAttempts.length : 2;
-          
-          return {
-            questionId: q.id,
-            questionNumber: idx + 1,
-            questionType: q.type,
-            questionText: q.question || '',
-            questionImage: q.questionImage || null,
-            options: q.options || [],
-            isCorrect: true, // All questions are correct since student completed the exercise
-            timeSpent: getTimeMsForQuestion(q),
-            attempts: attemptCounts[q.id] || 1,
-            studentAnswer: finalAnswers.find(a => a.questionId === q.id)?.answer || '',
-            correctAnswer: formatCorrectAnswer(q),
-            attemptHistory: questionAttempts.map(attempt => ({
-              ...attempt,
-              hesitationTime: attempt.hesitationTime || 0,
-              isSignificantChange: attempt.isSignificantChange || false
-            })),
-            
-            // Enhanced metadata for better analysis
-            metadata: metadata,
-            totalHesitationTime: totalHesitationTime,
-            averageConfidence: averageConfidence,
-            significantChanges: questionAttempts.filter(attempt => attempt.isSignificantChange).length,
-            phaseDistribution: {
-              reading: questionAttempts.filter(attempt => attempt.questionPhase === 'reading').length,
-              thinking: questionAttempts.filter(attempt => attempt.questionPhase === 'thinking').length,
-              answering: questionAttempts.filter(attempt => attempt.questionPhase === 'answering').length,
-              reviewing: questionAttempts.filter(attempt => attempt.questionPhase === 'reviewing').length
-            },
-            
-            // Interaction tracking data
-            interactions: (interactionLogs[q.id] || []).map(interaction => ({
-              ...interaction,
-              duration: interaction.duration || 0 // Ensure no undefined values
-            })),
-            helpUsage: helpUsage[q.id] || {ttsCount: 0, helpButtonClicks: 0},
-            optionHoverTimes: optionHoverTimes[q.id] || {},
-            totalInteractions: (interactionLogs[q.id] || []).length,
-            interactionTypes: {
-              optionClicks: (interactionLogs[q.id] || []).filter(i => i.type === 'option_click').length,
-              helpUsed: (interactionLogs[q.id] || []).filter(i => i.type === 'help_used').length,
-              answerChanges: (interactionLogs[q.id] || []).filter(i => i.type === 'answer_change').length
-            },
-            
-            // Granular time tracking
-            timeBreakdown: {
-              totalTime: getTimeMsForQuestion(q),
-              readingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'reading').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
-              thinkingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'thinking').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
-              answeringTime: questionAttempts.filter(attempt => attempt.questionPhase === 'answering').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
-              reviewingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'reviewing').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
-              averageTimePerAttempt: questionAttempts.length > 0 ? getTimeMsForQuestion(q) / questionAttempts.length : 0,
-              timeToFirstAnswer: questionAttempts.length > 0 ? (questionAttempts[0].timeSpent || 0) : 0,
-              timeToFinalAnswer: questionAttempts.length > 0 ? (questionAttempts[questionAttempts.length - 1].timeSpent || 0) : 0
-            }
-          };
-        }) || []
-      };
-      
-      // Save to normalized ExerciseResults table
-      const exerciseResult = await writeData(`/ExerciseResults/${resultId}`, resultData);
+      // Save to ExerciseResults table
+      const exerciseResult = await writeData(`/ExerciseResults/${exerciseResultId}`, resultData);
       if (!exerciseResult.success) {
         throw new Error(`Failed to save exercise result: ${exerciseResult.error}`);
       }
-      
-      // No need to update assignedExercises - completion status is determined by ExerciseResults existence
       
       // Close results panel and navigate back
       setShowResults(false);
@@ -1800,8 +2340,42 @@ export default function StudentExerciseAnswering() {
         const q = exercise.questions[currentQuestionIndex];
         const currentAns = answers.find(a => a.questionId === q.id)?.answer;
         const correct = isAnswerCorrect(q, currentAns);
+        const currentAttempts = attemptCounts[q.id] || 0;
+        const maxAttempts = exercise?.maxAttemptsPerItem;
+        
         if (!correct) {
-          setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+          const newAttemptCount = currentAttempts + 1;
+          
+          // Check if attempt limit is reached
+          if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+            setAttemptCounts(prev => ({ ...prev, [q.id]: newAttemptCount }));
+            
+            // Show attempt limit reached message
+            showCustomAlert(
+              'Attempt Limit Reached', 
+              `You have reached the maximum number of attempts (${maxAttempts}) for this question. The correct answer will be shown.`,
+              () => {
+                // Mark as incorrect but allow progression
+                setAnswers(prev => prev.map(a => 
+                  a.questionId === q.id ? { ...a, isCorrect: false } : a
+                ));
+                setCorrectQuestions(prev => ({ ...prev, [q.id]: false }));
+                setShowResults(true);
+              },
+              'warning'
+            );
+            setSubmitting(false);
+            return;
+          }
+          
+          setAttemptCounts(prev => ({ ...prev, [q.id]: newAttemptCount }));
+          
+          // Show remaining attempts if limit is set
+          const remainingAttempts = maxAttempts !== null && maxAttempts !== undefined ? maxAttempts - newAttemptCount : null;
+          const attemptMessage = remainingAttempts 
+            ? `Your current answer is not correct yet. You have ${remainingAttempts} attempt${remainingAttempts > 1 ? 's' : ''} remaining.`
+            : 'Your current answer is not correct yet. Please try again.';
+          
           // Shake on submit when wrong
           Animated.sequence([
             Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
@@ -1811,10 +2385,14 @@ export default function StudentExerciseAnswering() {
             Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
           ]).start();
           triggerWrongFeedback();
-      showCustomAlert('Try again', 'Your current answer is not correct yet. Please try again.', undefined, 'warning');
-      setSubmitting(false);
-      return;
+          showCustomAlert('Try again', attemptMessage, undefined, 'warning');
+          setSubmitting(false);
+          return;
         } else {
+          // Update the answer with isCorrect: true
+          setAnswers(prev => prev.map(a => 
+            a.questionId === q.id ? { ...a, isCorrect: true } : a
+          ));
           // Count the final successful attempt
           setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
         }
@@ -1843,7 +2421,7 @@ export default function StudentExerciseAnswering() {
     if (correct) {
       // Accumulate time for the level question
       const delta = Date.now() - questionStartTime;
-      setAnswers(prev => prev.map(a => a.questionId === q.id ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+      setAnswers(prev => prev.map(a => a.questionId === q.id ? { ...a, timeSpent: (a.timeSpent || 0) + delta, isCorrect: true } : a));
       setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
       // Count the final successful attempt
       setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
@@ -1869,15 +2447,45 @@ export default function StudentExerciseAnswering() {
           <View style={styles.questionImageContainer}>
               {Array.isArray(question.questionImage) ? (
               question.questionImage.map((img, idx) => (
-                <ExpoImage key={`qi-${idx}`} source={{ uri: img }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
+                <ExpoImage 
+                  key={`qi-${idx}`} 
+                  source={{ uri: img }} 
+                  style={styles.questionImage} 
+                  contentFit="contain" 
+                  transition={150} 
+                  cachePolicy="memory-disk" 
+                  priority="high"
+                  recyclingKey={`qi-${question.id}-${idx}`}
+                  onLoadStart={() => console.log(`Loading question image ${idx}`)}
+                  onLoadEnd={() => console.log(`Question image ${idx} loaded`)}
+                />
               ))
             ) : question.questionImage ? (
-              <ExpoImage source={{ uri: question.questionImage }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
+              <ExpoImage 
+                source={{ uri: question.questionImage }} 
+                style={styles.questionImage} 
+                contentFit="contain" 
+                transition={150} 
+                cachePolicy="memory-disk" 
+                priority="high"
+                recyclingKey={`qi-${question.id}`}
+                onLoadStart={() => console.log('Loading question image')}
+                onLoadEnd={() => console.log('Question image loaded')}
+              />
             ) : null}
             {question.questionImages && question.questionImages.length ? (
               <View style={styles.questionImagesGrid}>
                 {question.questionImages.map((img, idx) => (
-                  <ExpoImage key={`qis-${idx}`} source={{ uri: img }} style={styles.questionImageThumb} contentFit="cover" transition={120} cachePolicy="disk" />
+                  <ExpoImage 
+                    key={`qis-${idx}`} 
+                    source={{ uri: img }} 
+                    style={styles.questionImageThumb} 
+                    contentFit="cover" 
+                    transition={120} 
+                    cachePolicy="memory-disk"
+                    priority="high"
+                    recyclingKey={`qis-${question.id}-${idx}`}
+                  />
                 ))}
               </View>
             ) : null}
@@ -1911,8 +2519,32 @@ export default function StudentExerciseAnswering() {
                     // Single answer immediate validation and feedback
                     if (!question.multiAnswer) {
                       if (!isCorrect) {
+                        const newAttemptCount = (attemptCounts[question.id] || 0) + 1;
+                        const maxAttempts = exercise?.maxAttemptsPerItem;
+                        
+                        // Check if attempt limit is reached
+                        if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+                          setAttemptCounts(prev => ({ ...prev, [question.id]: newAttemptCount }));
+                          logAttempt(question, option, 'change');
+                          
+                          // Mark as failed and advance
+                          setAnswers(prev => prev.map(a => 
+                            a.questionId === question.id ? { ...a, isCorrect: false } : a
+                          ));
+                          setCorrectQuestions(prev => ({ ...prev, [question.id]: false }));
+                          
+                          // Show attempt limit reached message briefly
+                          showCustomAlert(
+                            'Attempt Limit Reached', 
+                            `You have reached the maximum number of attempts (${maxAttempts}) for this question.`,
+                            () => advanceToNextOrFinish(),
+                            'warning'
+                          );
+                          return;
+                        }
+                        
                         setLastShakeKey(optionKey);
-                        setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
+                        setAttemptCounts(prev => ({ ...prev, [question.id]: newAttemptCount }));
                         logAttempt(question, option, 'change');
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
@@ -1929,6 +2561,12 @@ export default function StudentExerciseAnswering() {
                       stopCurrentTTS();
                       logInteraction(question.id, 'option_click', option, 0);
                       handleAnswerChange(option);
+                      
+                      // Update the answer with isCorrect: true
+                      setAnswers(prev => prev.map(a => 
+                        a.questionId === question.id ? { ...a, isCorrect: true } : a
+                      ));
+                      
                       setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
                       // Count the final successful attempt
                       setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
@@ -1951,7 +2589,9 @@ export default function StudentExerciseAnswering() {
                               style={styles.gridOptionImage}
                               contentFit="contain"
                               transition={120}
-                              cachePolicy="disk"
+                              cachePolicy="memory-disk"
+                              priority="high"
+                              recyclingKey={`opt-${question.id}-${index}`}
                             />
                           )}
                   
@@ -1991,8 +2631,32 @@ export default function StudentExerciseAnswering() {
                   onPress={() => {
                     if (!question.multiAnswer) {
                       if (!isCorrect) {
+                        const newAttemptCount = (attemptCounts[question.id] || 0) + 1;
+                        const maxAttempts = exercise?.maxAttemptsPerItem;
+                        
+                        // Check if attempt limit is reached
+                        if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+                          setAttemptCounts(prev => ({ ...prev, [question.id]: newAttemptCount }));
+                          logAttempt(question, option, 'change');
+                          
+                          // Mark as failed and advance
+                          setAnswers(prev => prev.map(a => 
+                            a.questionId === question.id ? { ...a, isCorrect: false } : a
+                          ));
+                          setCorrectQuestions(prev => ({ ...prev, [question.id]: false }));
+                          
+                          // Show attempt limit reached message briefly
+                          showCustomAlert(
+                            'Attempt Limit Reached', 
+                            `You have reached the maximum number of attempts (${maxAttempts}) for this question.`,
+                            () => advanceToNextOrFinish(),
+                            'warning'
+                          );
+                          return;
+                        }
+                        
                         setLastShakeKey(optionKey);
-                        setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
+                        setAttemptCounts(prev => ({ ...prev, [question.id]: newAttemptCount }));
                         logAttempt(question, option, 'change');
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
@@ -2007,6 +2671,12 @@ export default function StudentExerciseAnswering() {
                       // Stop TTS immediately when correct answer is selected
                       stopCurrentTTS();
                       handleAnswerChange(option);
+                      
+                      // Update the answer with isCorrect: true
+                      setAnswers(prev => prev.map(a => 
+                        a.questionId === question.id ? { ...a, isCorrect: true } : a
+                      ));
+                      
                       setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
                       logAttempt(question, option, 'change');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
@@ -2035,7 +2705,9 @@ export default function StudentExerciseAnswering() {
                         style={styles.optionImage}
                         contentFit="contain"
                         transition={120}
-                        cachePolicy="disk"
+                        cachePolicy="memory-disk"
+                        priority="high"
+                        recyclingKey={`opt-${question.id}-${index}`}
                       />
                     )}
                     
@@ -2712,6 +3384,246 @@ export default function StudentExerciseAnswering() {
     );
   };
   
+  const renderLoadingScreen = () => {
+    const bounceTranslateY = bounceAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0, -20],
+    });
+
+    const rotateInterpolate = rotateAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: ['0deg', '360deg'],
+    });
+
+    const slideTranslateX = slideAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [-50, 50],
+    });
+
+    return (
+      <View style={styles.container}>
+        {/* Background Image with Blur Overlay */}
+        <ImageBackground
+          source={getBackgroundSource(backgroundImage)}
+          style={styles.backgroundImage}
+          blurRadius={0.5}
+        >
+          {/* Dark Overlay */}
+          <View style={styles.overlay} />
+          
+          {/* Interactive Loading Content */}
+          <View style={styles.interactiveLoadingContainer}>
+            {/* Floating Math Elements */}
+            <View style={styles.floatingMathElements}>
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement1,
+                  { 
+                    transform: [
+                      { translateY: bounceTranslateY },
+                      { scale: pulseAnim }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>🔢</Text>
+              </Animated.View>
+              
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement2,
+                  { 
+                    transform: [
+                      { rotate: rotateInterpolate },
+                      { scale: pulseAnim }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>📚</Text>
+              </Animated.View>
+              
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement3,
+                  { 
+                    transform: [
+                      { translateX: slideTranslateX },
+                      { scale: pulseAnim }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>✨</Text>
+              </Animated.View>
+
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement4,
+                  { 
+                    transform: [
+                      { translateY: bounceTranslateY },
+                      { rotate: rotateInterpolate }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>🎯</Text>
+              </Animated.View>
+
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement5,
+                  { 
+                    transform: [
+                      { translateX: slideTranslateX },
+                      { scale: pulseAnim }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>🧮</Text>
+              </Animated.View>
+            </View>
+
+            {/* Main Loading Card */}
+            <View style={styles.loadingCard}>
+              {/* Header */}
+              <View style={styles.loadingHeader}>
+                <Animated.View 
+                  style={[
+                    styles.loadingIcon,
+                    { 
+                      transform: [
+                        { scale: pulseAnim },
+                        { rotate: rotateInterpolate }
+                      ]
+                    }
+                  ]}
+                >
+                  <Text style={styles.loadingIconEmoji}>🚀</Text>
+                </Animated.View>
+                
+                <View style={styles.loadingTitleContainer}>
+                  <Text style={styles.loadingTitle}>
+                    {loading ? 'Loading Exercise...' : 'Getting Ready!'}
+                  </Text>
+                  <Text style={styles.loadingSubtitle}>
+                    {loading ? 'Preparing your math adventure...' : 'Loading your math adventure...'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Progress Section */}
+              <View style={styles.progressSection}>
+                <View style={styles.progressHeader}>
+                  <Text style={styles.progressTitle}>Progress</Text>
+                  <Text style={styles.progressPercentage}>
+                    {loading ? '...' : `${preloadProgress}%`}
+                  </Text>
+                </View>
+                
+                <View style={styles.loadingProgressBarContainer}>
+                  <View style={styles.loadingProgressBarBackground}>
+                    <Animated.View 
+                      style={[
+                        styles.loadingProgressBarFill, 
+                        { width: `${loading ? 0 : preloadProgress}%` }
+                      ]} 
+                    />
+                  </View>
+                </View>
+                
+                <Text style={styles.progressStatus}>
+                  {loading ? 'Please wait while we prepare everything...' : preloadStatus}
+                </Text>
+              </View>
+
+              {/* Interactive Elements */}
+              <View style={styles.interactiveElements}>
+                {/* Loading Dots */}
+                <View style={styles.loadingDotsContainer}>
+                  <Animated.View style={[styles.loadingDot, { opacity: pulseAnim }]} />
+                  <Animated.View style={[styles.loadingDot, { opacity: pulseAnim }]} />
+                  <Animated.View style={[styles.loadingDot, { opacity: pulseAnim }]} />
+                </View>
+
+                {/* Fun Math Facts */}
+                <View style={styles.mathFactsContainer}>
+                  <Text style={styles.mathFactText}>
+                    💡 Did you know? Math is everywhere around us!
+                  </Text>
+                </View>
+              </View>
+
+              {/* START NOW Button - Only show when resources are ready */}
+              {resourcesReady && !exerciseStarted && (
+                <TouchableOpacity 
+                  style={styles.startNowButton}
+                  onPress={handleStartExercise}
+                  activeOpacity={0.8}
+                >
+                  <Animated.View 
+                    style={[
+                      styles.startNowButtonContent,
+                      { 
+                        transform: [
+                          { scale: pulseAnim }
+                        ]
+                      }
+                    ]}
+                  >
+                    <Text style={styles.startNowEmoji}>🚀</Text>
+                    <Text style={styles.startNowText}>START NOW!</Text>
+                    <Text style={styles.startNowSubtext}>Ready to begin your math adventure!</Text>
+                  </Animated.View>
+                </TouchableOpacity>
+              )}
+
+              {/* Error Display */}
+              {preloadError && (
+                <View style={styles.loadingErrorContainer}>
+                  <Text style={styles.loadingErrorText}>😟 Oops! Something went wrong</Text>
+                  <Text style={styles.errorSubtext}>{preloadError}</Text>
+                  {failedResources.size > 0 && (
+                    <TouchableOpacity 
+                      style={styles.retryButton}
+                      onPress={retryFailedResources}
+                      disabled={isPreloadingResources}
+                    >
+                      <Text style={styles.retryButtonText}>
+                        🔄 Try Again ({failedResources.size} items)
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+              
+              {/* Skip Option */}
+              {failedResources.size > 0 && !isPreloadingResources && (
+                <TouchableOpacity 
+                  style={styles.skipButton}
+                  onPress={() => {
+                    setIsPreloadingResources(false);
+                    setPreloadProgress(100);
+                    setPreloadStatus('Ready to start! Some content may load slowly.');
+                  }}
+                >
+                  <Text style={styles.skipButtonText}>🚀 Start Anyway</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </ImageBackground>
+      </View>
+    );
+  };
+
   const renderQuestion = () => {
     if (!exercise) return null;
     
@@ -2786,8 +3698,21 @@ export default function StudentExerciseAnswering() {
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>Loading exercise...</Text>
+      <View style={styles.container}>
+        <ImageBackground source={getBackgroundSource(backgroundImage)} style={styles.backgroundImage}>
+          {renderLoadingScreen()}
+        </ImageBackground>
+      </View>
+    );
+  }
+
+  // Show resource preloading screen
+  if (isPreloadingResources || (resourcesReady && !exerciseStarted)) {
+    return (
+      <View style={styles.container}>
+        <ImageBackground source={getBackgroundSource(backgroundImage)} style={styles.backgroundImage}>
+          {renderLoadingScreen()}
+        </ImageBackground>
       </View>
     );
   }
@@ -2823,7 +3748,7 @@ export default function StudentExerciseAnswering() {
           
           <View style={styles.headerCenter}>
             {/* Simple Time Limit Badge */}
-            {exercise.timeLimitPerItem && (
+            {exercise.timeLimitPerItem && exerciseStarted && (
               <View style={[
                 styles.timeLimitBadge,
                 timeRemaining !== null && timeRemaining < 10000 && styles.timeLimitBadgeWarning,
@@ -2843,8 +3768,6 @@ export default function StudentExerciseAnswering() {
                 </Text>
               </View>
             )}
-            
-            <Text style={styles.exerciseTitle}>{exercise.title}</Text>
             <Text style={styles.progressText}>
               Question {currentQuestionIndex + 1} of {exercise.questions.length}
             </Text>
@@ -2881,6 +3804,16 @@ export default function StudentExerciseAnswering() {
             </View>
           </View>
         </View>
+        
+        {/* Attempt Limit Indicator */}
+        {exercise.maxAttemptsPerItem !== null && (
+          <View style={styles.attemptLimitContainer}>
+            <MaterialCommunityIcons name="repeat" size={16} color="#64748b" />
+            <Text style={styles.attemptLimitText}>
+              Attempts: {attemptCounts[exercise.questions[currentQuestionIndex]?.id] || 0} / {exercise.maxAttemptsPerItem}
+            </Text>
+          </View>
+        )}
         
         {/* Question Content */}
         <ScrollView 
@@ -2953,81 +3886,138 @@ export default function StudentExerciseAnswering() {
           </Animated.View>
         )}
 
-        {/* Results Panel */}
+        {/* Kid-Friendly Results Panel */}
         {showResults && (
-          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
-            <View style={{ backgroundColor: '#ffffff', width: '100%', maxWidth: 500, borderRadius: 16, padding: 20 }}>
-              <Text style={{ fontSize: 20, fontWeight: '800', color: '#1e293b', marginBottom: 12 }}>Assessment Summary</Text>
-              {(() => {
-                const totalMs = (answers || []).reduce((sum, a) => sum + (a.timeSpent || 0), 0);
-                return <Text style={{ fontSize: 16, color: '#334155', marginBottom: 8 }}>Total time: {formatTime(totalMs)}</Text>;
-              })()}
-              <View style={{ maxHeight: 320 }}>
-                <ScrollView>
+          <View style={styles.resultsOverlay}>
+            <View style={styles.resultsContainer}>
+              {/* Header with Celebration */}
+              <View style={styles.resultsHeader}>
+                <Text style={styles.resultsTitleEmoji}>🎉</Text>
+                <Text style={styles.resultsTitle}>Great Job!</Text>
+                <Text style={styles.resultsSubtitle}>You completed your math adventure!</Text>
+              </View>
+
+              {/* Summary Stats Cards */}
+              <View style={styles.statsContainer}>
+                {/* Score Card */}
+                <View style={styles.statCard}>
+                  <Text style={styles.statEmoji}>⭐</Text>
+                  <Text style={styles.statNumber}>
+                    {(() => {
+                      const correct = answers.filter(a => a.isCorrect).length;
+                      const total = exercise?.questions.length || 0;
+                      return `${correct}/${total}`;
+                    })()}
+                  </Text>
+                  <Text style={styles.statLabel}>Questions Correct</Text>
+                </View>
+
+                {/* Time Card */}
+                <View style={styles.statCard}>
+                  <Text style={styles.statEmoji}>⏱️</Text>
+                  <Text style={styles.statNumber}>
+                    {(() => {
+                      const totalMs = (answers || []).reduce((sum, a) => sum + (a.timeSpent || 0), 0);
+                      return formatTime(totalMs);
+                    })()}
+                  </Text>
+                  <Text style={styles.statLabel}>Total Time</Text>
+                </View>
+
+                {/* Attempts Card */}
+                <View style={styles.statCard}>
+                  <Text style={styles.statEmoji}>🎯</Text>
+                  <Text style={styles.statNumber}>
+                    {(() => {
+                      const totalAttempts = Object.values(attemptCounts).reduce((sum, count) => sum + count, 0);
+                      return totalAttempts;
+                    })()}
+                  </Text>
+                  <Text style={styles.statLabel}>Total Attempts</Text>
+                </View>
+              </View>
+
+              {/* Performance Message */}
+              <View style={styles.performanceContainer}>
+                <Text style={styles.performanceEmoji}>
+                  {(() => {
+                    const correct = answers.filter(a => a.isCorrect).length;
+                    const total = exercise?.questions.length || 0;
+                    const percentage = total > 0 ? (correct / total) * 100 : 0;
+                    
+                    if (percentage >= 80) return '🌟';
+                    if (percentage >= 60) return '👍';
+                    if (percentage >= 40) return '💪';
+                    return '🌱';
+                  })()}
+                </Text>
+                <Text style={styles.performanceMessage}>
+                  {(() => {
+                    const correct = answers.filter(a => a.isCorrect).length;
+                    const total = exercise?.questions.length || 0;
+                    const percentage = total > 0 ? (correct / total) * 100 : 0;
+                    
+                    if (percentage >= 80) return 'Amazing work! You\'re a math superstar! 🌟';
+                    if (percentage >= 60) return 'Great job! You\'re getting better! 👍';
+                    if (percentage >= 40) return 'Good effort! Keep practicing! 💪';
+                    return 'Nice try! Every attempt helps you learn! 🌱';
+                  })()}
+                </Text>
+              </View>
+
+              {/* Question Details */}
+              <View style={styles.questionDetailsContainer}>
+                <Text style={styles.questionDetailsTitle}>Question Summary</Text>
+                <ScrollView style={styles.questionDetailsScroll} showsVerticalScrollIndicator={false}>
                   {exercise?.questions.map((q, idx) => {
-                    if (q.type === 'reading-passage' && q.subQuestions && q.subQuestions.length) {
-                      return (
-                        <View key={q.id} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                          <Text style={{ fontSize: 15, fontWeight: '700', color: '#0f172a' }}>Question {idx + 1} (Reading Passage)</Text>
-                          {q.subQuestions.map((sq, sidx) => (
-                            <View key={sq.id} style={{ marginTop: 6 }}>
-                              <Text style={{ fontSize: 14, fontWeight: '700', color: '#0f172a' }}>Q{subQuestionsLabel(sidx)}</Text>
-                              <Text style={{ fontSize: 14, color: '#334155' }}>Tries: {attemptCounts[sq.id] || 0}</Text>
-                              {(() => {
-                                const ms = getTimeMsForSubQuestion(q, sq);
-                                return <Text style={{ fontSize: 13, color: '#64748b' }}>Time: {formatTime(ms)}</Text>;
-                              })()}
-                              <Text style={{ fontSize: 14, color: '#475569' }}>Correct answer: {Array.isArray(formatCorrectAnswer(sq)) ? (formatCorrectAnswer(sq) as string[]).join(', ') : (formatCorrectAnswer(sq) as string)}</Text>
-                              {(attemptLogs[sq.id] && attemptLogs[sq.id].length > 0) && (
-                                <View style={{ marginTop: 4 }}>
-                                  {attemptLogs[sq.id].map((log, li) => (
-                                    <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || '(blank)'} ({Math.round(log.timeSpent / 1000)}s)</Text>
-                                  ))}
-                                </View>
-                              )}
-                            </View>
-                          ))}
-                        </View>
-                      );
-                    }
+                    const isCorrect = answers.find(a => a.questionId === q.id)?.isCorrect;
+                    const attempts = attemptCounts[q.id] || 0;
+                    const timeMs = getTimeMsForQuestion(q);
+                    
                     return (
-                      <View key={q.id} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: '#0f172a' }}>Question {idx + 1}</Text>
-                        <Text style={{ fontSize: 14, color: '#334155' }}>Tries: {attemptCounts[q.id] || 0}</Text>
-                        {(() => {
-                          const ms = getTimeMsForQuestion(q);
-                          return <Text style={{ fontSize: 13, color: '#64748b' }}>Time: {formatTime(ms)}</Text>;
-                        })()}
-                        <Text style={{ fontSize: 14, color: '#475569' }}>Correct answer: {Array.isArray(formatCorrectAnswer(q)) ? (formatCorrectAnswer(q) as string[]).join(', ') : (formatCorrectAnswer(q) as string)}</Text>
-                        {(attemptLogs[q.id] && attemptLogs[q.id].length > 0) && (
-                          <View style={{ marginTop: 4 }}>
-                            {attemptLogs[q.id].map((log, li) => (
-                              <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || '(blank)'} ({Math.round(log.timeSpent / 1000)}s)</Text>
-                            ))}
+                      <View key={q.id} style={styles.questionDetailCard}>
+                        <View style={styles.questionDetailHeader}>
+                          <Text style={styles.questionDetailNumber}>Q{idx + 1}</Text>
+                          <View style={[
+                            styles.questionDetailStatus,
+                            { backgroundColor: isCorrect ? '#10b981' : '#ef4444' }
+                          ]}>
+                            <Text style={styles.questionDetailStatusText}>
+                              {isCorrect ? '✓' : '✗'}
+                            </Text>
                           </View>
-                        )}
+                        </View>
+                        <View style={styles.questionDetailStats}>
+                          <Text style={styles.questionDetailStat}>
+                            🎯 {attempts} attempt{attempts !== 1 ? 's' : ''}
+                          </Text>
+                          <Text style={styles.questionDetailStat}>
+                            ⏱️ {formatTime(timeMs)}
+                          </Text>
+                        </View>
                       </View>
                     );
                   })}
                 </ScrollView>
               </View>
-              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
-                <TouchableOpacity 
-                  onPress={handleFinalSubmission} 
-                  disabled={submitting}
-                  style={{ 
-                    backgroundColor: submitting ? '#ccc' : '#ffa500', 
-                    paddingHorizontal: 16, 
-                    paddingVertical: 10, 
-                    borderRadius: 10 
-                  }} 
-                  activeOpacity={0.8}
-                >
-                  <Text style={{ color: '#fff', fontWeight: '700' }}>
-                    {submitting ? 'Submitting...' : 'Done'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
+
+              {/* Action Button */}
+              <TouchableOpacity 
+                onPress={handleFinalSubmission} 
+                disabled={submitting}
+                style={[
+                  styles.submitButton,
+                  submitting && styles.submitButtonDisabled
+                ]} 
+                activeOpacity={0.8}
+              >
+                <Text style={styles.submitButtonEmoji}>
+                  {submitting ? '⏳' : '🚀'}
+                </Text>
+                <Text style={styles.submitButtonText}>
+                  {submitting ? 'Submitting...' : 'Finish Adventure!'}
+                </Text>
+              </TouchableOpacity>
             </View>
           </View>
         )}
@@ -3329,13 +4319,468 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   progressText: {
-    fontSize: 16,
+    fontSize: 12,
     fontWeight: '700',
     color: '#ffffff',
     textShadowColor: 'rgba(0, 0, 0, 0.3)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
     letterSpacing: 0.3,
+  },
+  attemptLimitContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    marginHorizontal: getResponsivePadding(20),
+    marginTop: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  attemptLimitText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginLeft: 6,
+  },
+  
+  // Interactive loading screen styles
+  interactiveLoadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: getResponsivePadding(20),
+  },
+  floatingMathElements: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  mathElement: {
+    position: 'absolute',
+    width: 80,
+    height: 80,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 40,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  mathElement1: {
+    top: '10%',
+    left: '5%',
+  },
+  mathElement2: {
+    top: '15%',
+    right: '8%',
+  },
+  mathElement3: {
+    bottom: '20%',
+    left: '10%',
+  },
+  mathElement4: {
+    top: '60%',
+    right: '5%',
+  },
+  mathElement5: {
+    bottom: '10%',
+    right: '15%',
+  },
+  mathElementText: {
+    fontSize: 40,
+  },
+  loadingCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 25,
+    padding: 30,
+    minWidth: 350,
+    maxWidth: 450,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 10,
+    borderWidth: 2,
+    borderColor: '#ffa500',
+  },
+  loadingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 25,
+  },
+  loadingIcon: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: '#ff6b6b',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 20,
+    shadowColor: '#ff6b6b',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  loadingIconEmoji: {
+    fontSize: 35,
+  },
+  loadingTitleContainer: {
+    flex: 1,
+  },
+  loadingTitle: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#2d3748',
+    marginBottom: 5,
+    fontFamily: Platform.OS === 'ios' ? 'LuckiestGuy-Regular' : 'LuckiestGuy-Regular',
+  },
+  loadingSubtitle: {
+    fontSize: 14,
+    color: '#4a5568',
+    lineHeight: 20,
+  },
+  progressSection: {
+    marginBottom: 25,
+  },
+  progressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  progressTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#2d3748',
+  },
+  progressPercentage: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#ffa500',
+  },
+  loadingProgressBarContainer: {
+    width: '100%',
+    marginBottom: 10,
+  },
+  loadingProgressBarBackground: {
+    height: 12,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 6,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#cbd5e0',
+  },
+  loadingProgressBarFill: {
+    height: '100%',
+    backgroundColor: '#ffa500',
+    borderRadius: 4,
+  },
+  progressStatus: {
+    fontSize: 12,
+    color: '#718096',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  interactiveElements: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  loadingDotsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+  loadingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#ffa500',
+    marginHorizontal: 5,
+  },
+  mathFactsContainer: {
+    backgroundColor: 'rgba(255, 165, 0, 0.1)',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 165, 0, 0.3)',
+  },
+  mathFactText: {
+    fontSize: 12,
+    color: '#4a5568',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  loadingErrorContainer: {
+    backgroundColor: '#fed7d7',
+    borderWidth: 2,
+    borderColor: '#feb2b2',
+    borderRadius: 15,
+    padding: 20,
+    marginTop: 20,
+    width: '100%',
+  },
+  loadingErrorText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#c53030',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  errorSubtext: {
+    fontSize: 14,
+    color: '#9b2c2c',
+    textAlign: 'center',
+    marginBottom: 15,
+  },
+  retryButton: {
+    backgroundColor: '#4299e1',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  retryButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  skipButton: {
+    backgroundColor: '#ed8936',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    marginTop: 15,
+    alignItems: 'center',
+  },
+  skipButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  // Kid-Friendly Results Styles
+  resultsOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  resultsContainer: {
+    backgroundColor: '#ffffff',
+    width: '100%',
+    maxWidth: 500,
+    borderRadius: 24,
+    padding: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  resultsHeader: {
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  resultsTitleEmoji: {
+    fontSize: 48,
+    marginBottom: 8,
+  },
+  resultsTitle: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 4,
+    textAlign: 'center',
+  },
+  resultsSubtitle: {
+    fontSize: 16,
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  statsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+    gap: 12,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: 16,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+  statEmoji: {
+    fontSize: 24,
+    marginBottom: 8,
+  },
+  statNumber: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+    fontWeight: '600',
+  },
+  performanceContainer: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#0ea5e9',
+  },
+  performanceEmoji: {
+    fontSize: 32,
+    marginBottom: 8,
+  },
+  performanceMessage: {
+    fontSize: 16,
+    color: '#0c4a6e',
+    textAlign: 'center',
+    fontWeight: '600',
+    lineHeight: 22,
+  },
+  questionDetailsContainer: {
+    marginBottom: 24,
+  },
+  questionDetailsTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  questionDetailsScroll: {
+    maxHeight: 200,
+  },
+  questionDetailCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  questionDetailHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  questionDetailNumber: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  questionDetailStatus: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  questionDetailStatusText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  questionDetailStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  questionDetailStat: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  submitButton: {
+    backgroundColor: '#ffa500',
+    borderRadius: 16,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#ffa500',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  submitButtonDisabled: {
+    backgroundColor: '#cbd5e0',
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  submitButtonEmoji: {
+    fontSize: 20,
+    marginRight: 8,
+  },
+  submitButtonText: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  startNowButton: {
+    marginTop: 25,
+    borderRadius: 20,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  startNowButtonContent: {
+    backgroundColor: '#48bb78',
+    paddingVertical: 20,
+    paddingHorizontal: 40,
+    alignItems: 'center',
+    borderRadius: 20,
+    borderWidth: 3,
+    borderColor: '#38a169',
+  },
+  startNowEmoji: {
+    fontSize: 32,
+    marginBottom: 8,
+  },
+  startNowText: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#ffffff',
+    marginBottom: 4,
+    textShadowColor: 'rgba(0, 0, 0, 0.3)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
+  },
+  startNowSubtext: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#f0fff4',
+    textAlign: 'center',
   },
   contentContainer: {
     flex: 1,
@@ -3750,25 +5195,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0,
     elevation: 0,
   },
-  submitButton: {
-    backgroundColor: '#ffa500',
-    borderColor: '#ff8c00',
-    shadowColor: '#ffa500',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 8,
-    transform: [{ scale: 1.02 }],
-  },
   navButtonText: {
     fontSize: 16,
     fontWeight: '600',
     color: '#1e293b',
-  },
-  submitButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
   },
   // TTS button
   ttsButton: {
