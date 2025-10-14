@@ -44,6 +44,7 @@ import {
 
 import { ResponsiveCards } from '../components/ResponsiveGrid';
 import { useResponsive } from '../hooks/useResponsive';
+import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
 
 import * as XLSX from 'xlsx';
 
@@ -1637,6 +1638,15 @@ export default function TeacherDashboard() {
   const router = useRouter();
   const { width, height } = useWindowDimensions();
   const responsive = useResponsive();
+  const layout = useResponsiveLayout();
+  
+  // Responsive values
+  const containerPadding = useResponsiveValue({
+    mobile: 16,
+    tablet: 24,
+    desktop: 32,
+    default: 16,
+  });
 
   const [teacherData, setTeacherData] = useState<TeacherData | null>(null);
 
@@ -13893,7 +13903,7 @@ const styles = StyleSheet.create({
 
     marginHorizontal: Math.min(12, staticWidth * 0.03),
 
-    marginBottom: Math.min(20, staticHeight * 0.025),
+    marginBottom: Math.min(50, staticHeight * 0.050),
 
     shadowColor: '#000',
 
@@ -20938,9 +20948,9 @@ const styles = StyleSheet.create({
 
     width: '100%',
 
-    maxHeight: '85%',
+    maxHeight: '95%',
 
-    minHeight: '60%',
+    minHeight: '80%',
 
     shadowColor: '#000',
 
@@ -21188,7 +21198,7 @@ const styles = StyleSheet.create({
 
     paddingHorizontal: 24,
 
-    paddingBottom: 24,
+    paddingBottom: 48,
 
     paddingTop: 12,
 

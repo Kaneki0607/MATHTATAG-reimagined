@@ -11,19 +11,19 @@ import * as Speech from 'expo-speech';
 // import * as Network from 'expo-network';
 import { useEffect, useRef, useState } from 'react';
 import {
-  Animated,
-  Dimensions,
-  Easing,
-  Image,
-  ImageBackground,
-  LayoutAnimation,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    Animated,
+    Dimensions,
+    Easing,
+    Image,
+    ImageBackground,
+    LayoutAnimation,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import { readData, writeData } from '../lib/firebase-database';
 
@@ -3618,19 +3618,6 @@ export default function StudentExerciseAnswering() {
                 </View>
               )}
               
-              {/* Skip Option */}
-              {failedResources.size > 0 && !isPreloadingResources && (
-                <TouchableOpacity 
-                  style={styles.skipButton}
-                  onPress={() => {
-                    setIsPreloadingResources(false);
-                    setPreloadProgress(100);
-                    setPreloadStatus('Ready to start! Some content may load slowly.');
-                  }}
-                >
-                  <Text style={styles.skipButtonText}>🚀 Start Anyway</Text>
-                </TouchableOpacity>
-              )}
             </View>
           </View>
         </ImageBackground>

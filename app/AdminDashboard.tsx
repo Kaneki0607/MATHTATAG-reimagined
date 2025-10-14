@@ -4,6 +4,7 @@ import { Accelerometer } from 'expo-sensors';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, Easing, FlatList, Image, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useResponsive } from '../hooks/useResponsive';
+import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
 import { deleteData, listenToData, readData, stopListening, updateData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -45,6 +46,22 @@ interface TechnicalReport {
 export default function AdminDashboard() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const responsive = useResponsive();
+  const layout = useResponsiveLayout();
+  
+  // Responsive values
+  const containerPadding = useResponsiveValue({
+    mobile: 16,
+    tablet: 24,
+    desktop: 32,
+    default: 16,
+  });
+  
+  const headerHeight = useResponsiveValue({
+    mobile: 80,
+    tablet: 100,
+    desktop: 120,
+    default: 80,
+  });
   
   const [activeTab, setActiveTab] = useState<TabKey>('home');
   const [teachers, setTeachers] = useState<Teacher[]>([]);
@@ -2281,9 +2298,9 @@ const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center',
+    justifyContent: 'flex-end',
     alignItems: 'center',
-    padding: 20,
+    padding: 0,
   },
   modalContent: {
     backgroundColor: '#ffffff',
@@ -3264,8 +3281,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderTopLeftRadius: 32,
     borderTopRightRadius: 32,
-    maxHeight: '90%',
-    minHeight: '70%',
+    width: '100%',
+    maxHeight: '95%',
+    minHeight: '80%',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -8 },
     shadowOpacity: 0.25,
@@ -3387,10 +3405,11 @@ const styles = StyleSheet.create({
   },
   techReportModalFooter: {
     flexDirection: 'row',
-    gap: 12,
+    justifyContent: 'space-between',
     paddingHorizontal: 24,
-    paddingBottom: 24,
+    paddingBottom: 48,
     paddingTop: 12,
+    gap: 12,
   },
   techReportCancelButton: {
     flex: 1,

@@ -5,6 +5,7 @@ import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Animated, Dimensions, Easing, Image, KeyboardAvoidingView, Modal, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import { useResponsive } from '../hooks/useResponsive';
+import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
 import { logError, logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -210,7 +211,16 @@ export default function ParentDashboard() {
   const router = useRouter();
   const { width, height } = useWindowDimensions();
   const responsive = useResponsive();
+  const layout = useResponsiveLayout();
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  
+  // Responsive values
+  const containerPadding = useResponsiveValue({
+    mobile: 16,
+    tablet: 24,
+    desktop: 32,
+    default: 16,
+  });
   const translateAnim = useRef(new Animated.Value(16)).current;
   
   // Floating button position state
@@ -6340,8 +6350,8 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 32,
     borderTopRightRadius: 32,
     width: '100%',
-    maxHeight: '85%',
-    minHeight: '60%',
+    maxHeight: '95%',
+    minHeight: '80%',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -8 },
     shadowOpacity: 0.25,
@@ -6465,7 +6475,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     paddingHorizontal: 24,
-    paddingBottom: 24,
+    paddingBottom: 48,
     paddingTop: 12,
   },
   techReportCancelButton: {
