@@ -4,9 +4,10 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   Image,
   Modal,
   ScrollView,
@@ -862,6 +863,31 @@ interface Question {
 
 export default function CreateExercise() {
   const router = useRouter();
+  
+  // Image preloading for better performance
+  const preloadImages = useCallback(async () => {
+    try {
+      // Preload common stock images
+      const commonImages = [
+        require('../assets/images/icon.png'),
+        ...stockImages['Alphabet'].slice(0, 5).map(img => img.uri),
+        ...stockImages['Numbers'].slice(0, 5).map(img => img.uri),
+        ...stockImages['Shapes'].slice(0, 5).map(img => img.uri),
+      ];
+      
+      await Promise.all(
+        commonImages.map(imageSource => 
+          Image.prefetch(Image.resolveAssetSource(imageSource).uri)
+        )
+      );
+    } catch (error) {
+      console.log('Image preloading failed:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    preloadImages();
+  }, [preloadImages]);
   const { edit } = useLocalSearchParams();
   const [exerciseTitle, setExerciseTitle] = useState('');
   const [exerciseDescription, setExerciseDescription] = useState('');
@@ -869,6 +895,7 @@ export default function CreateExercise() {
   const [exerciseCode, setExerciseCode] = useState('');
   const [exerciseCategory, setExerciseCategory] = useState('');
   const [timeLimitPerItem, setTimeLimitPerItem] = useState<number | null>(120); // Default 2 minutes (120 seconds)
+  const [maxAttemptsPerItem, setMaxAttemptsPerItem] = useState<number | null>(null); // null = unlimited attempts
   const [questions, setQuestions] = useState<Question[]>([]);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [showCustomCategoryModal, setShowCustomCategoryModal] = useState(false);
@@ -1286,6 +1313,7 @@ export default function CreateExercise() {
         setExerciseCode(data.exerciseCode || '');
         setExerciseCategory(data.category || '');
         setTimeLimitPerItem(data.timeLimitPerItem || 120);
+        setMaxAttemptsPerItem(data.maxAttemptsPerItem || null);
         // Migrate old order arrays to reorderItems structure
         const migratedQuestions = (data.questions || []).map((q: any) => {
           if (q.type === 're-order' && q.order && !q.reorderItems) {
@@ -2089,6 +2117,10 @@ REQUIREMENTS FOR FILIPINO GRADE 1 STUDENTS:
 7. MAXIMIZE USE OF STOCK IMAGES: Reference specific images from the available list in questions and options
 8. When using images, mention the exact image name from the stock images list
 9. CRITICAL: NEVER include the answer in the question text - questions should only ask, not provide answers even if its multiple answer.
+10. CRITICAL: Write questions as PURE QUESTIONS or SCENARIOS ONLY - NO category labels, NO prefixes like "Fruits:", "Animals:", "[Category: Item]", etc.
+11. Make questions natural and conversational - like a teacher talking to students
+12. Examples of GOOD questions: "Ano ito?", "Ilan ang mga ito?", "Anong kulay ito?"
+13. Examples of BAD questions: "Fruits: Ano ito?", "[Animals] What is this?", "Numbers: Ilan ito?"
 
 QUESTION TYPE SPECIFIC RULES:
 
@@ -2151,12 +2183,26 @@ CRITICAL IMAGE RELEVANCE RULES:
 
 YOU CAN ALSO USE EMOJIS INSTEAD OF USING ONLY PICTURES
 
+CRITICAL FORMATTING RULES:
+- Write questions as NATURAL CONVERSATIONS - like a friendly teacher asking students
+- NO category labels (WRONG: "Fruits: Ano ito?", "Animals: What is this?", "[Money] Magkano ito?")
+- NO metadata in questions (WRONG: "[Category: Item] Question here")
+- Just PURE QUESTIONS (CORRECT: "Ano ito?", "What is this?", "Magkano ito?", "Ilan ang mga ito?")
+- Think like you're talking to a child - simple, direct, natural
+- Examples:
+  * WRONG: "Fruits: Ano ang kulay nito?"
+  * CORRECT: "Ano ang kulay nito?"
+  * WRONG: "[Animals] May ilang paa ang hayop na ito?"
+  * CORRECT: "May ilang paa ang hayop na ito?"
+  * WRONG: "Money: Magkano ang halaga nito?"
+  * CORRECT: "Magkano ang halaga nito?"
+
 IMPORTANT: Respond ONLY with valid JSON array. No additional text before or after.
 
 JSON Format for Multiple Choice:
 [
   {
-    "question": "Simple question in Filipino/English mix",
+    "question": "Ano ito?",
     "answer": "Exact text that appears in options array",
     "options": ["Option A", "Correct Answer", "Option C", "Option D"],
     "imageReferences": ["Image Name 1", "Image Name 2"]
@@ -3657,13 +3703,20 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
     try {
       const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
       
-      const prompt = `You are an expert educational content writer. Rewrite the following exercise title and description to make them more professional and appealing for co-teachers who will see this exercise in a public library.
+      const prompt = `You are an expert educational content writer for Grade 1 students. Rewrite the following exercise title and description to make them engaging and appealing.
 
 Current Title: "${exerciseTitle}"
 Current Description: "${exerciseDescription}"
 
-Requirements:
-- Make the title clear, engaging, and professional
+Requirements for TITLE:
+- MAXIMUM 3 WORDS ONLY! This is critical!
+- Make it fun, catchy, and witty for 6-7 year old children
+- Use simple Filipino or English words that Grade 1 students love
+- Think playful, exciting, and child-friendly (e.g., "Bilang Fun!", "Shape Hunt", "Number Magic")
+- NO complex words, NO long phrases
+- Make kids excited to play!
+
+Requirements for DESCRIPTION:
 - Write a compelling description that explains what students will learn and practice
 - Use educational terminology that teachers will understand
 - Highlight the key learning objectives and skills
@@ -3672,7 +3725,7 @@ Requirements:
 
 Please respond with a JSON object in this exact format:
 {
-  "title": "Improved title here",
+  "title": "Short 3-word title here",
   "description": "Improved description here"
 }`;
 
@@ -4088,6 +4141,7 @@ Please respond with a JSON object in this exact format:
         exerciseCode: finalExerciseCode,
         category: exerciseCategory,
         timeLimitPerItem: timeLimitPerItem,
+        maxAttemptsPerItem: maxAttemptsPerItem,
         createdAt: new Date().toISOString(),
       };
       
@@ -4699,7 +4753,12 @@ Please respond with a JSON object in this exact format:
           ) : (
             <View style={styles.reorderImageContainer}>
               {item.imageUrl && item.imageUrl.trim() !== '' ? (
-                <Image source={{ uri: item.imageUrl }} style={styles.reorderImageThumbnail} />
+                <Image 
+                  source={{ uri: item.imageUrl }} 
+                  style={styles.reorderImageThumbnail}
+                  resizeMode="cover"
+                  loadingIndicatorSource={require('../assets/images/icon.png')}
+                />
               ) : (
                 <View style={styles.reorderImagePlaceholder}>
                   <MaterialCommunityIcons name="image" size={24} color="#9ca3af" />
@@ -4925,6 +4984,7 @@ Please respond with a JSON object in this exact format:
                       source={{ uri: editingQuestion.questionImage }} 
                       style={{ width: 140, height: 140, borderRadius: 12, marginRight: 8 }} 
                       resizeMode="cover"
+                      fadeDuration={0}
                       loadingIndicatorSource={require('../assets/images/icon.png')}
                     />
                     <TouchableOpacity onPress={() => updateQuestion(editingQuestion.id, { questionImage: null })}>
@@ -5124,6 +5184,7 @@ Please respond with a JSON object in this exact format:
                             source={{ uri: editingQuestion.optionImages[index] as string }} 
                             style={{ width: 72, height: 72, borderRadius: 8, marginRight: 8 }} 
                             resizeMode="cover"
+                            fadeDuration={0}
                             loadingIndicatorSource={require('../assets/images/icon.png')}
                           />
                           <TouchableOpacity onPress={() => {
@@ -5155,6 +5216,7 @@ Please respond with a JSON object in this exact format:
                                   source={{ uri: imageUrl }} 
                                   style={{ width: 72, height: 72, borderRadius: 8 }} 
                                   resizeMode="cover"
+                                  fadeDuration={0}
                                   loadingIndicatorSource={require('../assets/images/icon.png')}
                                 />
                                 <TouchableOpacity 
@@ -5224,7 +5286,12 @@ Please respond with a JSON object in this exact format:
                           <View key={`pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                             <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
                               {pair.leftImage && pair.leftImage.trim() !== '' ? (
-                                <Image source={{ uri: pair.leftImage }} style={styles.pairImage} />
+                                <Image 
+                                  source={{ uri: pair.leftImage }} 
+                                  style={styles.pairImage}
+                                  resizeMode="cover"
+                                  loadingIndicatorSource={require('../assets/images/icon.png')}
+                                />
                               ) : (
                                 <Text style={styles.pairText}>{pair.left || 'Left item'}</Text>
                               )}
@@ -5234,7 +5301,12 @@ Please respond with a JSON object in this exact format:
                             </View>
                             <View style={[styles.pairSide, styles.pairRight, { backgroundColor: ['#1e40af','#059669','#d97706','#dc2626','#7c3aed'][idx % 5] }]}>
                               {pair.rightImage && pair.rightImage.trim() !== '' ? (
-                                <Image source={{ uri: pair.rightImage }} style={styles.pairImage} />
+                                <Image 
+                                  source={{ uri: pair.rightImage }} 
+                                  style={styles.pairImage}
+                                  resizeMode="cover"
+                                  loadingIndicatorSource={require('../assets/images/icon.png')}
+                                />
                               ) : (
                                 <Text style={styles.pairText}>{pair.right || 'Right item'}</Text>
                               )}
@@ -5290,7 +5362,12 @@ Please respond with a JSON object in this exact format:
                           </View>
                           {pair.leftImage && pair.leftImage.trim() !== '' && (
                             <View style={styles.pairImagePreview}>
-                              <Image source={{ uri: pair.leftImage }} style={styles.pairImageThumbnail} />
+                              <Image 
+                                source={{ uri: pair.leftImage }} 
+                                style={styles.pairImageThumbnail}
+                                resizeMode="cover"
+                                loadingIndicatorSource={require('../assets/images/icon.png')}
+                              />
                               <TouchableOpacity 
                                 style={styles.pairImageRemove} 
                                 onPress={() => clearPairImage(editingQuestion.id, index, 'left')}
@@ -5330,7 +5407,12 @@ Please respond with a JSON object in this exact format:
                           </View>
                           {pair.rightImage && pair.rightImage.trim() !== '' && (
                             <View style={styles.pairImagePreview}>
-                              <Image source={{ uri: pair.rightImage }} style={styles.pairImageThumbnail} />
+                              <Image 
+                                source={{ uri: pair.rightImage }} 
+                                style={styles.pairImageThumbnail}
+                                resizeMode="cover"
+                                loadingIndicatorSource={require('../assets/images/icon.png')}
+                              />
                               <TouchableOpacity 
                                 style={styles.pairImageRemove} 
                                 onPress={() => clearPairImage(editingQuestion.id, index, 'right')}
@@ -5414,7 +5496,12 @@ Please respond with a JSON object in this exact format:
                             {item.type === 'text' ? (
                               <Text style={styles.reorderPreviewText}>{item.content || `Item ${i+1}`}</Text>
                             ) : item.imageUrl && item.imageUrl.trim() !== '' ? (
-                              <Image source={{ uri: item.imageUrl }} style={styles.reorderPreviewImage} />
+                              <Image 
+                                source={{ uri: item.imageUrl }} 
+                                style={styles.reorderPreviewImage}
+                                resizeMode="cover"
+                                loadingIndicatorSource={require('../assets/images/icon.png')}
+                              />
                             ) : (
                               <View style={styles.reorderPreviewPlaceholder}>
                                 <MaterialCommunityIcons name="image" size={20} color="#ffffff" />
@@ -5644,7 +5731,11 @@ Please respond with a JSON object in this exact format:
                                     <View key={`sub-pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                                       <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
                                         {(pair as any).leftImage && (pair as any).leftImage.trim() !== '' ? (
-                                          <Image source={{ uri: (pair as any).leftImage }} style={styles.pairImage} />
+                                          <Image 
+                                            source={{ uri: (pair as any).leftImage }} 
+                                            style={styles.pairImage}
+                                            loadingIndicatorSource={require('../assets/images/icon.png')}
+                                          />
                                         ) : (
                                           <Text style={styles.pairText}>{pair.left || 'Left item'}</Text>
                                         )}
@@ -5654,7 +5745,11 @@ Please respond with a JSON object in this exact format:
                                       </View>
                                       <View style={[styles.pairSide, styles.pairRight, { backgroundColor: ['#1e40af','#059669','#d97706','#dc2626','#7c3aed'][idx % 5] }]}>
                                         {(pair as any).rightImage && (pair as any).rightImage.trim() !== '' ? (
-                                          <Image source={{ uri: (pair as any).rightImage }} style={styles.pairImage} />
+                                          <Image 
+                                            source={{ uri: (pair as any).rightImage }} 
+                                            style={styles.pairImage}
+                                            loadingIndicatorSource={require('../assets/images/icon.png')}
+                                          />
                                         ) : (
                                           <Text style={styles.pairText}>{pair.right || 'Right item'}</Text>
                                         )}
@@ -5731,7 +5826,12 @@ Please respond with a JSON object in this exact format:
                                     </View>
                                     {(pair as any).leftImage && (pair as any).leftImage.trim() !== '' && (
                                       <View style={styles.pairImagePreview}>
-                                        <Image source={{ uri: (pair as any).leftImage }} style={styles.pairImageThumbnail} />
+                                        <Image 
+                                          source={{ uri: (pair as any).leftImage }} 
+                                          style={styles.pairImageThumbnail}
+                                          resizeMode="cover"
+                                          loadingIndicatorSource={require('../assets/images/icon.png')}
+                                        />
                                         <TouchableOpacity 
                                           style={styles.pairImageRemove} 
                                           onPress={() => {
@@ -5803,7 +5903,12 @@ Please respond with a JSON object in this exact format:
                                     </View>
                                     {(pair as any).rightImage && (pair as any).rightImage.trim() !== '' && (
                                       <View style={styles.pairImagePreview}>
-                                        <Image source={{ uri: (pair as any).rightImage }} style={styles.pairImageThumbnail} />
+                                        <Image 
+                                          source={{ uri: (pair as any).rightImage }} 
+                                          style={styles.pairImageThumbnail}
+                                          resizeMode="cover"
+                                          loadingIndicatorSource={require('../assets/images/icon.png')}
+                                        />
                                         <TouchableOpacity 
                                           style={styles.pairImageRemove} 
                                           onPress={() => {
@@ -6213,6 +6318,65 @@ Please respond with a JSON object in this exact format:
                 </View>
                 <Text style={styles.timeLimitHelperText}>
                   {timeLimitPerItem ? `${Math.floor(timeLimitPerItem / 60)}m ${timeLimitPerItem % 60}s` : 'No time limit'}
+                </Text>
+              </View>
+            )}
+          </View>
+          
+          {/* Attempt Limit Per Item */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Attempt Limit Per Item</Text>
+            <View style={styles.timeLimitContainer}>
+              <TouchableOpacity
+                style={[styles.timeLimitOption, maxAttemptsPerItem === null && styles.timeLimitOptionActive]}
+                onPress={() => setMaxAttemptsPerItem(null)}
+              >
+                <MaterialCommunityIcons name="infinity" size={20} color={maxAttemptsPerItem === null ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.timeLimitText, maxAttemptsPerItem === null && styles.timeLimitTextActive]}>Unlimited</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.timeLimitOption, maxAttemptsPerItem !== null && styles.timeLimitOptionActive]}
+                onPress={() => setMaxAttemptsPerItem(3)}
+              >
+                <MaterialCommunityIcons name="repeat" size={20} color={maxAttemptsPerItem !== null ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.timeLimitText, maxAttemptsPerItem !== null && styles.timeLimitTextActive]}>Set Limit</Text>
+              </TouchableOpacity>
+            </View>
+            
+            {maxAttemptsPerItem !== null && (
+              <View style={styles.timeLimitInputContainer}>
+                <Text style={styles.timeLimitInputLabel}>Maximum attempts per item</Text>
+                <View style={styles.timeLimitInputRow}>
+                  <TouchableOpacity
+                    style={styles.timeLimitButton}
+                    onPress={() => setMaxAttemptsPerItem(Math.max(1, maxAttemptsPerItem - 1))}
+                  >
+                    <AntDesign name="minus" size={16} color="#3b82f6" />
+                  </TouchableOpacity>
+                  <TextInput
+                    style={styles.timeLimitInput}
+                    value={maxAttemptsPerItem.toString()}
+                    onChangeText={(text) => {
+                      const value = parseInt(text);
+                      if (!isNaN(value) && value >= 1) {
+                        setMaxAttemptsPerItem(value);
+                      }
+                    }}
+                    keyboardType="numeric"
+                    placeholder="3"
+                  />
+                  <TouchableOpacity
+                    style={styles.timeLimitButton}
+                    onPress={() => setMaxAttemptsPerItem(Math.min(10, maxAttemptsPerItem + 1))}
+                  >
+                    <AntDesign name="plus" size={16} color="#3b82f6" />
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.timeLimitHelperText}>
+                  {maxAttemptsPerItem === 1 
+                    ? 'Students get only 1 attempt per question' 
+                    : `Students can try up to ${maxAttemptsPerItem} times per question`
+                  }
                 </Text>
               </View>
             )}
@@ -6790,26 +6954,39 @@ Please respond with a JSON object in this exact format:
                   {stockImageCategories.find(c => c.id === selectedCategory)?.name} Images
                 </Text>
                 
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }}>
-                  {stockImageCategories
-                    .find(c => c.id === selectedCategory)
-                    ?.images.map((image) => (
-                      <TouchableOpacity
-                        key={image.name}
-                        style={{ width: '30%', marginBottom: 16, alignItems: 'center' }}
-                        onPress={() => selectStockImage(image.source)}
-                      >
-                        <Image
-                          source={image.source}
-                          style={{ width: 80, height: 80, borderRadius: 12, backgroundColor: '#f1f5f9' }}
-                          resizeMode="cover"
-                        />
-                        <Text style={{ fontSize: 12, color: '#64748b', marginTop: 8, textAlign: 'center', fontWeight: '500' }} numberOfLines={1}>
-                          {image.name}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                </View>
+                <FlatList
+                  data={stockImageCategories.find(c => c.id === selectedCategory)?.images || []}
+                  numColumns={3}
+                  keyExtractor={(item) => item.name}
+                  showsVerticalScrollIndicator={false}
+                  contentContainerStyle={{ paddingBottom: 20 }}
+                  columnWrapperStyle={{ justifyContent: 'space-between' }}
+                  initialNumToRender={12}
+                  maxToRenderPerBatch={6}
+                  windowSize={10}
+                  getItemLayout={(data, index) => ({
+                    length: 116, // 80 (image) + 16 (margin) + 20 (text)
+                    offset: 116 * Math.floor(index / 3),
+                    index,
+                  })}
+                  renderItem={({ item: image }) => (
+                    <TouchableOpacity
+                      style={{ width: '30%', marginBottom: 16, alignItems: 'center' }}
+                      onPress={() => selectStockImage(image.source)}
+                    >
+                      <Image
+                        source={image.source}
+                        style={{ width: 80, height: 80, borderRadius: 12, backgroundColor: '#f1f5f9' }}
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                      <Text style={{ fontSize: 12, color: '#64748b', marginTop: 8, textAlign: 'center', fontWeight: '500' }} numberOfLines={1}>
+                        {image.name}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                />
               </View>
             )}
           </ScrollView>
@@ -6848,759 +7025,945 @@ Please respond with a JSON object in this exact format:
             {/* Animals Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Animals</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `animal-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Animals')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Animals')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Animals'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`animal-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Alphabet Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Alphabet</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Alphabet'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `alphabet-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Alphabet')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Alphabet')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Alphabet'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`alphabet-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Fruits Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Fruits</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Fruits and Vegetables'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `fruit-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Fruits')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Fruits')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Fruits and Vegetables'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`fruit-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* 3D Alphabet Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>3D Alphabet</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['3D Alphabet'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `3d-alphabet-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('3D Alphabet')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('3D Alphabet')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['3D Alphabet'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`3d-alphabet-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Boxed Alphabet Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Boxed Alphabet</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Boxed Alphabet'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `boxed-alphabet-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Boxed Alphabet')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Boxed Alphabet')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Boxed Alphabet'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`boxed-alphabet-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Boxed Numbers Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Boxed Numbers 1-9</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Boxed Numbers 1-9'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `boxed-number-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Boxed Numbers 1-9')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Boxed Numbers 1-9')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Boxed Numbers 1-9'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`boxed-number-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Comparing Quantities Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Comparing Quantities</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Comparing Quantities'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `comparing-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Comparing Quantities')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Comparing Quantities')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Comparing Quantities'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`comparing-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Dates Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Dates</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Dates'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `date-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Dates')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Dates')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Dates'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`date-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Extra Objects Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Extra Objects</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Extra Objects'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `extra-object-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Extra Objects')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Extra Objects')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Extra Objects'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`extra-object-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Fractions Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Fractions</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Fractions'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `fraction-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Fractions')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Fractions')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Fractions'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`fraction-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Length and Distance Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Length and Distance</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Length and Distance'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `length-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Length and Distance')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Length and Distance')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Length and Distance'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`length-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Money Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Money</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Money'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `money-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Money')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Money')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Money'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`money-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Patterns Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Patterns</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Patterns'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `pattern-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Patterns')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Patterns')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Patterns'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`pattern-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Time and Position Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Time and Position</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Time and Position'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `time-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Time and Position')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Time and Position')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Time and Position'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`time-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Land Animals Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Land Animals</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).filter((_, index) => index < 32).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `land-animal-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Land Animals')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Land Animals')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Animals'] || []).filter((_, index) => index < 32).map((image, index) => (
-                  <TouchableOpacity
-                    key={`land-animal-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Sea Animals Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Sea Animals</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).filter((_, index) => index >= 32).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `sea-animal-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Sea Animals')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Sea Animals')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Animals'] || []).filter((_, index) => index >= 32).map((image, index) => (
-                  <TouchableOpacity
-                    key={`sea-animal-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Math Symbols Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Math Symbols</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Math Symbols'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `math-symbol-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Math Symbols')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Math Symbols')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Math Symbols'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`math-symbol-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Numbers Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Numbers</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...stockImages['Numbers'].map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `number-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Numbers')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={8}
+                maxToRenderPerBatch={5}
+                windowSize={5}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Numbers')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {stockImages['Numbers'].map((image, index) => (
-                  <TouchableOpacity
-                    key={`number-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* School Supplies Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>School Supplies</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['School Supplies'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `school-supply-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('School Supplies')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('School Supplies')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['School Supplies'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`school-supply-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Shapes Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Shapes</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Shapes'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `shape-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Shapes')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Shapes')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Shapes'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`shape-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Toys Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Toys</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(stockImages['Toys'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `toy-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Toys')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Toys')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Toys'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`toy-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Custom Categories */}
             {Object.keys(customCategories).map((categoryName) => (
               <View key={categoryName} style={styles.imageCategory}>
                 <Text style={styles.categoryTitle}>{categoryName}</Text>
-                <ScrollView 
-                  horizontal 
+                <FlatList
+                  horizontal
                   showsHorizontalScrollIndicator={false}
-                  style={styles.horizontalImageScroll}
+                  data={[{ isAddButton: true }, ...customCategories[categoryName].map(url => ({ imageUrl: url }))]}
+                  keyExtractor={(item, index) => `custom-${categoryName}-${index}`}
+                  renderItem={({ item }: any) => {
+                    if (item.isAddButton) {
+                      return (
+                        <TouchableOpacity
+                          style={styles.addImageButton}
+                          onPress={() => handleImageUpload(categoryName)}
+                        >
+                          <AntDesign name="plus" size={24} color="#3b82f6" />
+                        </TouchableOpacity>
+                      );
+                    }
+                    return (
+                      <TouchableOpacity
+                        style={styles.horizontalImageItem}
+                        onPress={() => handleImageSelect(item.imageUrl)}
+                      >
+                        <Image 
+                          source={{ uri: item.imageUrl }} 
+                          style={styles.horizontalImageThumbnail} 
+                          resizeMode="cover"
+                          fadeDuration={0}
+                          loadingIndicatorSource={require('../assets/images/icon.png')}
+                        />
+                      </TouchableOpacity>
+                    );
+                  }}
+                  initialNumToRender={5}
+                  maxToRenderPerBatch={3}
+                  windowSize={3}
                   contentContainerStyle={styles.horizontalImageContainer}
-                >
-                  {/* Add button as first item */}
-                  <TouchableOpacity
-                    style={styles.addImageButton}
-                    onPress={() => handleImageUpload(categoryName)}
-                  >
-                    <AntDesign name="plus" size={24} color="#3b82f6" />
-                  </TouchableOpacity>
-                  
-                  {customCategories[categoryName].map((imageUrl, index) => (
-                    <TouchableOpacity
-                      key={`custom-${categoryName}-${index}`}
-                      style={styles.horizontalImageItem}
-                      onPress={() => handleImageSelect(imageUrl)}
-                    >
-                      <Image 
-                        source={{ uri: imageUrl }} 
-                        style={styles.horizontalImageThumbnail} 
-                        resizeMode="cover"
-                        loadingIndicatorSource={require('../assets/images/icon.png')}
-                      />
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
+                />
               </View>
             ))}
 
             {/* Custom Uploads Category - Always show this */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Custom Uploads</Text>
-              <ScrollView 
-                horizontal 
+              <FlatList
+                horizontal
                 showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+                data={[{ isAddButton: true }, ...(customCategories['Custom Uploads'] || []).map(url => ({ imageUrl: url }))]}
+                keyExtractor={(item, index) => `custom-uploads-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Custom Uploads')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(item.imageUrl)}
+                    >
+                      <Image 
+                        source={{ uri: item.imageUrl }} 
+                        style={styles.horizontalImageThumbnail}
+                        resizeMode="cover"
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                {/* Add button as first item */}
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Custom Uploads')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(customCategories['Custom Uploads'] || []).map((imageUrl, index) => (
-                  <TouchableOpacity
-                    key={`custom-uploads-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(imageUrl)}
-                  >
-                    <Image source={{ uri: imageUrl }} style={styles.horizontalImageThumbnail} />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Create Another Category Button */}

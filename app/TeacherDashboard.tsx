@@ -1808,8 +1808,6 @@ export default function TeacherDashboard() {
 
   };
 
-  const [annAllClasses, setAnnAllClasses] = useState(true);
-
   const [annSelectedClassIds, setAnnSelectedClassIds] = useState<string[]>([]);
 
   const [teacherClasses, setTeacherClasses] = useState<{
@@ -1975,6 +1973,9 @@ export default function TeacherDashboard() {
   const [resultsSortBy, setResultsSortBy] = useState<'attempts' | 'time'>('attempts');
 
   const [resultsSortOrder, setResultsSortOrder] = useState<'asc' | 'desc'>('asc');
+  
+  // Quarter filtering state for Results tab
+  const [selectedQuarter, setSelectedQuarter] = useState<string>('All Quarters');
 
   // List modal state
 
@@ -2084,6 +2085,8 @@ export default function TeacherDashboard() {
 
   const [classAverages, setClassAverages] = useState<any>(null);
 
+  // Class statistics expansion state
+  const [expandedStats, setExpandedStats] = useState<Record<string, boolean>>({});
 
 
   // Technical Report Modal state
@@ -2262,25 +2265,73 @@ export default function TeacherDashboard() {
 
       const matchingStudent = classStudents.find((student: any) => {
 
-        // Try Firebase parent ID match (new format)
+        // Strategy 1: Direct studentId match (most reliable)
 
-        if (result.parentId === student.parentId) return true;
-
-        
-
-        // Try studentId match (if available in result)
-
-        if (result.studentId === student.studentId) return true;
-
-        
-
-        // Try login code match (old format - backward compatibility)
-
-        const parentData = parentsById[student.parentId];
-
-        if (parentData && parentData.loginCode && result.parentId === parentData.loginCode) {
-
+        if (result.studentId && student.studentId && result.studentId === student.studentId) {
+          console.log('[COMPLETION MATCH] Matched by studentId:', result.studentId, 'for student:', student.fullName);
           return true;
+
+        }
+
+        
+
+        // Strategy 2: Firebase parent ID match (new format)
+
+        if (result.parentId && student.parentId && result.parentId === student.parentId) {
+          console.log('[COMPLETION MATCH] Matched by parentId:', result.parentId, 'for student:', student.fullName);
+          return true;
+
+        }
+
+        
+
+        // Strategy 3: Student name match (fallback for data structure compatibility)
+
+        if (result.studentInfo && result.studentInfo.name && student.fullName) {
+
+          // Normalize names for comparison
+
+          const resultName = result.studentInfo.name.toLowerCase().trim();
+
+          const studentName = student.fullName.toLowerCase().trim();
+
+          if (resultName === studentName) {
+            console.log('[COMPLETION MATCH] Matched by name:', studentName);
+            return true;
+
+          }
+
+        }
+
+        
+
+        // Strategy 4: Login code match (old format - backward compatibility)
+
+        if (result.parentId && student.parentId) {
+
+          const parentData = parentsById[student.parentId];
+
+          if (parentData && parentData.loginCode && result.parentId === parentData.loginCode) {
+
+            return true;
+
+          }
+
+        }
+
+        
+
+        // Strategy 5: Check if result.parentId matches student's parent login code directly
+
+        if (result.parentId && student.parentId) {
+
+          const parentData = parentsById[student.parentId];
+
+          if (parentData && parentData.loginCode === result.parentId) {
+
+            return true;
+
+          }
 
         }
 
@@ -2296,6 +2347,17 @@ export default function TeacherDashboard() {
 
         completedStudentIds.add(matchingStudent.studentId);
 
+      } else {
+        console.log('[COMPLETION NO MATCH] Could not match result:', {
+          resultStudentId: result.studentId,
+          resultParentId: result.parentId,
+          resultStudentInfo: result.studentInfo,
+          availableStudents: classStudents.map((s: any) => ({ 
+            id: s.studentId, 
+            name: s.fullName,
+            parentId: s.parentId 
+          }))
+        });
       }
 
     });
@@ -2305,6 +2367,20 @@ export default function TeacherDashboard() {
     const completedCount = completedStudentIds.size;
 
     
+
+    // Debug logging to help understand completion tracking
+
+    console.log(`[COMPLETION DEBUG] Assignment: ${assignment.exercise?.title}`);
+
+    console.log(`[COMPLETION DEBUG] Class: ${assignment.classId}`);
+
+    console.log(`[COMPLETION DEBUG] Total students: ${totalStudents}`);
+
+    console.log(`[COMPLETION DEBUG] Exercise results found: ${assignmentResults.length}`);
+
+    console.log(`[COMPLETION DEBUG] Completed students: ${completedCount}`);
+
+    console.log(`[COMPLETION DEBUG] Completion percentage: ${totalStudents > 0 ? Math.round((completedCount / totalStudents) * 100) : 0}%`);
 
     
 
@@ -2336,38 +2412,64 @@ export default function TeacherDashboard() {
 
     const student = studentsByClass[assignment.classId]?.find((s: any) => s.studentId === studentId);
 
-    if (!student) return 'pending';
+    if (!student) {
+      console.log('[STATUS CHECK] Student not found:', studentId);
+      return 'pending';
+    }
 
     
 
-    // Check for exercise results using both Firebase parent ID and login code (for backward compatibility)
+    // Check for exercise results using multiple matching strategies
 
     const studentResult = classResults.find((result: any) => {
 
+      // Must match the exercise
       if (result.exerciseId !== assignment.exerciseId) return false;
+      
+      // Must match the assignment ID if both are available
+      if (result.assignedExerciseId && assignment.id && result.assignedExerciseId !== assignment.id) {
+        return false;
+      }
 
       
 
-      // Try to match by Firebase parent ID (new format)
+      // Strategy 1: Try to match by studentId directly (most reliable)
 
-      if (result.parentId === student.parentId) return true;
-
-      
-
-      // Try to match by studentId directly (if available in result)
-
-      if (result.studentId === studentId) return true;
+      if (result.studentId && result.studentId === studentId) {
+        console.log('[STATUS MATCH] Matched by studentId:', studentId);
+        return true;
+      }
 
       
 
-      // Try to match by login code (old format - backward compatibility)
+      // Strategy 2: Try to match by studentInfo.name
 
-      // This requires resolving the student's parent to their login code
+      if (result.studentInfo?.name && student.fullName) {
+        const resultName = result.studentInfo.name.toLowerCase().trim();
+        const studentName = student.fullName.toLowerCase().trim();
+        if (resultName === studentName) {
+          console.log('[STATUS MATCH] Matched by name:', studentName);
+          return true;
+        }
+      }
+
+      
+
+      // Strategy 3: Try to match by Firebase parent ID
+
+      if (result.parentId && student.parentId && result.parentId === student.parentId) {
+        console.log('[STATUS MATCH] Matched by parentId:', student.parentId);
+        return true;
+      }
+
+      
+
+      // Strategy 4: Try to match by login code (old format - backward compatibility)
 
       const parentData = parentsById[student.parentId];
 
       if (parentData && parentData.loginCode && result.parentId === parentData.loginCode) {
-
+        console.log('[STATUS MATCH] Matched by login code');
         return true;
 
       }
@@ -2377,6 +2479,16 @@ export default function TeacherDashboard() {
       return false;
 
     });
+
+    
+    if (!studentResult) {
+      console.log('[STATUS CHECK] No result found for student:', {
+        studentId,
+        studentName: student.fullName,
+        exerciseId: assignment.exerciseId,
+        availableResults: classResults.length
+      });
+    }
 
     
 
@@ -2897,15 +3009,60 @@ export default function TeacherDashboard() {
 
       Object.entries(exerciseResultsData || {}).forEach(([resultId, result]: any) => {
 
-        const r = { resultId, ...(result || {}) };
-
+        // Parse the new result structure
+        // Result key format: exerciseId_studentId_timestamp_random
+        const keyParts = resultId.split('_');
+        let studentId = null;
         
-
-        // Find the classId for this result using parentId
-
-        const classId = r.parentId ? parentToClassMap[r.parentId] : null;
-
+        // Extract studentId from the key (second part)
+        if (keyParts.length >= 2) {
+          studentId = keyParts[1];
+        }
         
+        // Also check if studentInfo has the studentId
+        if (!studentId && result?.studentInfo?.studentId) {
+          studentId = result.studentInfo.studentId;
+        }
+
+        // Get data from nested structure
+        const exerciseId = result?.exerciseInfo?.exerciseId || result?.exerciseId;
+        const classId = result?.assignmentMetadata?.classId || result?.classId;
+        const assignedExerciseId = result?.assignedExerciseId || result?.assignmentId || result?.assignmentMetadata?.assignmentId;
+        
+        // Debug logging
+        console.log('[RESULT PARSING]', {
+          resultId,
+          extractedStudentId: studentId,
+          exerciseId,
+          classId,
+          hasStudentInfo: !!result?.studentInfo,
+          studentInfoId: result?.studentInfo?.studentId
+        });
+
+        // Create a flattened result object that maintains backward compatibility
+        const r = { 
+          resultId,
+          exerciseId,
+          classId,
+          studentId,
+          assignedExerciseId,
+          // Preserve root-level properties (with fallbacks to nested structure)
+          exerciseTitle: result?.exerciseTitle || result?.exerciseInfo?.title || result?.exerciseInfo?.exerciseTitle,
+          scorePercentage: result?.scorePercentage ?? result?.resultsSummary?.meanPercentageScore,
+          totalTimeSpent: result?.totalTimeSpent ?? (result?.resultsSummary?.totalTimeSpentSeconds ? result.resultsSummary.totalTimeSpentSeconds * 1000 : undefined),
+          questionResults: result?.questionResults,
+          completedAt: result?.completedAt || result?.exerciseSession?.completedAt,
+          submittedAt: result?.submittedAt || result?.exerciseSession?.submittedAt,
+          studentInfo: result?.studentInfo,
+          // Add nested structures for reference
+          resultsSummary: result?.resultsSummary,
+          exerciseSession: result?.exerciseSession,
+          assignmentMetadata: result?.assignmentMetadata,
+          exerciseInfo: result?.exerciseInfo,
+          deviceInfo: result?.deviceInfo,
+          // Keep original parentId for backward compatibility
+          parentId: result?.parentId,
+        };
 
         
 
@@ -2915,7 +3072,9 @@ export default function TeacherDashboard() {
 
           if (!resultsByClassArray[classId]) resultsByClassArray[classId] = [];
 
-          resultsByClass[classId].add(r.exerciseId);
+          if (exerciseId) {
+            resultsByClass[classId].add(exerciseId);
+          }
 
           resultsByClassArray[classId].push(r);
 
@@ -2926,17 +3085,87 @@ export default function TeacherDashboard() {
       
 
       // Update stats with actual completion data from ExerciseResults
+      // An assignment is considered "completed" if:
+      // 1. ALL students in the class have completed it, OR
+      // 2. The assignment is closed (acceptingStatus !== 'open')
 
-      Object.entries(resultsByClass).forEach(([classId, completedExerciseIds]) => {
-
-        if (stats[classId]) {
-
-          stats[classId].completed = completedExerciseIds.size;
-
-          stats[classId].pending = Math.max(0, stats[classId].total - completedExerciseIds.size);
-
+      const assignmentCompletionStatus: Record<string, Set<string>> = {}; // classId -> Set of truly completed assignmentIds
+      
+      Object.entries(assignmentsData || {}).forEach(([assignmentId, assignment]: any) => {
+        const a = { id: assignmentId, ...(assignment || {}) };
+        
+        if (!classIds.includes(a.classId)) return;
+        
+        // Count students in this class
+        const classStudentCount = Object.values(studentsData || {}).filter((s: any) => 
+          s.classId === a.classId
+        ).length;
+        
+        // Count completed students for this assignment
+        const assignmentResults = resultsByClassArray[a.classId]?.filter((result: any) => 
+          result.exerciseId === a.exerciseId && 
+          result.assignedExerciseId === assignmentId
+        ) || [];
+        
+        // Match results to actual students
+        const completedStudentIds = new Set<string>();
+        assignmentResults.forEach((result: any) => {
+          const matchingStudent = Object.values(studentsData || {}).find((student: any) => {
+            if (student.classId !== a.classId) return false;
+            
+            // Try multiple matching strategies
+            if (result.studentId && student.studentId === result.studentId) return true;
+            if (result.studentInfo?.name && student.fullName && 
+                result.studentInfo.name.toLowerCase().trim() === student.fullName.toLowerCase().trim()) return true;
+            if (result.parentId && student.parentId === result.parentId) return true;
+            
+            return false;
+          });
+          
+          if (matchingStudent) {
+            completedStudentIds.add((matchingStudent as any).studentId);
+          }
+        });
+        
+        const allStudentsCompleted = classStudentCount > 0 && completedStudentIds.size >= classStudentCount;
+        const assignmentClosed = a.acceptingStatus !== 'open';
+        
+        // Debug logging
+        console.log('[ASSIGNMENT COMPLETION CHECK]', {
+          assignmentId,
+          exerciseTitle: a.exercise?.title,
+          classId: a.classId,
+          totalStudents: classStudentCount,
+          completedStudents: completedStudentIds.size,
+          allStudentsCompleted,
+          acceptingStatus: a.acceptingStatus,
+          assignmentClosed,
+          isCompleted: allStudentsCompleted || assignmentClosed
+        });
+        
+        // Assignment is completed if all students finished OR teacher closed it
+        if (allStudentsCompleted || assignmentClosed) {
+          if (!assignmentCompletionStatus[a.classId]) {
+            assignmentCompletionStatus[a.classId] = new Set();
+          }
+          assignmentCompletionStatus[a.classId].add(assignmentId);
         }
+      });
 
+      // Update stats based on true completion status
+      Object.entries(assignmentCompletionStatus).forEach(([classId, completedAssignmentIds]) => {
+        if (stats[classId]) {
+          stats[classId].completed = completedAssignmentIds.size;
+          stats[classId].pending = Math.max(0, stats[classId].total - completedAssignmentIds.size);
+        }
+      });
+      
+      // Ensure all classes have proper counts even if no assignments are completed
+      Object.keys(stats).forEach(classId => {
+        if (!assignmentCompletionStatus[classId]) {
+          stats[classId].completed = 0;
+          stats[classId].pending = stats[classId].total;
+        }
       });
 
       
@@ -2976,7 +3205,7 @@ export default function TeacherDashboard() {
 
       const { data: analyticsData } = await readData('/classAnalytics');
 
-      const { data: exerciseResults } = await readData('/exerciseResults');
+      const { data: exerciseResults } = await readData('/ExerciseResults');
 
       
 
@@ -2996,7 +3225,26 @@ export default function TeacherDashboard() {
 
         if (exerciseResults) {
 
-          const classResults = Object.values(exerciseResults).filter((result: any) => 
+          // Parse results with new structure
+          const parsedResults = Object.entries(exerciseResults).map(([resultId, result]: any) => {
+            const keyParts = resultId.split('_');
+            const extractedStudentId = keyParts.length >= 2 ? keyParts[1] : null;
+            
+            return {
+              resultId,
+              exerciseId: result?.exerciseInfo?.exerciseId || result?.exerciseId,
+              classId: result?.assignmentMetadata?.classId || result?.classId,
+              studentId: extractedStudentId || result?.studentId,
+              exerciseTitle: result?.exerciseTitle || result?.exerciseInfo?.title || result?.exerciseInfo?.exerciseTitle,
+              scorePercentage: result?.scorePercentage ?? result?.resultsSummary?.meanPercentageScore,
+              totalTimeSpent: result?.totalTimeSpent ?? (result?.resultsSummary?.totalTimeSpentSeconds ? result.resultsSummary.totalTimeSpentSeconds * 1000 : undefined),
+              questionResults: result?.questionResults,
+              studentInfo: result?.studentInfo,
+              resultsSummary: result?.resultsSummary,
+            };
+          });
+
+          const classResults = parsedResults.filter((result: any) => 
 
             result.classId === classId
 
@@ -3722,7 +3970,31 @@ export default function TeacherDashboard() {
 
 
 
-      const results = Object.values(allResults) as any[];
+      // Parse results with new structure
+      const results = Object.entries(allResults).map(([resultId, result]: any) => {
+        // Extract studentId from key format: exerciseId_studentId_timestamp_random
+        const keyParts = resultId.split('_');
+        const extractedStudentId = keyParts.length >= 2 ? keyParts[1] : null;
+        
+        return {
+          resultId,
+          exerciseId: result?.exerciseInfo?.exerciseId || result?.exerciseId,
+          classId: result?.assignmentMetadata?.classId || result?.classId,
+          studentId: extractedStudentId || result?.studentId,
+          exerciseTitle: result?.exerciseTitle || result?.exerciseInfo?.title || result?.exerciseInfo?.exerciseTitle,
+          scorePercentage: result?.scorePercentage ?? result?.resultsSummary?.meanPercentageScore,
+          totalTimeSpent: result?.totalTimeSpent ?? (result?.resultsSummary?.totalTimeSpentSeconds ? result.resultsSummary.totalTimeSpentSeconds * 1000 : undefined),
+          questionResults: result?.questionResults,
+          completedAt: result?.completedAt || result?.exerciseSession?.completedAt,
+          submittedAt: result?.submittedAt || result?.exerciseSession?.submittedAt,
+          studentInfo: result?.studentInfo,
+          resultsSummary: result?.resultsSummary,
+          exerciseSession: result?.exerciseSession,
+          assignmentMetadata: result?.assignmentMetadata,
+          exerciseInfo: result?.exerciseInfo,
+          deviceInfo: result?.deviceInfo,
+        };
+      });
 
       const studentResult = results.find((result: any) => 
 
@@ -4434,23 +4706,247 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     try {
 
-      // Prepare data for Excel
+      // Create a workbook
 
-      const excelData = results.map((result: any, idx: number) => {
+      const wb = XLSX.utils.book_new();
 
-        const student = students.find((s: any) => s.studentId === result.studentId);
+      
 
-        const studentNickname = student ? formatStudentName(student) : 'Unknown Student';
+      // SHEET 1: CLASS STATISTICS
 
+      const classStatsData = [];
+
+      if (results.length > 0) {
+
+        // Calculate class statistics
+
+        const totalStudents = results.length;
+
+        const totalQuestions = results[0]?.questionResults?.length || 0;
+
+        const totalCorrect = results.reduce((sum, result) => {
+
+          return sum + (result.resultsSummary?.totalCorrect || 0);
+
+        }, 0);
+
+        const totalPossible = totalStudents * totalQuestions;
+
+        const mps = totalPossible > 0 ? ((totalCorrect / totalPossible) * 100).toFixed(1) : '0.0';
+
+        const passingStudents = results.filter(result => (result.scorePercentage || 0) >= 75).length;
+
+        const passRate = ((passingStudents / totalStudents) * 100).toFixed(1);
+
+        const avgTimePerItem = results.reduce((sum, result) => {
+
+          const questionResults = result.questionResults || [];
+
+          const totalTime = questionResults.reduce((timeSum: number, q: any) => timeSum + (q.timeSpentSeconds || 0), 0);
+
+          return sum + (totalTime / Math.max(questionResults.length, 1));
+
+        }, 0) / totalStudents;
+
+        const avgAttemptsPerItem = results.reduce((sum, result) => {
+
+          const questionResults = result.questionResults || [];
+
+          const totalAttempts = questionResults.reduce((attemptSum: number, q: any) => attemptSum + (q.attempts || 1), 0);
+
+          return sum + (totalAttempts / Math.max(questionResults.length, 1));
+
+        }, 0) / totalStudents;
+
+        // CENTRAL TENDENCY CALCULATIONS
+        const scores = results.map(result => result.scorePercentage || 0);
+        const times = results.map(result => Math.round((result.totalTimeSpent || 0) / 1000));
+        const attempts = results.map(result => {
+          const questionResults = result.questionResults || [];
+          return questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+        });
+
+        // Sort arrays for median calculation
+        const sortedScores = [...scores].sort((a, b) => a - b);
+        const sortedTimes = [...times].sort((a, b) => a - b);
+        const sortedAttempts = [...attempts].sort((a, b) => a - b);
+
+        // Calculate mean, median, mode
+        const meanScore = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+        const medianScore = sortedScores.length % 2 === 0 
+          ? (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2
+          : sortedScores[Math.floor(sortedScores.length / 2)];
+
+        const meanTime = times.reduce((sum, time) => sum + time, 0) / times.length;
+        const medianTime = sortedTimes.length % 2 === 0 
+          ? (sortedTimes[sortedTimes.length / 2 - 1] + sortedTimes[sortedTimes.length / 2]) / 2
+          : sortedTimes[Math.floor(sortedTimes.length / 2)];
+
+        const meanAttempts = attempts.reduce((sum, attempt) => sum + attempt, 0) / attempts.length;
+        const medianAttempts = sortedAttempts.length % 2 === 0 
+          ? (sortedAttempts[sortedAttempts.length / 2 - 1] + sortedAttempts[sortedAttempts.length / 2]) / 2
+          : sortedAttempts[Math.floor(sortedAttempts.length / 2)];
+
+        // DISPERSION CALCULATIONS
+        const scoreVariance = scores.reduce((sum, score) => sum + Math.pow(score - meanScore, 2), 0) / scores.length;
+        const scoreStdDev = Math.sqrt(scoreVariance);
+        const scoreRange = Math.max(...scores) - Math.min(...scores);
+
+        const timeVariance = times.reduce((sum, time) => sum + Math.pow(time - meanTime, 2), 0) / times.length;
+        const timeStdDev = Math.sqrt(timeVariance);
+        const timeRange = Math.max(...times) - Math.min(...times);
+
+        const attemptVariance = attempts.reduce((sum, attempt) => sum + Math.pow(attempt - meanAttempts, 2), 0) / attempts.length;
+        const attemptStdDev = Math.sqrt(attemptVariance);
+        const attemptRange = Math.max(...attempts) - Math.min(...attempts);
+
+        // Quartiles calculation
+        const getQuartiles = (arr: number[]) => {
+          const sorted = [...arr].sort((a, b) => a - b);
+          const q1Index = Math.floor(sorted.length * 0.25);
+          const q3Index = Math.floor(sorted.length * 0.75);
+          return {
+            q1: sorted[q1Index],
+            q3: sorted[q3Index],
+            iqr: sorted[q3Index] - sorted[q1Index]
+          };
+        };
+
+        const scoreQuartiles = getQuartiles(scores);
+        const timeQuartiles = getQuartiles(times);
+        const attemptQuartiles = getQuartiles(attempts);
+
+        // EFFICIENCY CALCULATIONS
+        const completedStudents = results.filter(result => result.completedAt).length;
+        const completionRate = ((completedStudents / totalStudents) * 100).toFixed(1);
+
+        // Time efficiency: students who completed in reasonable time (below median + 1 std dev)
+        const timeThreshold = meanTime + timeStdDev;
+        const timeEfficientStudents = results.filter(result => 
+          Math.round((result.totalTimeSpent || 0) / 1000) <= timeThreshold
+        ).length;
+        const timeEfficiencyRate = ((timeEfficientStudents / totalStudents) * 100).toFixed(1);
+
+        // Attempt efficiency: students who used minimal attempts (below median + 1 std dev)
+        const attemptThreshold = meanAttempts + attemptStdDev;
+        const attemptEfficientStudents = results.filter(result => {
+          const questionResults = result.questionResults || [];
+          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+          return totalAttempts <= attemptThreshold;
+        }).length;
+        const attemptEfficiencyRate = ((attemptEfficientStudents / totalStudents) * 100).toFixed(1);
+
+        // Overall efficiency: students who are both time and attempt efficient
+        const overallEfficientStudents = results.filter(result => {
+          const totalTime = Math.round((result.totalTimeSpent || 0) / 1000);
+          const questionResults = result.questionResults || [];
+          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+          return totalTime <= timeThreshold && totalAttempts <= attemptThreshold;
+        }).length;
+        const overallEfficiencyRate = ((overallEfficientStudents / totalStudents) * 100).toFixed(1);
+
+        classStatsData.push(
+          // BASIC STATISTICS
+          { 'Metric': 'Exercise Title', 'Value': exerciseTitle },
+          { 'Metric': 'Total Students', 'Value': totalStudents },
+          { 'Metric': 'Total Questions', 'Value': totalQuestions },
+          { 'Metric': 'Total Correct Answers', 'Value': totalCorrect },
+          { 'Metric': 'Total Possible Points', 'Value': totalPossible },
+          { 'Metric': 'Mean Percentage Score (MPS)', 'Value': `${mps}%` },
+          { 'Metric': 'Passing Students (≥75%)', 'Value': passingStudents },
+          { 'Metric': 'Pass Rate', 'Value': `${passRate}%` },
+          
+          // CENTRAL TENDENCY - SCORES
+          { 'Metric': '--- CENTRAL TENDENCY (SCORES) ---', 'Value': '---' },
+          { 'Metric': 'Mean Score', 'Value': `${meanScore.toFixed(1)}%` },
+          { 'Metric': 'Median Score', 'Value': `${medianScore.toFixed(1)}%` },
+          { 'Metric': 'Mode Score (Most Common)', 'Value': `${Math.round(meanScore)}%` },
+          
+          // CENTRAL TENDENCY - TIME
+          { 'Metric': '--- CENTRAL TENDENCY (TIME) ---', 'Value': '---' },
+          { 'Metric': 'Mean Time (seconds)', 'Value': `${meanTime.toFixed(1)}` },
+          { 'Metric': 'Median Time (seconds)', 'Value': `${medianTime.toFixed(1)}` },
+          { 'Metric': 'Average Time per Item', 'Value': `${avgTimePerItem.toFixed(1)}s` },
+          
+          // CENTRAL TENDENCY - ATTEMPTS
+          { 'Metric': '--- CENTRAL TENDENCY (ATTEMPTS) ---', 'Value': '---' },
+          { 'Metric': 'Mean Total Attempts', 'Value': `${meanAttempts.toFixed(1)}` },
+          { 'Metric': 'Median Total Attempts', 'Value': `${medianAttempts.toFixed(1)}` },
+          { 'Metric': 'Average Attempts per Item', 'Value': `${avgAttemptsPerItem.toFixed(1)}` },
+          
+          // DISPERSION - SCORES
+          { 'Metric': '--- DISPERSION (SCORES) ---', 'Value': '---' },
+          { 'Metric': 'Score Standard Deviation', 'Value': `${scoreStdDev.toFixed(1)}` },
+          { 'Metric': 'Score Variance', 'Value': `${scoreVariance.toFixed(1)}` },
+          { 'Metric': 'Score Range', 'Value': `${scoreRange.toFixed(1)}` },
+          { 'Metric': 'Score Q1 (25th percentile)', 'Value': `${scoreQuartiles.q1.toFixed(1)}%` },
+          { 'Metric': 'Score Q3 (75th percentile)', 'Value': `${scoreQuartiles.q3.toFixed(1)}%` },
+          { 'Metric': 'Score IQR (Interquartile Range)', 'Value': `${scoreQuartiles.iqr.toFixed(1)}` },
+          
+          // DISPERSION - TIME
+          { 'Metric': '--- DISPERSION (TIME) ---', 'Value': '---' },
+          { 'Metric': 'Time Standard Deviation (seconds)', 'Value': `${timeStdDev.toFixed(1)}` },
+          { 'Metric': 'Time Variance', 'Value': `${timeVariance.toFixed(1)}` },
+          { 'Metric': 'Time Range (seconds)', 'Value': `${timeRange.toFixed(1)}` },
+          { 'Metric': 'Time Q1 (25th percentile)', 'Value': `${timeQuartiles.q1.toFixed(1)}s` },
+          { 'Metric': 'Time Q3 (75th percentile)', 'Value': `${timeQuartiles.q3.toFixed(1)}s` },
+          { 'Metric': 'Time IQR (Interquartile Range)', 'Value': `${timeQuartiles.iqr.toFixed(1)}s` },
+          
+          // DISPERSION - ATTEMPTS
+          { 'Metric': '--- DISPERSION (ATTEMPTS) ---', 'Value': '---' },
+          { 'Metric': 'Attempt Standard Deviation', 'Value': `${attemptStdDev.toFixed(1)}` },
+          { 'Metric': 'Attempt Variance', 'Value': `${attemptVariance.toFixed(1)}` },
+          { 'Metric': 'Attempt Range', 'Value': `${attemptRange.toFixed(1)}` },
+          { 'Metric': 'Attempt Q1 (25th percentile)', 'Value': `${attemptQuartiles.q1.toFixed(1)}` },
+          { 'Metric': 'Attempt Q3 (75th percentile)', 'Value': `${attemptQuartiles.q3.toFixed(1)}` },
+          { 'Metric': 'Attempt IQR (Interquartile Range)', 'Value': `${attemptQuartiles.iqr.toFixed(1)}` },
+          
+          // EFFICIENCY METRICS
+          { 'Metric': '--- EFFICIENCY METRICS ---', 'Value': '---' },
+          { 'Metric': 'Completion Rate', 'Value': `${completionRate}%` },
+          { 'Metric': 'Time Efficiency Rate', 'Value': `${timeEfficiencyRate}%` },
+          { 'Metric': 'Attempt Efficiency Rate', 'Value': `${attemptEfficiencyRate}%` },
+          { 'Metric': 'Overall Efficiency Rate', 'Value': `${overallEfficiencyRate}%` },
+          { 'Metric': 'Time Efficient Students', 'Value': `${timeEfficientStudents}/${totalStudents}` },
+          { 'Metric': 'Attempt Efficient Students', 'Value': `${attemptEfficientStudents}/${totalStudents}` },
+          { 'Metric': 'Overall Efficient Students', 'Value': `${overallEfficientStudents}/${totalStudents}` }
+        );
+
+      }
+
+      const classStatsWs = XLSX.utils.json_to_sheet(classStatsData);
+
+      classStatsWs['!cols'] = [{ wch: 30 }, { wch: 20 }];
+
+      XLSX.utils.book_append_sheet(wb, classStatsWs, 'Class Statistics');
+
+      
+
+      // SHEET 2: STUDENT RESULTS
+
+      const studentResultsData = results.map((result: any, idx: number) => {
+
+        // Try to find student by studentId, then by studentInfo.name, then by parentId
+        let student = students.find((s: any) => s.studentId === result.studentId);
         
+        if (!student && result.studentInfo?.name) {
+          student = students.find((s: any) => 
+            s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+          );
+        }
+        
+        if (!student && result.parentId) {
+          student = students.find((s: any) => s.parentId === result.parentId);
+        }
+
+        const studentNickname = student ? formatStudentName(student) : 
+          (result.studentInfo?.name || 'Unknown Student');
 
         const questionResults = result.questionResults || [];
 
         const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
 
         const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
-
-        
 
         const totalTimeSeconds = Math.round((result.totalTimeSpent || 0) / 1000);
 
@@ -4460,13 +4956,19 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${remainingSeconds}s` : `${totalTimeSeconds}s`;
 
-        
+        const totalCorrect = result.resultsSummary?.totalCorrect || questionResults.filter((q: any) => q.isCorrect).length;
+
+        const totalQuestions = questionResults.length;
 
         return {
 
           '#': idx + 1,
 
           'Student': studentNickname,
+
+          'Correct Answers': `${totalCorrect}/${totalQuestions}`,
+
+          'Score %': `${Math.round(result.scorePercentage || 0)}%`,
 
           'Avg Attempts': avgAttempts,
 
@@ -4480,27 +4982,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       });
 
+      const studentResultsWs = XLSX.utils.json_to_sheet(studentResultsData);
 
-
-      // Create a workbook
-
-      const wb = XLSX.utils.book_new();
-
-      
-
-      // Convert data to worksheet
-
-      const ws = XLSX.utils.json_to_sheet(excelData);
-
-      
-
-      // Set column widths
-
-      ws['!cols'] = [
+      studentResultsWs['!cols'] = [
 
         { wch: 5 },   // #
 
-        { wch: 20 },  // Student
+        { wch: 25 },  // Student
+
+        { wch: 18 },  // Correct Answers
+
+        { wch: 12 },  // Score %
 
         { wch: 15 },  // Avg Attempts
 
@@ -4508,15 +5000,155 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         { wch: 18 },  // Time (formatted)
 
-        { wch: 20 }   // Completed At
+        { wch: 25 }   // Completed At
 
       ];
 
+      XLSX.utils.book_append_sheet(wb, studentResultsWs, 'Student Results');
+
       
 
-      // Add worksheet to workbook
+      // SHEET 3: ITEM ANALYSIS
 
-      XLSX.utils.book_append_sheet(wb, ws, 'Results');
+      const itemAnalysisData: Array<{Question: string, Metric: string, Value: string | number}> = [];
+
+      if (results.length > 0 && results[0]?.questionResults?.length > 0) {
+
+        const firstResult = results[0];
+
+        const questionResults = firstResult.questionResults || [];
+
+        
+
+        questionResults.forEach((question: any, questionIndex: number) => {
+
+          const questionNumber = questionIndex + 1;
+
+          const correctAnswer = question.correctAnswer || 'N/A';
+
+          const questionText = question.questionText || `Question ${questionNumber}`;
+
+          
+
+          // Analyze all students' responses to this question
+
+          const studentResponses = results.map(result => {
+
+            const studentQuestion = result.questionResults?.find((q: any) => q.questionNumber === questionNumber);
+
+            return {
+
+              student: result.studentInfo?.name || 'Unknown',
+
+              answer: studentQuestion?.studentAnswer || 'No answer',
+
+              isCorrect: studentQuestion?.isCorrect || false,
+
+              attempts: studentQuestion?.attempts || 1,
+
+              timeSpent: studentQuestion?.timeSpentSeconds || 0
+
+            };
+
+          });
+
+          
+
+          // Count correct vs incorrect responses
+
+          const correctCount = studentResponses.filter(response => response.isCorrect).length;
+
+          const incorrectCount = studentResponses.filter(response => !response.isCorrect).length;
+
+          
+
+          // Group incorrect answers
+
+          const incorrectAnswers = studentResponses.filter(response => !response.isCorrect);
+
+          const answerCounts: Record<string, number> = {};
+
+          incorrectAnswers.forEach(response => {
+
+            const answer = response.answer || 'No answer';
+
+            answerCounts[answer] = (answerCounts[answer] || 0) + 1;
+
+          });
+
+          
+
+          // Calculate averages
+
+          const avgTimePerQuestion = studentResponses.reduce((sum, response) => sum + response.timeSpent, 0) / studentResponses.length;
+
+          const avgAttemptsPerQuestion = studentResponses.reduce((sum, response) => sum + response.attempts, 0) / studentResponses.length;
+
+          
+
+          // Add question summary
+
+          itemAnalysisData.push(
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Question Text', 'Value': questionText },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Correct Answer', 'Value': correctAnswer },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Students Answered Correctly', 'Value': correctCount },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Students Answered Incorrectly', 'Value': incorrectCount },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Average Time (seconds)', 'Value': avgTimePerQuestion.toFixed(1) },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Average Attempts', 'Value': avgAttemptsPerQuestion.toFixed(1) },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': '---', 'Value': '---' }
+
+          );
+
+          
+
+          // Add incorrect answer details
+
+          Object.entries(answerCounts).forEach(([answer, count]) => {
+
+            itemAnalysisData.push({
+
+              'Question': `Q${questionNumber}`,
+
+              'Metric': 'Incorrect Answer',
+
+              'Value': `${answer} (${count} students)`
+
+            });
+
+          });
+
+          
+
+          // Add separator between questions
+
+          if (questionIndex < questionResults.length - 1) {
+
+            itemAnalysisData.push(
+
+              { 'Question': '', 'Metric': '', 'Value': '' },
+
+              { 'Question': '', 'Metric': '', 'Value': '' }
+
+            );
+
+          }
+
+        });
+
+      }
+
+      const itemAnalysisWs = XLSX.utils.json_to_sheet(itemAnalysisData as any[]);
+
+      itemAnalysisWs['!cols'] = [{ wch: 10 }, { wch: 25 }, { wch: 40 }];
+
+      XLSX.utils.book_append_sheet(wb, itemAnalysisWs, 'Item Analysis');
 
       
 
@@ -4528,7 +5160,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       // Create filename
 
-      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_results.xlsx`;
+      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_detailed_analysis.xlsx`;
 
       const fileUri = `${FileSystem.cacheDirectory}${filename}`;
 
@@ -4552,17 +5184,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 
-          dialogTitle: `Export ${exerciseTitle} Results`,
+          dialogTitle: `Export ${exerciseTitle} Detailed Analysis`,
 
           UTI: 'com.microsoft.excel.xlsx'
 
         });
 
-        showAlert('Success', 'Excel file exported successfully!', undefined, 'success');
+        showAlert('Success', 'Detailed Excel analysis exported successfully!', undefined, 'success');
 
       } else {
 
-        showAlert('Success', `Results exported to ${filename}`, undefined, 'success');
+        showAlert('Success', `Detailed analysis exported to ${filename}`, undefined, 'success');
 
       }
 
@@ -4598,10 +5230,192 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       console.error('Export error:', error);
 
-      showAlert('Error', 'Failed to export results to Excel. Please try again.', undefined, 'error');
+      showAlert('Error', 'Failed to export detailed analysis to Excel. Please try again.', undefined, 'error');
 
     }
 
+  };
+  
+  
+  
+  const handleExportQuarterToExcel = async (quarter: string, classId: string, resultsByExercise: any, students: any[]) => {
+    try {
+      // Get class info for filename
+      const classInfo = activeClasses.find(c => c.id === classId);
+      const className = classInfo?.name || 'Class';
+      
+      // Create a map of all students with their results for each exercise
+      const studentResultsMap: Record<string, any> = {};
+      
+      // Initialize all students
+      students.forEach((student: any) => {
+        const studentName = formatStudentName(student);
+        studentResultsMap[studentName] = {
+          studentName,
+          student,
+          exercises: {}
+        };
+      });
+      
+      // Process each exercise's results
+      Object.entries(resultsByExercise).forEach(([exerciseTitle, exerciseResults]: [string, any]) => {
+        (exerciseResults as any[]).forEach((result: any) => {
+          // Try to find student by multiple strategies
+          let student = students.find((s: any) => s.studentId === result.studentId);
+          
+          if (!student && result.studentInfo?.name) {
+            student = students.find((s: any) => 
+              s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+            );
+          }
+          
+          if (!student && result.parentId) {
+            student = students.find((s: any) => s.parentId === result.parentId);
+          }
+
+          const studentName = student ? formatStudentName(student) : 
+            (result.studentInfo?.name || 'Unknown Student');
+
+          // Initialize student if not exists
+          if (!studentResultsMap[studentName]) {
+            studentResultsMap[studentName] = {
+              studentName,
+              student,
+              exercises: {}
+            };
+          }
+
+          // Calculate metrics for this exercise
+          const questionResults = result.questionResults || [];
+          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+          const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
+          
+          const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
+          const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
+          const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
+          
+          // Store exercise results for this student
+          studentResultsMap[studentName].exercises[exerciseTitle] = {
+            scorePercentage: `${Math.round(result.scorePercentage || 0)}%`,
+            avgAttempts,
+            timeFormatted: timeDisplay,
+            completedAt: result.completedAt ? new Date(result.completedAt).toLocaleString() : 'N/A'
+          };
+        });
+      });
+      
+      // Create headers for the wide format
+      const exerciseTitles = Object.keys(resultsByExercise);
+      const headers = ['#', 'Student'];
+      
+      // Add columns for each exercise
+      exerciseTitles.forEach(exerciseTitle => {
+        headers.push(`${exerciseTitle} - Score %`);
+        headers.push(`${exerciseTitle} - Avg Attempts`);
+        headers.push(`${exerciseTitle} - Time (formatted)`);
+        headers.push(`${exerciseTitle} - Completed At`);
+      });
+      
+      // Create Excel data in wide format
+      const excelData: any[] = [];
+      let rowNumber = 1;
+      
+      // Sort students alphabetically
+      const sortedStudents = Object.values(studentResultsMap).sort((a: any, b: any) => 
+        a.studentName.localeCompare(b.studentName)
+      );
+      
+      sortedStudents.forEach((studentData: any) => {
+        const row: any = {
+          '#': rowNumber++,
+          'Student': studentData.studentName
+        };
+        
+        // Add data for each exercise
+        exerciseTitles.forEach(exerciseTitle => {
+          const exerciseData = studentData.exercises[exerciseTitle];
+          if (exerciseData) {
+            row[`${exerciseTitle} - Score %`] = exerciseData.scorePercentage;
+            row[`${exerciseTitle} - Avg Attempts`] = exerciseData.avgAttempts;
+            row[`${exerciseTitle} - Time (formatted)`] = exerciseData.timeFormatted;
+            row[`${exerciseTitle} - Completed At`] = exerciseData.completedAt;
+          } else {
+            // No data for this exercise
+            row[`${exerciseTitle} - Score %`] = 'N/A';
+            row[`${exerciseTitle} - Avg Attempts`] = 'N/A';
+            row[`${exerciseTitle} - Time (formatted)`] = 'N/A';
+            row[`${exerciseTitle} - Completed At`] = 'N/A';
+          }
+        });
+        
+        excelData.push(row);
+      });
+
+      // Create a workbook
+      const wb = XLSX.utils.book_new();
+      
+      // Convert data to worksheet
+      const ws = XLSX.utils.json_to_sheet(excelData);
+      
+      // Set column widths for wide format
+      const colWidths = [
+        { wch: 5 },   // #
+        { wch: 20 },  // Student
+      ];
+      
+      // Add widths for each exercise's columns
+      exerciseTitles.forEach(() => {
+        colWidths.push({ wch: 12 }); // Score %
+        colWidths.push({ wch: 15 }); // Avg Attempts
+        colWidths.push({ wch: 18 }); // Time (formatted)
+        colWidths.push({ wch: 25 }); // Completed At
+      });
+      
+      ws['!cols'] = colWidths;
+      
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(wb, ws, quarter.replace(' ', '_'));
+      
+      // Generate Excel file as base64
+      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+      
+      // Create filename
+      const filename = `${className}_${quarter.replace(' ', '_')}_ClassRecord.xlsx`;
+      const fileUri = `${FileSystem.cacheDirectory}${filename}`;
+      
+      // Write file to device
+      await FileSystem.writeAsStringAsync(fileUri, wbout, {
+        encoding: 'base64',
+      });
+      
+      // Share the file
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          dialogTitle: `Export ${quarter} Class Record`,
+          UTI: 'com.microsoft.excel.xlsx'
+        });
+        showAlert('Success', `${quarter} class record exported successfully!`, undefined, 'success');
+      } else {
+        showAlert('Success', `Results exported to ${filename}`, undefined, 'success');
+      }
+      
+      // Clean up the file after a delay
+      setTimeout(async () => {
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(fileUri);
+          if (fileInfo.exists) {
+            await FileSystem.deleteAsync(fileUri);
+          }
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temporary Excel file:', cleanupError);
+        }
+      }, 5000);
+      
+    } catch (error) {
+      console.error('Quarter export error:', error);
+      showAlert('Error', 'Failed to export quarter results. Please try again.', undefined, 'error');
+    }
   };
 
 
@@ -6029,8 +6843,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                        setAnnSelectedClassIds([]);
 
-                       setAnnAllClasses(false);
-
                      }
 
                    }}
@@ -6100,258 +6912,191 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
              <View style={styles.classroomsSection}>
 
-               <Text style={styles.sectionTitle}>Classrooms</Text>
+               <View style={styles.classroomsSectionHeader}>
+                 <View>
+                   <Text style={styles.sectionTitle}>My Classrooms</Text>
+                   <Text style={styles.sectionSubtitle}>Manage your classes and track progress</Text>
+                 </View>
+                 <View style={styles.classroomBadge}>
+                   <Text style={styles.classroomBadgeText}>{activeClasses.length}</Text>
+                 </View>
+               </View>
 
                {activeClasses.length === 0 ? (
 
-                 <Text style={styles.classroomSubtitle}>No active classes yet.</Text>
+                 <View style={styles.emptyStateContainer}>
+                   <MaterialCommunityIcons name="school-outline" size={64} color="#cbd5e1" />
+                   <Text style={styles.emptyStateTitle}>No Active Classes</Text>
+                   <Text style={styles.emptyStateText}>Create your first classroom to get started</Text>
+                 </View>
 
                ) : (
 
-                activeClasses.map((cls) => (
+                activeClasses.map((cls, index) => (
 
                   <View key={cls.id} style={styles.classroomCard}>
 
-                   <View style={styles.classroomHeader}>
-
-                      <Text style={styles.classroomTitle}>{cls.name}</Text>
-
-                      <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
-
-                      <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                    {/* Gradient Header */}
+                    <View style={[styles.classroomCardHeader, { 
+                      backgroundColor: index % 4 === 0 ? '#3b82f6' : 
+                                       index % 4 === 1 ? '#8b5cf6' :
+                                       index % 4 === 2 ? '#10b981' : '#f59e0b'
+                    }]}>
+                      <View style={styles.classroomHeaderLeft}>
+                        <View style={styles.classroomIconContainer}>
+                          <MaterialCommunityIcons name="school" size={24} color="#ffffff" />
+                        </View>
+                        <View style={styles.classroomHeaderInfo}>
+                          <Text style={styles.classroomTitle}>{cls.name}</Text>
+                          <Text style={styles.classroomSubtitle}>{cls.schoolName || 'No School Name'}</Text>
+                        </View>
+                      </View>
 
                       <TouchableOpacity
-                        style={styles.parentsListButton}
-                        onPress={() => handleShowParentsList(cls.id)}
-                      >
-                        <MaterialCommunityIcons name="account-group-outline" size={18} color="#3b82f6" />
-                        <Text style={styles.parentsListButtonText}>Parents List</Text>
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-
                         accessibilityLabel="More actions"
-
                         onPress={() => setOpenMenuClassId(openMenuClassId === cls.id ? null : cls.id)}
-
                         style={styles.moreButton}
-
                       >
-
-                        <MaterialIcons name="more-vert" size={22} color="#64748b" />
-
+                        <MaterialIcons name="more-vert" size={24} color="#ffffff" />
                       </TouchableOpacity>
 
                       {openMenuClassId === cls.id && (
-
                         <View style={styles.moreMenu}>
-
                           <TouchableOpacity
-
                             style={styles.moreMenuItem}
-
                             onPress={() => {
-
                               setOpenMenuClassId(null);
-
                               handleOpenAddStudent({ id: cls.id, name: cls.name });
-
                             }}
-
                           >
-
                             <AntDesign name="plus" size={16} color="#1e293b" />
-
                             <Text style={styles.moreMenuText}>Add Student</Text>
-
                           </TouchableOpacity>
 
                           <TouchableOpacity
-
                             style={styles.moreMenuItem}
-
                             onPress={() => {
-
                               setOpenMenuClassId(null);
-
-                              handleCloseClass(cls);
-
+                              handleShowParentsList(cls.id);
                             }}
-
-                            disabled={closingClassId === cls.id}
-
                           >
-
-                            <MaterialCommunityIcons name="lock" size={16} color="#ef4444" />
-
-                            <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{closingClassId === cls.id ? 'Closing…' : 'Close Class'}</Text>
-
+                            <MaterialCommunityIcons name="account-group-outline" size={16} color="#1e293b" />
+                            <Text style={styles.moreMenuText}>View Parents</Text>
                           </TouchableOpacity>
 
+                          <TouchableOpacity
+                            style={styles.moreMenuItem}
+                            onPress={() => {
+                              setOpenMenuClassId(null);
+                              handleCloseClass(cls);
+                            }}
+                            disabled={closingClassId === cls.id}
+                          >
+                            <MaterialCommunityIcons name="lock" size={16} color="#ef4444" />
+                            <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{closingClassId === cls.id ? 'Closing…' : 'Close Class'}</Text>
+                          </TouchableOpacity>
                         </View>
-
                       )}
-
                     </View>
 
-                    {/* Student Statistics Section */}
-                    <View style={styles.studentStatsContainer}>
-                      <Text style={styles.studentStatsTitle}>Student Statistics</Text>
-                      <View style={styles.studentStatsGrid}>
-                        <View style={styles.studentStatCard}>
-                          <MaterialCommunityIcons name="account-group" size={responsive.scale(20)} color="#3b82f6" />
-                          <Text style={styles.studentStatValue}>{studentsByClass[cls.id]?.length ?? 0}</Text>
-                          <Text style={styles.studentStatLabel}>Total</Text>
+                    {/* Card Body */}
+                    <View style={styles.classroomCardBody}>
+                      {/* School Year Badge */}
+                      <View style={styles.schoolYearBadge}>
+                        <MaterialCommunityIcons name="calendar-today" size={14} color="#64748b" />
+                        <Text style={styles.schoolYearText}>SY {formatSchoolYear(cls.schoolYear)}</Text>
+                      </View>
+
+                      {/* Student Statistics Section */}
+                      <View style={styles.studentStatsContainer}>
+                        <View style={styles.studentStatsHeader}>
+                          <MaterialCommunityIcons name="account-group" size={18} color="#1e293b" />
+                          <Text style={styles.studentStatsTitle}>Student Demographics</Text>
                         </View>
-                        <View style={styles.studentStatCard}>
-                          <MaterialCommunityIcons name="account" size={responsive.scale(20)} color="#10b981" />
-                          <Text style={styles.studentStatValue}>
-                            {studentsByClass[cls.id]?.filter(s => s.gender === 'male').length ?? 0}
-                          </Text>
-                          <Text style={styles.studentStatLabel}>Male</Text>
-                        </View>
-                        <View style={styles.studentStatCard}>
-                          <MaterialCommunityIcons name="account" size={responsive.scale(20)} color="#f59e0b" />
-                          <Text style={styles.studentStatValue}>
-                            {studentsByClass[cls.id]?.filter(s => s.gender === 'female').length ?? 0}
-                          </Text>
-                          <Text style={styles.studentStatLabel}>Female</Text>
+                        <View style={styles.studentStatsGrid}>
+                          <View style={[styles.studentStatCard, styles.studentStatCardTotal]}>
+                            <View style={styles.studentStatIconContainer}>
+                              <MaterialCommunityIcons name="account-group" size={responsive.scale(20)} color="#3b82f6" />
+                            </View>
+                            <Text style={styles.studentStatValue}>{studentsByClass[cls.id]?.length ?? 0}</Text>
+                            <Text style={styles.studentStatLabel}>Total Students</Text>
+                          </View>
+                          <View style={[styles.studentStatCard, styles.studentStatCardMale]}>
+                            <View style={styles.studentStatIconContainer}>
+                              <MaterialCommunityIcons name="human-male" size={responsive.scale(20)} color="#10b981" />
+                            </View>
+                            <Text style={styles.studentStatValue}>
+                              {studentsByClass[cls.id]?.filter(s => s.gender === 'male').length ?? 0}
+                            </Text>
+                            <Text style={styles.studentStatLabel}>Male Students</Text>
+                          </View>
+                          <View style={[styles.studentStatCard, styles.studentStatCardFemale]}>
+                            <View style={styles.studentStatIconContainer}>
+                              <MaterialCommunityIcons name="human-female" size={responsive.scale(20)} color="#f59e0b" />
+                            </View>
+                            <Text style={styles.studentStatValue}>
+                              {studentsByClass[cls.id]?.filter(s => s.gender === 'female').length ?? 0}
+                            </Text>
+                            <Text style={styles.studentStatLabel}>Female Students</Text>
+                          </View>
                         </View>
                       </View>
-                    </View>
 
-                    {/* Analytics Section (placeholder/demo) */}
+                      {/* Exercise Statistics */}
+                      <View style={styles.exerciseStatsContainer}>
+                        <View style={styles.exerciseStatsRow}>
+                          <View style={styles.exerciseStatItem}>
+                            <View style={[styles.exerciseStatIconBg, { backgroundColor: '#ede9fe' }]}>
+                              <MaterialCommunityIcons name="book-open-page-variant" size={18} color="#8b5cf6" />
+                            </View>
+                            <View style={styles.exerciseStatInfo}>
+                              <Text style={styles.exerciseStatValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
+                              <Text style={styles.exerciseStatLabel}>Exercises</Text>
+                            </View>
+                          </View>
 
-                    <View style={styles.analyticsContainer}>
+                          <View style={styles.exerciseStatDivider} />
 
-                       <View style={styles.analyticsHeader}>
+                          <View style={styles.exerciseStatItem}>
+                            <View style={[styles.exerciseStatIconBg, { backgroundColor: '#dcfce7' }]}>
+                              <MaterialCommunityIcons name="check-circle-outline" size={18} color="#10b981" />
+                            </View>
+                            <View style={styles.exerciseStatInfo}>
+                              <Text style={styles.exerciseStatValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
+                              <Text style={styles.exerciseStatLabel}>Completed</Text>
+                            </View>
+                          </View>
 
-                         <Text style={styles.analyticsTitle}>Results</Text>
+                          <View style={styles.exerciseStatDivider} />
 
-                         <TouchableOpacity 
+                          <View style={styles.exerciseStatItem}>
+                            <View style={[styles.exerciseStatIconBg, { backgroundColor: '#fef3c7' }]}>
+                              <MaterialCommunityIcons name="timer-outline" size={18} color="#f59e0b" />
+                            </View>
+                            <View style={styles.exerciseStatInfo}>
+                              <Text style={styles.exerciseStatValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
+                              <Text style={styles.exerciseStatLabel}>Pending</Text>
+                            </View>
+                          </View>
+                        </View>
+                      </View>
 
-                           style={styles.viewAllButton}
-
-                           onPress={() => setActiveTab('results')}
-
-                         >
-
-                           <Text style={styles.viewAllText}>View All</Text>
-
-                           <AntDesign name="arrow-right" size={14} color="#3b82f6" />
-
-                         </TouchableOpacity>
-
-                       </View>
-
-                      <ResponsiveCards 
-                        cardsPerRow={{ xs: 1, sm: 2, md: 3, lg: 3, xl: 3 }}
-                        style={styles.analyticsCards}
+                      {/* View Results Button */}
+                      <TouchableOpacity 
+                        style={styles.viewResultsButton}
+                        onPress={async () => {
+                          setActiveTab('results');
+                          // Auto-refresh data when switching to results tab to get latest completion stats
+                          if (activeClasses.length > 0) {
+                            await loadAssignments(activeClasses.map(c => c.id));
+                            await loadClassAnalytics(activeClasses.map(c => c.id));
+                          }
+                        }}
                       >
-
-                        <View style={styles.analyticsCard}>
-
-                          <View style={styles.analyticsIcon}>
-
-                            <MaterialCommunityIcons name="repeat" size={responsive.scale(24)} color="#10b981" />
-
-                          </View>
-
-                          <View style={styles.analyticsContent}>
-
-                            <Text style={styles.analyticsLabel}>Avg Attempts per Item</Text>
-
-                            <Text style={styles.analyticsValue}>{
-
-                              (() => {
-
-                                const ca = classAnalytics[cls.id] as any;
-
-                                if (!ca || !ca.averageAttempts) return '—';
-
-                                return ca.averageAttempts.toFixed(1);
-
-                              })()
-
-                            }</Text>
-
-                            <Text style={styles.analyticsChange}>Per question average</Text>
-
-                          </View>
-
-                        </View>
-
-                        <View style={styles.analyticsCard}>
-
-                          <View style={styles.analyticsIcon}>
-
-                            <MaterialCommunityIcons name="clock-outline" size={responsive.scale(24)} color="#3b82f6" />
-
-                           </View>
-
-                           <View style={styles.analyticsContent}>
-
-                            <Text style={styles.analyticsLabel}>Average Time</Text>
-
-                            <Text style={styles.analyticsValue}>{
-
-                              (() => {
-
-                                const ca = classAnalytics[cls.id] as any;
-
-                                if (!ca || !ca.averageTime) return '—';
-
-                                const minutes = Math.floor(ca.averageTime / 60000);
-
-                                const seconds = Math.floor((ca.averageTime % 60000) / 1000);
-
-                                return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-
-                              })()
-
-                            }</Text>
-
-                            <Text style={styles.analyticsChange}>Per exercise average</Text>
-
-                          </View>
-
-                        </View>
-
-                      </ResponsiveCards>
-
-                       <View style={styles.quickStats}>
-
-                         <View style={styles.statItem}>
-
-                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
-
-                           <Text style={styles.statLabel}>Exercises</Text>
-
-                         </View>
-
-                         <View style={styles.statDivider} />
-
-                         <View style={styles.statItem}>
-
-                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
-
-                           <Text style={styles.statLabel}>Completed</Text>
-
-                         </View>
-
-                         <View style={styles.statDivider} />
-
-                         <View style={styles.statItem}>
-
-                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
-
-                           <Text style={styles.statLabel}>Pending</Text>
-
-                         </View>
-
-                       </View>
-
-                     </View>
+                        <Text style={styles.viewResultsButtonText}>View All Results</Text>
+                        <MaterialIcons name="arrow-forward" size={18} color="#ffffff" />
+                      </TouchableOpacity>
+                    </View>
 
                    </View>
 
@@ -6934,6 +7679,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                  // Assigned Exercises Tab
 
                  <>
+
+                   {/* Header with refresh button */}
+                   <View style={styles.assignmentsHeader}>
+                     <Text style={styles.assignmentsHeaderTitle}>Assigned Exercises</Text>
+                     <TouchableOpacity 
+                       style={styles.refreshButton}
+                       onPress={async () => {
+                         if (activeClasses.length > 0) {
+                           await loadAssignments(activeClasses.map(c => c.id));
+                           await loadClassAnalytics(activeClasses.map(c => c.id));
+                         }
+                       }}
+                     >
+                       <MaterialCommunityIcons name="refresh" size={20} color="#3b82f6" />
+                     </TouchableOpacity>
+                   </View>
 
                    {exercisesLoading ? (
 
@@ -7546,20 +8307,45 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
            <View style={{ paddingBottom: 140 }}>
 
-             {/* Header */}
+             {/* Compact Header with Quarter Filter */}
 
-             <View style={styles.classTabHeader}>
+             <View style={[styles.classTabHeader, { marginBottom: 12 }]}>
 
-               <View>
+               <View style={{ flex: 1 }}>
 
                  <Text style={styles.classTabTitle}>Exercise Results</Text>
 
-                 <Text style={styles.classTabSubtitle}>Track performance and analytics</Text>
+                 <Text style={[styles.classTabSubtitle, { fontSize: 11 }]}>Grouped by quarter</Text>
 
                </View>
 
-               <MaterialIcons name="assessment" size={32} color="#3b82f6" />
+               <MaterialIcons name="assessment" size={28} color="#3b82f6" />
 
+             </View>
+             
+             {/* Quarter Filter Pills */}
+             <View style={styles.quarterFilterContainer}>
+               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }}>
+                 <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 16 }}>
+                   {['All Quarters', 'Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4'].map((quarter) => (
+                     <TouchableOpacity
+                       key={quarter}
+                       style={[
+                         styles.quarterPill,
+                         selectedQuarter === quarter && styles.quarterPillActive
+                       ]}
+                       onPress={() => setSelectedQuarter(quarter)}
+                     >
+                       <Text style={[
+                         styles.quarterPillText,
+                         selectedQuarter === quarter && styles.quarterPillTextActive
+                       ]}>
+                         {quarter}
+                       </Text>
+                     </TouchableOpacity>
+                   ))}
+                 </View>
+               </ScrollView>
              </View>
 
 
@@ -7606,39 +8392,37 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                return (
 
-                 <View key={cls.id} style={styles.classTabCard}>
+                <View key={cls.id} style={styles.resultsClassCard}>
 
-                   <View style={styles.classCardHeader}>
+                  <View style={styles.resultsClassHeader}>
 
-                     <View style={styles.classIconContainer}>
+                    <View style={styles.resultsClassIcon}>
 
-                       <MaterialCommunityIcons name="google-classroom" size={24} color="#3b82f6" />
+                      <MaterialCommunityIcons name="google-classroom" size={16} color="#3b82f6" />
 
-                     </View>
+                    </View>
 
-                     <View style={{ flex: 1 }}>
+                    <View style={styles.resultsClassInfo}>
 
-                       <Text style={styles.classroomTitle}>{cls.name}</Text>
+                      <Text style={styles.resultsClassName}>{cls.name}</Text>
 
-                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                      <View style={styles.resultsClassMeta}>
 
-                         <MaterialIcons name="school" size={14} color="#64748b" />
+                        <MaterialIcons name="school" size={10} color="#64748b" />
 
-                         <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+                        <Text style={styles.resultsClassMetaText}>{cls.schoolName || '—'}</Text>
+                        
+                        <View style={styles.resultsClassMetaDivider} />
 
-                       </View>
+                        <MaterialIcons name="calendar-today" size={10} color="#64748b" />
 
-                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                        <Text style={styles.resultsClassMetaText}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
 
-                         <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+                      </View>
 
-                         <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                    </View>
 
-                       </View>
-
-                     </View>
-
-                   </View>
+                  </View>
 
                   
 
@@ -7714,69 +8498,150 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                          
 
-                         // Group results by exercise for better organization
-
-                         const resultsByExercise = rankedResults.reduce((acc: any, result: any) => {
-
-                           const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
-
-                           if (!acc[exerciseTitle]) {
-
-                             acc[exerciseTitle] = [];
-
-                           }
-
-                           acc[exerciseTitle].push(result);
-
-                           return acc;
-
-                         }, {});
+                        // Group results by quarter, then by exercise
+                        const resultsByQuarterAndExercise = rankedResults.reduce((acc: any, result: any) => {
+                          // Get quarter from assignedExercises first, then fallback to assignmentMetadata
+                          let quarter = 'Unknown Quarter';
+                          
+                          // Try to find the assignment in assignedExercises to get the quarter
+                          // First try to match by assignedExerciseId if available, then by exerciseId + classId
+                          let assignment = null;
+                          
+                          if (result.assignedExerciseId) {
+                            assignment = assignedExercises.find((assignment: any) => 
+                              assignment.id === result.assignedExerciseId
+                            );
+                          }
+                          
+                          // If not found by assignedExerciseId, try by exerciseId + classId
+                          if (!assignment) {
+                            assignment = assignedExercises.find((assignment: any) => 
+                              assignment.exerciseId === result.exerciseId && 
+                              assignment.classId === result.classId
+                            );
+                          }
+                          
+                          if (assignment?.quarter) {
+                            quarter = assignment.quarter;
+                            console.log('[QUARTER MATCH] Found quarter from assignedExercises:', {
+                              exerciseId: result.exerciseId,
+                              assignedExerciseId: result.assignedExerciseId,
+                              quarter: assignment.quarter,
+                              assignmentId: assignment.id
+                            });
+                          } else if (result.assignmentMetadata?.quarter) {
+                            quarter = result.assignmentMetadata.quarter;
+                            console.log('[QUARTER MATCH] Using quarter from assignmentMetadata:', quarter);
+                          } else {
+                            console.log('[QUARTER MATCH] No quarter found for result:', {
+                              exerciseId: result.exerciseId,
+                              assignedExerciseId: result.assignedExerciseId,
+                              classId: result.classId,
+                              assignedExercisesLength: assignedExercises.length,
+                              allAssignedExercises: assignedExercises.map(a => ({ id: a.id, exerciseId: a.exerciseId, classId: a.classId, quarter: a.quarter })),
+                              availableAssignments: assignedExercises.filter(a => a.exerciseId === result.exerciseId && a.classId === result.classId).map(a => ({ id: a.id, quarter: a.quarter }))
+                            });
+                          }
+                          
+                          const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
+                          
+                          if (!acc[quarter]) {
+                            acc[quarter] = {};
+                          }
+                          
+                          if (!acc[quarter][exerciseTitle]) {
+                            acc[quarter][exerciseTitle] = [];
+                          }
+                          
+                          acc[quarter][exerciseTitle].push(result);
+                          return acc;
+                        }, {});
+                        
+                        // Filter by selected quarter
+                        const filteredQuarters = selectedQuarter === 'All Quarters' 
+                          ? resultsByQuarterAndExercise 
+                          : { [selectedQuarter]: resultsByQuarterAndExercise[selectedQuarter] || {} };
 
 
 
                          // Handle sorting function
 
-                         const handleSort = (newSortBy: 'attempts' | 'time') => {
+                        const handleSort = (newSortBy: 'attempts' | 'time') => {
 
-                           if (resultsSortBy === newSortBy) {
+                          if (resultsSortBy === newSortBy) {
 
-                             setResultsSortOrder(resultsSortOrder === 'asc' ? 'desc' : 'asc');
+                            setResultsSortOrder(resultsSortOrder === 'asc' ? 'desc' : 'asc');
 
-                           } else {
+                          } else {
 
-                             setResultsSortBy(newSortBy);
+                            setResultsSortBy(newSortBy);
 
-                             setResultsSortOrder('asc');
+                            setResultsSortOrder('asc');
 
-                           }
+                          }
 
-                         };
+                        };
 
 
 
-                         return Object.entries(resultsByExercise).map(([exerciseTitle, exerciseResults]: [string, any]) => {
+                        return Object.entries(filteredQuarters).map(([quarter, resultsByExercise]: [string, any]) => (
+                          <View key={quarter} style={{ marginBottom: 16 }}>
+                            {/* Quarter Header with Export Button */}
+                            <View style={styles.resultsQuarterHeader}>
+                              <View style={styles.resultsQuarterTitleRow}>
+                                <MaterialCommunityIcons name="calendar-range" size={16} color="#8b5cf6" />
+                                <Text style={styles.resultsQuarterTitle}>{quarter}</Text>
+                              </View>
+                              <TouchableOpacity
+                                style={styles.resultsExportBtn}
+                                onPress={() => handleExportQuarterToExcel(quarter, cls.id, resultsByExercise, classStudents)}
+                              >
+                                <MaterialCommunityIcons name="microsoft-excel" size={14} color="#10b981" />
+                                <Text style={styles.resultsExportBtnText}>Export</Text>
+                              </TouchableOpacity>
+                            </View>
+                            
+                            {/* Exercises in this quarter */}
+                            {Object.entries(resultsByExercise).map(([exerciseTitle, exerciseResults]: [string, any]) => {
 
-                           // Find the assignment for this exercise to get status
+                          // Find the assignment for this exercise to get status
+                          // First try from assignedExercises, then fall back to assignmentMetadata from results
+                          let exerciseAssignment = assignedExercises.find((assignment: any) => 
 
-                           const exerciseAssignment = assignedExercises.find((assignment: any) => 
+                            assignment.exerciseId === exerciseResults[0]?.exerciseId && 
 
-                             assignment.exerciseId === exerciseResults[0]?.exerciseId && 
+                            assignment.classId === cls.id
 
-                             assignment.classId === cls.id
+                          );
+                          
+                          // If not found in assignedExercises, use the data from the first result's assignmentMetadata
+                          if (!exerciseAssignment && exerciseResults[0]?.assignmentMetadata) {
+                            const metadata = exerciseResults[0].assignmentMetadata;
+                            console.log('[RESULTS STATUS] Using assignmentMetadata fallback for', exerciseTitle, {
+                              acceptingStatus: metadata.acceptingStatus,
+                              deadline: metadata.deadline
+                            });
+                            exerciseAssignment = {
+                              id: metadata.assignmentId || exerciseResults[0].assignedExerciseId,
+                              exerciseId: exerciseResults[0].exerciseId,
+                              classId: metadata.classId,
+                              acceptingStatus: metadata.acceptingStatus,
+                              deadline: metadata.deadline,
+                              acceptLateSubmissions: metadata.acceptLateSubmissions
+                            } as any;
+                          }
 
-                           );
+                          
 
-                           
+                          // Determine if exercise is still accepting results
 
-                           // Determine if exercise is still accepting results
+                          const isAcceptingResults = exerciseAssignment ? 
 
-                           const isAcceptingResults = exerciseAssignment ? 
+                            exerciseAssignment.acceptingStatus === 'open' && 
 
-                             exerciseAssignment.acceptingStatus === 'open' && 
+                            (new Date() <= new Date(exerciseAssignment.deadline) || (exerciseAssignment.acceptLateSubmissions ?? true)) : 
 
-                             (new Date() <= new Date(exerciseAssignment.deadline) || (exerciseAssignment.acceptLateSubmissions ?? true)) : 
-
-                             false;
+                            false;
 
                            
 
@@ -7850,23 +8715,23 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                            return (
 
-                             <View key={exerciseTitle} style={styles.exerciseResultsSection}>
+                            <View key={exerciseTitle} style={styles.resultsExerciseCard}>
 
-                               {/* Exercise Header with Status */}
+                              {/* Exercise Header with Status */}
 
-                               <View style={styles.exerciseHeader}>
+                              <View style={styles.resultsExerciseHeader}>
 
-                                 <View style={styles.exerciseTitleRow}>
+                                <View style={styles.resultsExerciseTitleRow}>
 
-                                   <MaterialCommunityIcons name="book-open-variant" size={20} color="#3b82f6" />
+                                  <MaterialCommunityIcons name="book-open-variant" size={16} color="#3b82f6" />
 
-                                   <Text style={styles.exerciseTitle}>{exerciseTitle}</Text>
+                                  <Text style={styles.resultsExerciseTitle}>{exerciseTitle}</Text>
 
                                    <View style={[
 
-                                     styles.exerciseStatusBadge,
+                                     styles.resultsExerciseStatusBadge,
 
-                                     { backgroundColor: isAcceptingResults ? '#10b981' : '#ef4444' }
+                                     { backgroundColor: isAcceptingResults ? '#10b981' : '#64748b' }
 
                                    ]}>
 
@@ -7874,13 +8739,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        name={isAcceptingResults ? "check-circle" : "close-circle"} 
 
-                                       size={12} 
+                                       size={10} 
 
                                        color="#ffffff" 
 
                                      />
 
-                                     <Text style={styles.exerciseStatusText}>
+                                     <Text style={styles.resultsExerciseStatusText}>
 
                                        {isAcceptingResults ? 'Open' : 'Closed'}
 
@@ -7892,195 +8757,47 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                  
 
-                                 {/* Exercise Details - 2x2 Grid */}
+                                {/* Exercise Details - Compact Inline */}
 
-                                 <View style={styles.exerciseDetailsGrid}>
+                                <View style={styles.resultsExerciseDetails}>
 
-                                   <View style={styles.exerciseDetailItem}>
+                                  <View style={styles.resultsExerciseDetailItem}>
 
-                                     <MaterialCommunityIcons name="help-circle-outline" size={16} color="#64748b" />
+                                    <MaterialCommunityIcons name="help-circle-outline" size={12} color="#64748b" />
 
-                                     <Text style={styles.exerciseDetailText}>
+                                    <Text style={styles.resultsExerciseDetailText}>
 
-                                       {exerciseResults[0]?.questionResults?.length || 0} Questions
+                                      {exerciseResults[0]?.questionResults?.length || 0} Q
 
-                                     </Text>
+                                    </Text>
 
-                                   </View>
+                                  </View>
 
-                                   <View style={styles.exerciseDetailItem}>
+                                  <View style={styles.resultsExerciseDetailItem}>
 
-                                     <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
+                                    <MaterialCommunityIcons name="account-group" size={12} color="#64748b" />
 
-                                     <Text style={styles.exerciseDetailText}>
+                                    <Text style={styles.resultsExerciseDetailText}>
 
-                                       {exerciseAssignment?.exercise?.timeLimitPerItem ? 
+                                      {exerciseResults.length}/{classStudents.length}
 
-                                         `${Math.round(exerciseAssignment.exercise.timeLimitPerItem / 60)} min per item` : 'No time limit'}
+                                    </Text>
 
-                                     </Text>
+                                  </View>
 
-                                   </View>
+                                  <View style={styles.resultsExerciseDetailItem}>
 
-                                   <View style={styles.exerciseDetailItem}>
+                                    <MaterialCommunityIcons name="school-outline" size={12} color="#64748b" />
 
-                                     <MaterialCommunityIcons name="school-outline" size={16} color="#64748b" />
+                                    <Text style={styles.resultsExerciseDetailText}>
 
-                                     <Text style={styles.exerciseDetailText}>
+                                      {exerciseAssignment?.exercise?.category || 'General'}
 
-                                       {exerciseAssignment?.exercise?.category || 'General'}
+                                    </Text>
 
-                                     </Text>
+                                  </View>
 
-                                   </View>
-
-                                   <View style={styles.exerciseDetailItem}>
-
-                                     <MaterialCommunityIcons name="chart-line" size={16} color="#64748b" />
-
-                                     <Text style={styles.exerciseDetailText}>
-
-                                       {exerciseAssignment?.exercise?.questionCount ? 
-
-                                         (exerciseAssignment.exercise.questionCount <= 5 ? 'Easy' : 
-
-                                          exerciseAssignment.exercise.questionCount <= 10 ? 'Medium' : 'Hard') : 'Medium'} Level
-
-                                     </Text>
-
-                                   </View>
-
-                                 </View>
-
-                                 
-
-                                 {/* Performance Summary Card */}
-
-                                 <View style={styles.performanceSummaryCard}>
-
-                                   <Text style={styles.performanceSummaryTitle}>Summary of Class Average</Text>
-
-                                   
-
-                                   {/* Progress Bar for Completion Rate */}
-
-                                   <View style={styles.completionProgressContainer}>
-
-                                     <Text style={styles.completionProgressLabel}>Class Completion Progress</Text>
-
-                                     <View style={styles.completionProgressBar}>
-
-                                       <View style={[styles.completionProgressFill, { 
-
-                                         width: `${Math.min(exerciseCompletionRate, 100)}%`,
-
-                                         backgroundColor: exerciseCompletionRate >= 90 ? '#10b981' : 
-
-                                                         exerciseCompletionRate >= 70 ? '#f59e0b' : '#ef4444'
-
-                                       }]} />
-
-                                     </View>
-
-                                     <Text style={styles.completionProgressText}>
-
-                                       {Math.round(exerciseCompletionRate)}% Complete
-
-                                     </Text>
-
-                                   </View>
-
-                                   
-
-                                   <View style={styles.performanceMetricsGrid}>
-
-                                     <View style={styles.performanceMetric}>
-
-                                       <View style={styles.metricIconContainer}>
-
-                                         <MaterialCommunityIcons name="clock-outline" size={12} color="#3b82f6" />
-
-                                       </View>
-
-                                       <View style={styles.metricContent}>
-
-                                         <Text style={styles.metricLabel}>Average Time</Text>
-
-                                         <Text style={styles.metricValue}>
-
-                                           {exerciseAverageTime > 0 ? 
-
-                                             (() => {
-
-                                               const totalMinutes = Math.floor(exerciseAverageTime / 60000);
-
-                                               const remainingSeconds = Math.floor((exerciseAverageTime % 60000) / 1000);
-
-                                               return totalMinutes > 0 ? `${totalMinutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
-
-                                             })() : 
-
-                                             '—'
-
-                                           }
-
-                                         </Text>
-
-                                       </View>
-
-                                     </View>
-
-                                     
-
-                                     <View style={styles.performanceMetric}>
-
-                                       <View style={styles.metricIconContainer}>
-
-                                         <MaterialCommunityIcons name="repeat" size={12} color="#10b981" />
-
-                                       </View>
-
-                                       <View style={styles.metricContent}>
-
-                                         <Text style={styles.metricLabel}>Average Attempts</Text>
-
-                                         <Text style={styles.metricValue}>
-
-                                           {exerciseAverageAttempts > 0 ? exerciseAverageAttempts.toFixed(1) : '—'}
-
-                                         </Text>
-
-                                       </View>
-
-                                     </View>
-
-                                     
-
-                                     <View style={styles.performanceMetric}>
-
-                                       <View style={styles.metricIconContainer}>
-
-                                         <MaterialCommunityIcons name="account-group" size={12} color="#f59e0b" />
-
-                                       </View>
-
-                                       <View style={styles.metricContent}>
-
-                                         <Text style={styles.metricLabel}>Completion</Text>
-
-                                         <Text style={styles.metricValue}>
-
-                                           ({exerciseResults.length}/{classStudents.length})
-
-                                         </Text>
-
-                                       </View>
-
-                                     </View>
-
-                                   </View>
-
-                                 </View>
+                                </View>
 
                                </View>
 
@@ -8088,23 +8805,23 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                {/* Student Results Table */}
 
-                               <View style={styles.studentResultsContainer}>
+                               <View style={styles.resultsStudentTable}>
 
-                                 <View style={styles.studentResultsHeader}>
+                                 <View style={styles.resultsTableSectionHeader}>
 
-                                   <Text style={styles.studentResultsTitle}>Student Results</Text>
+                                   <Text style={styles.resultsTableTitle}>Student Results</Text>
 
                                    <TouchableOpacity 
 
-                                     style={styles.exportButton}
+                                     style={styles.resultsExportBtn}
 
                                      onPress={() => handleExportToExcel(exerciseTitle, sortedResults, classStudents)}
 
                                    >
 
-                                     <MaterialCommunityIcons name="file-excel" size={14} color="#ffffff" />
+                                     <MaterialCommunityIcons name="file-excel" size={14} color="#10b981" />
 
-                                     <Text style={styles.exportButtonText}>Export Excel</Text>
+                                     <Text style={styles.resultsExportBtnText}>Excel</Text>
 
                                    </TouchableOpacity>
 
@@ -8132,19 +8849,23 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                      <View style={styles.resultsTableHeader}>
 
-                                       <Text style={[styles.tableHeaderText, { width: 50 }]}>#</Text>
+                                       <Text style={[styles.tableHeaderText, { width: 35 }]}>#</Text>
 
                                        <Text style={[styles.tableHeaderText, { flex: 2 }]}>Student</Text>
 
+                                       <Text style={[styles.tableHeaderText, { flex: 1 }]}>Correct</Text>
+
+                                       <Text style={[styles.tableHeaderText, { flex: 1 }]}>Score</Text>
+
                                        <TouchableOpacity 
 
-                                         style={styles.sortableHeaderCell}
+                                         style={[styles.sortableHeaderCell, { flex: 1 }]}
 
                                          onPress={() => handleSort('attempts')}
 
                                        >
 
-                                         <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'attempts' && styles.activeSort]}>
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'attempts' && styles.activeSort]}>
 
                                            Attempts
 
@@ -8156,7 +8877,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                              name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
 
-                                             size={16} 
+                                             size={14} 
 
                                              color="#3b82f6" 
 
@@ -8168,15 +8889,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        <TouchableOpacity 
 
-                                         style={styles.sortableHeaderCell}
+                                         style={[styles.sortableHeaderCell, { flex: 1 }]}
 
                                          onPress={() => handleSort('time')}
 
                                        >
 
-                                         <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'time' && styles.activeSort]}>
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'time' && styles.activeSort]}>
 
-                                           Time Spent
+                                           Time
 
                                          </Text>
 
@@ -8186,7 +8907,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                              name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
 
-                                             size={16} 
+                                             size={14} 
 
                                              color="#3b82f6" 
 
@@ -8196,19 +8917,34 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        </TouchableOpacity>
 
+                                       <Text style={[styles.tableHeaderText, { flex: 1.5 }]}>Remarks</Text>
+
                                      </View>
 
                                    
 
                                      {/* Table Rows */}
 
-                                     {sortedResults.map((result: any, idx: number) => {
+                                    {sortedResults.map((result: any, idx: number) => {
 
-                                       // Find student by studentId from the result (proper database lookup)
+                                      // Find student by studentId from the result (proper database lookup)
+                                      let student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
+                                      
+                                      // If not found by studentId, try matching by studentInfo name
+                                      if (!student && result.studentInfo?.name) {
+                                        student = Object.values(studentsByClass).flat().find((s: any) => 
+                                          s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+                                        );
+                                      }
+                                      
+                                      // If still not found, try by parentId
+                                      if (!student && result.parentId) {
+                                        student = Object.values(studentsByClass).flat().find((s: any) => s.parentId === result.parentId);
+                                      }
 
-                                       const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
-
-                                       const studentNickname = student ? formatStudentName(student) : 'Unknown Student';
+                                      // Get student name with fallback to studentInfo
+                                      const studentNickname = student ? formatStudentName(student) : 
+                                        (result.studentInfo?.name || 'Unknown Student');
 
                                        
 
@@ -8225,6 +8961,25 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                        const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
 
                                        const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
+
+                                       
+                                       // Calculate total correct and score
+                                       const totalQuestions = questionResults.length;
+                                       const totalCorrect = result.resultsSummary?.totalCorrect || questionResults.filter((q: any) => q.isCorrect).length;
+                                       const scorePercentage = result.scorePercentage || 0;
+
+                                       // Get remarks based on score
+                                       const getRemarks = (score: number) => {
+                                         if (score >= 90) return 'Excellent';
+                                         if (score >= 75) return 'Good';
+                                         if (score >= 60) return 'Fair';
+                                         return 'Needs Work';
+                                       };
+
+                                       const remarks = getRemarks(scorePercentage);
+                                       const remarksColor = scorePercentage >= 90 ? '#10b981' : 
+                                                           scorePercentage >= 75 ? '#3b82f6' : 
+                                                           scorePercentage >= 60 ? '#f59e0b' : '#ef4444';
 
                                        
 
@@ -8254,7 +9009,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                          <View key={result.resultId || idx} style={styles.resultsTableRow}>
 
-                                           <Text style={[styles.tableRowText, { width: 50 }]}>{idx + 1}</Text>
+                                           <Text style={[styles.tableRowText, { width: 35 }]}>{idx + 1}</Text>
 
                                            <TouchableOpacity 
 
@@ -8268,9 +9023,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                            </TouchableOpacity>
 
-                                           <Text style={[styles.tableRowText, { flex: 1.5 }]}>{avgAttempts}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1 }]}>{totalCorrect}/{totalQuestions}</Text>
 
-                                           <Text style={[styles.tableRowText, { flex: 1.5 }]}>{timeDisplay}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1, fontWeight: '700' }]}>{scorePercentage.toFixed(0)}%</Text>
+
+                                           <Text style={[styles.tableRowText, { flex: 1 }]}>{avgAttempts}</Text>
+
+                                           <Text style={[styles.tableRowText, { flex: 1 }]}>{timeDisplay}</Text>
+
+                                           <Text style={[styles.tableRowText, { flex: 1.5, fontWeight: '600', color: remarksColor }]}>{remarks}</Text>
 
                                          </View>
 
@@ -8282,15 +9043,293 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                  </ScrollView>
 
-                               </View>
+                              </View>
 
-                             </View>
+                               
+                               {/* Class Statistics Section */}
+                               <View style={styles.resultsStatsSection}>
+                                 <View style={styles.resultsStatsHeader}>
+                                   <MaterialCommunityIcons name="chart-box" size={16} color="#8b5cf6" />
+                                   <Text style={styles.resultsStatsTitle}>Class Statistics</Text>
+                                 </View>
+                                 
+                                 {(() => {
+                                   // Calculate all statistics
+                                   const scores = exerciseResults.map((r: any) => r.scorePercentage || 0);
+                                   const sortedScores = [...scores].sort((a, b) => a - b);
+                                   
+                                   // Mean Percentage Score (MPS)
+                                   const mps = scores.length > 0 ? scores.reduce((sum: number, score: number) => sum + score, 0) / scores.length : 0;
+                                   
+                                   // Median
+                                   let median = 0;
+                                   if (sortedScores.length > 0) {
+                                     const mid = Math.floor(sortedScores.length / 2);
+                                     median = sortedScores.length % 2 === 0 
+                                       ? (sortedScores[mid - 1] + sortedScores[mid]) / 2 
+                                       : sortedScores[mid];
+                                   }
+                                   
+                                   // Mode (most frequent score)
+                                   const scoreFrequency: { [key: number]: number } = {};
+                                   scores.forEach((score: number) => {
+                                     const roundedScore = Math.round(score);
+                                     scoreFrequency[roundedScore] = (scoreFrequency[roundedScore] || 0) + 1;
+                                   });
+                                   let mode = 0;
+                                   let maxFreq = 0;
+                                   Object.entries(scoreFrequency).forEach(([score, freq]) => {
+                                     if (freq > maxFreq) {
+                                       maxFreq = freq;
+                                       mode = parseInt(score);
+                                     }
+                                   });
+                                   
+                                   // Standard Deviation
+                                   let stdDev = 0;
+                                   if (scores.length > 1) {
+                                     const variance = scores.reduce((sum: number, score: number) => sum + Math.pow(score - mps, 2), 0) / scores.length;
+                                     stdDev = Math.sqrt(variance);
+                                   }
+                                   
+                                   // Range
+                                   const highestScore = sortedScores.length > 0 ? sortedScores[sortedScores.length - 1] : 0;
+                                   const lowestScore = sortedScores.length > 0 ? sortedScores[0] : 0;
+                                   const range = highestScore - lowestScore;
+                                   
+                                   // Find students with highest and lowest scores
+                                   const topStudent = exerciseResults.find((r: any) => r.scorePercentage === highestScore);
+                                   const bottomStudent = exerciseResults.find((r: any) => r.scorePercentage === lowestScore);
+                                   
+                                   const getStudentName = (result: any) => {
+                                     const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result?.studentId);
+                                     return student ? formatStudentName(student) : (result?.studentInfo?.name || 'Unknown');
+                                   };
+                                   
+                                   // Class Average Attempts per Item
+                                   const allAttempts = exerciseResults.map((r: any) => {
+                                     const questionResults = r.questionResults || [];
+                                     const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                                     return questionResults.length > 0 ? totalAttempts / questionResults.length : 1;
+                                   });
+                                   const avgAttemptsPerItem = allAttempts.length > 0 ? allAttempts.reduce((sum: number, val: number) => sum + val, 0) / allAttempts.length : 0;
+                                   
+                                   // Class Average Time per Item
+                                   const allTimes = exerciseResults.map((r: any) => {
+                                     const questionResults = r.questionResults || [];
+                                     return questionResults.length > 0 ? (r.totalTimeSpent || 0) / questionResults.length : 0;
+                                   });
+                                   const avgTimePerItem = allTimes.length > 0 ? allTimes.reduce((sum: number, val: number) => sum + val, 0) / allTimes.length : 0;
+                                   
+                                   // Passing Rate (assuming 60% is passing)
+                                   const passingScore = 60;
+                                   const passedCount = scores.filter((score: number) => score >= passingScore).length;
+                                   const passingRate = scores.length > 0 ? (passedCount / scores.length) * 100 : 0;
+                                   
+                                   // Item Analysis - Performance distribution
+                                   const excellentCount = scores.filter((s: number) => s >= 90).length;
+                                   const goodCount = scores.filter((s: number) => s >= 75 && s < 90).length;
+                                   const fairCount = scores.filter((s: number) => s >= 60 && s < 75).length;
+                                   const needsImprovementCount = scores.filter((s: number) => s < 60).length;
+                                   
+                                   // Create unique key for this exercise stats
+                                   const statsKey = `${cls.id}-${exerciseResults[0]?.exerciseId || exerciseTitle}`;
+                                   const isExpanded = expandedStats[statsKey] || false;
 
-                           );
+                                   return (
+                                    <View style={styles.resultsStatsContent}>
+                                      {/* Primary Metrics Grid */}
+                                      <View style={styles.resultsStatsGrid}>
+                                        <View style={styles.resultsStatCard}>
+                                          <MaterialCommunityIcons name="percent" size={14} color="#3b82f6" />
+                                          <Text style={styles.resultsStatLabel}>MPS</Text>
+                                          <Text style={styles.resultsStatValue}>{mps.toFixed(1)}%</Text>
+                                        </View>
+                                        
+                                        <View style={styles.resultsStatCard}>
+                                          <MaterialCommunityIcons name="chart-line" size={14} color="#10b981" />
+                                          <Text style={styles.resultsStatLabel}>Pass Rate</Text>
+                                          <Text style={[styles.resultsStatValue, { color: passingRate >= 75 ? '#10b981' : passingRate >= 50 ? '#f59e0b' : '#ef4444' }]}>
+                                            {passingRate.toFixed(1)}%
+                                          </Text>
+                                          <Text style={styles.resultsStatSubtext}>{passedCount}/{scores.length}</Text>
+                                        </View>
+                                      </View>
 
-                         });
+                                      {/* Toggle Button */}
+                                      <TouchableOpacity 
+                                        style={styles.statsToggleButton}
+                                        onPress={() => setExpandedStats(prev => ({ ...prev, [statsKey]: !isExpanded }))}
+                                      >
+                                        <Text style={styles.statsToggleText}>
+                                          {isExpanded ? 'Hide Detailed Statistics' : 'Show Detailed Statistics'}
+                                        </Text>
+                                        <MaterialCommunityIcons 
+                                          name={isExpanded ? 'chevron-up' : 'chevron-down'} 
+                                          size={18} 
+                                          color="#3b82f6" 
+                                        />
+                                      </TouchableOpacity>
+                                      
+                                      {isExpanded && (
+                                        <>
+                                      {/* Central Tendency Measures */}
+                                      <View style={styles.resultsStatsSubsection}>
+                                         <Text style={styles.resultsStatsSubtitle}>Central Tendency</Text>
+                                         <View style={styles.resultsStatsGrid}>
+                                           <View style={styles.resultsStatCard}>
+                                             <MaterialCommunityIcons name="calculator" size={12} color="#64748b" />
+                                             <Text style={styles.resultsStatLabel}>Mean</Text>
+                                             <Text style={styles.resultsStatValue}>{mps.toFixed(1)}%</Text>
+                                           </View>
+                                           
+                                           <View style={styles.resultsStatCard}>
+                                             <MaterialCommunityIcons name="chart-bell-curve" size={12} color="#64748b" />
+                                             <Text style={styles.resultsStatLabel}>Median</Text>
+                                             <Text style={styles.resultsStatValue}>{median.toFixed(1)}%</Text>
+                                           </View>
+                                           
+                                           <View style={styles.resultsStatCard}>
+                                             <MaterialCommunityIcons name="trending-up" size={12} color="#64748b" />
+                                             <Text style={styles.resultsStatLabel}>Mode</Text>
+                                             <Text style={styles.resultsStatValue}>{mode.toFixed(0)}%</Text>
+                                           </View>
+                                         </View>
+                                       </View>
+                                       
+                                       {/* Dispersion Measures */}
+                                       <View style={styles.resultsStatsSubsection}>
+                                         <Text style={styles.resultsStatsSubtitle}>Dispersion</Text>
+                                         <View style={styles.resultsStatsGrid}>
+                                           <View style={styles.resultsStatCard}>
+                                             <MaterialCommunityIcons name="sigma" size={12} color="#64748b" />
+                                             <Text style={styles.resultsStatLabel}>Std Dev</Text>
+                                             <Text style={styles.resultsStatValue}>{stdDev.toFixed(1)}</Text>
+                                             <Text style={styles.resultsStatSubtext}>
+                                               {stdDev < 10 ? 'Low' : stdDev < 20 ? 'Moderate' : 'High'}
+                                             </Text>
+                                           </View>
+                                           
+                                           <View style={styles.resultsStatCard}>
+                                             <MaterialCommunityIcons name="arrow-expand-horizontal" size={12} color="#64748b" />
+                                             <Text style={styles.resultsStatLabel}>Range</Text>
+                                             <Text style={styles.resultsStatValue}>{range.toFixed(1)}%</Text>
+                                             <Text style={styles.resultsStatSubtext}>{lowestScore.toFixed(0)}-{highestScore.toFixed(0)}%</Text>
+                                           </View>
+                                         </View>
+                                       </View>
+                                       
+                                       {/* Performance Extremes */}
+                                       <View style={styles.resultsStatsSubsection}>
+                                         <Text style={styles.resultsStatsSubtitle}>Top & Bottom</Text>
+                                         <View style={styles.resultsStatsGrid}>
+                                           <View style={[styles.resultsStatCard, { backgroundColor: '#f0fdf4' }]}>
+                                             <MaterialCommunityIcons name="trophy" size={12} color="#10b981" />
+                                             <Text style={[styles.resultsStatLabel, { color: '#10b981' }]}>Highest</Text>
+                                             <Text style={[styles.resultsStatValue, { color: '#10b981' }]}>{highestScore.toFixed(1)}%</Text>
+                                             <Text style={[styles.resultsStatSubtext, { fontSize: 9 }]} numberOfLines={1}>{topStudent ? getStudentName(topStudent) : '—'}</Text>
+                                           </View>
+                                           
+                                           <View style={[styles.resultsStatCard, { backgroundColor: '#fef2f2' }]}>
+                                             <MaterialCommunityIcons name="alert-circle" size={12} color="#ef4444" />
+                                             <Text style={[styles.resultsStatLabel, { color: '#ef4444' }]}>Lowest</Text>
+                                             <Text style={[styles.resultsStatValue, { color: '#ef4444' }]}>{lowestScore.toFixed(1)}%</Text>
+                                             <Text style={[styles.resultsStatSubtext, { fontSize: 9 }]} numberOfLines={1}>{bottomStudent ? getStudentName(bottomStudent) : '—'}</Text>
+                                           </View>
+                                         </View>
+                                       </View>
+                                       
+                                       {/* Efficiency Metrics */}
+                                       <View style={styles.resultsStatsSubsection}>
+                                         <Text style={styles.resultsStatsSubtitle}>Efficiency</Text>
+                                         <View style={styles.resultsStatsGrid}>
+                                           <View style={styles.resultsStatCard}>
+                                             <MaterialCommunityIcons name="repeat" size={12} color="#64748b" />
+                                             <Text style={styles.resultsStatLabel}>Avg Attempts</Text>
+                                             <Text style={styles.resultsStatValue}>{avgAttemptsPerItem.toFixed(1)}</Text>
+                                             <Text style={styles.resultsStatSubtext}>
+                                               {avgAttemptsPerItem < 1.5 ? 'Excellent' : avgAttemptsPerItem < 2.5 ? 'Good' : 'Fair'}
+                                             </Text>
+                                           </View>
+                                           
+                                           <View style={styles.resultsStatCard}>
+                                             <MaterialCommunityIcons name="clock-outline" size={12} color="#64748b" />
+                                             <Text style={styles.resultsStatLabel}>Avg Time</Text>
+                                             <Text style={styles.resultsStatValue}>
+                                               {avgTimePerItem > 60000 
+                                                 ? `${Math.floor(avgTimePerItem / 60000)}m ${Math.floor((avgTimePerItem % 60000) / 1000)}s`
+                                                 : `${Math.floor(avgTimePerItem / 1000)}s`}
+                                             </Text>
+                                           </View>
+                                         </View>
+                                       </View>
+                                       
+                                       {/* Item Analysis - Performance Distribution */}
+                                       <View style={styles.resultsStatsSubsection}>
+                                         <Text style={styles.resultsStatsSubtitle}>Performance Distribution</Text>
+                                         <View style={styles.resultsDistribution}>
+                                           <View style={styles.resultsDistItem}>
+                                             <View style={[styles.resultsDistBar, { width: scores.length > 0 ? `${(excellentCount / scores.length) * 100}%` : '0%', backgroundColor: '#10b981' }]} />
+                                             <View style={styles.resultsDistLabel}>
+                                               <View style={styles.resultsDistLabelRow}>
+                                                 <View style={[styles.resultsDistDot, { backgroundColor: '#10b981' }]} />
+                                                 <Text style={styles.resultsDistText}>Excellent (90-100%)</Text>
+                                               </View>
+                                               <Text style={styles.resultsDistCount}>{excellentCount} ({scores.length > 0 ? ((excellentCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                                             </View>
+                                           </View>
+                                           
+                                           <View style={styles.resultsDistItem}>
+                                             <View style={[styles.resultsDistBar, { width: scores.length > 0 ? `${(goodCount / scores.length) * 100}%` : '0%', backgroundColor: '#3b82f6' }]} />
+                                             <View style={styles.resultsDistLabel}>
+                                               <View style={styles.resultsDistLabelRow}>
+                                                 <View style={[styles.resultsDistDot, { backgroundColor: '#3b82f6' }]} />
+                                                 <Text style={styles.resultsDistText}>Good (75-89%)</Text>
+                                               </View>
+                                               <Text style={styles.resultsDistCount}>{goodCount} ({scores.length > 0 ? ((goodCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                                             </View>
+                                           </View>
+                                           
+                                           <View style={styles.resultsDistItem}>
+                                             <View style={[styles.resultsDistBar, { width: scores.length > 0 ? `${(fairCount / scores.length) * 100}%` : '0%', backgroundColor: '#f59e0b' }]} />
+                                             <View style={styles.resultsDistLabel}>
+                                               <View style={styles.resultsDistLabelRow}>
+                                                 <View style={[styles.resultsDistDot, { backgroundColor: '#f59e0b' }]} />
+                                                 <Text style={styles.resultsDistText}>Fair (60-74%)</Text>
+                                               </View>
+                                               <Text style={styles.resultsDistCount}>{fairCount} ({scores.length > 0 ? ((fairCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                                             </View>
+                                           </View>
+                                           
+                                           <View style={styles.resultsDistItem}>
+                                             <View style={[styles.resultsDistBar, { width: scores.length > 0 ? `${(needsImprovementCount / scores.length) * 100}%` : '0%', backgroundColor: '#ef4444' }]} />
+                                             <View style={styles.resultsDistLabel}>
+                                               <View style={styles.resultsDistLabelRow}>
+                                                 <View style={[styles.resultsDistDot, { backgroundColor: '#ef4444' }]} />
+                                                 <Text style={styles.resultsDistText}>Needs Improvement (&lt;60%)</Text>
+                                               </View>
+                                               <Text style={styles.resultsDistCount}>{needsImprovementCount} ({scores.length > 0 ? ((needsImprovementCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                                             </View>
+                                          </View>
+                                        </View>
+                                      </View>
+                                      </>
+                                      )}
+                                    </View>
+                                  );
+                                })()}
+                              </View>
 
-                       })()}
+                           </View>
+
+                          );
+
+                        })}
+                        
+                          </View>
+                        ));
+
+                      })()}
 
                      </View>
 
@@ -8372,7 +9411,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <View style={styles.classIconContainer}>
 
-                            <MaterialCommunityIcons name="google-classroom" size={24} color="#3b82f6" />
+                            <MaterialCommunityIcons name="google-classroom" size={20} color="#3b82f6" />
 
                           </View>
 
@@ -8380,17 +9419,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                             <Text style={styles.classroomTitle}>{cls.name}</Text>
 
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
 
-                              <MaterialIcons name="school" size={14} color="#64748b" />
+                              <MaterialIcons name="school" size={12} color="#64748b" />
 
                               <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
 
                             </View>
 
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
 
-                              <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+                              <MaterialIcons name="calendar-today" size={12} color="#64748b" />
 
                               <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
 
@@ -8410,7 +9449,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         <View style={styles.classStudentCount}>
 
-                          <MaterialCommunityIcons name="account-group" size={18} color="#64748b" />
+                          <MaterialCommunityIcons name="account-group" size={16} color="#64748b" />
 
                           <Text style={styles.studentCountText}>{studentsByClass[cls.id]?.length ?? 0} Students</Text>
 
@@ -8419,6 +9458,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                         <View style={styles.quickStats}>
 
                           <View style={styles.statItem}>
+
+                            <View style={[styles.statIconBg, { backgroundColor: '#f3e8ff' }]}>
+
+                              <MaterialCommunityIcons name="book-open-outline" size={14} color="#8b5cf6" />
+
+                            </View>
 
                             <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
 
@@ -8430,15 +9475,26 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <View style={styles.statItem}>
 
+                            <View style={[styles.statIconBg, { backgroundColor: '#dcfce7' }]}>
+
+                              <MaterialCommunityIcons name="check-circle-outline" size={14} color="#10b981" />
+
+                            </View>
+
                             <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
 
                             <Text style={styles.statLabel}>Completed</Text>
-
                           </View>
 
                           <View style={styles.statDivider} />
 
                           <View style={styles.statItem}>
+
+                            <View style={[styles.statIconBg, { backgroundColor: '#fef3c7' }]}>
+
+                              <MaterialCommunityIcons name="clock-outline" size={14} color="#f59e0b" />
+
+                            </View>
 
                             <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
 
@@ -8488,7 +9544,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <View style={styles.classIconContainerInactive}>
 
-                            <MaterialCommunityIcons name="google-classroom" size={24} color="#94a3b8" />
+                            <MaterialCommunityIcons name="google-classroom" size={20} color="#94a3b8" />
 
                           </View>
 
@@ -8496,17 +9552,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                             <Text style={styles.classroomTitle}>{cls.name}</Text>
 
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
 
-                              <MaterialIcons name="school" size={14} color="#64748b" />
+                              <MaterialIcons name="school" size={12} color="#64748b" />
 
                               <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
 
                             </View>
 
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
 
-                              <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+                              <MaterialIcons name="calendar-today" size={12} color="#64748b" />
 
                               <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
 
@@ -8526,7 +9582,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         <View style={styles.classStudentCount}>
 
-                          <MaterialCommunityIcons name="account-group" size={18} color="#64748b" />
+                          <MaterialCommunityIcons name="account-group" size={16} color="#64748b" />
 
                           <Text style={styles.studentCountText}>{studentsByClass[cls.id]?.length ?? 0} Students</Text>
 
@@ -8586,7 +9642,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         
 
-        <TouchableOpacity style={[styles.navItem, activeTab === 'results' && styles.activeNavItem]} onPress={() => setActiveTab('results')}>
+        <TouchableOpacity style={[styles.navItem, activeTab === 'results' && styles.activeNavItem]} onPress={async () => {
+          setActiveTab('results');
+          // Auto-refresh data when switching to results tab to get latest completion stats
+          if (activeClasses.length > 0) {
+            await loadAssignedExercises(); // Load assigned exercises to get quarter data
+            await loadAssignments(activeClasses.map(c => c.id));
+            await loadClassAnalytics(activeClasses.map(c => c.id));
+          }
+        }}>
 
           <MaterialIcons name="assessment" size={24} color={activeTab === 'results' ? '#000000' : '#9ca3af'} />
 
@@ -9346,65 +10410,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                 <View style={styles.announcementField}>
 
-                  <Text style={styles.announcementFieldLabel}>Send To</Text>
+                  <Text style={styles.announcementFieldLabel}>Select Classes</Text>
 
-                  <View style={styles.announcementSegmentWrap}>
-
-                    <TouchableOpacity
-
-                      style={[styles.announcementSegmentButton, annAllClasses && styles.announcementSegmentActive]}
-
-                      onPress={() => {
-
-                        setAnnAllClasses(true);
-
-                        setAnnSelectedClassIds(teacherClasses.map((c) => c.id));
-
-                      }}
-
-                    >
-
-                      <MaterialCommunityIcons 
-
-                        name="school" 
-
-                        size={18} 
-
-                        color={annAllClasses ? "#ffffff" : "#64748b"} 
-
-                      />
-
-                      <Text style={[styles.announcementSegmentText, annAllClasses && styles.announcementSegmentTextActive]}>All Classes</Text>
-
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-
-                      style={[styles.announcementSegmentButton, !annAllClasses && styles.announcementSegmentActive]}
-
-                      onPress={() => setAnnAllClasses(false)}
-
-                    >
-
-                      <MaterialCommunityIcons 
-
-                        name="account-group" 
-
-                        size={18} 
-
-                        color={!annAllClasses ? "#ffffff" : "#64748b"} 
-
-                      />
-
-                      <Text style={[styles.announcementSegmentText, !annAllClasses && styles.announcementSegmentTextActive]}>Specific Classes</Text>
-
-                    </TouchableOpacity>
-
-                  </View>
-
-                  {!annAllClasses && (
-
-                    <View style={styles.announcementClassList}>
+                  <View style={styles.announcementClassList}>
 
                       <Text style={styles.announcementClassListTitle}>Select Classes:</Text>
 
@@ -9458,8 +10466,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     </View>
 
-                  )}
-
                 </View>
 
               </View>
@@ -9482,9 +10488,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
               <TouchableOpacity
 
-                style={[styles.announcementSendButton, (!annTitle.trim() || !annMessage.trim() || (!annAllClasses && annSelectedClassIds.length === 0)) && styles.announcementSendButtonDisabled]}
+                style={[styles.announcementSendButton, (!annTitle.trim() || !annMessage.trim() || annSelectedClassIds.length === 0) && styles.announcementSendButtonDisabled]}
 
-                disabled={sendingAnn || !annTitle.trim() || !annMessage.trim() || (!annAllClasses && annSelectedClassIds.length === 0)}
+                disabled={sendingAnn || !annTitle.trim() || !annMessage.trim() || annSelectedClassIds.length === 0}
 
                 onPress={async () => {
 
@@ -9492,7 +10498,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                   if (!annTitle.trim() || !annMessage.trim()) { showAlert('Error', 'Title and message are required.', undefined, 'error'); return; }
 
-                  const targetIds = annAllClasses ? teacherClasses.map((c) => c.id) : annSelectedClassIds;
+                  const targetIds = annSelectedClassIds;
 
                   if (!targetIds.length) { showAlert('Error', 'Select at least one class.', undefined, 'error'); return; }
 
@@ -9533,8 +10539,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                       setAnnTitle('');
 
                       setAnnMessage('');
-
-                      setAnnAllClasses(false);
 
                       setAnnSelectedClassIds([]);
 
@@ -9863,22 +10867,56 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                     (studentsByClass[selectedClassForParentsList] || []).map((s) => {
                       const p = s.parentId ? parentsById[s.parentId] : undefined;
                       const parentStatus = getParentStatus(p);
+                      const isRegistered = p && p.infoStatus === 'completed';
+                      const parentName = isRegistered ? `${p.firstName || ''} ${p.lastName || ''}`.trim() : null;
                       
                       return (
-                        <View key={s.studentId} style={styles.parentListItem}>
-                          <View style={styles.parentInfo}>
-                            <Text style={styles.nonClickableStudentName}>{formatStudentName(s)}</Text>
-                            {p ? (
-                              <TouchableOpacity onPress={() => handleShowParentInfo(s, p)}>
-                                <Text style={styles.clickableParentCode}>Code: {p.loginCode || '—'}</Text>
-                              </TouchableOpacity>
-                            ) : (
-                              <Text style={styles.parentCode}>Code: —</Text>
-                            )}
+                        <View key={s.studentId} style={styles.parentListCard}>
+                          <View style={styles.parentCardLeft}>
+                            {/* Student Avatar/Initials */}
+                            <View style={styles.parentCardAvatar}>
+                              <Text style={styles.parentCardAvatarText}>{getStudentInitials(s)}</Text>
+                            </View>
+                            
+                            <View style={styles.parentCardInfo}>
+                              {/* Student Name */}
+                              <View style={styles.parentCardNameRow}>
+                                <MaterialCommunityIcons name="account" size={16} color="#64748b" style={{ marginRight: 4 }} />
+                                <Text style={styles.parentCardStudentName}>{formatStudentName(s)}</Text>
+                              </View>
+                              
+                              {/* Parent Name (if registered) */}
+                              {parentName && (
+                                <View style={styles.parentCardParentRow}>
+                                  <MaterialCommunityIcons name="account-heart" size={14} color="#8b5cf6" style={{ marginRight: 4 }} />
+                                  <Text style={styles.parentCardParentName}>Parent: {parentName}</Text>
+                                </View>
+                              )}
+                              
+                              {/* Access Code */}
+                              <View style={styles.parentCardCodeRow}>
+                                <MaterialCommunityIcons name="key-variant" size={14} color="#64748b" style={{ marginRight: 4 }} />
+                                {p ? (
+                                  <TouchableOpacity onPress={() => handleShowParentInfo(s, p)}>
+                                    <Text style={styles.parentCardCodeClickable}>Code: {p.loginCode || '—'}</Text>
+                                  </TouchableOpacity>
+                                ) : (
+                                  <Text style={styles.parentCardCode}>Code: —</Text>
+                                )}
+                              </View>
+                            </View>
                           </View>
-                          <View style={styles.parentStatusContainer}>
-                            <View style={[styles.parentStatusBadge, { backgroundColor: parentStatus.color }]}>
-                              <Text style={styles.parentStatusText}>{parentStatus.text}</Text>
+                          
+                          {/* Status Badge */}
+                          <View style={styles.parentCardRight}>
+                            <View style={[styles.parentCardStatusBadge, { backgroundColor: parentStatus.color }]}>
+                              <MaterialCommunityIcons 
+                                name={isRegistered ? "check-circle" : p ? "clock-outline" : "account-off"} 
+                                size={14} 
+                                color="#ffffff" 
+                                style={{ marginRight: 4 }}
+                              />
+                              <Text style={styles.parentCardStatusText}>{parentStatus.text}</Text>
                             </View>
                           </View>
                         </View>
@@ -12751,6 +13789,72 @@ const styles = StyleSheet.create({
 
   },
 
+  classroomsSectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: Math.min(20, staticHeight * 0.025),
+    paddingHorizontal: Math.min(16, staticWidth * 0.04),
+  },
+
+  sectionTitle: {
+
+    fontSize: Math.max(20, Math.min(24, staticWidth * 0.06)),
+
+    fontWeight: '800',
+
+    color: '#1e293b',
+
+  },
+
+  sectionSubtitle: {
+    fontSize: Math.max(13, Math.min(15, staticWidth * 0.038)),
+    color: '#64748b',
+    fontWeight: '500',
+    marginTop: 4,
+  },
+
+  classroomBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 20,
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+
+  classroomBadgeText: {
+    color: '#ffffff',
+    fontSize: Math.max(16, Math.min(18, staticWidth * 0.045)),
+    fontWeight: '700',
+  },
+
+  emptyStateContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Math.min(60, staticHeight * 0.08),
+    paddingHorizontal: Math.min(32, staticWidth * 0.08),
+  },
+
+  emptyStateTitle: {
+    fontSize: Math.max(18, Math.min(22, staticWidth * 0.055)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginTop: Math.min(16, staticHeight * 0.02),
+    marginBottom: Math.min(8, staticHeight * 0.01),
+  },
+
+  emptyStateText: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    color: '#64748b',
+    textAlign: 'center',
+  },
+
   classHeader: {
 
     flexDirection: 'row',
@@ -12781,85 +13885,112 @@ const styles = StyleSheet.create({
 
   },
 
-  sectionTitle: {
-
-    fontSize: Math.max(16, Math.min(20, staticWidth * 0.05)),
-
-    fontWeight: '700',
-
-    color: '#1e293b',
-
-    marginBottom: Math.min(12, staticHeight * 0.015),
-
-    paddingHorizontal: Math.min(8, staticWidth * 0.02),
-
-  },
-
   classroomCard: {
 
     backgroundColor: '#ffffff',
 
-    borderRadius: Math.min(16, staticWidth * 0.04),
+    borderRadius: Math.min(20, staticWidth * 0.05),
 
-    padding: Math.min(20, staticWidth * 0.05),
+    marginHorizontal: Math.min(12, staticWidth * 0.03),
 
-    marginHorizontal: Math.min(8, staticWidth * 0.02),
-
-    marginBottom: Math.min(16, staticHeight * 0.02),
+    marginBottom: Math.min(20, staticHeight * 0.025),
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 8 },
 
-    shadowOpacity: 0.06,
+    shadowOpacity: 0.12,
 
-    shadowRadius: 8,
+    shadowRadius: 16,
 
-    elevation: 3,
+    elevation: 8,
 
-    borderWidth: 1,
+    overflow: 'hidden',
 
-    borderColor: '#e2e8f0',
-
-    width: staticWidth - Math.min(32, staticWidth * 0.08),
+    width: staticWidth - Math.min(40, staticWidth * 0.1),
 
     alignSelf: 'center',
 
   },
 
-  classroomHeader: {
+  classroomCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: Math.min(20, staticWidth * 0.05),
+    paddingBottom: Math.min(16, staticHeight * 0.02),
+  },
 
-    marginBottom: 12,
+  classroomHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
 
+  classroomIconContainer: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Math.min(16, staticWidth * 0.04),
+  },
+
+  classroomHeaderInfo: {
+    flex: 1,
   },
 
   classroomTitle: {
 
-    fontSize: Math.max(16, Math.min(20, staticWidth * 0.05)),
+    fontSize: Math.max(16, Math.min(18, staticWidth * 0.045)),
 
     fontWeight: '700',
 
     color: '#1e293b',
 
-    marginBottom: Math.min(6, staticHeight * 0.008),
+    marginBottom: Math.min(2, staticHeight * 0.005),
 
   },
 
   classroomSubtitle: {
 
-    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    fontSize: Math.max(12, Math.min(13, staticWidth * 0.032)),
 
-    color: '#64748b',
-
-    marginBottom: Math.min(4, staticHeight * 0.005),
+    color: '#000000',
 
     fontWeight: '500',
 
   },
 
+  classroomCardBody: {
+    padding: Math.min(20, staticWidth * 0.05),
+    paddingTop: Math.min(16, staticHeight * 0.02),
+  },
+
+  schoolYearBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: Math.min(12, staticWidth * 0.03),
+    paddingVertical: Math.min(6, staticHeight * 0.008),
+    borderRadius: Math.min(20, staticWidth * 0.05),
+    marginBottom: Math.min(16, staticHeight * 0.02),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  schoolYearText: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#64748b',
+    fontWeight: '600',
+    marginLeft: Math.min(6, staticWidth * 0.015),
+  },
+
   classroomYear: {
 
-    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
+    fontSize: Math.max(11, Math.min(12, staticWidth * 0.03)),
 
     color: '#64748b',
 
@@ -13189,13 +14320,13 @@ const styles = StyleSheet.create({
 
   },
 
-  metricContent: {
+  oldMetricContent: {
 
     alignItems: 'center',
 
   },
 
-  metricLabel: {
+  oldMetricLabel: {
 
     fontSize: Math.max(8, Math.min(10, staticWidth * 0.02)),
 
@@ -13209,7 +14340,7 @@ const styles = StyleSheet.create({
 
   },
 
-  metricValue: {
+  oldMetricValue: {
 
     fontSize: Math.max(10, Math.min(11, staticWidth * 0.035)),
 
@@ -13359,15 +14490,11 @@ const styles = StyleSheet.create({
 
   moreButton: {
 
-    position: 'absolute',
+    padding: 8,
 
-    top: 0,
+    borderRadius: 20,
 
-    right: 0,
-
-    padding: 6,
-
-    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
 
   },
 
@@ -13375,33 +14502,35 @@ const styles = StyleSheet.create({
 
     position: 'absolute',
 
-    top: 28,
+    top: 60,
 
-    right: 0,
+    right: 16,
 
     backgroundColor: '#ffffff',
 
-    borderRadius: 12,
+    borderRadius: 16,
 
-    paddingVertical: 6,
+    paddingVertical: 8,
 
-    paddingHorizontal: 8,
+    paddingHorizontal: 12,
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 6 },
 
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.15,
 
-    shadowRadius: 8,
+    shadowRadius: 12,
 
-    elevation: 6,
+    elevation: 8,
 
     borderWidth: 1,
 
-    borderColor: '#e5e7eb',
+    borderColor: '#e2e8f0',
 
     zIndex: 10,
+
+    minWidth: 160,
 
   },
 
@@ -13427,48 +14556,222 @@ const styles = StyleSheet.create({
 
   studentStatsContainer: {
     marginBottom: Math.min(16, staticHeight * 0.02),
-    padding: Math.min(16, staticWidth * 0.04),
-    backgroundColor: '#f8fafc',
-    borderRadius: Math.min(12, staticWidth * 0.03),
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
+  },
+
+  studentStatsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Math.min(10, staticHeight * 0.012),
   },
 
   studentStatsTitle: {
     fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
     fontWeight: '700',
     color: '#1e293b',
-    marginBottom: Math.min(12, staticHeight * 0.015),
+    marginLeft: Math.min(6, staticWidth * 0.015),
   },
 
   studentStatsGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    gap: Math.min(8, staticWidth * 0.02),
   },
 
   studentStatCard: {
     flex: 1,
     alignItems: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: '#f8fafc',
     padding: Math.min(12, staticWidth * 0.03),
-    borderRadius: Math.min(8, staticWidth * 0.02),
-    marginHorizontal: Math.min(4, staticWidth * 0.01),
-    borderWidth: 1,
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    borderWidth: 2,
     borderColor: '#e2e8f0',
+  },
+
+  studentStatCardTotal: {
+    borderColor: '#3b82f6',
+    backgroundColor: '#eff6ff',
+  },
+
+  studentStatCardMale: {
+    borderColor: '#10b981',
+    backgroundColor: '#ecfdf5',
+  },
+
+  studentStatCardFemale: {
+    borderColor: '#f59e0b',
+    backgroundColor: '#fef3c7',
+  },
+
+  studentStatIconContainer: {
+    marginBottom: Math.min(6, staticHeight * 0.008),
   },
 
   studentStatValue: {
     fontSize: Math.max(18, Math.min(22, staticWidth * 0.055)),
-    fontWeight: '700',
+    fontWeight: '800',
     color: '#1e293b',
-    marginTop: Math.min(6, staticHeight * 0.008),
+    marginBottom: Math.min(4, staticHeight * 0.005),
+    textAlign: 'center',
   },
 
   studentStatLabel: {
-    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
+    fontSize: Math.max(10, Math.min(12, staticWidth * 0.03)),
     color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    lineHeight: Math.max(14, Math.min(16, staticWidth * 0.04)),
+  },
+
+  // Performance Metrics Styles
+  performanceMetricsContainer: {
+    marginBottom: Math.min(20, staticHeight * 0.025),
+  },
+
+  performanceMetricsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Math.min(12, staticHeight * 0.015),
+  },
+
+  performanceMetricsTitle: {
+    fontSize: Math.max(15, Math.min(17, staticWidth * 0.043)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: Math.min(8, staticWidth * 0.02),
+  },
+
+  metricsCardsContainer: {
+    gap: Math.min(12, staticWidth * 0.03),
+  },
+
+  metricCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    padding: Math.min(16, staticWidth * 0.04),
+    borderRadius: Math.min(16, staticWidth * 0.04),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+
+  metricIconWrapper: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Math.min(12, staticWidth * 0.03),
+  },
+
+  metricInfo: {
+    flex: 1,
+  },
+
+  metricLabel: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#64748b',
+    fontWeight: '600',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  metricValue: {
+    fontSize: Math.max(20, Math.min(24, staticWidth * 0.06)),
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: Math.min(2, staticHeight * 0.003),
+  },
+
+  metricSubtext: {
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
+    color: '#94a3b8',
     fontWeight: '500',
-    marginTop: Math.min(4, staticHeight * 0.005),
+  },
+
+  // Exercise Statistics Styles
+  exerciseStatsContainer: {
+    marginBottom: Math.min(20, staticHeight * 0.025),
+    backgroundColor: '#f8fafc',
+    borderRadius: Math.min(16, staticWidth * 0.04),
+    padding: Math.min(20, staticWidth * 0.05),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  exerciseStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    justifyContent: 'space-between',
+    gap: Math.min(8, staticWidth * 0.02),
+  },
+
+  exerciseStatItem: {
+    alignItems: 'center',
+    flex: 1,
+    paddingHorizontal: Math.min(4, staticWidth * 0.01),
+  },
+
+  exerciseStatIconBg: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Math.min(8, staticHeight * 0.01),
+  },
+
+  exerciseStatInfo: {
+    alignItems: 'center',
+    width: '100%',
+  },
+
+  exerciseStatValue: {
+    fontSize: Math.max(18, Math.min(22, staticWidth * 0.055)),
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  exerciseStatLabel: {
+    fontSize: Math.max(10, Math.min(12, staticWidth * 0.03)),
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    lineHeight: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    maxWidth: '100%',
+  },
+
+  exerciseStatDivider: {
+    width: 1,
+    height: 50,
+    backgroundColor: '#cbd5e1',
+    marginHorizontal: Math.min(4, staticWidth * 0.01),
+  },
+
+  // View Results Button
+  viewResultsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#3b82f6',
+    paddingVertical: Math.min(14, staticHeight * 0.018),
+    paddingHorizontal: Math.min(24, staticWidth * 0.06),
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+
+  viewResultsButtonText: {
+    color: '#ffffff',
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '700',
+    marginRight: Math.min(8, staticWidth * 0.02),
   },
 
   parentListItem: {
@@ -13538,6 +14841,111 @@ const styles = StyleSheet.create({
     marginBottom: Math.min(4, staticHeight * 0.005),
   },
 
+  // Enhanced Parent List Card Styles
+  parentListCard: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: Math.min(16, staticWidth * 0.04),
+    backgroundColor: '#ffffff',
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    marginBottom: Math.min(12, staticHeight * 0.015),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+
+  parentCardLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  parentCardAvatar: {
+    width: Math.min(48, staticWidth * 0.12),
+    height: Math.min(48, staticWidth * 0.12),
+    borderRadius: Math.min(24, staticWidth * 0.06),
+    backgroundColor: '#6366f1',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Math.min(12, staticWidth * 0.03),
+  },
+
+  parentCardAvatarText: {
+    fontSize: Math.max(16, Math.min(18, staticWidth * 0.045)),
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  parentCardInfo: {
+    flex: 1,
+  },
+
+  parentCardNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentCardStudentName: {
+    fontSize: Math.max(15, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#1e293b',
+    flex: 1,
+  },
+
+  parentCardParentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentCardParentName: {
+    fontSize: Math.max(13, Math.min(14, staticWidth * 0.035)),
+    fontWeight: '500',
+    color: '#8b5cf6',
+    flex: 1,
+  },
+
+  parentCardCodeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  parentCardCode: {
+    fontSize: Math.max(12, Math.min(13, staticWidth * 0.032)),
+    color: '#64748b',
+  },
+
+  parentCardCodeClickable: {
+    fontSize: Math.max(12, Math.min(13, staticWidth * 0.032)),
+    color: '#3b82f6',
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+
+  parentCardRight: {
+    marginLeft: Math.min(12, staticWidth * 0.03),
+  },
+
+  parentCardStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Math.min(10, staticWidth * 0.025),
+    paddingVertical: Math.min(6, staticHeight * 0.008),
+    borderRadius: Math.min(16, staticWidth * 0.04),
+  },
+
+  parentCardStatusText: {
+    fontSize: Math.max(11, Math.min(12, staticWidth * 0.03)),
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
   parentDetailsSection: {
     marginBottom: Math.min(20, staticHeight * 0.025),
     padding: Math.min(16, staticWidth * 0.04),
@@ -13588,11 +14996,15 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    paddingVertical: 8,
+    paddingVertical: 12,
 
-    paddingHorizontal: 8,
+    paddingHorizontal: 12,
 
-    gap: 8,
+    gap: 12,
+
+    borderRadius: 10,
+
+    marginBottom: 4,
 
   },
 
@@ -13600,7 +15012,7 @@ const styles = StyleSheet.create({
 
     color: '#1e293b',
 
-    fontSize: 14,
+    fontSize: Math.max(13, Math.min(15, staticWidth * 0.038)),
 
     fontWeight: '600',
 
@@ -13818,23 +15230,25 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    borderRadius: 16,
+    borderRadius: 10,
 
-    padding: 20,
+    padding: 10,
 
     shadowColor: '#000',
 
     shadowOffset: { width: 0, height: 2 },
 
-    shadowOpacity: 0.05,
+    shadowOpacity: 0.1,
 
-    shadowRadius: 8,
+    shadowRadius: 4,
 
-    elevation: 2,
+    elevation: 3,
 
     borderWidth: 1,
 
     borderColor: '#f1f5f9',
+
+    height: 80,
 
   },
 
@@ -13844,27 +15258,35 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
+    justifyContent: 'center',
+
+    paddingHorizontal: 2,
+
   },
 
   statValue: {
 
-    fontSize: 20,
+    fontSize: 16,
 
     fontWeight: '700',
 
     color: '#1e293b',
 
-    marginBottom: 4,
+    marginBottom: 2,
 
   },
 
   statLabel: {
 
-    fontSize: 12,
+    fontSize: 10,
 
     color: '#64748b',
 
     fontWeight: '500',
+
+    textAlign: 'center',
+
+    lineHeight: 12,
 
   },
 
@@ -13874,7 +15296,23 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#e2e8f0',
 
-    marginHorizontal: 16,
+    marginHorizontal: 4,
+
+  },
+
+  statIconBg: {
+
+    width: 24,
+
+    height: 24,
+
+    borderRadius: 12,
+
+    alignItems: 'center',
+
+    justifyContent: 'center',
+
+    marginBottom: 6,
 
   },
 
@@ -14040,15 +15478,15 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    gap: 6,
+    gap: 4,
 
     backgroundColor: '#dcfce7',
 
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
 
-    paddingVertical: 6,
+    paddingVertical: 4,
 
-    borderRadius: 20,
+    borderRadius: 16,
 
     borderWidth: 1,
 
@@ -14062,15 +15500,15 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    gap: 6,
+    gap: 4,
 
     backgroundColor: '#f1f5f9',
 
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
 
-    paddingVertical: 6,
+    paddingVertical: 4,
 
-    borderRadius: 20,
+    borderRadius: 16,
 
     borderWidth: 1,
 
@@ -14092,7 +15530,7 @@ const styles = StyleSheet.create({
 
     color: '#15803d',
 
-    fontSize: 12,
+    fontSize: 10,
 
     fontWeight: '700',
 
@@ -14102,7 +15540,7 @@ const styles = StyleSheet.create({
 
     color: '#64748b',
 
-    fontSize: 12,
+    fontSize: 10,
 
     fontWeight: '700',
 
@@ -14138,7 +15576,7 @@ const styles = StyleSheet.create({
 
   classTabTitle: {
 
-    fontSize: 24,
+    fontSize: 20,
 
     fontWeight: '800',
 
@@ -14150,38 +15588,85 @@ const styles = StyleSheet.create({
 
   classTabSubtitle: {
 
-    fontSize: 14,
+    fontSize: 10,
 
     color: '#64748b',
 
     fontWeight: '500',
 
   },
-
-  emptyStateContainer: {
-
-    alignItems: 'center',
-
-    justifyContent: 'center',
-
-    paddingVertical: 60,
-
-    paddingHorizontal: 20,
-
+  
+  // Quarter filtering styles
+  quarterFilterContainer: {
+    marginBottom: 16,
+    paddingVertical: 8,
   },
-
-  emptyStateText: {
-
-    fontSize: 18,
-
+  
+  quarterPill: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  
+  quarterPillActive: {
+    backgroundColor: '#8b5cf6',
+    borderColor: '#8b5cf6',
+  },
+  
+  quarterPillText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  
+  quarterPillTextActive: {
+    color: '#ffffff',
+  },
+  
+  quarterHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#faf5ff',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e9d5ff',
+  },
+  
+  quarterTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  
+  quarterTitle: {
+    fontSize: 16,
     fontWeight: '700',
-
-    color: '#94a3b8',
-
-    marginTop: 16,
-
-    marginBottom: 8,
-
+    color: '#6b21a8',
+  },
+  
+  exportQuarterButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#dcfce7',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#86efac',
+  },
+  
+  exportQuarterButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#059669',
   },
 
   emptyStateSubtext: {
@@ -14254,13 +15739,13 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    borderRadius: 16,
+    borderRadius: 14,
 
-    padding: 18,
+    padding: 12,
 
     marginHorizontal: 8,
 
-    marginBottom: 32,
+    marginBottom: 14,
 
     shadowColor: '#000',
 
@@ -14284,19 +15769,19 @@ const styles = StyleSheet.create({
 
     alignItems: 'flex-start',
 
-    marginBottom: 14,
+    marginBottom: 8,
 
-    gap: 12,
+    gap: 10,
 
   },
 
   classIconContainer: {
 
-    width: 48,
+    width: 42,
 
-    height: 48,
+    height: 42,
 
-    borderRadius: 14,
+    borderRadius: 12,
 
     backgroundColor: '#eff6ff',
 
@@ -14312,11 +15797,11 @@ const styles = StyleSheet.create({
 
   classIconContainerInactive: {
 
-    width: 48,
+    width: 42,
 
-    height: 48,
+    height: 42,
 
-    borderRadius: 14,
+    borderRadius: 12,
 
     backgroundColor: '#f8fafc',
 
@@ -14336,17 +15821,17 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    gap: 8,
+    gap: 6,
 
-    paddingVertical: 10,
+    paddingVertical: 6,
 
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
 
     backgroundColor: '#f8fafc',
 
-    borderRadius: 10,
+    borderRadius: 8,
 
-    marginBottom: 12,
+    marginBottom: 8,
 
     borderWidth: 1,
 
@@ -14356,7 +15841,7 @@ const styles = StyleSheet.create({
 
   studentCountText: {
 
-    fontSize: 14,
+    fontSize: 12,
 
     fontWeight: '600',
 
@@ -15180,9 +16665,25 @@ const styles = StyleSheet.create({
 
   refreshButton: {
 
-    padding: 8,
+    padding: Math.min(8, staticWidth * 0.02),
 
-    borderRadius: 8,
+    borderRadius: Math.min(8, staticWidth * 0.02),
+
+    backgroundColor: '#ffffff',
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+    shadowColor: '#000',
+
+    shadowOffset: { width: 0, height: 1 },
+
+    shadowOpacity: 0.05,
+
+    shadowRadius: 2,
+
+    elevation: 1,
 
   },
 
@@ -15248,7 +16749,7 @@ const styles = StyleSheet.create({
 
   exercisesTabText: {
 
-    fontSize: 14,
+    fontSize: 12,
 
     color: '#64748b',
 
@@ -15748,7 +17249,7 @@ const styles = StyleSheet.create({
 
   },
 
-  quarterHeader: {
+  oldQuarterHeader: {
 
     flexDirection: 'row',
 
@@ -15995,6 +17496,40 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
 
     borderColor: '#f1f5f9',
+
+  },
+
+  // Assignments Header Styles
+
+  assignmentsHeader: {
+
+    flexDirection: 'row',
+
+    justifyContent: 'space-between',
+
+    alignItems: 'center',
+
+    paddingHorizontal: Math.min(16, staticWidth * 0.04),
+
+    paddingVertical: Math.min(12, staticHeight * 0.015),
+
+    marginBottom: Math.min(16, staticHeight * 0.02),
+
+    backgroundColor: '#f8fafc',
+
+    borderBottomWidth: 1,
+
+    borderBottomColor: '#e2e8f0',
+
+  },
+
+  assignmentsHeaderTitle: {
+
+    fontSize: Math.max(18, Math.min(20, staticWidth * 0.05)),
+
+    fontWeight: '700',
+
+    color: '#1e293b',
 
   },
 
@@ -17786,7 +19321,7 @@ const styles = StyleSheet.create({
 
     borderBottomColor: '#e2e8f0',
 
-    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 1.6 : 'auto',
 
     borderRadius: 6,
 
@@ -17812,7 +19347,7 @@ const styles = StyleSheet.create({
 
   tableHeaderText: {
 
-    fontSize: Math.max(11, Math.min(13, staticWidth * 0.03)),
+    fontSize: Math.max(10, Math.min(11, staticWidth * 0.027)),
 
     fontWeight: '700',
 
@@ -17833,8 +19368,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
 
     paddingVertical: 4,
-
-    flex: 1.5,
 
   },
 
@@ -17862,7 +19395,7 @@ const styles = StyleSheet.create({
 
     borderBottomColor: '#f1f5f9',
 
-    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 1.6 : 'auto',
 
     backgroundColor: '#ffffff',
 
@@ -17890,7 +19423,7 @@ const styles = StyleSheet.create({
 
   tableRowText: {
 
-    fontSize: Math.max(11, Math.min(13, staticWidth * 0.03)),
+    fontSize: Math.max(10, Math.min(11, staticWidth * 0.027)),
 
     color: '#1e293b',
 
@@ -17926,7 +19459,7 @@ const styles = StyleSheet.create({
 
   tableContainer: {
 
-    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 1.6 : 'auto',
 
   },
 
@@ -19737,6 +21270,473 @@ const styles = StyleSheet.create({
 
     fontSize: 15,
 
+  },
+
+  // Class Statistics Styles
+  classStatisticsSection: {
+    marginTop: 16,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  classStatisticsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 2,
+    borderBottomColor: '#8b5cf6',
+  },
+
+  classStatisticsTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+
+  classStatisticsContent: {
+    gap: 16,
+  },
+
+  statsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+
+  statCard: {
+    flex: 1,
+    minWidth: 150,
+    backgroundColor: '#f8fafc',
+    borderRadius: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  statIconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+
+  classStatLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+
+  classStatValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+
+  statSubtext: {
+    fontSize: 11,
+    color: '#94a3b8',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+
+  statsSection: {
+    marginTop: 12,
+  },
+
+  statsSectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 12,
+    paddingLeft: 4,
+  },
+
+  performanceDistribution: {
+    gap: 12,
+  },
+
+  distributionItem: {
+    marginBottom: 8,
+  },
+
+  distributionBar: {
+    height: 8,
+    borderRadius: 4,
+    marginBottom: 6,
+    minWidth: 2,
+  },
+
+  distributionLabel: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  distributionDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+
+  distributionText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '500',
+  },
+
+  distributionCount: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  // Results Tab - Compact Mobile-Friendly Styles
+  resultsClassCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    marginBottom: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+
+  resultsClassHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+
+  resultsClassIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#eff6ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+
+  resultsClassInfo: {
+    flex: 1,
+  },
+
+  resultsClassName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 3,
+  },
+
+  resultsClassMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  resultsClassMetaText: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+
+  resultsClassMetaDivider: {
+    width: 1,
+    height: 10,
+    backgroundColor: '#cbd5e1',
+    marginHorizontal: 4,
+  },
+
+  resultsQuarterHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#faf5ff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#e9d5ff',
+  },
+
+  resultsQuarterTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+
+  resultsQuarterTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#7c3aed',
+  },
+
+  resultsExportBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#d1fae5',
+  },
+
+  resultsExportBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#10b981',
+  },
+
+  resultsExerciseCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    marginBottom: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  resultsExerciseHeader: {
+    marginBottom: 8,
+  },
+
+  resultsExerciseTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+
+  resultsExerciseTitle: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+
+  resultsExerciseStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+
+  resultsExerciseStatusText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#ffffff',
+    textTransform: 'uppercase',
+  },
+
+  resultsExerciseDetails: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+
+  resultsExerciseDetailItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    backgroundColor: '#f8fafc',
+    borderRadius: 4,
+  },
+
+  resultsExerciseDetailText: {
+    fontSize: 10,
+    color: '#475569',
+    fontWeight: '600',
+  },
+
+  resultsStudentTable: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 6,
+    padding: 6,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  resultsTableSectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingHorizontal: 4,
+  },
+
+  resultsTableTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+  },
+
+  resultsStatsSection: {
+    marginTop: 10,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  resultsStatsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 10,
+    paddingBottom: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: '#8b5cf6',
+  },
+
+  resultsStatsTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+
+  resultsStatsContent: {
+    gap: 10,
+  },
+
+  resultsStatsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+
+  statsToggleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    backgroundColor: '#eff6ff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+    marginTop: 8,
+  },
+
+  statsToggleText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3b82f6',
+  },
+
+  resultsStatCard: {
+    flex: 1,
+    minWidth: '47%',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  resultsStatLabel: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+    marginBottom: 2,
+  },
+
+  resultsStatValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+
+  resultsStatSubtext: {
+    fontSize: 9,
+    color: '#94a3b8',
+    textAlign: 'center',
+    marginTop: 2,
+  },
+
+  resultsStatsSubsection: {
+    marginTop: 8,
+  },
+
+  resultsStatsSubtitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 8,
+  },
+
+  resultsDistribution: {
+    gap: 8,
+  },
+
+  resultsDistItem: {
+    marginBottom: 6,
+  },
+
+  resultsDistBar: {
+    height: 6,
+    borderRadius: 3,
+    marginBottom: 4,
+    minWidth: 2,
+  },
+
+  resultsDistLabel: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  resultsDistLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  resultsDistDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+
+  resultsDistText: {
+    fontSize: 11,
+    color: '#475569',
+    fontWeight: '500',
+  },
+
+  resultsDistCount: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
   },
 
 });

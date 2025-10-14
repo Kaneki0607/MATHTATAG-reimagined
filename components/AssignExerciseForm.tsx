@@ -163,8 +163,12 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
         <View style={styles.container}>
           <View style={styles.header}>
             <Text style={styles.title}>Assign Exercise</Text>
-            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-              <AntDesign name="close" size={24} color="#64748b" />
+            <TouchableOpacity 
+              onPress={onClose} 
+              style={styles.closeButton}
+              activeOpacity={0.7}
+            >
+              <AntDesign name="close" size={22} color="#64748b" />
             </TouchableOpacity>
           </View>
 
@@ -195,6 +199,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       selectedClasses.includes(classItem.id) && styles.classItemSelected,
                     ]}
                     onPress={() => toggleClassSelection(classItem.id)}
+                    activeOpacity={0.7}
                   >
                     <View style={styles.classInfo}>
                       <Text style={styles.className}>{classItem.name}</Text>
@@ -202,9 +207,15 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                         {classItem.schoolName} • {classItem.schoolYear}
                       </Text>
                     </View>
-                    <View style={styles.checkbox}>
+                    <View style={[
+                      styles.checkbox,
+                      selectedClasses.includes(classItem.id) && {
+                        backgroundColor: '#0ea5e9',
+                        borderColor: '#0ea5e9',
+                      }
+                    ]}>
                       {selectedClasses.includes(classItem.id) && (
-                        <AntDesign name="check" size={20} color="#3b82f6" />
+                        <AntDesign name="check" size={18} color="#ffffff" />
                       )}
                     </View>
                   </TouchableOpacity>
@@ -224,6 +235,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       selectedQuarter === quarter && styles.quarterButtonSelected,
                     ]}
                     onPress={() => setSelectedQuarter(quarter)}
+                    activeOpacity={0.7}
                   >
                     <Text
                       style={[
@@ -243,7 +255,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               <View style={styles.deadlineContainer}>
                 {/* Date Selection */}
                 <View style={styles.dateTimeButton}>
-                  <MaterialCommunityIcons name="calendar" size={20} color="#3b82f6" />
+                  <MaterialCommunityIcons name="calendar" size={22} color="#0ea5e9" />
                   <TextInput
                     style={styles.dateTimeText}
                     placeholder="MM/DD/YYYY"
@@ -253,8 +265,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                 </View>
 
                 {/* Time Selection */}
-                <View style={[styles.dateTimeButton, { marginTop: 8 }]}>
-                  <MaterialCommunityIcons name="clock" size={20} color="#3b82f6" />
+                <View style={[styles.dateTimeButton, { marginTop: 12 }]}>
+                  <MaterialCommunityIcons name="clock" size={22} color="#0ea5e9" />
                   <TextInput
                     style={styles.dateTimeText}
                     placeholder="HH:MM AM/PM"
@@ -283,6 +295,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       setDeadlineDate(tomorrow.toLocaleDateString('en-US'));
                       setDeadlineTime(tomorrow.toLocaleTimeString('en-US', { hour12: true }));
                     }}
+                    activeOpacity={0.7}
                   >
                     <Text style={styles.quickDateText}>Tomorrow</Text>
                   </TouchableOpacity>
@@ -295,6 +308,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       setDeadlineDate(nextWeek.toLocaleDateString('en-US'));
                       setDeadlineTime(nextWeek.toLocaleTimeString('en-US', { hour12: true }));
                     }}
+                    activeOpacity={0.7}
                   >
                     <Text style={styles.quickDateText}>Next Week</Text>
                   </TouchableOpacity>
@@ -309,6 +323,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               <TouchableOpacity 
                 style={styles.settingItem}
                 onPress={() => setAcceptLateSubmissions(!acceptLateSubmissions)}
+                activeOpacity={0.7}
               >
                 <View style={styles.settingInfo}>
                   <Text style={styles.settingTitle}>Accept Late Submissions</Text>
@@ -331,8 +346,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               <View style={styles.statusInfo}>
                 <MaterialCommunityIcons 
                   name="information" 
-                  size={16} 
-                  color="#3b82f6" 
+                  size={18} 
+                  color="#0ea5e9" 
                 />
                 <Text style={styles.statusInfoText}>
                   Exercises will be open for submissions by default. You can close or reactivate them later from the Assignments tab.
@@ -342,7 +357,11 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
           </ScrollView>
 
           <View style={styles.footer}>
-            <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
+            <TouchableOpacity 
+              style={styles.cancelButton} 
+              onPress={onClose}
+              activeOpacity={0.7}
+            >
               <MaterialCommunityIcons name="close" size={20} color="#64748b" />
               <Text style={styles.cancelButtonText}>Cancel</Text>
             </TouchableOpacity>
@@ -353,6 +372,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               ]}
               onPress={handleAssign}
               disabled={selectedClasses.length === 0}
+              activeOpacity={0.8}
             >
               <MaterialCommunityIcons name="send" size={20} color="#ffffff" />
               <Text style={styles.assignButtonText}>
@@ -369,166 +389,208 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 10,
   },
   container: {
     backgroundColor: '#ffffff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: '90%',
-    height: '85%',
+    borderRadius: 24,
+    width: '100%',
+    maxWidth: 580,
+    maxHeight: '98%',
+    minHeight: 600,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    elevation: 8,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 24,
+    elevation: 12,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 20,
+    paddingHorizontal: 32,
+    paddingVertical: 24,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
-    backgroundColor: '#fafbfc',
+    backgroundColor: '#ffffff',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
   },
   title: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#1e293b',
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#0f172a',
+    letterSpacing: -0.5,
   },
   closeButton: {
-    padding: 8,
-    borderRadius: 8,
-    backgroundColor: '#f1f5f9',
+    padding: 10,
+    borderRadius: 12,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   content: {
     flex: 1,
-    paddingHorizontal: 20,
+    paddingHorizontal: 32,
   },
   exerciseInfo: {
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
+    paddingVertical: 20,
+    paddingHorizontal: 20,
+    backgroundColor: '#f8fafc',
+    borderRadius: 16,
+    marginVertical: 20,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   exerciseTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#374151',
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#1e293b',
+    lineHeight: 24,
   },
   section: {
-    paddingVertical: 16,
+    paddingVertical: 28,
   },
   sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1e293b',
-    marginBottom: 12,
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginBottom: 16,
+    letterSpacing: -0.3,
   },
   loadingText: {
-    fontSize: 14,
+    fontSize: 16,
     color: '#64748b',
     textAlign: 'center',
     paddingVertical: 20,
+    fontWeight: '600',
   },
   emptyText: {
-    fontSize: 14,
+    fontSize: 16,
     color: '#64748b',
     textAlign: 'center',
     paddingVertical: 20,
+    fontWeight: '600',
   },
   loadingContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 40,
+    paddingVertical: 60,
+    backgroundColor: '#f8fafc',
+    borderRadius: 16,
+    marginTop: 8,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
   },
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 40,
+    paddingVertical: 60,
+    backgroundColor: '#f8fafc',
+    borderRadius: 16,
+    marginTop: 8,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
   },
   emptySubtext: {
-    fontSize: 14,
+    fontSize: 15,
     color: '#9ca3af',
-    marginTop: 8,
+    marginTop: 12,
     textAlign: 'center',
+    fontWeight: '500',
+    lineHeight: 20,
   },
   classesList: {
     marginTop: 8,
   },
   deadlineContainer: {
-    marginTop: 8,
+    marginTop: 12,
   },
   quickDateOptions: {
     flexDirection: 'row',
-    marginTop: 12,
-    gap: 8,
+    marginTop: 16,
+    gap: 12,
   },
   quickDateButton: {
     flex: 1,
-    backgroundColor: '#f8fafc',
-    borderWidth: 1,
+    backgroundColor: '#ffffff',
+    borderWidth: 2,
     borderColor: '#e2e8f0',
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
   },
   quickDateText: {
-    fontSize: 14,
-    color: '#3b82f6',
-    fontWeight: '600',
+    fontSize: 15,
+    color: '#0ea5e9',
+    fontWeight: '700',
+    letterSpacing: -0.1,
   },
   classItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    marginBottom: 12,
+    paddingVertical: 20,
+    paddingHorizontal: 24,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    marginBottom: 16,
     borderWidth: 2,
     borderColor: '#e2e8f0',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
   },
   classItemSelected: {
-    backgroundColor: '#eff6ff',
-    borderColor: '#3b82f6',
-    shadowColor: '#3b82f6',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
+    backgroundColor: '#f0f9ff',
+    borderColor: '#0ea5e9',
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 6,
+    transform: [{ scale: 1.02 }],
   },
   classInfo: {
     flex: 1,
   },
   className: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1e293b',
-    marginBottom: 2,
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginBottom: 4,
+    letterSpacing: -0.2,
   },
   classDetails: {
-    fontSize: 14,
+    fontSize: 15,
     color: '#64748b',
+    fontWeight: '500',
   },
   checkbox: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     borderWidth: 2,
     borderColor: '#d1d5db',
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
   },
   dateInputContainer: {
     flexDirection: 'row',
@@ -556,90 +618,107 @@ const styles = StyleSheet.create({
   dateTimeButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    backgroundColor: '#f8fafc',
-    borderRadius: 8,
-    borderWidth: 1,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 2,
     borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 1,
   },
   dateTimeText: {
     flex: 1,
     fontSize: 16,
-    color: '#1e293b',
+    color: '#0f172a',
     marginLeft: 12,
+    fontWeight: '600',
   },
   currentDeadlineDisplay: {
-    backgroundColor: '#eff6ff',
-    borderRadius: 8,
-    padding: 12,
-    marginTop: 12,
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    marginTop: 16,
     borderLeftWidth: 4,
-    borderLeftColor: '#3b82f6',
+    borderLeftColor: '#0ea5e9',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
   },
   currentDeadlineLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1e40af',
-    marginBottom: 4,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0369a1',
+    marginBottom: 6,
+    letterSpacing: -0.1,
   },
   currentDeadlineText: {
-    fontSize: 14,
-    color: '#1e40af',
-    fontWeight: '500',
+    fontSize: 15,
+    color: '#0369a1',
+    fontWeight: '600',
+    lineHeight: 20,
   },
   footer: {
     flexDirection: 'row',
-    paddingHorizontal: 24,
-    paddingVertical: 20,
+    paddingHorizontal: 32,
+    paddingVertical: 24,
     borderTopWidth: 1,
     borderTopColor: '#f1f5f9',
-    backgroundColor: '#fafbfc',
+    backgroundColor: '#ffffff',
     borderBottomLeftRadius: 24,
     borderBottomRightRadius: 24,
-    gap: 12,
+    gap: 16,
   },
   cancelButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: 12,
+    paddingVertical: 16,
+    borderRadius: 16,
     borderWidth: 2,
     borderColor: '#e2e8f0',
     backgroundColor: '#ffffff',
     gap: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
   },
   cancelButtonText: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
     color: '#64748b',
+    letterSpacing: -0.1,
   },
   assignButton: {
     flex: 2,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: 12,
-    backgroundColor: '#3b82f6',
+    paddingVertical: 16,
+    borderRadius: 16,
+    backgroundColor: '#0ea5e9',
     gap: 8,
-    shadowColor: '#3b82f6',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 6,
   },
   assignButtonDisabled: {
-    backgroundColor: '#9ca3af',
+    backgroundColor: '#94a3b8',
     shadowOpacity: 0,
     elevation: 0,
   },
   assignButtonText: {
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: '800',
     color: '#ffffff',
+    letterSpacing: -0.1,
   },
   
   // Submission Settings Styles
@@ -647,52 +726,69 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    marginBottom: 12,
-    borderWidth: 1,
+    paddingVertical: 20,
+    paddingHorizontal: 20,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    marginBottom: 16,
+    borderWidth: 2,
     borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 1,
   },
   settingInfo: {
     flex: 1,
-    marginRight: 16,
+    marginRight: 20,
   },
   settingTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1e293b',
-    marginBottom: 4,
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginBottom: 6,
+    letterSpacing: -0.2,
   },
   settingDescription: {
-    fontSize: 14,
+    fontSize: 15,
     color: '#64748b',
-    lineHeight: 20,
+    lineHeight: 22,
+    fontWeight: '500',
   },
   
   // Toggle Switch Styles
   toggle: {
-    width: 48,
-    height: 28,
-    borderRadius: 14,
+    width: 52,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: '#d1d5db',
-    padding: 2,
+    padding: 3,
     justifyContent: 'center',
-  },
-  toggleActive: {
-    backgroundColor: '#3b82f6',
-  },
-  toggleThumb: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#ffffff',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.1,
     shadowRadius: 2,
+    elevation: 1,
+  },
+  toggleActive: {
+    backgroundColor: '#0ea5e9',
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
     elevation: 2,
+  },
+  toggleThumb: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    elevation: 3,
   },
   toggleThumbActive: {
     transform: [{ translateX: 20 }],
@@ -702,56 +798,69 @@ const styles = StyleSheet.create({
   statusInfo: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    padding: 12,
-    borderRadius: 8,
-    marginTop: 8,
-    gap: 8,
-    backgroundColor: '#eff6ff',
-    borderLeftWidth: 3,
-    borderLeftColor: '#3b82f6',
+    padding: 16,
+    borderRadius: 12,
+    marginTop: 12,
+    gap: 12,
+    backgroundColor: '#f0f9ff',
+    borderLeftWidth: 4,
+    borderLeftColor: '#0ea5e9',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
   },
   statusInfoText: {
     flex: 1,
-    fontSize: 13,
-    lineHeight: 18,
-    color: '#1e40af',
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#0369a1',
+    fontWeight: '500',
   },
   
   // Quarter Selection Styles
   quarterContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 12,
     marginTop: 8,
+    marginBottom: 16,
   },
   quarterButton: {
     flex: 1,
     minWidth: '45%',
-    paddingVertical: 12,
+    maxWidth: '48%',
+    paddingVertical: 16,
     paddingHorizontal: 16,
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#ffffff',
     borderWidth: 2,
     borderColor: '#e2e8f0',
-    borderRadius: 12,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 1,
   },
   quarterButtonSelected: {
-    backgroundColor: '#eff6ff',
-    borderColor: '#3b82f6',
-    shadowColor: '#3b82f6',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
+    backgroundColor: '#f0f9ff',
+    borderColor: '#0ea5e9',
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 4,
+    transform: [{ scale: 1.02 }],
   },
   quarterButtonText: {
     fontSize: 15,
-    fontWeight: '600',
+    fontWeight: '700',
     color: '#64748b',
+    letterSpacing: -0.2,
+    textAlign: 'center',
   },
   quarterButtonTextSelected: {
-    color: '#3b82f6',
-    fontWeight: '700',
+    color: '#0ea5e9',
+    fontWeight: '800',
   },
 });

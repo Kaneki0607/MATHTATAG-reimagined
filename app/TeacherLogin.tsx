@@ -1531,7 +1531,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   forgotPasswordText: {
-    color: '#00aaff',
+    color: '#0000ff',
     fontSize: 14,
     textDecorationLine: 'underline',
     textShadowColor: 'rgba(0,0,0,0.3)',

@@ -1,29 +1,29 @@
 {
   "expo": {
-    "name": "MATHTATAG-reimagined",
-    "slug": "MATHTATAG-reimagined",
+    "name": "MATHTATAG",
+    "slug": "MATHTATAG",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/applogo.png",
     "scheme": "mathtatagreimagined",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "icon": "./assets/images/icon.png"
+      "icon": "./assets/images/logo-transparent.png"
     },
     "android": {
       "package": "com.mathtatag.reimagined",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/icon.png"
+        "foregroundImage": "./assets/images/logo-transparent.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/logo-transparent.png"
     },
     "plugins": [
       "expo-router",
