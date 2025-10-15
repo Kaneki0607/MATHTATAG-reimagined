@@ -34,6 +34,32 @@ npm run ios        # Start on iOS
 npm run web        # Start on web
 ```
 
+## 🌐 Deploy to Vercel (Web)
+
+This app is ready for Vercel deployment! See **[VERCEL_SETUP.md](./VERCEL_SETUP.md)** for step-by-step instructions.
+
+Quick deploy:
+```bash
+git add .
+git commit -m "Ready for deployment"
+git push
+```
+
+Then import your repository on [vercel.com](https://vercel.com) and deploy in one click!
+
+## 📦 Build for Production
+
+```bash
+# Build web version
+npm run build:web
+
+# Build Android APK (requires EAS CLI)
+eas build --platform android --profile preview
+
+# Build for production
+eas build --platform android --profile production
+```
+
 In the output, you'll find options to open the app in a
 
 - [development build](https://docs.expo.dev/develop/development-builds/introduction/)

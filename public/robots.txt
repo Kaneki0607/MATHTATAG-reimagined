@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://mathtatag-reimagined.vercel.app/sitemap.xml
+
