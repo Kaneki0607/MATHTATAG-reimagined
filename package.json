@@ -11,6 +11,7 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
+    "build:web": "expo export --platform web",
     "lint": "expo lint"
   },
   "dependencies": {
@@ -42,6 +43,7 @@
     "expo-status-bar": "~3.0.8",
     "expo-symbols": "~1.0.7",
     "expo-system-ui": "~6.0.7",
+    "expo-updates": "~29.0.12",
     "expo-web-browser": "~15.0.8",
     "firebase": "^11.7.3",
     "react": "19.1.0",
