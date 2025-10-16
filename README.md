@@ -1,4 +1,4 @@
-# MATHTATAG - Reimagined 🧮
+# MATHTATAG
 
 A comprehensive cross-platform educational application for mathematical learning, built with React Native and Expo. This modern learning management system enables teachers to create interactive exercises, students to solve them, and parents to monitor progress—all in real-time.
 
