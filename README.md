@@ -67,6 +67,22 @@ A comprehensive cross-platform educational application for mathematical learning
 - Node.js 18+ and npm
 - Expo CLI (installed automatically)
 - Firebase account (project already configured)
+- Git (for cloning the repository)
+
+### Clone the Repository
+
+To get started, clone the repository from GitHub:
+
+```bash
+# Clone the entire repository
+git clone https://github.com/Kaneki0607/MATHTATAG-reimagined.git
+
+# Or clone a specific branch (e.g., ced2)
+git clone --branch ced2 --single-branch https://github.com/Kaneki0607/MATHTATAG-reimagined.git
+
+# Navigate to the project directory
+cd MATHTATAG-reimagined
+```
 
 ### Installation
 
@@ -501,6 +517,30 @@ npm run web        # Web browser
 - **File-based Routing**: Add files to `/app` directory
 - **Error Overlay**: Helpful error messages in development
 
+### Git Workflow
+
+```bash
+# Check current branch
+git branch
+
+# Create and switch to a new branch
+git checkout -b feature/new-feature
+
+# Switch to existing branch
+git checkout ced2
+
+# Pull latest changes from a specific branch
+git pull origin ced2
+
+# Push changes to your branch
+git add .
+git commit -m "Your commit message"
+git push origin your-branch-name
+
+# Clone a specific branch only
+git clone --branch ced2 --single-branch https://github.com/Kaneki0607/MATHTATAG-reimagined.git
+```
+
 ### Testing
 
 ```bash
@@ -553,6 +593,29 @@ eas build --platform android --profile production
 # Build iOS
 eas build --platform ios --profile production
 ```
+
+### Over-The-Air (OTA) Updates
+
+Push updates to users without rebuilding the app:
+
+```bash
+# Push an update to the preview branch
+eas update --branch preview --message "Bug fixes and improvements"
+
+# Push an update to production
+eas update --branch production --message "New features"
+
+# Push an update with automatic message
+eas update --branch preview --message "fixes"
+```
+
+**Benefits of OTA Updates:**
+- ✅ Instant bug fixes without app store review
+- ✅ Update JavaScript and assets in seconds
+- ✅ Users get updates automatically on app restart
+- ✅ No need to rebuild native binaries
+
+**Note:** OTA updates only work for JavaScript code and assets. Native code changes require a full rebuild.
 
 ## 📦 Build for Production
 
