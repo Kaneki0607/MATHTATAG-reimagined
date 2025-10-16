@@ -2,7 +2,7 @@ import { getCurrentUser } from './firebase-auth';
 import { writeData } from './firebase-database';
 
 export type LogSeverity = 'error' | 'warning' | 'info';
-export type LogSource = 'TeacherDashboard' | 'ParentDashboard' | 'AdminDashboard' | 'StudentExercise' | 'System';
+export type LogSource = 'TeacherDashboard' | 'ParentDashboard' | 'AdminDashboard' | 'StudentExercise' | 'StudentExerciseAnswering' | 'System';
 
 export interface ErrorLogData {
   id: string;

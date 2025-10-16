@@ -11,21 +11,24 @@ import * as Speech from 'expo-speech';
 // import * as Network from 'expo-network';
 import { useEffect, useRef, useState } from 'react';
 import {
-    Animated,
-    Dimensions,
-    Easing,
-    Image,
-    ImageBackground,
-    LayoutAnimation,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  Animated,
+  Dimensions,
+  Easing,
+  Image,
+  ImageBackground,
+  LayoutAnimation,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
+import { collectAppMetadata } from '../lib/app-metadata';
+import { logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
+import { generateResultId } from '../lib/id-generator';
 
 // Standalone component for Re-order interaction to keep hooks valid
 function ReorderQuestion({
@@ -293,6 +296,14 @@ interface DeviceInfo {
   appVersion: string;
   deviceModel: string;
   networkType: string;
+  // Enhanced metadata fields
+  updateId?: string | null;
+  runtimeVersion?: string | null;
+  platformVersion?: string;
+  deviceInfo?: string;
+  environment?: string;
+  buildProfile?: string;
+  expoVersion?: string;
 }
 
 interface ExerciseSession {
@@ -401,6 +412,8 @@ export default function StudentExerciseAnswering() {
   const [assignedExercise, setAssignedExercise] = useState<any>(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<StudentAnswer[]>([]);
+  // CRITICAL FIX: Use ref to track answers synchronously for accurate submission
+  const answersRef = useRef<StudentAnswer[]>([]);
   const [currentAnswer, setCurrentAnswer] = useState<string | string[] | {[key: string]: any}>('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -426,6 +439,9 @@ export default function StudentExerciseAnswering() {
   // Attempts and correctness tracking for try-again assessment
   const [attemptCounts, setAttemptCounts] = useState<{[questionId: string]: number}>({});
   const [correctQuestions, setCorrectQuestions] = useState<{[questionId: string]: boolean}>({});
+  // CRITICAL FIX: Use refs to track counts synchronously for accurate submission data
+  const attemptCountsRef = useRef<{[questionId: string]: number}>({});
+  const correctQuestionsRef = useRef<{[questionId: string]: boolean}>({});
   
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -443,6 +459,8 @@ export default function StudentExerciseAnswering() {
   const [alertConfig, setAlertConfig] = useState({title: '', message: '', type: 'warning', onConfirm: () => {}});
   const alertAnim = useRef(new Animated.Value(0)).current;
   const [attemptLogs, setAttemptLogs] = useState<{[questionId: string]: Array<{answer: string, timeSpent: number, timestamp: number, attemptType: string, hesitationTime: number, isSignificantChange: boolean, questionPhase: string, confidence: string}>}>({});
+  // CRITICAL FIX: Use ref to track attempts synchronously for immediate access during submission
+  const attemptLogsRef = useRef<{[questionId: string]: Array<{answer: string, timeSpent: number, timestamp: number, attemptType: string, hesitationTime: number, isSignificantChange: boolean, questionPhase: string, confidence: string}>}>({});
   
   // Enhanced interaction tracking
   const [interactionLogs, setInteractionLogs] = useState<{[questionId: string]: Array<{
@@ -564,37 +582,94 @@ export default function StudentExerciseAnswering() {
       const now = new Date().toISOString();
       setSessionStartTime(now);
       
-      // Initialize device info
-      const { width, height } = Dimensions.get('window');
-      const deviceData: DeviceInfo = {
-        platform: Platform.OS,
-        appVersion: '1.0.0', // You can get this from app.json or package.json
-        deviceModel: Platform.OS === 'android' ? `Android ${Platform.Version}` : `iOS ${Platform.Version}`,
-        networkType: 'unknown' // Network detection would require additional setup
-      };
-      setDeviceInfo(deviceData);
+      // Collect comprehensive device and app metadata
+      try {
+        const metadata = await collectAppMetadata();
+        console.log('[DeviceInfo] Collected comprehensive metadata:', metadata);
+        
+        const deviceData: DeviceInfo = {
+          platform: metadata.platform,
+          appVersion: metadata.appVersion,
+          deviceModel: metadata.deviceInfo || `${metadata.platform} ${metadata.platformVersion}`,
+          networkType: 'unknown', // Network detection would require additional setup
+          // Enhanced metadata
+          updateId: metadata.updateId,
+          runtimeVersion: metadata.runtimeVersion,
+          platformVersion: metadata.platformVersion,
+          deviceInfo: metadata.deviceInfo,
+          environment: metadata.environment,
+          buildProfile: metadata.buildProfile,
+          expoVersion: metadata.expoVersion,
+        };
+        
+        console.log('[DeviceInfo] Enhanced device data set:', deviceData);
+        setDeviceInfo(deviceData);
+      } catch (error) {
+        console.error('[DeviceInfo] Failed to collect metadata, using fallback:', error);
+        // Fallback to basic device info
+        const deviceData: DeviceInfo = {
+          platform: Platform.OS,
+          appVersion: '1.0.0',
+          deviceModel: Platform.OS === 'android' ? `Android ${Platform.Version}` : `iOS ${Platform.Version}`,
+          networkType: 'unknown'
+        };
+        setDeviceInfo(deviceData);
+      }
       
       // Load student information
       try {
-        const parentId = await AsyncStorage.getItem('parent_key');
-        const studentId = await AsyncStorage.getItem('student_id');
+        const loginCode = await AsyncStorage.getItem('parent_key');
+        console.log('[StudentInfo] Login code from AsyncStorage:', loginCode);
         
-        if (parentId && studentId) {
-          const studentsData = await readData('/students');
-          if (studentsData.data) {
-            const student = Object.values(studentsData.data).find((s: any) => s.studentId === studentId) as any;
-            if (student) {
-              setStudentInfo({
-                studentId: student.studentId,
-                name: student.fullName || 'Unknown Student',
-                gradeSection: student.gradeSection || 'Unknown Grade',
-                sex: student.gender || 'Unknown'
-              });
+        if (loginCode) {
+          // CRITICAL FIX: Resolve login code to actual parent ID first
+          const parentIdResult = await readData(`/parentLoginCodes/${loginCode}`);
+          console.log('[StudentInfo] Parent ID resolution result:', parentIdResult);
+          
+          if (parentIdResult.data) {
+            const actualParentId = parentIdResult.data;
+            console.log('[StudentInfo] Resolved actual parent ID:', actualParentId);
+            
+            // Now find the student using the actual parent ID
+            const studentsData = await readData('/students');
+            if (studentsData.data) {
+              // Search for student by parentId (the ACTUAL parent ID, not login code)
+              const student = Object.values(studentsData.data).find((s: any) => s.parentId === actualParentId) as any;
+              console.log('[StudentInfo] Found student:', student);
+              
+              if (student) {
+                const studentData = {
+                  studentId: student.studentId,
+                  name: student.fullName || 'Unknown Student',
+                  gradeSection: student.gradeSection || 'Unknown Grade',
+                  sex: student.gender || 'Unknown'
+                };
+                
+                setStudentInfo(studentData);
+                console.log('[StudentInfo] Student info set successfully:', studentData);
+                
+                // Store student ID for future use
+                if (student.studentId) {
+                  await AsyncStorage.setItem('student_id', student.studentId);
+                  console.log('[StudentInfo] Student ID stored in AsyncStorage:', student.studentId);
+                }
+              } else {
+                console.warn('[StudentInfo] No student found with parentId:', actualParentId);
+              }
+            } else {
+              console.warn('[StudentInfo] No students data available');
             }
+          } else {
+            console.warn('[StudentInfo] Could not resolve login code to parent ID');
           }
+        } else {
+          console.warn('[StudentInfo] No login code found in AsyncStorage');
         }
       } catch (error) {
-        console.warn('Could not load student information:', error);
+        console.error('[StudentInfo] Failed to load student information:', error);
+        if (error instanceof Error) {
+          logErrorWithStack(error, 'error', 'StudentExerciseAnswering', 'Failed to load student info');
+        }
       }
     };
     
@@ -646,7 +721,8 @@ export default function StudentExerciseAnswering() {
               timeSpent: questionElapsedRef.current,
             };
             
-            setAnswers(prev => {
+            // CRITICAL FIX: Use updateAnswers to update both state and ref
+            updateAnswers(prev => {
               const existingIndex = prev.findIndex(a => a.questionId === currentQuestion.id);
               if (existingIndex >= 0) {
                 const updated = [...prev];
@@ -767,7 +843,8 @@ export default function StudentExerciseAnswering() {
         const prevQid = exercise.questions[prevIndex].id;
         // Use frozen UI timer value captured at correctness if present, else latest UI timer value
         const delta = (frozenElapsedRef.current ?? questionElapsedRef.current);
-        setAnswers(prev => prev.map(a => a.questionId === prevQid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+        // CRITICAL FIX: Use updateAnswers to update both state and ref
+        updateAnswers(prev => prev.map(a => a.questionId === prevQid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
         frozenElapsedRef.current = null;
       }
       prevQuestionIndexRef.current = currentQuestionIndex;
@@ -1194,6 +1271,19 @@ export default function StudentExerciseAnswering() {
 
   const formatCorrectAnswer = (question: Question): string | string[] => {
     if (question.type === 'multiple-choice') {
+      // CRITICAL: Check if this is an image-based question
+      const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+      const hasEmptyOptions = (question.options || []).every(opt => !opt || opt.trim() === '');
+      
+      // CRITICAL: For image-based questions with empty text, just use the letter directly
+      if (hasOptionImages && hasEmptyOptions) {
+        if (Array.isArray(question.answer)) {
+          return (question.answer as string[]).join(', ');
+        }
+        return String(question.answer ?? '');
+      }
+      
+      // For text-based questions, use the full mapping logic
       if (Array.isArray(question.answer)) {
         const values = (question.answer as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
         const labeled = values.map(v => {
@@ -1238,7 +1328,29 @@ export default function StudentExerciseAnswering() {
   const serializeAnswer = (question: Question, ans: any): string => {
     try {
       if (question.type === 'multiple-choice') {
+        // CRITICAL: Check if this is an image-based question
+        const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+        const hasEmptyOptions = (question.options || []).every(opt => !opt || opt.trim() === '');
+        
+        // CRITICAL: For image-based questions with empty text, just use the letter directly
+        if (hasOptionImages && hasEmptyOptions) {
+          const arr = (Array.isArray(ans) ? ans : [ans]).filter(Boolean).map(x => String(x));
+          if (arr.length === 0) return '';
+          // Just return the letters as-is (e.g., "A", "B", "C")
+          return arr.join(', ');
+        }
+        
+        // For text-based questions, use the full mapping logic
         const arr = (Array.isArray(ans) ? ans : [ans]).filter(Boolean).map(x => String(x));
+        
+        if (arr.length === 0) {
+          console.warn('[SerializeAnswer] Empty answer array after filtering!', {
+            questionId: question.id,
+            originalAnswer: ans
+          });
+          return '';
+        }
+        
         const labeled = arr.map(v => {
           const valueText = mapAnswerTokenToOptionValue(question, v);
           const letter = getOptionLetterForValue(question, valueText) || v.toUpperCase();
@@ -1388,6 +1500,45 @@ export default function StudentExerciseAnswering() {
     logInteraction(questionId, 'help_used', type, 0);
   };
 
+  // CRITICAL FIX: Helper functions to update both state and ref synchronously
+  const updateAnswers = (updater: (prev: StudentAnswer[]) => StudentAnswer[]) => {
+    setAnswers(prev => {
+      const updated = updater(prev);
+      
+      // CRITICAL: Validate that we're not setting questionable answers
+      updated.forEach((ans, idx) => {
+        if (ans.isCorrect === true && (!ans.answer || ans.answer === '')) {
+          console.error('[UpdateAnswers] WARNING: Question marked correct with empty answer!', {
+            index: idx,
+            questionId: ans.questionId,
+            answer: ans.answer,
+            isCorrect: ans.isCorrect
+          });
+        }
+      });
+      
+      answersRef.current = updated; // Update ref synchronously
+      return updated;
+    });
+  };
+  
+  const updateAttemptCount = (questionId: string, count: number) => {
+    attemptCountsRef.current = { ...attemptCountsRef.current, [questionId]: count };
+    setAttemptCounts(prev => ({ ...prev, [questionId]: count }));
+  };
+  
+  const incrementAttemptCount = (questionId: string) => {
+    const newCount = (attemptCountsRef.current[questionId] || 0) + 1;
+    attemptCountsRef.current = { ...attemptCountsRef.current, [questionId]: newCount };
+    setAttemptCounts(prev => ({ ...prev, [questionId]: newCount }));
+    return newCount;
+  };
+  
+  const setQuestionCorrect = (questionId: string, isCorrect: boolean) => {
+    correctQuestionsRef.current = { ...correctQuestionsRef.current, [questionId]: isCorrect };
+    setCorrectQuestions(prev => ({ ...prev, [questionId]: isCorrect }));
+  };
+
   const logAttempt = (question: Question, ans: any, attemptType: 'initial' | 'change' | 'final' = 'change') => {
     const text = serializeAnswer(question, ans);
     
@@ -1401,8 +1552,8 @@ export default function StudentExerciseAnswering() {
     const currentTime = Date.now();
     const timeSpent = currentTime - questionStartTime;
     
-    // Calculate hesitation time (time between attempts)
-    const previousAttempts = attemptLogs[question.id] || [];
+    // CRITICAL FIX: Use ref for synchronous access to previous attempts
+    const previousAttempts = attemptLogsRef.current[question.id] || [];
     const lastAttemptTime = previousAttempts.length > 0 ? previousAttempts[previousAttempts.length - 1].timestamp : questionStartTime;
     const hesitationTime = currentTime - lastAttemptTime;
     
@@ -1410,18 +1561,33 @@ export default function StudentExerciseAnswering() {
     const isSignificantChange = previousAttempts.length === 0 || 
       (previousAttempts.length > 0 && previousAttempts[previousAttempts.length - 1].answer !== text);
     
+    const newAttempt = {
+      answer: text,
+      timeSpent: timeSpent,
+      timestamp: currentTime,
+      attemptType: attemptType,
+      hesitationTime: hesitationTime,
+      isSignificantChange: isSignificantChange,
+      questionPhase: getQuestionPhase(question, ans), // 'reading', 'thinking', 'answering', 'reviewing'
+      confidence: estimateConfidence(question, ans, timeSpent, previousAttempts.length + 1)
+    };
+    
+    // CRITICAL FIX: Update ref synchronously first, then state
+    attemptLogsRef.current = {
+      ...attemptLogsRef.current,
+      [question.id]: [...(attemptLogsRef.current[question.id] || []), newAttempt]
+    };
+    
+    console.log(`[LogAttempt] Logged attempt for ${question.id}:`, {
+      attemptType,
+      answer: text,
+      totalAttempts: attemptLogsRef.current[question.id].length
+    });
+    
+    // Update state for UI (but we'll use ref for submission)
     setAttemptLogs(prev => ({
       ...prev,
-      [question.id]: [...(prev[question.id] || []), {
-        answer: text,
-        timeSpent: timeSpent,
-        timestamp: currentTime,
-        attemptType: attemptType,
-        hesitationTime: hesitationTime,
-        isSignificantChange: isSignificantChange,
-        questionPhase: getQuestionPhase(question, ans), // 'reading', 'thinking', 'answering', 'reviewing'
-        confidence: estimateConfidence(question, ans, timeSpent, previousAttempts.length + 1)
-      }],
+      [question.id]: [...(prev[question.id] || []), newAttempt],
     }));
   };
 
@@ -1439,39 +1605,49 @@ export default function StudentExerciseAnswering() {
       let studentId: string | null = null;
       try {
         const loginCode = await AsyncStorage.getItem('parent_key');
-        console.log('Debug - Login code from AsyncStorage:', loginCode);
+        console.log('[LoadExercise] Login code from AsyncStorage:', loginCode);
         
         if (loginCode) {
-          // Resolve login code to actual parent ID
+          // CRITICAL FIX: Resolve login code to actual parent ID
           const parentIdResult = await readData(`/parentLoginCodes/${loginCode}`);
-          console.log('Debug - Parent ID resolution result:', parentIdResult);
+          console.log('[LoadExercise] Parent ID resolution result:', parentIdResult);
           
           if (parentIdResult.data) {
             parentId = parentIdResult.data;
-            console.log('Debug - Resolved parentId:', parentId);
+            console.log('[LoadExercise] Resolved actual parentId:', parentId);
             
-            // Find the student associated with this parent
+            // Find the student associated with this actual parent ID
             const studentsData = await readData('/students');
             if (studentsData.data) {
               const student = Object.values(studentsData.data).find((s: any) => s.parentId === parentId) as any;
-              console.log('Debug - Found student:', student);
+              console.log('[LoadExercise] Found student:', student);
               
               if (student && student.studentId) {
                 studentId = student.studentId;
-                console.log('Debug - Final studentId:', studentId);
+                console.log('[LoadExercise] Final studentId:', studentId);
                 
                 // Store student ID in AsyncStorage for future use
                 if (studentId) {
                   await AsyncStorage.setItem('student_id', studentId);
+                  console.log('[LoadExercise] Student ID stored in AsyncStorage');
                 }
+              } else {
+                console.warn('[LoadExercise] No student found with parentId:', parentId);
               }
+            } else {
+              console.warn('[LoadExercise] No students data available');
             }
           } else {
-            console.warn('Debug - No parent ID found for login code:', loginCode);
+            console.warn('[LoadExercise] No parent ID found for login code:', loginCode);
           }
+        } else {
+          console.warn('[LoadExercise] No login code found in AsyncStorage');
         }
       } catch (error) {
-        console.warn('Could not get parent key or student ID:', error);
+        console.error('[LoadExercise] Failed to get parent key or student ID:', error);
+        if (error instanceof Error) {
+          logErrorWithStack(error, 'error', 'StudentExerciseAnswering', 'Failed to resolve parent/student IDs');
+        }
       }
       
       // If assignedExerciseId is provided, load assigned exercise data first
@@ -1536,6 +1712,56 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
+          // CRITICAL: Validate multiple choice questions have valid options
+          const invalidQuestions: string[] = [];
+          result.data.questions.forEach((q: Question, idx: number) => {
+            if (q.type === 'multiple-choice') {
+              // Check if this question uses images as options
+              const hasOptionImages = q.optionImages && q.optionImages.length > 0 && q.optionImages.some(img => img);
+              
+              if (hasOptionImages) {
+                // Image-based options: validate that we have at least some images
+                const validImageCount = q.optionImages?.filter(img => img && typeof img === 'string' && img.trim() !== '').length || 0;
+                if (validImageCount === 0) {
+                  invalidQuestions.push(`Question ${idx + 1}: No valid option images`);
+                  console.error('[LoadExercise] Invalid MC question - no images:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    optionImages: q.optionImages
+                  });
+                }
+              } else {
+                // Text-based options: validate text options
+                const validOptions = (q.options || []).filter(opt => opt && typeof opt === 'string' && opt.trim() !== '');
+                if (validOptions.length === 0) {
+                  invalidQuestions.push(`Question ${idx + 1}: No valid options`);
+                  console.error('[LoadExercise] Invalid MC question - no text options:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    options: q.options
+                  });
+                } else if (validOptions.length < (q.options?.length || 0)) {
+                  console.warn('[LoadExercise] MC question has some invalid options:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    totalOptions: q.options?.length,
+                    validOptions: validOptions.length
+                  });
+                }
+              }
+            }
+          });
+          
+          if (invalidQuestions.length > 0) {
+            showCustomAlert(
+              'Invalid Exercise Data', 
+              `This exercise has questions with missing or invalid answer options:\n\n${invalidQuestions.join('\n')}\n\nPlease contact your teacher to fix this exercise.`,
+              () => router.back(),
+              'error'
+            );
+            return;
+          }
+          
           const exerciseData = {
             ...result.data,
             id: actualExerciseId,
@@ -1583,7 +1809,7 @@ export default function StudentExerciseAnswering() {
             setCurrentQuestionIndex(levelIndex);
           }
           // Initialize answers array (including nested sub-answers for reading-passage)
-          setAnswers(result.data.questions.map((q: Question) => ({
+          const initialAnswers = result.data.questions.map((q: Question) => ({
             questionId: q.id,
             answer:
               q.type === 'multiple-choice' ? [] :
@@ -1600,7 +1826,10 @@ export default function StudentExerciseAnswering() {
                   }, {})
                 : '',
             timeSpent: 0,
-          })));
+          }));
+          // CRITICAL FIX: Initialize ref and state
+          answersRef.current = initialAnswers;
+          setAnswers(initialAnswers);
           // Initialize attempts and correctness maps
           const initAttempts: {[id: string]: number} = {};
           const initCorrect: {[id: string]: boolean} = {};
@@ -1615,6 +1844,9 @@ export default function StudentExerciseAnswering() {
               });
             }
           });
+          // CRITICAL FIX: Initialize both state and ref
+          attemptCountsRef.current = initAttempts;
+          correctQuestionsRef.current = initCorrect;
           setAttemptCounts(initAttempts);
           setCorrectQuestions(initCorrect);
         } else {
@@ -1635,6 +1867,56 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
+          // CRITICAL: Validate multiple choice questions have valid options
+          const invalidQuestions: string[] = [];
+          result.data.questions.forEach((q: Question, idx: number) => {
+            if (q.type === 'multiple-choice') {
+              // Check if this question uses images as options
+              const hasOptionImages = q.optionImages && q.optionImages.length > 0 && q.optionImages.some(img => img);
+              
+              if (hasOptionImages) {
+                // Image-based options: validate that we have at least some images
+                const validImageCount = q.optionImages?.filter(img => img && typeof img === 'string' && img.trim() !== '').length || 0;
+                if (validImageCount === 0) {
+                  invalidQuestions.push(`Question ${idx + 1}: No valid option images`);
+                  console.error('[LoadExercise] Invalid MC question - no images:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    optionImages: q.optionImages
+                  });
+                }
+              } else {
+                // Text-based options: validate text options
+                const validOptions = (q.options || []).filter(opt => opt && typeof opt === 'string' && opt.trim() !== '');
+                if (validOptions.length === 0) {
+                  invalidQuestions.push(`Question ${idx + 1}: No valid options`);
+                  console.error('[LoadExercise] Invalid MC question - no text options:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    options: q.options
+                  });
+                } else if (validOptions.length < (q.options?.length || 0)) {
+                  console.warn('[LoadExercise] MC question has some invalid options:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    totalOptions: q.options?.length,
+                    validOptions: validOptions.length
+                  });
+                }
+              }
+            }
+          });
+          
+          if (invalidQuestions.length > 0) {
+            showCustomAlert(
+              'Invalid Exercise Data', 
+              `This exercise has questions with missing or invalid answer options:\n\n${invalidQuestions.join('\n')}\n\nPlease contact your teacher to fix this exercise.`,
+              () => router.back(),
+              'error'
+            );
+            return;
+          }
+          
           setExercise({
             ...result.data,
             id: exerciseId as string,
@@ -1644,7 +1926,7 @@ export default function StudentExerciseAnswering() {
             setCurrentQuestionIndex(levelIndex);
           }
           // Initialize answers array (including nested sub-answers for reading-passage)
-          setAnswers(result.data.questions.map((q: Question) => ({
+          const initialAnswers = result.data.questions.map((q: Question) => ({
             questionId: q.id,
             answer:
               q.type === 'multiple-choice' ? [] :
@@ -1661,7 +1943,10 @@ export default function StudentExerciseAnswering() {
                   }, {})
                 : '',
             timeSpent: 0,
-          })));
+          }));
+          // CRITICAL FIX: Initialize ref and state
+          answersRef.current = initialAnswers;
+          setAnswers(initialAnswers);
           // Initialize attempts and correctness maps
           const initAttempts: {[id: string]: number} = {};
           const initCorrect: {[id: string]: boolean} = {};
@@ -1676,6 +1961,9 @@ export default function StudentExerciseAnswering() {
               });
             }
           });
+          // CRITICAL FIX: Initialize both state and ref
+          attemptCountsRef.current = initAttempts;
+          correctQuestionsRef.current = initCorrect;
           setAttemptCounts(initAttempts);
           setCorrectQuestions(initCorrect);
         } else {
@@ -1699,8 +1987,8 @@ export default function StudentExerciseAnswering() {
       logInteraction(currentQuestion.id, 'answer_change', 'user_input', 0);
     }
     
-    // Update answers array
-    setAnswers(prev => prev.map(a => 
+    // CRITICAL FIX: Update answers array using helper that updates both state and ref
+    updateAnswers(prev => prev.map(a => 
       a.questionId === exercise?.questions[currentQuestionIndex].id 
         ? { ...a, answer }
         : a
@@ -1719,7 +2007,7 @@ export default function StudentExerciseAnswering() {
   };
 
   const setSubAnswer = (parentId: string, subId: string, value: any) => {
-    setAnswers(prev => prev.map(a => {
+    updateAnswers(prev => prev.map(a => {
       if (a.questionId !== parentId) return a;
       const base = (a.answer && typeof a.answer === 'object' && !Array.isArray(a.answer)) ? { ...(a.answer as {[key: string]: any}) } : {};
       base[subId] = value;
@@ -1738,21 +2026,36 @@ export default function StudentExerciseAnswering() {
     if (!correct) {
       const newAttemptCount = currentAttempts + 1;
       
+      // CRITICAL FIX: Save the wrong answer to the answers array
+      // This ensures wrong answers are recorded in the database
+      console.log('[HandleNext-Wrong] Saving wrong answer:', {
+        questionId: q.id,
+        answer: currentAns,
+        attemptCount: newAttemptCount,
+        maxAttempts: maxAttempts
+      });
+      
+      updateAnswers(prev => {
+        const updated = prev.map(a => 
+          a.questionId === q.id ? { ...a, answer: currentAns || '', isCorrect: false } : a
+        );
+        console.log('[HandleNext-Wrong] Updated answers array with wrong answer');
+        return updated;
+      });
+      
       // Check if attempt limit is reached
       if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
-        setAttemptCounts(prev => ({ ...prev, [q.id]: newAttemptCount }));
-        logAttempt(q, currentAns, 'change');
+        updateAttemptCount(q.id, newAttemptCount);
+        logAttempt(q, currentAns, 'final'); // Changed to 'final' since it's the last attempt
+        
+        // Mark question as completed (with wrong answer) and allow progression
+        setQuestionCorrect(q.id, false);
         
         // Show attempt limit reached message
         showCustomAlert(
           'Attempt Limit Reached', 
           `You have reached the maximum number of attempts (${maxAttempts}) for this question. The correct answer will be shown.`,
           () => {
-            // Mark as incorrect but allow progression
-            setAnswers(prev => prev.map(a => 
-              a.questionId === q.id ? { ...a, isCorrect: false } : a
-            ));
-            setCorrectQuestions(prev => ({ ...prev, [q.id]: false }));
             advanceToNextOrFinish();
           },
           'warning'
@@ -1760,7 +2063,7 @@ export default function StudentExerciseAnswering() {
         return;
       }
       
-      setAttemptCounts(prev => ({ ...prev, [q.id]: newAttemptCount }));
+      updateAttemptCount(q.id, newAttemptCount);
       logAttempt(q, currentAns, 'change');
       
       // Show remaining attempts if limit is set
@@ -1785,14 +2088,26 @@ export default function StudentExerciseAnswering() {
     // Stop TTS immediately when answer is correct
     stopCurrentTTS();
     
-    // Update the answer with isCorrect: true
-    setAnswers(prev => prev.map(a => 
-      a.questionId === q.id ? { ...a, isCorrect: true } : a
-    ));
+    // CRITICAL FIX: Update the answer with isCorrect: true and ensure answer is set
+    updateAnswers(prev => {
+      const updated = prev.map(a => {
+        if (a.questionId === q.id) {
+          return { ...a, answer: currentAns || a.answer, isCorrect: true };
+        }
+        return a;
+      });
+      console.log('[HandleNext-Correct] Updated answers state:', updated.map(a => ({
+        qId: a.questionId,
+        hasAnswer: !!a.answer,
+        isCorrect: a.isCorrect
+      })));
+      return updated;
+    });
     
-    setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
+    // Use helper functions to update both state and ref
+    setQuestionCorrect(q.id, true);
     // Count the final successful attempt
-    setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+    incrementAttemptCount(q.id);
     // Log the successful attempt as well
     logAttempt(q, currentAns, 'final');
     triggerCorrectFeedback(() => advanceToNextOrFinish());
@@ -1815,12 +2130,28 @@ export default function StudentExerciseAnswering() {
       // Finishing: accumulate the current question's elapsed time before stopping
       const qid = exercise.questions[currentQuestionIndex].id;
       const delta = (frozenElapsedRef.current ?? questionElapsedRef.current);
-      setAnswers(prev => prev.map(a => a.questionId === qid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+      
+      // CRITICAL FIX: Use updateAnswers helper to update both state and ref
+      updateAnswers(prev => {
+        const updated = prev.map(a => a.questionId === qid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a);
+        console.log('[AdvanceToFinish] Final question time accumulated:', {
+          questionId: qid,
+          delta,
+          updatedAnswer: updated.find(a => a.questionId === qid)
+        });
+        return updated;
+      });
+      
       frozenElapsedRef.current = null;
       if (timerInterval) {
         clearInterval(timerInterval);
         setTimerInterval(null);
       }
+      
+      // CRITICAL FIX: Wait for React state to commit before submission
+      // This ensures all state updates (especially isCorrect flags and answers) are committed
+      // Increased delay to handle slower devices and ensure all async state updates complete
+      await new Promise(resolve => setTimeout(resolve, 250));
       
       // Auto-submit before showing results
       await autoSubmitResults();
@@ -2006,6 +2337,20 @@ export default function StudentExerciseAnswering() {
   };
 
   const isOptionCorrect = (question: Question, optionValue: string): boolean => {
+    // CRITICAL: Check if this is an image-based question
+    const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+    const hasEmptyOptions = (question.options || []).every(opt => !opt || opt.trim() === '');
+    
+    // CRITICAL: For image-based questions, compare letters directly
+    if (hasOptionImages && hasEmptyOptions) {
+      const expectedRaw = question.answer;
+      if (Array.isArray(expectedRaw)) {
+        return (expectedRaw as string[]).map(v => normalize(v)).includes(normalize(optionValue));
+      }
+      return normalize(optionValue) === normalize(String(expectedRaw));
+    }
+    
+    // For text-based questions, use the mapping logic
     const expectedRaw = question.answer;
     if (Array.isArray(expectedRaw)) {
       const expectedValues = (expectedRaw as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
@@ -2018,7 +2363,24 @@ export default function StudentExerciseAnswering() {
   const isAnswerCorrect = (question: Question, ans: any): boolean => {
     try {
       if (question.type === 'multiple-choice') {
-        // Normalize both expected and given; support letter-based keys (A,B,C...)
+        // CRITICAL: Check if this is an image-based question
+        const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+        const hasEmptyOptions = (question.options || []).every(opt => !opt || opt.trim() === '');
+        
+        // CRITICAL: For image-based questions, compare letters directly without mapping
+        if (hasOptionImages && hasEmptyOptions) {
+          const expectedRaw = question.answer;
+          if (Array.isArray(expectedRaw)) {
+            const givenValues = (Array.isArray(ans) ? ans : [ans]).map(v => normalize(v));
+            const normExpected = (expectedRaw as string[]).map(v => normalize(v));
+            normExpected.sort();
+            givenValues.sort();
+            return normExpected.length === givenValues.length && normExpected.every((v, i) => v === givenValues[i]);
+          }
+          return normalize(String(ans)) === normalize(String(expectedRaw));
+        }
+        
+        // For text-based questions, use the mapping logic
         const expectedRaw = question.answer;
         
         if (Array.isArray(expectedRaw)) {
@@ -2083,51 +2445,170 @@ export default function StudentExerciseAnswering() {
       // Get parent ID and student ID from storage
       let parentId: string | null = null;
       let studentId: string | null = null;
+      let actualParentId: string | null = null;
+      
       try {
-        parentId = await AsyncStorage.getItem('parent_key');
-        studentId = await AsyncStorage.getItem('student_id');
+        const loginCode = await AsyncStorage.getItem('parent_key');
+        console.log('[Submission] Login code from AsyncStorage:', loginCode);
         
-        // If student ID is not found, try to find it again
-        if (!studentId && parentId) {
+        if (loginCode) {
+          // CRITICAL FIX: Resolve login code to actual parent ID
+          const parentIdResult = await readData(`/parentLoginCodes/${loginCode}`);
+          if (parentIdResult.data) {
+            actualParentId = parentIdResult.data;
+            parentId = loginCode; // Keep login code for backward compatibility
+            console.log('[Submission] Resolved actual parent ID:', actualParentId);
+          }
+        }
+        
+        studentId = await AsyncStorage.getItem('student_id');
+        console.log('[Submission] Student ID from AsyncStorage:', studentId);
+        
+        // If student ID is not found, try to find it using actual parent ID
+        if (!studentId && actualParentId) {
           const studentsData = await readData('/students');
           if (studentsData.data) {
-            const student = Object.values(studentsData.data).find((s: any) => s.parentId === parentId) as any;
+            const student = Object.values(studentsData.data).find((s: any) => s.parentId === actualParentId) as any;
             if (student && student.studentId) {
               studentId = student.studentId;
+              console.log('[Submission] Found student ID from database:', studentId);
               if (studentId) {
                 await AsyncStorage.setItem('student_id', studentId);
               }
             }
           }
         }
+        
+        if (!studentId) {
+          console.error('[Submission] CRITICAL: No student ID available for result submission');
+        }
       } catch (error) {
-        console.warn('Could not get parent key or student ID from storage:', error);
+        console.error('[Submission] Failed to get parent key or student ID from storage:', error);
       }
 
-      // Calculate final answers with time spent
-      let finalAnswers = answers;
+      // CRITICAL FIX: Ensure all questions have attempts logged before final submission
+      // This handles cases where students complete quickly or auto-advance skips logging
+      if (exercise) {
+        console.log('[Submission] Pre-submission attempt logging starting...');
+        console.log('[Submission] Current attemptLogsRef:', Object.keys(attemptLogsRef.current).map(qId => ({
+          qId,
+          attemptCount: attemptLogsRef.current[qId]?.length || 0
+        })));
+        
+        // CRITICAL FIX: Use answersRef.current instead of answers state for synchronous access
+        // Log any missing attempts using synchronous ref access
+        exercise.questions.forEach((q) => {
+          const questionAttempts = attemptLogsRef.current[q.id] || [];
+          const answerData = answersRef.current.find(a => a.questionId === q.id); // FIX: Use ref instead of state
+          
+          // If no attempts logged but there's an answer, log it now as a final attempt
+          if (questionAttempts.length === 0 && answerData?.answer) {
+            console.log(`[Submission] Logging missing final attempt for question ${q.id}`, {
+              answer: answerData.answer,
+              isCorrect: answerData.isCorrect
+            });
+            logAttempt(q, answerData.answer, 'final');
+          }
+        });
+        
+        // CRITICAL: Wait longer to ensure ALL attempt logs are written to refs
+        // This is essential for fast submissions where state might not have settled
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        console.log('[Submission] After logging, attemptLogsRef:', Object.keys(attemptLogsRef.current).map(qId => ({
+          qId,
+          attemptCount: attemptLogsRef.current[qId]?.length || 0,
+          lastAnswer: attemptLogsRef.current[qId]?.[attemptLogsRef.current[qId].length - 1]?.answer
+        })));
+      }
+
+      // CRITICAL FIX: Use answersRef.current for most up-to-date data, add current question time
+      console.log('[Submission] Reading answers from ref (most up-to-date)...');
+      let finalAnswers = answersRef.current;
+      
       if (exercise) {
         const currentQid = exercise.questions[currentQuestionIndex].id;
         const currentDelta = Date.now() - questionStartTime;
-        finalAnswers = answers.map(a => ({
+        
+        // Update the ref directly with final time
+        finalAnswers = answersRef.current.map(a => ({
           ...a,
           timeSpent: a.questionId === currentQid ? (a.timeSpent || 0) + currentDelta : (a.timeSpent || 0),
         }));
+        
+        // Update ref with final time data
+        answersRef.current = finalAnswers;
+        
+        // Debug logging to see what answers we have
+        console.log('[Submission] Final answers being saved (from ref):', finalAnswers.map(a => ({
+          questionId: a.questionId,
+          hasAnswer: !!a.answer,
+          answerType: typeof a.answer,
+          answerValue: a.answer,
+          isCorrect: a.isCorrect,
+          timeSpent: Math.floor((a.timeSpent || 0) / 1000)
+        })));
       }
 
       // Calculate results
-      const correctAnswers = finalAnswers.filter(answer => answer.isCorrect).length;
+      const correctAnswers = finalAnswers.filter(answer => answer.isCorrect === true).length;
+      const incorrectAnswers = finalAnswers.filter(answer => answer.isCorrect === false).length;
       const totalQuestions = exercise?.questions.length || 0;
       const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
       const totalAttempts = Object.values(attemptCounts).reduce((sum, v) => sum + (v || 0), 0);
       const totalTimeSpentSeconds = Math.floor(elapsedTime / 1000);
       
-      // Create unique result ID
-      const exerciseResultId = `${exercise?.id || exerciseId}_${parentId || 'anonymous'}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      console.log('[Submission] Score Calculation:', {
+        correctAnswers,
+        incorrectAnswers,
+        totalQuestions,
+        scorePercentage,
+        answersWithCorrectFlag: finalAnswers.filter(a => a.isCorrect === true).map(a => a.questionId),
+        answersWithWrongFlag: finalAnswers.filter(a => a.isCorrect === false).map(a => a.questionId),
+        answersWithUndefinedFlag: finalAnswers.filter(a => a.isCorrect === undefined).map(a => a.questionId)
+      });
       
       // Get current timestamp for submission
       const completedAt = new Date().toISOString();
       const timestampSubmitted = Date.now();
+      
+      // CRITICAL FIX: Generate hierarchical result ID linked to exercise
+      // Format: E-GTK-0004-R-ABC-0001 (shows which exercise this result belongs to)
+      const currentExerciseId = exercise?.id || exerciseId as string;
+      const exerciseResultId = await generateResultId(currentExerciseId, '/ExerciseResults');
+      
+      console.log('[Submission] Generated hierarchical result ID:', exerciseResultId);
+      console.log('[Submission] Result linked to exercise:', currentExerciseId);
+      
+      // CRITICAL FIX: Check for existing result to prevent duplicates
+      if (assignedExerciseId && studentId) {
+        try {
+          const existingResults = await readData('/ExerciseResults');
+          if (existingResults.data) {
+            const duplicate = Object.values(existingResults.data).find((result: any) => {
+              const resultStudentId = result.studentInfo?.studentId || result.studentId;
+              const resultAssignmentId = result.assignmentMetadata?.assignmentId || result.assignedExerciseId;
+              return resultStudentId === studentId && resultAssignmentId === assignedExerciseId;
+            });
+            
+            if (duplicate) {
+              console.warn('[Submission] Duplicate result detected - student already submitted this assignment');
+              showCustomAlert(
+                'Already Submitted',
+                'You have already submitted this exercise. Your previous submission will be kept.',
+                () => {
+                  setShowResults(true);
+                },
+                'warning'
+              );
+              return;
+            }
+          }
+        } catch (error) {
+          console.warn('[Submission] Could not check for duplicate results:', error);
+          // Continue with submission even if check fails
+        }
+      }
       
       // Calculate session duration
       const sessionDurationSeconds = sessionStartTime ? 
@@ -2143,7 +2624,7 @@ export default function StudentExerciseAnswering() {
         return 'Needs Improvement';
       };
       
-      // Create assignment metadata
+      // Create assignment metadata with actual parent ID
       const assignmentMetadata: AssignmentMetadata = assignedExercise ? {
         assignmentId: assignedExerciseId as string,
         classId: assignedExercise.classId || '',
@@ -2168,6 +2649,17 @@ export default function StudentExerciseAnswering() {
         acceptingStatus: 'open',
         isLateSubmission: false
       };
+      
+      // CRITICAL FIX: Store both assignmentId and assignedExerciseId for compatibility
+      // Also store actual parent ID in metadata for proper result tracking
+      if (assignedExerciseId) {
+        (assignmentMetadata as any).assignedExerciseId = assignedExerciseId as string;
+        console.log('[Submission] Storing assignedExerciseId for backward compatibility:', assignedExerciseId);
+      }
+      if (actualParentId) {
+        (assignmentMetadata as any).parentId = actualParentId;
+        console.log('[Submission] Storing actual parent ID in metadata:', actualParentId);
+      }
       
       // Fetch exercise data to get category information
       let exerciseData: any = null;
@@ -2198,13 +2690,37 @@ export default function StudentExerciseAnswering() {
         sex: 'Unknown'
       };
       
-      // Create device info (use state or fallback)
-      const deviceInfoData: DeviceInfo = deviceInfo || {
-        platform: Platform.OS,
-        appVersion: '1.0.0',
-        deviceModel: 'Unknown',
-        networkType: 'unknown'
-      };
+      // Create device info (use state or collect fresh if not available)
+      let deviceInfoData: DeviceInfo;
+      if (deviceInfo) {
+        deviceInfoData = deviceInfo;
+      } else {
+        // Collect metadata if not already available
+        try {
+          const metadata = await collectAppMetadata();
+          deviceInfoData = {
+            platform: metadata.platform,
+            appVersion: metadata.appVersion,
+            deviceModel: metadata.deviceInfo || `${metadata.platform} ${metadata.platformVersion}`,
+            networkType: 'unknown',
+            updateId: metadata.updateId,
+            runtimeVersion: metadata.runtimeVersion,
+            platformVersion: metadata.platformVersion,
+            deviceInfo: metadata.deviceInfo,
+            environment: metadata.environment,
+            buildProfile: metadata.buildProfile,
+            expoVersion: metadata.expoVersion,
+          };
+        } catch (error) {
+          console.warn('[Submission] Failed to collect device metadata, using fallback');
+          deviceInfoData = {
+            platform: Platform.OS,
+            appVersion: '1.0.0',
+            deviceModel: `${Platform.OS} ${Platform.Version}`,
+            networkType: 'unknown'
+          };
+        }
+      }
       
       // Create exercise session
       const exerciseSession: ExerciseSession = {
@@ -2228,27 +2744,94 @@ export default function StudentExerciseAnswering() {
         remarks: getRemarks(scorePercentage)
       };
       
+      // CRITICAL: Log the final state from refs before creating results
+      console.log('[Submission] Creating questionResults from refs...');
+      console.log('[Submission] answersRef.current:', answersRef.current.map(a => ({
+        qId: a.questionId,
+        answer: a.answer,
+        answerType: typeof a.answer,
+        hasAnswer: !!(a.answer && a.answer !== ''),
+        isCorrect: a.isCorrect,
+        timeSpent: Math.floor((a.timeSpent || 0) / 1000)
+      })));
+      
+      // CRITICAL: Verify all questions have answers (even if wrong)
+      const questionsWithoutAnswers = answersRef.current.filter(a => {
+        const hasNoAnswer = !a.answer || a.answer === '' || (Array.isArray(a.answer) && a.answer.length === 0);
+        return hasNoAnswer && a.isCorrect; // Questions marked correct but no answer - suspicious!
+      });
+      
+      if (questionsWithoutAnswers.length > 0) {
+        console.error('[Submission] CRITICAL ERROR: Questions marked correct but have no answer!', 
+          questionsWithoutAnswers.map(a => a.questionId));
+      }
+      
       // Create question results
       const questionResults: QuestionResult[] = exercise?.questions.map((q, idx) => {
-        const questionAttempts = attemptLogs[q.id] || [];
-        // Get the student answer from the last attempt, or from answers state as fallback
-        const lastAttempt = questionAttempts[questionAttempts.length - 1];
-        const studentAnswer = lastAttempt?.answer || finalAnswers.find(a => a.questionId === q.id)?.answer || '';
+        console.log(`[ResultCreation] Processing Q${idx + 1}/${exercise.questions.length} - ${q.id}`);
+        
+        // CRITICAL FIX: Use attemptLogsRef.current for synchronous access to latest attempts
+        const questionAttempts = attemptLogsRef.current[q.id] || [];
+        console.log(`[ResultCreation] Q${idx + 1} - Found ${questionAttempts.length} attempts in ref`);
+        
+        // CRITICAL FIX: Get student answer and correctness from finalAnswers (which is from answersRef.current)
+        // Don't recalculate correctness - use the already validated isCorrect flag
+        const answerData = finalAnswers.find(a => a.questionId === q.id);
+        console.log(`[ResultCreation] Q${idx + 1} - Answer data from finalAnswers:`, {
+          found: !!answerData,
+          hasAnswer: answerData?.answer !== undefined,
+          answerValue: answerData?.answer,
+          isCorrect: answerData?.isCorrect
+        });
+        
+        // CRITICAL FIX: Serialize the student answer properly (don't use raw value)
+        // Use serializeAnswer() to format it correctly just like we do for logging
+        // Handle both correct AND incorrect answers
+        const studentAnswer = answerData?.answer ? serializeAnswer(q, answerData.answer) : '';
+        console.log(`[ResultCreation] Q${idx + 1} - Serialized answer: "${studentAnswer}"`);
+        
+        // CRITICAL: Use the isCorrect flag from answers state, NOT recalculated
+        // The answer was already validated in handleNext when it was marked correct
+        // Default to false if not explicitly set to true
+        const isCorrect = answerData?.isCorrect === true;
+        
+        // VALIDATION: Log warning if answer exists but isCorrect is undefined
+        if (studentAnswer && answerData?.isCorrect === undefined) {
+          console.warn(`[ResultCreation] Q${idx + 1} has answer but isCorrect is undefined - defaulting to false`, {
+            studentAnswer,
+            answerData
+          });
+        }
+        
         const correctAnswer = formatCorrectAnswer(q);
-        const isCorrect = isAnswerCorrect(q, studentAnswer);
-        const attempts = attemptCounts[q.id] || 1;
-        const timeSpentSeconds = Math.floor(getTimeMsForQuestion(q) / 1000);
+        // CRITICAL FIX: Use attemptCountsRef for synchronous access to latest counts
+        let attempts = attemptCountsRef.current[q.id] || 1;
+        let timeSpentSeconds = Math.floor(getTimeMsForQuestion(q) / 1000);
         const ttsPlayed = helpUsage[q.id]?.ttsCount > 0;
         const ttsPlayCount = helpUsage[q.id]?.ttsCount || 0;
+        
+        console.log(`[ResultCreation] Question ${idx + 1} (${q.id}) - Summary:`, {
+          rawAnswer: answerData?.answer,
+          serializedAnswer: studentAnswer,
+          isCorrect,
+          fromAnswersState: !!answerData,
+          answerDataIsCorrect: answerData?.isCorrect,
+          hasAttemptLogs: questionAttempts.length > 0,
+          attemptCountFromRef: attemptCountsRef.current[q.id],
+          attemptCountUsed: attempts,
+          timeSpent: timeSpentSeconds
+        });
         
         // Get interaction types
         const interactions = interactionLogs[q.id] || [];
         const interactionTypes = interactions.map(i => i.type).filter((value, index, self) => self.indexOf(value) === index);
         
         // Create attempt history
-        const attemptHistory: AttemptHistory[] = questionAttempts.map((attempt, attemptIdx) => {
-          // For attempt history, we need to deserialize the answer back to raw format for validation
+        // CRITICAL FIX: If no attempts were logged but we have an answer, create at least one attempt entry
+        let attemptHistory: AttemptHistory[] = questionAttempts.map((attempt, attemptIdx) => {
+          // CRITICAL FIX: For attempt history, deserialize display format answers properly
           let rawAnswer = attempt.answer;
+          let attemptIsCorrect = false;
           
           // If the answer is in display format (e.g., "C. 5"), extract the raw value
           if (typeof rawAnswer === 'string' && rawAnswer.includes('. ')) {
@@ -2261,22 +2844,112 @@ export default function StudentExerciseAnswering() {
               const letterIndex = letterToIndex(letter);
               if (letterIndex >= 0 && q.options && q.options[letterIndex]) {
                 rawAnswer = q.options[letterIndex];
+                console.log(`[AttemptHistory] Converted display format "${attempt.answer}" to raw "${rawAnswer}"`);
               }
             }
           }
           
+          // Validate the deserialized answer
+          try {
+            attemptIsCorrect = isAnswerCorrect(q, rawAnswer);
+          } catch (error) {
+            console.warn(`[AttemptHistory] Failed to validate attempt ${attemptIdx + 1}:`, error);
+            attemptIsCorrect = false;
+          }
+          
+          console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1}:`, {
+            rawAnswer,
+            displayAnswer: attempt.answer,
+            isCorrect: attemptIsCorrect
+          });
+          
           return {
             attemptNumber: attemptIdx + 1,
             selectedAnswer: attempt.answer || '',
-            isCorrect: isAnswerCorrect(q, rawAnswer),
+            isCorrect: attemptIsCorrect,
             timeStamp: new Date(attempt.timestamp).toISOString()
           };
         });
+        
+        // CRITICAL FIX: If no attempts were logged but we have an answer, create a fallback attempt entry
+        // This ensures every question has at least one attempt record for proper tracking
+        if (attemptHistory.length === 0 && studentAnswer && studentAnswer.trim() !== '') {
+          console.log(`[ResultCreation] Creating fallback attempt for Question ${idx + 1} - no attempts logged but has answer`, {
+            studentAnswer,
+            isCorrect,
+            hasAnswerData: !!answerData
+          });
+          
+          // Use the already serialized studentAnswer (not raw answer)
+          attemptHistory = [{
+            attemptNumber: 1,
+            selectedAnswer: studentAnswer, // Already serialized above
+            isCorrect: isCorrect, // Use validated isCorrect value
+            timeStamp: new Date().toISOString()
+          }];
+        } else if (attemptHistory.length === 0) {
+          // Question was never answered (no attempts, no answer)
+          console.log(`[ResultCreation] Q${idx + 1} has NO attempts and NO answer - marking as unanswered`);
+        }
+
+        // FINAL SAFETY NETS: if state hadn't committed yet, derive from attempts
+        // Fallback studentAnswer and correctness from last attempt when needed
+        const lastAttempt = attemptHistory.length > 0 ? attemptHistory[attemptHistory.length - 1] : undefined;
+        const derivedStudentAnswer = studentAnswer || (lastAttempt?.selectedAnswer ?? '');
+        
+        // CRITICAL: Only use derived isCorrect if there's actually a correct attempt in history
+        // Don't assume correct if there's just any attempt
+        const derivedIsCorrect = isCorrect || (attemptHistory.some(a => a.isCorrect === true));
+        
+        console.log(`[ResultCreation] Q${idx + 1} Final Derivation:`, {
+          originalIsCorrect: isCorrect,
+          derivedIsCorrect,
+          hasCorrectAttemptInHistory: attemptHistory.some(a => a.isCorrect === true),
+          studentAnswer: derivedStudentAnswer
+        });
+        
+        // CRITICAL FIX: Ensure attempts count reflects history when available
+        // But use at least 1 if we have an answer (prevents 0 attempts with correct answer)
+        if (attemptHistory.length > 0) {
+          attempts = Math.max(attemptHistory.length, attempts);
+        } else if (derivedStudentAnswer) {
+          // If we have an answer but no history, ensure at least 1 attempt
+          attempts = Math.max(1, attempts);
+        }
+        
+        // CRITICAL FIX: Ensure timeSpent is at least 1 second if question was answered
+        if (derivedStudentAnswer && timeSpentSeconds === 0) {
+          timeSpentSeconds = 1; // Minimum 1 second if answered
+          console.log(`[ResultCreation] Q${idx + 1}: Set minimum timeSpent to 1 second (was 0)`);
+        }
         
         // Format choices for multiple choice questions
         const choices = q.type === 'multiple-choice' && q.options ? 
           q.options.map((option, optIdx) => `${String.fromCharCode(65 + optIdx)}. ${option}`) : 
           undefined;
+        
+        // FINAL VALIDATION: Ensure studentAnswer is never empty string if we have a real answer
+        const finalStudentAnswer = Array.isArray(derivedStudentAnswer) ? 
+          derivedStudentAnswer.join(', ') : 
+          String(derivedStudentAnswer || '');
+        
+        // CRITICAL: Validate consistency between studentAnswer and isCorrect
+        if (!finalStudentAnswer || finalStudentAnswer.trim() === '') {
+          // No answer provided - must not be correct
+          if (derivedIsCorrect) {
+            console.error(`[ResultCreation] FIXING Q${idx + 1}: Marked correct but no answer! Setting isCorrect to false`);
+          }
+        }
+        
+        const finalIsCorrect = (finalStudentAnswer && finalStudentAnswer.trim() !== '') ? derivedIsCorrect : false;
+        
+        console.log(`[ResultCreation] Q${idx + 1} Final Result:`, {
+          studentAnswer: finalStudentAnswer,
+          isCorrect: finalIsCorrect,
+          hasAnswer: !!(finalStudentAnswer && finalStudentAnswer.trim() !== ''),
+          attemptCount: attempts,
+          attemptHistoryCount: attemptHistory.length
+        });
         
         return {
           questionNumber: idx + 1,
@@ -2284,8 +2957,8 @@ export default function StudentExerciseAnswering() {
           questionText: q.question || '',
           choices: choices,
           correctAnswer: Array.isArray(correctAnswer) ? correctAnswer.join(', ') : String(correctAnswer),
-          studentAnswer: Array.isArray(studentAnswer) ? studentAnswer.join(', ') : String(studentAnswer),
-          isCorrect: isCorrect,
+          studentAnswer: finalStudentAnswer,
+          isCorrect: finalIsCorrect,
           attempts: attempts,
           timeSpentSeconds: timeSpentSeconds,
           ttsPlayed: ttsPlayed,
@@ -2294,6 +2967,13 @@ export default function StudentExerciseAnswering() {
           attemptHistory: attemptHistory
         };
       }) || [];
+      
+      // CRITICAL: Verify ALL questions from exercise are in results
+      console.log('[Submission] Final questionResults count check:', {
+        exerciseQuestions: exercise?.questions.length || 0,
+        questionResults: questionResults.length,
+        match: questionResults.length === (exercise?.questions.length || 0)
+      });
       
       // Create the complete result data
       const resultData: ExerciseResultData = {
@@ -2308,23 +2988,190 @@ export default function StudentExerciseAnswering() {
         questionResults
       };
       
-      // Debug logging
-      console.log('Recording exercise result with:', {
-        parentId,
-        studentId,
+      // CRITICAL: Comprehensive pre-submission logging to verify all data
+      console.log('[Submission] ========== FINAL RESULT DATA VERIFICATION ==========');
+      console.log('[Submission] Recording exercise result with:', {
         exerciseResultId,
-        exerciseId
+        loginCode: parentId,
+        actualParentId,
+        studentId,
+        exerciseId: exercise?.id || exerciseId,
+        assignedExerciseId,
+        studentName: studentInfoData.name,
+        correctAnswers,
+        totalQuestions,
+        scorePercentage
       });
       
-      if (!parentId) {
-        console.warn('No parentId found - exercise result may not be properly tracked');
+      // CRITICAL: Verify we have data for ALL questions
+      console.log('[Submission] VERIFICATION - Total questions:', totalQuestions);
+      console.log('[Submission] VERIFICATION - Question results count:', questionResults.length);
+      if (questionResults.length !== totalQuestions) {
+        console.error('[Submission] ERROR: Mismatch between total questions and results!', {
+          expected: totalQuestions,
+          actual: questionResults.length
+        });
       }
       
+      console.log('[Submission] Question Results Summary:');
+      questionResults.forEach((qr, idx) => {
+        const hasAnswer = qr.studentAnswer && qr.studentAnswer.trim() !== '';
+        const hasAttempts = qr.attemptHistory && qr.attemptHistory.length > 0;
+        
+        console.log(`  Q${idx + 1}:`, {
+          questionId: qr.questionId,
+          studentAnswer: qr.studentAnswer,
+          hasAnswer,
+          isCorrect: qr.isCorrect,
+          attempts: qr.attempts,
+          timeSpent: qr.timeSpentSeconds,
+          attemptHistoryCount: qr.attemptHistory.length,
+          hasAttempts,
+          attemptHistory: qr.attemptHistory.map(ah => ({
+            attemptNum: ah.attemptNumber,
+            answer: ah.selectedAnswer,
+            correct: ah.isCorrect
+          }))
+        });
+        
+        // CRITICAL: Warn if question is missing critical data
+        if (!hasAnswer && qr.isCorrect) {
+          console.warn(`  [WARNING] Q${idx + 1} marked correct but has no answer!`);
+        }
+        if (!hasAttempts) {
+          console.warn(`  [WARNING] Q${idx + 1} has no attempt history!`);
+        }
+      });
+      
+      console.log('[Submission] Results Summary:', {
+        totalItems: resultsSummary.totalItems,
+        totalCorrect: resultsSummary.totalCorrect,
+        totalIncorrect: resultsSummary.totalIncorrect,
+        score: resultsSummary.score,
+        meanPercentageScore: resultsSummary.meanPercentageScore,
+        remarks: resultsSummary.remarks
+      });
+      console.log('[Submission] ===================================================');
+      
+      if (!studentId) {
+        console.error('[Submission] CRITICAL: No studentId - result will have unknown student!');
+      }
+      if (!actualParentId && !parentId) {
+        console.warn('[Submission] WARNING: No parentId - exercise result may not be properly tracked');
+      }
+      
+      // CRITICAL: Final validation before saving to database
+      // Ensure all questions have at least minimal data
+      console.log('[Submission] ========== FINAL VALIDATION ==========');
+      
+      const invalidQuestions = questionResults.filter((qr, idx) => {
+        const hasNoAnswer = !qr.studentAnswer || qr.studentAnswer.trim() === '';
+        const hasNoAttempts = !qr.attemptHistory || qr.attemptHistory.length === 0;
+        
+        if (hasNoAnswer || hasNoAttempts) {
+          console.warn(`[Submission] VALIDATION WARNING - Q${idx + 1} missing data:`, {
+            questionId: qr.questionId,
+            studentAnswer: qr.studentAnswer,
+            hasNoAnswer,
+            hasNoAttempts,
+            isCorrect: qr.isCorrect,
+            attempts: qr.attempts
+          });
+        }
+        
+        return hasNoAnswer && hasNoAttempts;
+      });
+      
+      if (invalidQuestions.length > 0) {
+        console.error('[Submission] CRITICAL: Some questions have no data!', {
+          invalidCount: invalidQuestions.length,
+          totalQuestions: questionResults.length,
+          invalidQuestionIds: invalidQuestions.map(q => q.questionId)
+        });
+      }
+      
+      // Additional validation: Check for questions marked correct without answers
+      const suspiciousQuestions = questionResults.filter(qr => {
+        const hasNoAnswer = !qr.studentAnswer || qr.studentAnswer.trim() === '';
+        return qr.isCorrect && hasNoAnswer;
+      });
+      
+      if (suspiciousQuestions.length > 0) {
+        console.error('[Submission] CRITICAL ERROR: Questions marked CORRECT but have NO ANSWER!', {
+          count: suspiciousQuestions.length,
+          questionIds: suspiciousQuestions.map(q => ({ id: q.questionId, isCorrect: q.isCorrect, studentAnswer: q.studentAnswer }))
+        });
+        
+        // FIX: Force these questions to be marked incorrect
+        suspiciousQuestions.forEach(qr => {
+          qr.isCorrect = false;
+          console.log(`[Submission] Fixed Q${qr.questionNumber}: Changed isCorrect to false (no answer provided)`);
+        });
+      }
+      
+      console.log('[Submission] ========================================');
+      
+      // CRITICAL: Recalculate summary based on final validated questionResults
+      const finalCorrectCount = questionResults.filter(qr => qr.isCorrect === true).length;
+      const finalIncorrectCount = questionResults.filter(qr => qr.isCorrect === false).length;
+      const finalScorePercentage = totalQuestions > 0 ? Math.round((finalCorrectCount / totalQuestions) * 100) : 0;
+      
+      // Update resultsSummary with final validated counts
+      resultsSummary.totalCorrect = finalCorrectCount;
+      resultsSummary.totalIncorrect = finalIncorrectCount;
+      resultsSummary.meanPercentageScore = finalScorePercentage;
+      resultsSummary.score = finalCorrectCount;
+      resultsSummary.remarks = getRemarks(finalScorePercentage);
+      
+      console.log('[Submission] Final Validated Summary:', {
+        totalCorrect: finalCorrectCount,
+        totalIncorrect: finalIncorrectCount,
+        scorePercentage: finalScorePercentage,
+        remarks: resultsSummary.remarks
+      });
+      
       // Save to ExerciseResults table
+      console.log('[Submission] ========== DATABASE WRITE ==========');
+      console.log('[Submission] Path: /ExerciseResults/' + exerciseResultId);
+      console.log('[Submission] Total Questions:', questionResults.length);
+      console.log('[Submission] Correct Answers:', finalCorrectCount);
+      console.log('[Submission] Incorrect Answers:', finalIncorrectCount);
+      console.log('[Submission] Score:', finalScorePercentage + '%');
+      console.log('[Submission] Question Details Being Saved:');
+      questionResults.forEach((qr, idx) => {
+        console.log(`  Q${idx + 1}:`, {
+          id: qr.questionId,
+          studentAnswer: qr.studentAnswer,
+          correctAnswer: qr.correctAnswer,
+          isCorrect: qr.isCorrect,
+          attempts: qr.attempts,
+          hasAttemptHistory: qr.attemptHistory.length > 0
+        });
+      });
+      console.log('[Submission] =====================================');
+      
       const exerciseResult = await writeData(`/ExerciseResults/${exerciseResultId}`, resultData);
       if (!exerciseResult.success) {
         throw new Error(`Failed to save exercise result: ${exerciseResult.error}`);
       }
+      
+      console.log('[Submission] ========== SAVE SUCCESSFUL ==========');
+      console.log('[Submission] Result ID:', exerciseResultId);
+      console.log('[Submission] Saved Data Summary:');
+      console.log('  - Student:', studentInfoData.name);
+      console.log('  - Exercise:', exerciseInfo.title);
+      console.log('  - Total Questions:', resultsSummary.totalItems);
+      console.log('  - Correct:', resultsSummary.totalCorrect);
+      console.log('  - Incorrect:', resultsSummary.totalIncorrect);
+      console.log('  - Score:', resultsSummary.meanPercentageScore + '%');
+      console.log('  - Remarks:', resultsSummary.remarks);
+      console.log('[Submission] All question results saved with:');
+      questionResults.forEach((qr, idx) => {
+        const status = qr.isCorrect ? '✓ CORRECT' : '✗ WRONG';
+        const answerPreview = qr.studentAnswer.substring(0, 30) + (qr.studentAnswer.length > 30 ? '...' : '');
+        console.log(`  Q${idx + 1} ${status}: "${answerPreview}" (${qr.attemptHistory.length} attempts)`);
+      });
+      console.log('[Submission] =====================================');
       
       // Show results panel instead of navigating back
       setShowResults(true);
@@ -2360,20 +3207,34 @@ export default function StudentExerciseAnswering() {
         if (!correct) {
           const newAttemptCount = currentAttempts + 1;
           
+          // CRITICAL FIX: Save the wrong answer to the answers array
+          console.log('[HandleSubmit-Wrong] Saving wrong answer:', {
+            questionId: q.id,
+            answer: currentAns,
+            attemptCount: newAttemptCount
+          });
+          
+          updateAnswers(prev => {
+            const updated = prev.map(a => 
+              a.questionId === q.id ? { ...a, answer: currentAns || '', isCorrect: false } : a
+            );
+            console.log('[HandleSubmit-Wrong] Updated answers array');
+            return updated;
+          });
+          
           // Check if attempt limit is reached
           if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
-            setAttemptCounts(prev => ({ ...prev, [q.id]: newAttemptCount }));
+            updateAttemptCount(q.id, newAttemptCount);
+            logAttempt(q, currentAns, 'final'); // Log as final attempt
+            
+            // Mark question as completed (with wrong answer)
+            setQuestionCorrect(q.id, false);
             
             // Show attempt limit reached message
             showCustomAlert(
               'Attempt Limit Reached', 
               `You have reached the maximum number of attempts (${maxAttempts}) for this question. The correct answer will be shown.`,
               () => {
-                // Mark as incorrect but allow progression
-                setAnswers(prev => prev.map(a => 
-                  a.questionId === q.id ? { ...a, isCorrect: false } : a
-                ));
-                setCorrectQuestions(prev => ({ ...prev, [q.id]: false }));
                 setShowResults(true);
               },
               'warning'
@@ -2382,7 +3243,8 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
-          setAttemptCounts(prev => ({ ...prev, [q.id]: newAttemptCount }));
+          updateAttemptCount(q.id, newAttemptCount);
+          logAttempt(q, currentAns, 'change');
           
           // Show remaining attempts if limit is set
           const remainingAttempts = maxAttempts !== null && maxAttempts !== undefined ? maxAttempts - newAttemptCount : null;
@@ -2404,13 +3266,13 @@ export default function StudentExerciseAnswering() {
           return;
         } else {
           // Update the answer with isCorrect: true
-          setAnswers(prev => prev.map(a => 
-            a.questionId === q.id ? { ...a, isCorrect: true } : a
+          updateAnswers(prev => prev.map(a => 
+            a.questionId === q.id ? { ...a, answer: currentAns || a.answer, isCorrect: true } : a
           ));
           // Count the final successful attempt
-          setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+          incrementAttemptCount(q.id);
         }
-        setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
+        setQuestionCorrect(q.id, true);
       }
 
       // No need to update assignedExercises - completion status is determined by ExerciseResults existence
@@ -2435,20 +3297,77 @@ export default function StudentExerciseAnswering() {
     if (correct) {
       // Accumulate time for the level question
       const delta = Date.now() - questionStartTime;
-      setAnswers(prev => prev.map(a => a.questionId === q.id ? { ...a, timeSpent: (a.timeSpent || 0) + delta, isCorrect: true } : a));
-      setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
+      updateAnswers(prev => prev.map(a => a.questionId === q.id ? { ...a, timeSpent: (a.timeSpent || 0) + delta, isCorrect: true } : a));
+      setQuestionCorrect(q.id, true);
       // Count the final successful attempt
-      setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+      incrementAttemptCount(q.id);
       await unlockNextLevel();
       showCustomAlert('Great job!', 'Level cleared!', () => router.replace({ pathname: '/Homepage', params: { exerciseId: exercise.id, session: String(Date.now()) } } as any), 'success');
     } else {
-      setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+      incrementAttemptCount(q.id);
       showCustomAlert('Not yet correct', 'Try again!', undefined, 'warning');
     }
   };
   
   const renderMultipleChoice = (question: Question) => {
     const selectedAnswers = Array.isArray(currentAnswer) ? currentAnswer : [];
+    
+    // Check if this question uses images as options
+    const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+    
+    if (hasOptionImages) {
+      // Image-based options: validate images
+      const validImageCount = question.optionImages?.filter(img => img && typeof img === 'string' && img.trim() !== '').length || 0;
+      
+      if (validImageCount === 0) {
+        console.error('[MC-Render] Question has NO valid option images!', {
+          questionId: question.id,
+          optionImages: question.optionImages
+        });
+        return (
+          <View style={styles.questionContainer}>
+            <View style={styles.questionTextContainer}>
+              <Text style={styles.questionText}>{question.question}</Text>
+            </View>
+            <View style={[styles.questionTextContainer, { backgroundColor: '#fee2e2', borderColor: '#ef4444' }]}>
+              <Text style={[styles.questionText, { color: '#dc2626', fontSize: 16 }]}>
+                ⚠️ Error: This question has no valid answer option images. Please contact your teacher.
+              </Text>
+            </View>
+          </View>
+        );
+      }
+    } else {
+      // Text-based options: validate text
+      const validOptions = (question.options || []).filter(opt => opt && typeof opt === 'string' && opt.trim() !== '');
+      
+      if (validOptions.length === 0) {
+        console.error('[MC-Render] Question has NO valid text options!', {
+          questionId: question.id,
+          originalOptions: question.options
+        });
+        return (
+          <View style={styles.questionContainer}>
+            <View style={styles.questionTextContainer}>
+              <Text style={styles.questionText}>{question.question}</Text>
+            </View>
+            <View style={[styles.questionTextContainer, { backgroundColor: '#fee2e2', borderColor: '#ef4444' }]}>
+              <Text style={[styles.questionText, { color: '#dc2626', fontSize: 16 }]}>
+                ⚠️ Error: This question has no valid answer options. Please contact your teacher.
+              </Text>
+            </View>
+          </View>
+        );
+      }
+      
+      if (validOptions.length < (question.options?.length || 0)) {
+        console.warn('[MC-Render] Some options were invalid and filtered out', {
+          questionId: question.id,
+          originalCount: question.options?.length,
+          validCount: validOptions.length
+        });
+      }
+    }
     
     // Check if all options have images
     const hasAllImages = question.options?.every((_, index) => question.optionImages?.[index]);
@@ -2514,12 +3433,22 @@ export default function StudentExerciseAnswering() {
         {useGridLayout ? (
           <View style={styles.optionsGridContainer}>
             {question.options?.map((option, index) => {
-              const isSelected = selectedAnswers.includes(option);
+              // CRITICAL: For image-based questions, use image index as option value if text is empty
               const hasImage = question.optionImages?.[index];
+              const optionValue = (hasImage && (!option || option.trim() === '')) 
+                ? String.fromCharCode(65 + index) // Use "A", "B", "C", "D" for image options
+                : option;
+              
+              // Skip if both option text and image are invalid
+              if (!hasImage && (!optionValue || typeof optionValue !== 'string' || optionValue.trim() === '')) {
+                console.error('[MC-Grid] Invalid option at index', index, '- no text or image');
+                return null;
+              }
+              
+              const isSelected = selectedAnswers.includes(optionValue);
               const optionLabel = String.fromCharCode(65 + index); // A, B, C, D
               
               const optionKey = `mc-${question.id}-${index}`;
-              const isCorrect = isOptionCorrect(question, option);
               const shakeStyle = lastShakeKey === optionKey ? { transform: [{ translateX: shakeAnim }] } : undefined;
               return (
                 <AnimatedTouchable
@@ -2530,22 +3459,43 @@ export default function StudentExerciseAnswering() {
                   , shakeStyle as any
                   ]}
                   onPress={() => {
+                    // CRITICAL: Check correctness at press time, not render time
+                    const isCorrect = isOptionCorrect(question, optionValue);
+                    console.log('[MC-Grid] Option pressed:', {
+                      option: optionValue,
+                      isCorrect,
+                      questionId: question.id,
+                      hasImage: !!hasImage
+                    });
+                    
                     // Single answer immediate validation and feedback
                     if (!question.multiAnswer) {
                       if (!isCorrect) {
                         const newAttemptCount = (attemptCounts[question.id] || 0) + 1;
                         const maxAttempts = exercise?.maxAttemptsPerItem;
                         
+                        // CRITICAL FIX: Save the wrong answer to the answers array
+                        console.log('[MC-Grid-Wrong] Saving wrong answer:', {
+                          questionId: question.id,
+                          selectedOption: optionValue,
+                          attemptCount: newAttemptCount
+                        });
+                        
+                        updateAnswers(prev => {
+                          const updated = prev.map(a => 
+                            a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: false } : a
+                          );
+                          console.log('[MC-Grid-Wrong] Answer saved to array');
+                          return updated;
+                        });
+                        
                         // Check if attempt limit is reached
                         if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
-                          setAttemptCounts(prev => ({ ...prev, [question.id]: newAttemptCount }));
-                          logAttempt(question, option, 'change');
+                          updateAttemptCount(question.id, newAttemptCount);
+                          logAttempt(question, optionValue, 'final');
                           
                           // Mark as failed and advance
-                          setAnswers(prev => prev.map(a => 
-                            a.questionId === question.id ? { ...a, isCorrect: false } : a
-                          ));
-                          setCorrectQuestions(prev => ({ ...prev, [question.id]: false }));
+                          setQuestionCorrect(question.id, false);
                           
                           // Show attempt limit reached message briefly
                           showCustomAlert(
@@ -2558,8 +3508,8 @@ export default function StudentExerciseAnswering() {
                         }
                         
                         setLastShakeKey(optionKey);
-                        setAttemptCounts(prev => ({ ...prev, [question.id]: newAttemptCount }));
-                        logAttempt(question, option, 'change');
+                        updateAttemptCount(question.id, newAttemptCount);
+                        logAttempt(question, optionValue, 'change');
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
                           Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
@@ -2573,26 +3523,35 @@ export default function StudentExerciseAnswering() {
                       // Correct -> set answer and move next
                       // Stop TTS immediately when correct answer is selected
                       stopCurrentTTS();
-                      logInteraction(question.id, 'option_click', option, 0);
-                      handleAnswerChange(option);
+                      logInteraction(question.id, 'option_click', optionValue, 0);
+                      handleAnswerChange(optionValue);
                       
-                      // Update the answer with isCorrect: true
-                      setAnswers(prev => prev.map(a => 
-                        a.questionId === question.id ? { ...a, isCorrect: true } : a
-                      ));
+                      // CRITICAL FIX: Update the answer with isCorrect: true and log for debugging
+                      updateAnswers(prev => {
+                        const updated = prev.map(a => 
+                          a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: true } : a
+                        );
+                        console.log('[MC-Grid-Correct] Updated answers state:', updated.map(a => ({
+                          qId: a.questionId,
+                          hasAnswer: !!a.answer,
+                          isCorrect: a.isCorrect
+                        })));
+                        return updated;
+                      });
                       
-                      setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
+                      // Use helper functions to update both state and ref
+                      setQuestionCorrect(question.id, true);
                       // Count the final successful attempt
-                      setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
-                      logAttempt(question, option, 'final');
+                      incrementAttemptCount(question.id);
+                      logAttempt(question, optionValue, 'final');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
                     }
                     // Multi-answer behaves as selection accumulation
                     const newAnswers = isSelected 
-                      ? selectedAnswers.filter(a => a !== option)
-                      : [...selectedAnswers, option];
-                    logInteraction(question.id, 'option_click', option, 0);
+                      ? selectedAnswers.filter(a => a !== optionValue)
+                      : [...selectedAnswers, optionValue];
+                    logInteraction(question.id, 'option_click', optionValue, 0);
                     handleAnswerChange(newAnswers);
                   }}
                    activeOpacity={0.7}
@@ -2627,12 +3586,22 @@ export default function StudentExerciseAnswering() {
         ) : (
           <View style={styles.optionsContainer}>
             {question.options?.map((option, index) => {
-              const isSelected = selectedAnswers.includes(option);
+              // CRITICAL: For image-based questions, use image index as option value if text is empty
               const hasImage = question.optionImages?.[index];
+              const optionValue = (hasImage && (!option || option.trim() === '')) 
+                ? String.fromCharCode(65 + index) // Use "A", "B", "C", "D" for image options
+                : option;
+              
+              // Skip if both option text and image are invalid
+              if (!hasImage && (!optionValue || typeof optionValue !== 'string' || optionValue.trim() === '')) {
+                console.error('[MC-List] Invalid option at index', index, '- no text or image');
+                return null;
+              }
+              
+              const isSelected = selectedAnswers.includes(optionValue);
               const optionLabel = String.fromCharCode(65 + index); // A, B, C, D
               
               const optionKey = `mc-${question.id}-${index}`;
-              const isCorrect = isOptionCorrect(question, option);
               const shakeStyle = lastShakeKey === optionKey ? { transform: [{ translateX: shakeAnim }] } : undefined;
               return (
                 <AnimatedTouchable
@@ -2643,21 +3612,42 @@ export default function StudentExerciseAnswering() {
                     shakeStyle as any
                   ]}
                   onPress={() => {
+                    // CRITICAL: Check correctness at press time, not render time
+                    const isCorrect = isOptionCorrect(question, optionValue);
+                    console.log('[MC-List] Option pressed:', {
+                      option: optionValue,
+                      isCorrect,
+                      questionId: question.id,
+                      hasImage: !!hasImage
+                    });
+                    
                     if (!question.multiAnswer) {
                       if (!isCorrect) {
                         const newAttemptCount = (attemptCounts[question.id] || 0) + 1;
                         const maxAttempts = exercise?.maxAttemptsPerItem;
                         
+                        // CRITICAL FIX: Save the wrong answer to the answers array
+                        console.log('[MC-List-Wrong] Saving wrong answer:', {
+                          questionId: question.id,
+                          selectedOption: optionValue,
+                          attemptCount: newAttemptCount
+                        });
+                        
+                        updateAnswers(prev => {
+                          const updated = prev.map(a => 
+                            a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: false } : a
+                          );
+                          console.log('[MC-List-Wrong] Answer saved to array');
+                          return updated;
+                        });
+                        
                         // Check if attempt limit is reached
                         if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
-                          setAttemptCounts(prev => ({ ...prev, [question.id]: newAttemptCount }));
-                          logAttempt(question, option, 'change');
+                          updateAttemptCount(question.id, newAttemptCount);
+                          logAttempt(question, optionValue, 'final');
                           
                           // Mark as failed and advance
-                          setAnswers(prev => prev.map(a => 
-                            a.questionId === question.id ? { ...a, isCorrect: false } : a
-                          ));
-                          setCorrectQuestions(prev => ({ ...prev, [question.id]: false }));
+                          setQuestionCorrect(question.id, false);
                           
                           // Show attempt limit reached message briefly
                           showCustomAlert(
@@ -2670,8 +3660,8 @@ export default function StudentExerciseAnswering() {
                         }
                         
                         setLastShakeKey(optionKey);
-                        setAttemptCounts(prev => ({ ...prev, [question.id]: newAttemptCount }));
-                        logAttempt(question, option, 'change');
+                        updateAttemptCount(question.id, newAttemptCount);
+                        logAttempt(question, optionValue, 'change');
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
                           Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
@@ -2684,21 +3674,31 @@ export default function StudentExerciseAnswering() {
                       }
                       // Stop TTS immediately when correct answer is selected
                       stopCurrentTTS();
-                      handleAnswerChange(option);
+                      handleAnswerChange(optionValue);
                       
-                      // Update the answer with isCorrect: true
-                      setAnswers(prev => prev.map(a => 
-                        a.questionId === question.id ? { ...a, isCorrect: true } : a
-                      ));
+                      // CRITICAL FIX: Update the answer with isCorrect: true and ensure answer is set
+                      updateAnswers(prev => {
+                        const updated = prev.map(a => 
+                          a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: true } : a
+                        );
+                        console.log('[MC-List-Correct] Updated answers state:', updated.map(a => ({
+                          qId: a.questionId,
+                          hasAnswer: !!a.answer,
+                          isCorrect: a.isCorrect
+                        })));
+                        return updated;
+                      });
                       
-                      setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
-                      logAttempt(question, option, 'change');
+                      // Use helper functions to update both state and ref
+                      setQuestionCorrect(question.id, true);
+                      incrementAttemptCount(question.id);
+                      logAttempt(question, optionValue, 'final');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
                     }
                     const newAnswers = isSelected 
-                      ? selectedAnswers.filter(a => a !== option)
-                      : [...selectedAnswers, option];
+                      ? selectedAnswers.filter(a => a !== optionValue)
+                      : [...selectedAnswers, optionValue];
                     handleAnswerChange(newAnswers);
                   }}
                    activeOpacity={0.7}
@@ -3845,7 +4845,7 @@ export default function StudentExerciseAnswering() {
             }}
           >
             <View style={{ backgroundColor: '#10b981', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 16, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 8, elevation: 5 }}>
-              <Text style={{ color: '#ffffff', fontSize: 20, fontWeight: '800' }}>Correct!</Text>
+              <Text style={{ color: '#ffffff', fontSize: 18, fontWeight: '800' }}>Correct!</Text>
             </View>
           </Animated.View>
         )}
@@ -3869,7 +4869,7 @@ export default function StudentExerciseAnswering() {
             }}
           >
             <View style={{ backgroundColor: '#ef4444', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 16, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 8, elevation: 5 }}>
-              <Text style={{ color: '#ffffff', fontSize: 20, fontWeight: '800' }}>Wrong!</Text>
+              <Text style={{ color: '#ffffff', fontSize: 18, fontWeight: '800' }}>Wrong!</Text>
             </View>
           </Animated.View>
         )}
@@ -4446,7 +5446,7 @@ const styles = StyleSheet.create({
     right: '15%',
   },
   mathElementText: {
-    fontSize: 40,
+    fontSize: 24,
   },
   loadingCard: {
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
@@ -4482,13 +5482,13 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   loadingIconEmoji: {
-    fontSize: 35,
+    fontSize: 28,
   },
   loadingTitleContainer: {
     flex: 1,
   },
   loadingTitle: {
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: '800',
     color: '#2d3748',
     marginBottom: 5,
@@ -4514,7 +5514,7 @@ const styles = StyleSheet.create({
     color: '#2d3748',
   },
   progressPercentage: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#ffa500',
   },
@@ -4581,7 +5581,7 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   loadingErrorText: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     color: '#c53030',
     textAlign: 'center',
@@ -4602,7 +5602,7 @@ const styles = StyleSheet.create({
   },
   retryButtonText: {
     color: '#ffffff',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
   },
   skipButton: {
@@ -4615,7 +5615,7 @@ const styles = StyleSheet.create({
   },
   skipButtonText: {
     color: '#ffffff',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
   },
   // Kid-Friendly Results Styles
@@ -4683,11 +5683,11 @@ const styles = StyleSheet.create({
     color: '#0ea5e9',
   },
   resultsTitleEmoji: {
-    fontSize: 32,
+    fontSize: 28,
     marginBottom: 0,
   },
   resultsTitle: {
-    fontSize: 26,
+    fontSize: 20,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 8,
@@ -4753,11 +5753,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#fef2f2',
   },
   statEmoji: {
-    fontSize: 24,
+    fontSize: 20,
     marginBottom: 0,
   },
   statNumber: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 4,
@@ -4789,7 +5789,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   performanceEmoji: {
-    fontSize: 32,
+    fontSize: 28,
     marginBottom: 8,
   },
   performanceStars: {
@@ -4797,10 +5797,10 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   star: {
-    fontSize: 16,
+    fontSize: 14,
   },
   performanceMessage: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#1e293b',
     textAlign: 'center',
     fontWeight: '700',
@@ -4812,7 +5812,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 24,
   },
   questionDetailsTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     color: '#1e293b',
     marginBottom: 12,
@@ -4853,11 +5853,11 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   submitButtonEmoji: {
-    fontSize: 18,
+    fontSize: 16,
   },
   submitButtonText: {
     color: '#ffffff',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
   },
   submitInfoText: {
@@ -4887,7 +5887,7 @@ const styles = StyleSheet.create({
     borderColor: '#059669',
   },
   checkAnswerButtonText: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     color: '#ffffff',
     textShadowColor: 'rgba(0, 0, 0, 0.2)',
@@ -4912,11 +5912,11 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   resultsCelebrationEmoji: {
-    fontSize: 48,
+    fontSize: 36,
     marginBottom: 8,
   },
   compactResultsTitle: {
-    fontSize: 28,
+    fontSize: 20,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 12,
@@ -4926,7 +5926,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   starCompact: {
-    fontSize: 20,
+    fontSize: 16,
   },
   compactStatsRow: {
     flexDirection: 'row',
@@ -4941,11 +5941,11 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   compactStatEmoji: {
-    fontSize: 28,
+    fontSize: 20,
     marginBottom: 8,
   },
   compactStatNumber: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 4,
@@ -4966,7 +5966,7 @@ const styles = StyleSheet.create({
     borderColor: '#bfdbfe',
   },
   compactPerformanceText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
     color: '#1e293b',
     textAlign: 'center',
@@ -5001,7 +6001,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   compactQuestionIcon: {
-    fontSize: 18,
+    fontSize: 16,
     position: 'absolute',
     bottom: 6,
     left: 0,

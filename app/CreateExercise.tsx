@@ -6,20 +6,21 @@ import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
-  FlatList,
-  Image,
-  Modal,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    ActivityIndicator,
+    FlatList,
+    Image,
+    Modal,
+    ScrollView,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
 import { getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
+import { createExercise } from '../lib/entity-helpers';
 import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -4187,10 +4188,29 @@ Please respond with a JSON object in this exact format:
           error = updateError || 'Failed to update exercise';
         }
       } else {
-        // Create new exercise
-        const result = await pushData('/exercises', finalCleanPayload);
-        key = result.key;
-        error = result.error;
+        // Create new exercise with readable ID (EXERCISE-0001, EXERCISE-0002, etc.)
+        console.log('[CreateExercise] Creating new exercise with readable ID...');
+        
+        const result = await createExercise({
+          title: finalCleanPayload.title,
+          description: finalCleanPayload.description,
+          teacherId: finalCleanPayload.teacherId,
+          teacherName: finalCleanPayload.teacherName,
+          questions: finalCleanPayload.questions,
+          resourceUrl: finalCleanPayload.resourceUrl,
+          category: finalCleanPayload.category,
+          timesUsed: finalCleanPayload.timesUsed,
+          isPublic: finalCleanPayload.isPublic,
+          timeLimitPerItem: finalCleanPayload.timeLimitPerItem,
+          maxAttemptsPerItem: finalCleanPayload.maxAttemptsPerItem
+        });
+        
+        key = result.exerciseId || null;
+        error = result.error || null;
+        
+        if (result.success && key) {
+          console.log(`[CreateExercise] Exercise created with ID: ${key}`);
+        }
       }
       
       if (error || !key) {

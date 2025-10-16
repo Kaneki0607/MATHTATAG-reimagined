@@ -63,7 +63,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
   const loadClasses = async () => {
     try {
       setLoading(true);
-      const { data } = await readData('/sections');
+      const { data } = await readData('/classes');
       const classList = Object.entries(data || {})
         .map(([id, section]: any) => ({
           id,
@@ -168,7 +168,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               style={styles.closeButton}
               activeOpacity={0.7}
             >
-              <AntDesign name="close" size={22} color="#64748b" />
+              <AntDesign name="close" size={18} color="#64748b" />
             </TouchableOpacity>
           </View>
 
@@ -185,7 +185,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                 </View>
               ) : classes.length === 0 ? (
                 <View style={styles.emptyContainer}>
-                  <MaterialCommunityIcons name="school-outline" size={48} color="#9ca3af" />
+                  <MaterialCommunityIcons name="school-outline" size={40} color="#9ca3af" />
                   <Text style={styles.emptyText}>No classes available</Text>
                   <Text style={styles.emptySubtext}>Create a class first to assign exercises</Text>
                 </View>
@@ -215,7 +215,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       }
                     ]}>
                       {selectedClasses.includes(classItem.id) && (
-                        <AntDesign name="check" size={18} color="#ffffff" />
+                        <AntDesign name="check" size={14} color="#ffffff" />
                       )}
                     </View>
                   </TouchableOpacity>
@@ -255,7 +255,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               <View style={styles.deadlineContainer}>
                 {/* Date Selection */}
                 <View style={styles.dateTimeButton}>
-                  <MaterialCommunityIcons name="calendar" size={22} color="#0ea5e9" />
+                  <MaterialCommunityIcons name="calendar" size={18} color="#0ea5e9" />
                   <TextInput
                     style={styles.dateTimeText}
                     placeholder="MM/DD/YYYY"
@@ -265,8 +265,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                 </View>
 
                 {/* Time Selection */}
-                <View style={[styles.dateTimeButton, { marginTop: 12 }]}>
-                  <MaterialCommunityIcons name="clock" size={22} color="#0ea5e9" />
+                <View style={[styles.dateTimeButton, { marginTop: 10 }]}>
+                  <MaterialCommunityIcons name="clock" size={18} color="#0ea5e9" />
                   <TextInput
                     style={styles.dateTimeText}
                     placeholder="HH:MM AM/PM"
@@ -346,7 +346,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               <View style={styles.statusInfo}>
                 <MaterialCommunityIcons 
                   name="information" 
-                  size={18} 
+                  size={16} 
                   color="#0ea5e9" 
                 />
                 <Text style={styles.statusInfoText}>
@@ -362,7 +362,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               onPress={onClose}
               activeOpacity={0.7}
             >
-              <MaterialCommunityIcons name="close" size={20} color="#64748b" />
+              <MaterialCommunityIcons name="close" size={16} color="#64748b" />
               <Text style={styles.cancelButtonText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -374,7 +374,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               disabled={selectedClasses.length === 0}
               activeOpacity={0.8}
             >
-              <MaterialCommunityIcons name="send" size={20} color="#ffffff" />
+              <MaterialCommunityIcons name="send" size={16} color="#ffffff" />
               <Text style={styles.assignButtonText}>
                 Assign to {selectedClasses.length} {selectedClasses.length === 1 ? 'Class' : 'Classes'}
               </Text>
@@ -397,198 +397,194 @@ const styles = StyleSheet.create({
   },
   container: {
     backgroundColor: '#ffffff',
-    borderRadius: 24,
+    borderRadius: 16,
     width: '100%',
-    maxWidth: 580,
-    maxHeight: '98%',
-    minHeight: 600,
+    maxWidth: 560,
+    maxHeight: '96%',
+    minHeight: 500,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 24,
-    elevation: 12,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    elevation: 8,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 32,
-    paddingVertical: 24,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
     backgroundColor: '#ffffff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
   },
   title: {
-    fontSize: 24,
-    fontWeight: '800',
+    fontSize: 18,
+    fontWeight: '700',
     color: '#0f172a',
-    letterSpacing: -0.5,
+    letterSpacing: -0.3,
   },
   closeButton: {
-    padding: 10,
-    borderRadius: 12,
+    padding: 8,
+    borderRadius: 8,
     backgroundColor: '#f8fafc',
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
   content: {
     flex: 1,
-    paddingHorizontal: 32,
+    paddingHorizontal: 20,
   },
   exerciseInfo: {
-    paddingVertical: 20,
-    paddingHorizontal: 20,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
     backgroundColor: '#f8fafc',
-    borderRadius: 16,
-    marginVertical: 20,
+    borderRadius: 10,
+    marginTop: 16,
+    marginBottom: 8,
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
   exerciseTitle: {
-    fontSize: 17,
-    fontWeight: '700',
+    fontSize: 14,
+    fontWeight: '600',
     color: '#1e293b',
-    lineHeight: 24,
+    lineHeight: 20,
   },
   section: {
-    paddingVertical: 28,
+    marginBottom: 20,
   },
   sectionTitle: {
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: '700',
     color: '#0f172a',
-    marginBottom: 16,
-    letterSpacing: -0.3,
+    marginBottom: 12,
+    letterSpacing: -0.2,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: 13,
     color: '#64748b',
     textAlign: 'center',
-    paddingVertical: 20,
+    paddingVertical: 14,
     fontWeight: '600',
   },
   emptyText: {
-    fontSize: 16,
+    fontSize: 13,
     color: '#64748b',
     textAlign: 'center',
-    paddingVertical: 20,
+    paddingVertical: 14,
     fontWeight: '600',
   },
   loadingContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 60,
+    paddingVertical: 32,
     backgroundColor: '#f8fafc',
-    borderRadius: 16,
+    borderRadius: 10,
     marginTop: 8,
-    borderWidth: 2,
+    borderWidth: 1,
     borderColor: '#e2e8f0',
   },
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 60,
+    paddingVertical: 32,
     backgroundColor: '#f8fafc',
-    borderRadius: 16,
+    borderRadius: 10,
     marginTop: 8,
-    borderWidth: 2,
+    borderWidth: 1,
     borderColor: '#e2e8f0',
   },
   emptySubtext: {
-    fontSize: 15,
+    fontSize: 12,
     color: '#9ca3af',
-    marginTop: 12,
+    marginTop: 8,
     textAlign: 'center',
     fontWeight: '500',
-    lineHeight: 20,
+    lineHeight: 18,
   },
   classesList: {
     marginTop: 8,
   },
   deadlineContainer: {
-    marginTop: 12,
+    marginTop: 8,
   },
   quickDateOptions: {
     flexDirection: 'row',
-    marginTop: 16,
-    gap: 12,
+    marginTop: 12,
+    gap: 10,
   },
   quickDateButton: {
     flex: 1,
     backgroundColor: '#ffffff',
-    borderWidth: 2,
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
-    shadowRadius: 3,
+    shadowRadius: 2,
     elevation: 1,
   },
   quickDateText: {
-    fontSize: 15,
+    fontSize: 13,
     color: '#0ea5e9',
-    fontWeight: '700',
+    fontWeight: '600',
     letterSpacing: -0.1,
   },
   classItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 20,
-    paddingHorizontal: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
     backgroundColor: '#ffffff',
-    borderRadius: 16,
-    marginBottom: 16,
-    borderWidth: 2,
+    borderRadius: 10,
+    marginBottom: 8,
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
   },
   classItemSelected: {
     backgroundColor: '#f0f9ff',
     borderColor: '#0ea5e9',
-    shadowColor: '#0ea5e9',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
-    elevation: 6,
-    transform: [{ scale: 1.02 }],
+    borderWidth: 2,
   },
   classInfo: {
     flex: 1,
   },
   className: {
-    fontSize: 17,
-    fontWeight: '700',
+    fontSize: 14,
+    fontWeight: '600',
     color: '#0f172a',
-    marginBottom: 4,
+    marginBottom: 3,
     letterSpacing: -0.2,
   },
   classDetails: {
-    fontSize: 15,
+    fontSize: 12,
     color: '#64748b',
     fontWeight: '500',
   },
   checkbox: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    borderWidth: 2,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1.5,
     borderColor: '#d1d5db',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#ffffff',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.08,
     shadowRadius: 2,
     elevation: 1,
   },
@@ -618,79 +614,79 @@ const styles = StyleSheet.create({
   dateTimeButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
     backgroundColor: '#ffffff',
-    borderRadius: 12,
-    borderWidth: 2,
+    borderRadius: 10,
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 1,
-  },
-  dateTimeText: {
-    flex: 1,
-    fontSize: 16,
-    color: '#0f172a',
-    marginLeft: 12,
-    fontWeight: '600',
-  },
-  currentDeadlineDisplay: {
-    backgroundColor: '#f0f9ff',
-    borderRadius: 12,
-    padding: 16,
-    marginTop: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: '#0ea5e9',
-    borderWidth: 1,
-    borderColor: '#bae6fd',
-  },
-  currentDeadlineLabel: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#0369a1',
-    marginBottom: 6,
-    letterSpacing: -0.1,
-  },
-  currentDeadlineText: {
-    fontSize: 15,
-    color: '#0369a1',
-    fontWeight: '600',
-    lineHeight: 20,
-  },
-  footer: {
-    flexDirection: 'row',
-    paddingHorizontal: 32,
-    paddingVertical: 24,
-    borderTopWidth: 1,
-    borderTopColor: '#f1f5f9',
-    backgroundColor: '#ffffff',
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
-    gap: 16,
-  },
-  cancelButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    borderRadius: 16,
-    borderWidth: 2,
-    borderColor: '#e2e8f0',
-    backgroundColor: '#ffffff',
-    gap: 8,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
     shadowRadius: 3,
     elevation: 1,
   },
-  cancelButtonText: {
-    fontSize: 16,
+  dateTimeText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#0f172a',
+    marginLeft: 10,
+    fontWeight: '600',
+  },
+  currentDeadlineDisplay: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 10,
+    borderLeftWidth: 3,
+    borderLeftColor: '#0ea5e9',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+  },
+  currentDeadlineLabel: {
+    fontSize: 11,
     fontWeight: '700',
+    color: '#0369a1',
+    marginBottom: 4,
+    letterSpacing: -0.1,
+  },
+  currentDeadlineText: {
+    fontSize: 13,
+    color: '#0369a1',
+    fontWeight: '600',
+    lineHeight: 18,
+  },
+  footer: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    backgroundColor: '#ffffff',
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+    gap: 12,
+  },
+  cancelButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#ffffff',
+    gap: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  cancelButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
     color: '#64748b',
     letterSpacing: -0.1,
   },
@@ -699,15 +695,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 16,
-    borderRadius: 16,
+    paddingVertical: 12,
+    borderRadius: 10,
     backgroundColor: '#0ea5e9',
-    gap: 8,
+    gap: 6,
     shadowColor: '#0ea5e9',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 4,
   },
   assignButtonDisabled: {
     backgroundColor: '#94a3b8',
@@ -715,8 +711,8 @@ const styles = StyleSheet.create({
     elevation: 0,
   },
   assignButtonText: {
-    fontSize: 16,
-    fontWeight: '800',
+    fontSize: 14,
+    fontWeight: '700',
     color: '#ffffff',
     letterSpacing: -0.1,
   },
@@ -726,44 +722,44 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 20,
-    paddingHorizontal: 20,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
     backgroundColor: '#ffffff',
-    borderRadius: 16,
-    marginBottom: 16,
-    borderWidth: 2,
+    borderRadius: 10,
+    marginBottom: 8,
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
-    shadowRadius: 4,
+    shadowRadius: 3,
     elevation: 1,
   },
   settingInfo: {
     flex: 1,
-    marginRight: 20,
+    marginRight: 14,
   },
   settingTitle: {
-    fontSize: 17,
-    fontWeight: '700',
+    fontSize: 14,
+    fontWeight: '600',
     color: '#0f172a',
-    marginBottom: 6,
+    marginBottom: 4,
     letterSpacing: -0.2,
   },
   settingDescription: {
-    fontSize: 15,
+    fontSize: 12,
     color: '#64748b',
-    lineHeight: 22,
+    lineHeight: 18,
     fontWeight: '500',
   },
   
   // Toggle Switch Styles
   toggle: {
-    width: 52,
-    height: 32,
-    borderRadius: 16,
+    width: 48,
+    height: 28,
+    borderRadius: 14,
     backgroundColor: '#d1d5db',
-    padding: 3,
+    padding: 2,
     justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -775,20 +771,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#0ea5e9',
     shadowColor: '#0ea5e9',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
     elevation: 2,
   },
   toggleThumb: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     backgroundColor: '#ffffff',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.15,
-    shadowRadius: 3,
-    elevation: 3,
+    shadowRadius: 2,
+    elevation: 2,
   },
   toggleThumbActive: {
     transform: [{ translateX: 20 }],
@@ -798,20 +794,20 @@ const styles = StyleSheet.create({
   statusInfo: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    padding: 16,
-    borderRadius: 12,
-    marginTop: 12,
-    gap: 12,
+    padding: 10,
+    borderRadius: 8,
+    marginTop: 8,
+    gap: 8,
     backgroundColor: '#f0f9ff',
-    borderLeftWidth: 4,
+    borderLeftWidth: 3,
     borderLeftColor: '#0ea5e9',
     borderWidth: 1,
     borderColor: '#bae6fd',
   },
   statusInfoText: {
     flex: 1,
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 12,
+    lineHeight: 18,
     color: '#0369a1',
     fontWeight: '500',
   },
@@ -820,47 +816,40 @@ const styles = StyleSheet.create({
   quarterContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
+    justifyContent: 'space-between',
     marginTop: 8,
-    marginBottom: 16,
   },
   quarterButton: {
-    flex: 1,
-    minWidth: '45%',
-    maxWidth: '48%',
-    paddingVertical: 16,
-    paddingHorizontal: 16,
+    width: '48%',
+    paddingVertical: 10,
+    paddingHorizontal: 10,
     backgroundColor: '#ffffff',
-    borderWidth: 2,
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
-    borderRadius: 16,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
+    marginBottom: 10,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
-    shadowRadius: 4,
+    shadowRadius: 3,
     elevation: 1,
   },
   quarterButtonSelected: {
     backgroundColor: '#f0f9ff',
     borderColor: '#0ea5e9',
-    shadowColor: '#0ea5e9',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    elevation: 4,
-    transform: [{ scale: 1.02 }],
+    borderWidth: 2,
   },
   quarterButtonText: {
-    fontSize: 15,
-    fontWeight: '700',
+    fontSize: 13,
+    fontWeight: '600',
     color: '#64748b',
-    letterSpacing: -0.2,
+    letterSpacing: -0.1,
     textAlign: 'center',
   },
   quarterButtonTextSelected: {
     color: '#0ea5e9',
-    fontWeight: '800',
+    fontWeight: '700',
   },
 });

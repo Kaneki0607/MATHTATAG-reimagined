@@ -68,6 +68,17 @@ interface TechnicalReport {
   category?: string;
   resolvedAt?: string;
   resolvedBy?: string;
+  // App metadata fields
+  appVersion?: string;
+  updateId?: string | null;
+  runtimeVersion?: string | null;
+  platform?: string;
+  platformVersion?: string;
+  deviceInfo?: string;
+  environment?: string;
+  buildProfile?: string;
+  expoVersion?: string;
+  submittedAt?: string;
 }
 
 export default function SuperAdminDashboard() {
@@ -134,6 +145,17 @@ export default function SuperAdminDashboard() {
   // Technical reports state
   const [showReportDetailsModal, setShowReportDetailsModal] = useState(false);
   const [selectedReport, setSelectedReport] = useState<TechnicalReport | null>(null);
+  
+  // Fullscreen image viewer state
+  const [showFullscreenImage, setShowFullscreenImage] = useState(false);
+  const [fullscreenImageUrl, setFullscreenImageUrl] = useState<string | null>(null);
+  
+  // Technical reports filtering and sorting
+  const [reportSearchQuery, setReportSearchQuery] = useState('');
+  const [reportStatusFilter, setReportStatusFilter] = useState<'all' | 'pending' | 'in_progress' | 'resolved'>('all');
+  const [reportPriorityFilter, setReportPriorityFilter] = useState<'all' | 'low' | 'medium' | 'high' | 'critical'>('all');
+  const [reportSortBy, setReportSortBy] = useState<'timestamp' | 'priority' | 'status'>('timestamp');
+  const [reportSortOrder, setReportSortOrder] = useState<'asc' | 'desc'>('desc');
   
   // Modal state
   const [showTeacherModal, setShowTeacherModal] = useState(false);
@@ -410,6 +432,16 @@ export default function SuperAdminDashboard() {
     setSelectedReport(null);
   };
 
+  const openFullscreenImage = (imageUrl: string) => {
+    setFullscreenImageUrl(imageUrl);
+    setShowFullscreenImage(true);
+  };
+
+  const closeFullscreenImage = () => {
+    setShowFullscreenImage(false);
+    setFullscreenImageUrl(null);
+  };
+
   const handleMarkReportAsDone = async (reportId: string) => {
     try {
       await updateData(`/technicalReports/${reportId}`, {
@@ -422,6 +454,53 @@ export default function SuperAdminDashboard() {
       closeReportDetails();
     } catch (error) {
       Alert.alert('Error', 'Failed to mark report as resolved');
+    }
+  };
+
+  const updateReportStatus = async (reportId: string, newStatus: 'pending' | 'in_progress' | 'resolved') => {
+    try {
+      const updatePayload: any = { status: newStatus };
+      
+      if (newStatus === 'resolved') {
+        updatePayload.resolvedAt = new Date().toISOString();
+        updatePayload.resolvedBy = getCurrentUser()?.email || 'Super Admin';
+      }
+      
+      await updateData(`/technicalReports/${reportId}`, updatePayload);
+      
+      // Update local state
+      setTechnicalReports(prev => prev.map(r => 
+        r.id === reportId ? { ...r, ...updatePayload } : r
+      ));
+      
+      if (selectedReport?.id === reportId) {
+        setSelectedReport(prev => prev ? { ...prev, ...updatePayload } : null);
+      }
+      
+      Alert.alert('Success', `Report status updated to ${newStatus.replace('_', ' ')}`);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to update report status');
+    }
+  };
+
+  const updateReportPriority = async (reportId: string, newPriority: 'low' | 'medium' | 'high' | 'critical') => {
+    try {
+      await updateData(`/technicalReports/${reportId}`, {
+        priority: newPriority
+      });
+      
+      // Update local state
+      setTechnicalReports(prev => prev.map(r => 
+        r.id === reportId ? { ...r, priority: newPriority } : r
+      ));
+      
+      if (selectedReport?.id === reportId) {
+        setSelectedReport(prev => prev ? { ...prev, priority: newPriority } : null);
+      }
+      
+      Alert.alert('Success', `Report priority updated to ${newPriority}`);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to update report priority');
     }
   };
 
@@ -562,9 +641,77 @@ export default function SuperAdminDashboard() {
     );
   };
 
+  // SuperAdmin function to update individual API key status
+  const updateApiKeyStatus = async (keyId: string, newStatus: 'active' | 'low_credits' | 'failed') => {
+    try {
+      setActionBusy(true);
+      await updateData(`/apiKeys/${keyId}`, { status: newStatus });
+      
+      // Update local state
+      setApiKeys(prevKeys => 
+        prevKeys.map(key => 
+          key.id === keyId ? { ...key, status: newStatus } : key
+        )
+      );
+      
+      Alert.alert('Success', `API key status updated to ${newStatus.replace('_', ' ')}`);
+    } catch (error) {
+      console.error('Error updating API key status:', error);
+      Alert.alert('Error', 'Failed to update API key status');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
   const filteredTeachers = (teachers || []).filter(matchesSearch);
   const filteredAdmins = (admins || []).filter(matchesSearch);
   const filteredLogs = (logs || []).filter(matchesSearch);
+  
+  // Enhanced technical reports filtering and sorting
+  const filteredAndSortedReports = (technicalReports || [])
+    .filter(report => {
+      // Search filter
+      const searchLower = reportSearchQuery.toLowerCase();
+      const matchesSearch = !reportSearchQuery ||
+        (report.ticketNumber || '').toLowerCase().includes(searchLower) ||
+        (report.reportedByName || '').toLowerCase().includes(searchLower) ||
+        (report.reportedByEmail || '').toLowerCase().includes(searchLower) ||
+        (report.description || '').toLowerCase().includes(searchLower) ||
+        (report.platform || '').toLowerCase().includes(searchLower) ||
+        (report.appVersion || '').toLowerCase().includes(searchLower);
+      
+      // Status filter
+      const matchesStatus = reportStatusFilter === 'all' || report.status === reportStatusFilter;
+      
+      // Priority filter
+      const matchesPriority = reportPriorityFilter === 'all' || report.priority === reportPriorityFilter;
+      
+      return matchesSearch && matchesStatus && matchesPriority;
+    })
+    .sort((a, b) => {
+      let aValue: any, bValue: any;
+      
+      switch (reportSortBy) {
+        case 'timestamp':
+          aValue = new Date(a.timestamp || 0).getTime();
+          bValue = new Date(b.timestamp || 0).getTime();
+          break;
+        case 'priority':
+          const priorityOrder = { critical: 4, high: 3, medium: 2, low: 1 };
+          aValue = priorityOrder[a.priority || 'medium'];
+          bValue = priorityOrder[b.priority || 'medium'];
+          break;
+        case 'status':
+          const statusOrder = { pending: 1, in_progress: 2, resolved: 3 };
+          aValue = statusOrder[a.status || 'pending'];
+          bValue = statusOrder[b.status || 'pending'];
+          break;
+        default:
+          return 0;
+      }
+      
+      return reportSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+    });
   
   // Enhanced API key filtering and sorting
   const filteredKeys = (apiKeys || [])
@@ -1042,74 +1189,79 @@ export default function SuperAdminDashboard() {
               )}
             </View>
 
-            {/* Unified Filter and Sort Controls */}
-            <View style={styles.professionalUnifiedControls}>
+            {/* Compact Filter and Sort Controls */}
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false}
+              style={styles.professionalUnifiedControls}
+              contentContainerStyle={styles.professionalUnifiedControlsContent}
+            >
               {/* Filter Section */}
-              <View style={styles.professionalFilterSection}>
-                  <Text style={styles.professionalSectionLabel}>Filter:</Text>
-                  <View style={styles.professionalFilterChips}>
-                    {(['all', 'active', 'low_credits', 'failed'] as const).map(status => (
-                      <TouchableOpacity
-                        key={status}
-                        style={[
-                          styles.professionalFilterChip,
-                          filterStatus === status && styles.professionalFilterChipActive
-                        ]}
-                        onPress={() => setFilterStatus(status)}
-                        activeOpacity={0.7}
-                      >
-                        <Text style={[
-                          styles.professionalFilterChipText,
-                          filterStatus === status && styles.professionalFilterChipTextActive
-                        ]}>
-                          {status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
+              <View style={styles.professionalFilterGroup}>
+                <Text style={styles.professionalSectionLabel}>Filter</Text>
+                <View style={styles.professionalFilterChips}>
+                  {(['all', 'active', 'low_credits', 'failed'] as const).map(status => (
+                    <TouchableOpacity
+                      key={status}
+                      style={[
+                        styles.professionalFilterChip,
+                        filterStatus === status && styles.professionalFilterChipActive
+                      ]}
+                      onPress={() => setFilterStatus(status)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[
+                        styles.professionalFilterChipText,
+                        filterStatus === status && styles.professionalFilterChipTextActive
+                      ]}>
+                        {status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
-                
-                {/* Sort Section */}
-                <View style={styles.professionalSortSection}>
-                  <Text style={styles.professionalSectionLabel}>Sort:</Text>
-                  <View style={styles.professionalSortChips}>
-                    {(['addedAt', 'lastUsed', 'usageCount', 'creditsRemaining'] as const).map(sort => (
-                      <TouchableOpacity
-                        key={sort}
-                        style={[
-                          styles.professionalSortChip,
-                          sortBy === sort && styles.professionalSortChipActive
-                        ]}
-                        onPress={() => {
-                          if (sortBy === sort) {
-                            setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
-                          } else {
-                            setSortBy(sort);
-                            setSortOrder('desc');
-                          }
-                        }}
-                        activeOpacity={0.7}
-                      >
-                        <Text style={[
-                          styles.professionalSortChipText,
-                          sortBy === sort && styles.professionalSortChipTextActive
-                        ]}>
-                          {sort === 'addedAt' ? 'Added' : 
-                           sort === 'lastUsed' ? 'Last Used' :
-                           sort === 'usageCount' ? 'Uses' : 'Credits'}
-                        </Text>
-                        {sortBy === sort && (
-                          <MaterialIcons 
-                            name={sortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
-                            size={12} 
-                            color={sortBy === sort ? '#ffffff' : '#64748b'} 
-                          />
-                        )}
-                      </TouchableOpacity>
-                    ))}
-                  </View>
+              </View>
+              
+              {/* Sort Section */}
+              <View style={styles.professionalSortGroup}>
+                <Text style={styles.professionalSectionLabel}>Sort</Text>
+                <View style={styles.professionalSortChips}>
+                  {(['addedAt', 'lastUsed', 'usageCount', 'creditsRemaining'] as const).map(sort => (
+                    <TouchableOpacity
+                      key={sort}
+                      style={[
+                        styles.professionalSortChip,
+                        sortBy === sort && styles.professionalSortChipActive
+                      ]}
+                      onPress={() => {
+                        if (sortBy === sort) {
+                          setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                        } else {
+                          setSortBy(sort);
+                          setSortOrder('desc');
+                        }
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[
+                        styles.professionalSortChipText,
+                        sortBy === sort && styles.professionalSortChipTextActive
+                      ]}>
+                        {sort === 'addedAt' ? 'Added' : 
+                         sort === 'lastUsed' ? 'Last Used' :
+                         sort === 'usageCount' ? 'Uses' : 'Credits'}
+                      </Text>
+                      {sortBy === sort && (
+                        <MaterialIcons 
+                          name={sortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                          size={10} 
+                          color={sortBy === sort ? '#ffffff' : '#64748b'} 
+                        />
+                      )}
+                    </TouchableOpacity>
+                  ))}
                 </View>
-            </View>
+              </View>
+            </ScrollView>
 
             {/* Bulk Actions */}
             {selectedKeys.size > 0 && (
@@ -1222,6 +1374,57 @@ export default function SuperAdminDashboard() {
                           <Text style={styles.professionalApiKeyDetailText}>{apiKey.addedAt ? new Date(apiKey.addedAt).toLocaleDateString() : 'Unknown'}</Text>
                         </View>
                       </View>
+
+                      {/* SuperAdmin Status Controls */}
+                      <View style={styles.professionalStatusControls}>
+                        <Text style={styles.professionalStatusLabel}>Status:</Text>
+                        <View style={styles.professionalStatusButtons}>
+                          <TouchableOpacity
+                            style={[
+                              styles.professionalStatusButton,
+                              apiKey.status === 'active' && styles.professionalStatusButtonActive
+                            ]}
+                            onPress={() => updateApiKeyStatus(apiKey.id, 'active')}
+                          >
+                            <Text style={[
+                              styles.professionalStatusButtonText,
+                              apiKey.status === 'active' && styles.professionalStatusButtonTextActive
+                            ]}>
+                              Active
+                            </Text>
+                          </TouchableOpacity>
+                          
+                          <TouchableOpacity
+                            style={[
+                              styles.professionalStatusButton,
+                              apiKey.status === 'low_credits' && styles.professionalStatusButtonActive
+                            ]}
+                            onPress={() => updateApiKeyStatus(apiKey.id, 'low_credits')}
+                          >
+                            <Text style={[
+                              styles.professionalStatusButtonText,
+                              apiKey.status === 'low_credits' && styles.professionalStatusButtonTextActive
+                            ]}>
+                              Low Credits
+                            </Text>
+                          </TouchableOpacity>
+                          
+                          <TouchableOpacity
+                            style={[
+                              styles.professionalStatusButton,
+                              apiKey.status === 'failed' && styles.professionalStatusButtonActive
+                            ]}
+                            onPress={() => updateApiKeyStatus(apiKey.id, 'failed')}
+                          >
+                            <Text style={[
+                              styles.professionalStatusButtonText,
+                              apiKey.status === 'failed' && styles.professionalStatusButtonTextActive
+                            ]}>
+                              Failed
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
                     </View>
                   </View>
                   
@@ -1287,7 +1490,7 @@ export default function SuperAdminDashboard() {
             {/* Maintenance Status Card */}
             <View style={styles.updateCard}>
               <View style={styles.updateHeader}>
-                <MaterialIcons name="build" size={24} color="#ef4444" />
+                <MaterialIcons name="build" size={18} color="#ef4444" />
                 <Text style={styles.updateTitle}>Maintenance Mode</Text>
               </View>
               <Text style={styles.updateVersion}>Version: {maintenanceStatus.version}</Text>
@@ -1308,7 +1511,7 @@ export default function SuperAdminDashboard() {
                   setShowMaintenanceModal(true);
                 }}
               >
-                <MaterialIcons name="edit" size={20} color="#ffffff" />
+                <MaterialIcons name="edit" size={16} color="#ffffff" />
                 <Text style={styles.updateEditButtonText}>Edit Maintenance Settings</Text>
               </TouchableOpacity>
             </View>
@@ -1316,7 +1519,7 @@ export default function SuperAdminDashboard() {
             {/* Update Notification Card */}
             <View style={styles.updateCard}>
               <View style={styles.updateHeader}>
-                <MaterialIcons name="system-update" size={24} color="#0ea5e9" />
+                <MaterialIcons name="system-update" size={18} color="#0ea5e9" />
                 <Text style={styles.updateTitle}>Update Notifications</Text>
               </View>
               <Text style={styles.updateVersion}>{updateNotification.version}</Text>
@@ -1345,7 +1548,7 @@ export default function SuperAdminDashboard() {
                   setShowUpdateModal(true);
                 }}
               >
-                <MaterialIcons name="edit" size={20} color="#ffffff" />
+                <MaterialIcons name="edit" size={16} color="#ffffff" />
                 <Text style={styles.updateEditButtonText}>Edit Update Settings</Text>
               </TouchableOpacity>
             </View>
@@ -1392,48 +1595,155 @@ export default function SuperAdminDashboard() {
               </TouchableOpacity>
             </View>
             
-            {/* Reports Stats */}
+            {/* Compact Reports Stats */}
             <View style={styles.reportsStatsContainer}>
               <View style={styles.reportsStatCard}>
-                <View style={[styles.reportsStatIcon, { backgroundColor: '#fef3c7' }]}>
-                  <MaterialIcons name="schedule" size={18} color="#f59e0b" />
-                </View>
-                <View style={styles.reportsStatInfo}>
-                  <Text style={styles.reportsStatNumber}>
-                    {technicalReports.filter(r => r.status === 'pending' || !r.status).length}
-                  </Text>
-                  <Text style={styles.reportsStatLabel}>Pending</Text>
-                </View>
+                <MaterialIcons name="schedule" size={14} color="#f59e0b" />
+                <Text style={styles.reportsStatNumber}>
+                  {technicalReports.filter(r => r.status === 'pending' || !r.status).length}
+                </Text>
+                <Text style={styles.reportsStatLabel}>Pending</Text>
               </View>
               
               <View style={styles.reportsStatCard}>
-                <View style={[styles.reportsStatIcon, { backgroundColor: '#dbeafe' }]}>
-                  <MaterialIcons name="hourglass-empty" size={18} color="#3b82f6" />
-                </View>
-                <View style={styles.reportsStatInfo}>
-                  <Text style={styles.reportsStatNumber}>
-                    {technicalReports.filter(r => r.status === 'in_progress').length}
-                  </Text>
-                  <Text style={styles.reportsStatLabel}>In Progress</Text>
-                </View>
+                <MaterialIcons name="hourglass-empty" size={14} color="#3b82f6" />
+                <Text style={styles.reportsStatNumber}>
+                  {technicalReports.filter(r => r.status === 'in_progress').length}
+                </Text>
+                <Text style={styles.reportsStatLabel}>In Progress</Text>
               </View>
               
               <View style={styles.reportsStatCard}>
-                <View style={[styles.reportsStatIcon, { backgroundColor: '#d1fae5' }]}>
-                  <MaterialIcons name="check-circle" size={18} color="#10b981" />
-                </View>
-                <View style={styles.reportsStatInfo}>
-                  <Text style={styles.reportsStatNumber}>
-                    {technicalReports.filter(r => r.status === 'resolved').length}
-                  </Text>
-                  <Text style={styles.reportsStatLabel}>Resolved</Text>
-                </View>
+                <MaterialIcons name="check-circle" size={14} color="#10b981" />
+                <Text style={styles.reportsStatNumber}>
+                  {technicalReports.filter(r => r.status === 'resolved').length}
+                </Text>
+                <Text style={styles.reportsStatLabel}>Resolved</Text>
               </View>
             </View>
           </View>
 
+          {/* Compact Search and Filter Controls */}
+          <View style={styles.reportsControls}>
+            {/* Search Bar */}
+            <View style={styles.reportsSearchContainer}>
+              <MaterialIcons name="search" size={18} color="#9ca3af" />
+              <TextInput
+                style={styles.reportsSearchInput}
+                placeholder="Search reports..."
+                placeholderTextColor="#9ca3af"
+                value={reportSearchQuery}
+                onChangeText={setReportSearchQuery}
+              />
+              {reportSearchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => setReportSearchQuery('')} style={styles.reportsClearButton}>
+                  <MaterialIcons name="clear" size={16} color="#9ca3af" />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Compact Filter Row */}
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false}
+              style={styles.reportsFiltersScroll}
+              contentContainerStyle={styles.reportsFiltersContent}
+            >
+              {/* Status Filters */}
+              <View style={styles.reportsFilterGroup}>
+                <Text style={styles.reportsFilterLabel}>Status</Text>
+                <View style={styles.reportsFilterChips}>
+                  {(['all', 'pending', 'in_progress', 'resolved'] as const).map(status => (
+                    <TouchableOpacity
+                      key={status}
+                      style={[
+                        styles.reportsFilterChip,
+                        reportStatusFilter === status && styles.reportsFilterChipActive
+                      ]}
+                      onPress={() => setReportStatusFilter(status)}
+                    >
+                      <Text style={[
+                        styles.reportsFilterChipText,
+                        reportStatusFilter === status && styles.reportsFilterChipTextActive
+                      ]}>
+                        {status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {/* Priority Filters */}
+              <View style={styles.reportsFilterGroup}>
+                <Text style={styles.reportsFilterLabel}>Priority</Text>
+                <View style={styles.reportsFilterChips}>
+                  {(['all', 'critical', 'high', 'medium', 'low'] as const).map(priority => (
+                    <TouchableOpacity
+                      key={priority}
+                      style={[
+                        styles.reportsFilterChip,
+                        reportPriorityFilter === priority && styles.reportsFilterChipActive
+                      ]}
+                      onPress={() => setReportPriorityFilter(priority)}
+                    >
+                      <Text style={[
+                        styles.reportsFilterChipText,
+                        reportPriorityFilter === priority && styles.reportsFilterChipTextActive
+                      ]}>
+                        {priority.charAt(0).toUpperCase() + priority.slice(1)}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {/* Sort Controls */}
+              <View style={styles.reportsFilterGroup}>
+                <Text style={styles.reportsFilterLabel}>Sort</Text>
+                <View style={styles.reportsFilterChips}>
+                  {(['timestamp', 'priority', 'status'] as const).map(sort => (
+                    <TouchableOpacity
+                      key={sort}
+                      style={[
+                        styles.reportsFilterChip,
+                        reportSortBy === sort && styles.reportsFilterChipActive
+                      ]}
+                      onPress={() => {
+                        if (reportSortBy === sort) {
+                          setReportSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                        } else {
+                          setReportSortBy(sort);
+                          setReportSortOrder('desc');
+                        }
+                      }}
+                    >
+                      <Text style={[
+                        styles.reportsFilterChipText,
+                        reportSortBy === sort && styles.reportsFilterChipTextActive
+                      ]}>
+                        {sort.charAt(0).toUpperCase() + sort.slice(1)}
+                      </Text>
+                      {reportSortBy === sort && (
+                        <MaterialIcons 
+                          name={reportSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                          size={10} 
+                          color="#ffffff" 
+                        />
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            </ScrollView>
+
+            {/* Results Count */}
+            <Text style={styles.reportsResultsCount}>
+              {filteredAndSortedReports.length} of {technicalReports.length} reports
+            </Text>
+          </View>
+
           <FlatList
-            data={technicalReports || []}
+            data={filteredAndSortedReports || []}
             keyExtractor={(item) => item.id}
             refreshing={refreshing}
             onRefresh={onRefresh}
@@ -1445,22 +1755,36 @@ export default function SuperAdminDashboard() {
                 onPress={() => openReportDetails(report)}
                 activeOpacity={0.85}
               >
-                {/* Status Stripe */}
+                {/* Priority & Status Stripe */}
                 <View style={[
                   styles.reportStatusStripe,
-                  (report.status === 'pending' || !report.status) && { backgroundColor: '#f59e0b' },
-                  report.status === 'in_progress' && { backgroundColor: '#3b82f6' },
-                  report.status === 'resolved' && { backgroundColor: '#10b981' }
+                  report.priority === 'critical' && { backgroundColor: '#dc2626' },
+                  report.priority === 'high' && { backgroundColor: '#f59e0b' },
+                  report.priority === 'medium' && { backgroundColor: '#3b82f6' },
+                  (!report.priority || report.priority === 'low') && { backgroundColor: '#64748b' }
                 ]} />
                 
                 <View style={styles.reportCardContent}>
-                  {/* Header Section */}
+                  {/* Compact Header */}
                   <View style={styles.reportCardHeader}>
-                    <View style={styles.reportTicketSection}>
-                      <MaterialIcons name="confirmation-number" size={20} color="#0ea5e9" />
+                    <View style={styles.reportHeaderLeft}>
                       <Text style={styles.reportTicketNumber}>
                         {report.ticketNumber || report.ticketId || 'N/A'}
                       </Text>
+                      {/* Priority Badge */}
+                      {report.priority && (
+                        <View style={[
+                          styles.reportPriorityBadge,
+                          report.priority === 'critical' && styles.reportPriorityCritical,
+                          report.priority === 'high' && styles.reportPriorityHigh,
+                          report.priority === 'medium' && styles.reportPriorityMedium,
+                          report.priority === 'low' && styles.reportPriorityLow
+                        ]}>
+                          <Text style={styles.reportPriorityText}>
+                            {report.priority.charAt(0).toUpperCase()}
+                          </Text>
+                        </View>
+                      )}
                     </View>
                     
                     <View style={[
@@ -1476,7 +1800,7 @@ export default function SuperAdminDashboard() {
                           report.status === 'resolved' ? 'check-circle' :
                           'schedule'
                         } 
-                        size={12} 
+                        size={14} 
                         color={
                           report.status === 'pending' ? '#f59e0b' :
                           report.status === 'in_progress' ? '#3b82f6' :
@@ -1500,47 +1824,50 @@ export default function SuperAdminDashboard() {
                     {report.description || 'No description provided'}
                   </Text>
                   
-                  {/* Footer Section */}
+                  {/* Compact Footer */}
                   <View style={styles.reportCardFooter}>
                     <View style={styles.reportUserSection}>
-                      <View style={styles.reportUserAvatar}>
-                        <MaterialCommunityIcons name="account" size={14} color="#ffffff" />
-                      </View>
-                      <View style={styles.reportUserInfo}>
-                        <Text style={styles.reportUserName} numberOfLines={1}>
-                          {report.reportedByName || report.reportedByEmail || 'Unknown'}
-                        </Text>
-                        <Text style={styles.reportUserRole}>
-                          {report.userRole?.toUpperCase() || 'ADMIN'}
-                        </Text>
-                      </View>
+                      <Text style={styles.reportUserName} numberOfLines={1}>
+                        {report.reportedByName || report.reportedByEmail || 'Unknown'}
+                      </Text>
+                      <Text style={styles.reportUserRole}>
+                        {report.userRole?.toUpperCase() || 'ADMIN'}
+                      </Text>
                     </View>
                     
                     <View style={styles.reportMetaSection}>
                       {report.screenshots && report.screenshots.length > 0 && (
                         <View style={styles.reportScreenshotBadge}>
-                          <MaterialIcons name="image" size={14} color="#64748b" />
+                          <MaterialIcons name="image" size={12} color="#64748b" />
                           <Text style={styles.reportScreenshotCount}>{report.screenshots.length}</Text>
                         </View>
                       )}
                       
-                      <View style={styles.reportTimeSection}>
-                        <MaterialIcons name="access-time" size={14} color="#94a3b8" />
-                        <Text style={styles.reportTimestamp}>
-                          {report.timestamp ? new Date(report.timestamp).toLocaleDateString('en-US', { 
-                            month: 'short', 
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          }) : 'Unknown'}
-                        </Text>
-                      </View>
+                      <Text style={styles.reportTimestamp}>
+                        {report.timestamp ? new Date(report.timestamp).toLocaleDateString('en-US', { 
+                          month: 'short', 
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        }) : 'Unknown'}
+                      </Text>
                     </View>
                   </View>
+
+                  {/* Metadata Preview - Compact */}
+                  {(report.appVersion || report.platform || report.deviceInfo) && (
+                    <View style={styles.reportMetadataPreview}>
+                      <Text style={styles.reportMetadataText} numberOfLines={1}>
+                        {report.appVersion && `v${report.appVersion}`}
+                        {report.platform && ` • ${report.platform.charAt(0).toUpperCase() + report.platform.slice(1)}`}
+                        {report.deviceInfo && ` • ${report.deviceInfo.split('(')[0].trim()}`}
+                      </Text>
+                    </View>
+                  )}
                 </View>
                 
                 <View style={styles.reportCardArrow}>
-                  <MaterialIcons name="chevron-right" size={24} color="#cbd5e1" />
+                  <MaterialIcons name="chevron-right" size={20} color="#cbd5e1" />
                 </View>
               </TouchableOpacity>
             )}
@@ -1853,7 +2180,7 @@ export default function SuperAdminDashboard() {
                           selectedReport.status === 'pending' ? 'schedule' :
                           selectedReport.status === 'in_progress' ? 'hourglass-empty' :
                           selectedReport.status === 'resolved' ? 'check-circle' :
-                          'schedule' // Default to pending icon
+                          'schedule'
                         } 
                         size={16} 
                         color="#ffffff" 
@@ -1864,6 +2191,66 @@ export default function SuperAdminDashboard() {
                     </View>
                     
                     <Text style={styles.reportDetailsTicketId}>#{selectedReport.ticketNumber || selectedReport.ticketId || 'N/A'}</Text>
+                  </View>
+                </View>
+
+                {/* Status & Priority Management */}
+                <View style={styles.reportDetailsManagement}>
+                  <Text style={styles.reportDetailsManagementTitle}>Ticket Management</Text>
+                  
+                  {/* Status Control */}
+                  <View style={styles.reportDetailsControlGroup}>
+                    <Text style={styles.reportDetailsControlLabel}>Status</Text>
+                    <View style={styles.reportDetailsControlButtons}>
+                      {(['pending', 'in_progress', 'resolved'] as const).map(status => (
+                        <TouchableOpacity
+                          key={status}
+                          style={[
+                            styles.reportDetailsControlButton,
+                            selectedReport.status === status && styles.reportDetailsControlButtonActive,
+                            status === 'pending' && styles.reportDetailsControlPending,
+                            status === 'in_progress' && styles.reportDetailsControlInProgress,
+                            status === 'resolved' && styles.reportDetailsControlResolved
+                          ]}
+                          onPress={() => updateReportStatus(selectedReport.id, status)}
+                        >
+                          <Text style={[
+                            styles.reportDetailsControlButtonText,
+                            selectedReport.status === status && styles.reportDetailsControlButtonTextActive
+                          ]}>
+                            {status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Priority Control */}
+                  <View style={styles.reportDetailsControlGroup}>
+                    <Text style={styles.reportDetailsControlLabel}>Priority</Text>
+                    <View style={styles.reportDetailsControlButtons}>
+                      {(['low', 'medium', 'high', 'critical'] as const).map(priority => (
+                        <TouchableOpacity
+                          key={priority}
+                          style={[
+                            styles.reportDetailsControlButton,
+                            selectedReport.priority === priority && styles.reportDetailsControlButtonActive,
+                            priority === 'critical' && styles.reportDetailsControlCritical,
+                            priority === 'high' && styles.reportDetailsControlHigh,
+                            priority === 'medium' && styles.reportDetailsControlMedium,
+                            priority === 'low' && styles.reportDetailsControlLow
+                          ]}
+                          onPress={() => updateReportPriority(selectedReport.id, priority)}
+                        >
+                          <Text style={[
+                            styles.reportDetailsControlButtonText,
+                            selectedReport.priority === priority && styles.reportDetailsControlButtonTextActive
+                          ]}>
+                            {priority.charAt(0).toUpperCase() + priority.slice(1)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
                   </View>
                 </View>
 
@@ -1926,15 +2313,83 @@ export default function SuperAdminDashboard() {
                   <Text style={styles.reportDetailsDescription}>{selectedReport.description || 'No description provided'}</Text>
                 </View>
 
+                {/* App Metadata Section */}
+                {(selectedReport.appVersion || selectedReport.platform || selectedReport.deviceInfo) && (
+                  <View style={styles.reportDetailsMetadataContainer}>
+                    <Text style={styles.reportDetailsMetadataTitle}>Technical Information</Text>
+                    <View style={styles.reportDetailsMetadataContent}>
+                      {selectedReport.appVersion && (
+                        <View style={styles.metadataRow}>
+                          <MaterialIcons name="info" size={16} color="#0ea5e9" />
+                          <Text style={styles.metadataLabel}>App Version:</Text>
+                          <Text style={styles.metadataValue}>{selectedReport.appVersion}</Text>
+                        </View>
+                      )}
+                      
+                      {selectedReport.updateId && (
+                        <View style={styles.metadataRow}>
+                          <MaterialIcons name="update" size={16} color="#0ea5e9" />
+                          <Text style={styles.metadataLabel}>Update ID:</Text>
+                          <Text style={styles.metadataValue}>{selectedReport.updateId.substring(0, 12)}...</Text>
+                        </View>
+                      )}
+                      
+                      {selectedReport.platform && (
+                        <View style={styles.metadataRow}>
+                          <MaterialIcons name="phone-android" size={16} color="#0ea5e9" />
+                          <Text style={styles.metadataLabel}>Platform:</Text>
+                          <Text style={styles.metadataValue}>
+                            {selectedReport.platform.charAt(0).toUpperCase() + selectedReport.platform.slice(1)} {selectedReport.platformVersion}
+                          </Text>
+                        </View>
+                      )}
+                      
+                      {selectedReport.deviceInfo && (
+                        <View style={styles.metadataRow}>
+                          <MaterialIcons name="devices" size={16} color="#0ea5e9" />
+                          <Text style={styles.metadataLabel}>Device:</Text>
+                          <Text style={styles.metadataValue}>{selectedReport.deviceInfo}</Text>
+                        </View>
+                      )}
+                      
+                      {selectedReport.environment && (
+                        <View style={styles.metadataRow}>
+                          <MaterialIcons name="cloud" size={16} color="#0ea5e9" />
+                          <Text style={styles.metadataLabel}>Environment:</Text>
+                          <Text style={styles.metadataValue}>
+                            {selectedReport.environment.charAt(0).toUpperCase() + selectedReport.environment.slice(1)}
+                          </Text>
+                        </View>
+                      )}
+                      
+                      {selectedReport.buildProfile && selectedReport.buildProfile !== 'Unknown' && (
+                        <View style={styles.metadataRow}>
+                          <MaterialIcons name="build" size={16} color="#0ea5e9" />
+                          <Text style={styles.metadataLabel}>Build Profile:</Text>
+                          <Text style={styles.metadataValue}>{selectedReport.buildProfile}</Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                )}
+
                 {/* Screenshots */}
                 {selectedReport.screenshots && selectedReport.screenshots.length > 0 && (
                   <View style={styles.reportDetailsScreenshotsContainer}>
-                    <Text style={styles.reportDetailsScreenshotsTitle}>Screenshots</Text>
+                    <Text style={styles.reportDetailsScreenshotsTitle}>Screenshots ({selectedReport.screenshots.length})</Text>
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportDetailsScreenshotsScroll}>
                       {selectedReport.screenshots.map((screenshot, index) => (
-                        <View key={index} style={styles.reportDetailsScreenshotWrapper}>
+                        <TouchableOpacity 
+                          key={index} 
+                          style={styles.reportDetailsScreenshotWrapper}
+                          onPress={() => openFullscreenImage(screenshot)}
+                          activeOpacity={0.8}
+                        >
                           <Image source={{ uri: screenshot }} style={styles.reportDetailsScreenshot} />
-                        </View>
+                          <View style={styles.screenshotOverlay}>
+                            <MaterialIcons name="zoom-in" size={24} color="#ffffff" />
+                          </View>
+                        </TouchableOpacity>
                       ))}
                     </ScrollView>
                   </View>
@@ -2359,6 +2814,40 @@ export default function SuperAdminDashboard() {
           </View>
         </View>
       </Modal>
+
+      {/* Fullscreen Image Viewer Modal */}
+      <Modal
+        visible={showFullscreenImage}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={closeFullscreenImage}
+      >
+        <View style={styles.fullscreenImageOverlay}>
+          <TouchableOpacity 
+            style={styles.fullscreenCloseButton}
+            onPress={closeFullscreenImage}
+            activeOpacity={0.8}
+          >
+            <MaterialIcons name="close" size={32} color="#ffffff" />
+          </TouchableOpacity>
+          
+          {fullscreenImageUrl && (
+            <Image 
+              source={{ uri: fullscreenImageUrl }} 
+              style={styles.fullscreenImage}
+              resizeMode="contain"
+            />
+          )}
+          
+          <TouchableOpacity 
+            style={styles.fullscreenTapArea}
+            onPress={closeFullscreenImage}
+            activeOpacity={1}
+          >
+            <View />
+          </TouchableOpacity>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2412,7 +2901,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   adminWelcomeTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
   },
@@ -2440,7 +2929,7 @@ const styles = StyleSheet.create({
     minHeight: 120,
   },
   statNumber: {
-    fontSize: 32,
+    fontSize: 20,
     fontWeight: '800',
     color: '#ffffff',
     marginTop: 8,
@@ -2463,7 +2952,7 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   overviewTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 16,
@@ -2497,7 +2986,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   sectionTitle: {
-    fontSize: 28,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -2534,7 +3023,7 @@ const styles = StyleSheet.create({
     paddingVertical: 60,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#64748b',
     marginTop: 16,
     fontWeight: '500',
@@ -2554,7 +3043,7 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   emptyTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
     color: '#374151',
     marginTop: 20,
@@ -2599,7 +3088,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   teacherName: {
-    fontSize: 18,
+    fontSize: 15,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 4,
@@ -2702,7 +3191,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   adminCardName: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: '#1e293b',
   },
@@ -2917,7 +3406,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#f1f5f9',
   },
   modalTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -2985,7 +3474,7 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   profileName: {
-    fontSize: 26,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 20,
@@ -3021,7 +3510,7 @@ const styles = StyleSheet.create({
     paddingVertical: 32,
   },
   detailsTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 24,
@@ -3044,7 +3533,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   detailValue: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#1e293b',
     fontWeight: '600',
   },
@@ -3088,7 +3577,7 @@ const styles = StyleSheet.create({
   modalActionText: {
     color: '#ffffff',
     fontWeight: '700',
-    fontSize: 15,
+    fontSize: 14,
     letterSpacing: 0.3,
   },
   
@@ -3122,7 +3611,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   apiKeyStatNumber: {
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 4,
@@ -3358,7 +3847,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   apiKeyDetailTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     marginTop: 12,
@@ -3466,7 +3955,7 @@ const styles = StyleSheet.create({
   },
   professionalStatsRow: {
     flexDirection: 'row',
-    gap: 16,
+    gap: 12,
   },
   professionalStatItem: {
     flexDirection: 'row',
@@ -3479,14 +3968,14 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   professionalStatText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
     color: '#64748b',
   },
   professionalControls: {
     backgroundColor: '#ffffff',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
   },
@@ -3495,53 +3984,52 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#f8fafc',
     borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    marginBottom: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 8,
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
   professionalSearchInput: {
     flex: 1,
-    fontSize: 14,
+    fontSize: 13,
     color: '#1e293b',
-    marginLeft: 8,
+    marginLeft: 6,
     fontWeight: '500',
   },
   professionalClearButton: {
     padding: 2,
   },
   professionalUnifiedControls: {
-    marginBottom: 12,
+    marginBottom: 8,
   },
-  professionalUnifiedScroll: {
-    paddingRight: 16,
+  professionalUnifiedControlsContent: {
+    paddingRight: 12,
   },
-  professionalFilterSection: {
-    marginTop: 6,
+  professionalFilterGroup: {
+    marginRight: 16,
   },
-  professionalSortSection: {
-    marginTop: 14,
-    marginBottom: 6,
+  professionalSortGroup: {
+    marginRight: 16,
   },
   professionalSectionLabel: {
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '600',
     color: '#64748b',
-    marginBottom: 6,
+    marginBottom: 4,
   },
   professionalFilterChips: {
     flexDirection: 'row',
-    gap: 6,
+    gap: 4,
   },
   professionalSortChips: {
     flexDirection: 'row',
-    gap: 6,
+    gap: 4,
   },
   professionalFilterChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
     backgroundColor: '#f1f5f9',
     borderWidth: 1,
     borderColor: '#e2e8f0',
@@ -3551,7 +4039,7 @@ const styles = StyleSheet.create({
     borderColor: '#0ea5e9',
   },
   professionalFilterChipText: {
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '600',
     color: '#64748b',
   },
@@ -3568,20 +4056,20 @@ const styles = StyleSheet.create({
   professionalSortChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 10,
     backgroundColor: '#f1f5f9',
     borderWidth: 1,
     borderColor: '#e2e8f0',
-    gap: 4,
+    gap: 3,
   },
   professionalSortChipActive: {
     backgroundColor: '#0ea5e9',
     borderColor: '#0ea5e9',
   },
   professionalSortChipText: {
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '600',
     color: '#64748b',
   },
@@ -3736,6 +4224,44 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '500',
     color: '#64748b',
+  },
+  professionalStatusControls: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  professionalStatusLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 6,
+  },
+  professionalStatusButtons: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  professionalStatusButton: {
+    flex: 1,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+  professionalStatusButtonActive: {
+    backgroundColor: '#0ea5e9',
+    borderColor: '#0ea5e9',
+  },
+  professionalStatusButtonText: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  professionalStatusButtonTextActive: {
+    color: '#ffffff',
   },
   professionalDeleteButton: {
     padding: 6,
@@ -4665,44 +5191,44 @@ const styles = StyleSheet.create({
   // Update Card Styles
   updateCard: {
     backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
     borderWidth: 1,
     borderColor: '#e5e7eb',
   },
   updateHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 10,
   },
   updateTitle: {
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: '700',
     color: '#1e293b',
-    marginLeft: 12,
+    marginLeft: 8,
   },
   updateVersion: {
-    fontSize: 24,
+    fontSize: 16,
     fontWeight: '800',
     color: '#0ea5e9',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   updateMessage: {
-    fontSize: 14,
+    fontSize: 12,
     color: '#64748b',
-    lineHeight: 20,
-    marginBottom: 16,
+    lineHeight: 16,
+    marginBottom: 12,
   },
   updateStatus: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 12,
   },
   statusIndicator: {
     width: 12,
@@ -4717,7 +5243,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#10b981',
   },
   statusText: {
-    fontSize: 14,
+    fontSize: 11,
     fontWeight: '600',
     color: '#64748b',
   },
@@ -4745,13 +5271,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#0ea5e9',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    gap: 6,
   },
   updateEditButtonText: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '600',
     color: '#ffffff',
   },
@@ -4884,12 +5410,24 @@ const styles = StyleSheet.create({
   },
   reportDetailsScreenshotWrapper: {
     marginRight: 12,
+    position: 'relative',
   },
   reportDetailsScreenshot: {
     width: 120,
     height: 120,
     borderRadius: 12,
     backgroundColor: '#f1f5f9',
+  },
+  screenshotOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   reportDetailsResolutionInfo: {
     backgroundColor: '#f0fdf4',
@@ -5098,23 +5636,23 @@ const styles = StyleSheet.create({
   },
   reportsStatsContainer: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
+    marginTop: 12,
   },
   reportsStatCard: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
     backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 12,
-    gap: 10,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    padding: 8,
+    alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
-    shadowRadius: 3,
-    elevation: 2,
+    shadowRadius: 2,
+    elevation: 1,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+    gap: 4,
   },
   reportsStatIcon: {
     width: 36,
@@ -5127,102 +5665,112 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   reportsStatNumber: {
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
-    lineHeight: 24,
   },
   reportsStatLabel: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '600',
     color: '#64748b',
-    marginTop: 2,
+    textAlign: 'center',
   },
   reportsList: {
-    padding: 16,
-    paddingBottom: 150,
-    gap: 12,
+    padding: 8,
+    paddingBottom: 100,
   },
   reportCard: {
     backgroundColor: '#ffffff',
-    borderRadius: 16,
+    borderRadius: 8,
+    marginBottom: 8,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 4,
-    overflow: 'hidden',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: '#f1f5f9',
+    flexDirection: 'row',
+    overflow: 'hidden',
   },
   reportStatusStripe: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: 5,
+    width: 3,
+    backgroundColor: '#64748b',
   },
   reportCardContent: {
-    paddingLeft: 16,
-    paddingRight: 12,
-    paddingVertical: 16,
+    flex: 1,
+    padding: 12,
   },
   reportCardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 8,
   },
-  reportTicketSection: {
+  reportHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#f0f9ff',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#bae6fd',
+    gap: 6,
+    flex: 1,
   },
   reportTicketNumber: {
-    fontSize: 15,
-    fontWeight: '800',
+    fontSize: 14,
+    fontWeight: '700',
     color: '#0ea5e9',
     letterSpacing: 0.5,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  reportPriorityBadge: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reportPriorityCritical: {
+    backgroundColor: '#dc2626',
+  },
+  reportPriorityHigh: {
+    backgroundColor: '#f59e0b',
+  },
+  reportPriorityMedium: {
+    backgroundColor: '#3b82f6',
+  },
+  reportPriorityLow: {
+    backgroundColor: '#64748b',
+  },
+  reportPriorityText: {
+    fontSize: 8,
+    fontWeight: '700',
+    color: '#ffffff',
   },
   reportStatusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    gap: 5,
-    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 10,
+    gap: 3,
   },
   reportStatusBadgePending: {
-    backgroundColor: '#fffbeb',
-    borderColor: '#fef3c7',
+    backgroundColor: '#fef3c7',
   },
   reportStatusBadgeInProgress: {
-    backgroundColor: '#eff6ff',
-    borderColor: '#dbeafe',
+    backgroundColor: '#dbeafe',
   },
   reportStatusBadgeResolved: {
-    backgroundColor: '#f0fdf4',
-    borderColor: '#d1fae5',
+    backgroundColor: '#d1fae5',
   },
   reportStatusBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
+    fontSize: 9,
+    fontWeight: '600',
     letterSpacing: 0.5,
   },
   reportDescription: {
-    fontSize: 15,
-    color: '#475569',
-    lineHeight: 21,
-    marginBottom: 14,
+    fontSize: 13,
     fontWeight: '500',
+    color: '#374151',
+    lineHeight: 18,
+    marginBottom: 8,
   },
   reportCardFooter: {
     flexDirection: 'row',
@@ -5230,72 +5778,205 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   reportUserSection: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    flex: 1,
-  },
-  reportUserAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#0ea5e9',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  reportUserInfo: {
     flex: 1,
   },
   reportUserName: {
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '600',
     color: '#1e293b',
-    marginBottom: 2,
+    marginBottom: 1,
   },
   reportUserRole: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#0ea5e9',
+    fontSize: 9,
+    fontWeight: '500',
+    color: '#64748b',
     letterSpacing: 0.5,
   },
   reportMetaSection: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 6,
   },
   reportScreenshotBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 2,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 4,
+  },
+  reportScreenshotCount: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  reportTimestamp: {
+    fontSize: 9,
+    fontWeight: '500',
+    color: '#94a3b8',
+  },
+  reportMetadataPreview: {
+    paddingVertical: 2,
+    paddingHorizontal: 4,
     backgroundColor: '#f8fafc',
+    borderRadius: 4,
+    alignSelf: 'flex-start',
+    marginBottom: 6,
+  },
+  reportMetadataText: {
+    fontSize: 9,
+    fontWeight: '500',
+    color: '#64748b',
+  },
+  reportCardArrow: {
     paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reportsControls: {
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  reportsSearchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
     borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 8,
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
-  reportScreenshotCount: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#64748b',
+  reportsSearchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: '#1e293b',
+    marginLeft: 6,
+    fontWeight: '500',
   },
-  reportTimeSection: {
+  reportsClearButton: {
+    padding: 2,
+  },
+  reportsFiltersScroll: {
+    marginBottom: 6,
+  },
+  reportsFiltersContent: {
+    paddingRight: 12,
+  },
+  reportsFilterGroup: {
+    marginRight: 16,
+  },
+  reportsFilterLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  reportsFilterChips: {
     flexDirection: 'row',
-    alignItems: 'center',
     gap: 4,
   },
-  reportTimestamp: {
+  reportsFilterChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reportsFilterChipActive: {
+    backgroundColor: '#0ea5e9',
+    borderColor: '#0ea5e9',
+  },
+  reportsFilterChipText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  reportsFilterChipTextActive: {
+    color: '#ffffff',
+  },
+  reportsResultsCount: {
+    fontSize: 10,
+    fontWeight: '500',
+    color: '#94a3b8',
+    textAlign: 'center',
+  },
+  reportDetailsManagement: {
+    backgroundColor: '#f8fafc',
+    padding: 16,
+    marginHorizontal: 20,
+    marginBottom: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reportDetailsManagementTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+  reportDetailsControlGroup: {
+    marginBottom: 12,
+  },
+  reportDetailsControlLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 8,
+  },
+  reportDetailsControlButtons: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  reportDetailsControlButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+  reportDetailsControlButtonActive: {
+    borderWidth: 2,
+  },
+  reportDetailsControlPending: {
+    backgroundColor: '#fffbeb',
+  },
+  reportDetailsControlInProgress: {
+    backgroundColor: '#eff6ff',
+  },
+  reportDetailsControlResolved: {
+    backgroundColor: '#f0fdf4',
+  },
+  reportDetailsControlCritical: {
+    backgroundColor: '#fef2f2',
+  },
+  reportDetailsControlHigh: {
+    backgroundColor: '#fef3c7',
+  },
+  reportDetailsControlMedium: {
+    backgroundColor: '#dbeafe',
+  },
+  reportDetailsControlLow: {
+    backgroundColor: '#f8fafc',
+  },
+  reportDetailsControlButtonText: {
     fontSize: 11,
     fontWeight: '600',
-    color: '#94a3b8',
+    color: '#64748b',
   },
-  reportCardArrow: {
-    position: 'absolute',
-    right: 8,
-    top: 0,
-    bottom: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
+  reportDetailsControlButtonTextActive: {
+    fontWeight: '800',
+    color: '#1e293b',
   },
   reportsEmptyContainer: {
     flex: 1,
@@ -5328,5 +6009,82 @@ const styles = StyleSheet.create({
     color: '#64748b',
     textAlign: 'center',
     lineHeight: 22,
+  },
+  
+  // Report Metadata Styles
+  reportDetailsMetadataContainer: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    margin: 20,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+  },
+  reportDetailsMetadataTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  reportDetailsMetadataContent: {
+    gap: 12,
+  },
+  metadataRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 6,
+  },
+  metadataLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748b',
+    minWidth: 100,
+  },
+  metadataValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1e293b',
+    flex: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  
+  // Fullscreen Image Viewer Styles
+  fullscreenImageOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  fullscreenCloseButton: {
+    position: 'absolute',
+    top: 60,
+    right: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  fullscreenImage: {
+    width: '100%',
+    height: '100%',
+  },
+  fullscreenTapArea: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
 });

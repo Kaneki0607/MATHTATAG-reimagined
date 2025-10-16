@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createAssignedExercise } from '../lib/entity-helpers';
 import { deleteData, pushData, readData, writeData } from '../lib/firebase-database';
 
 export interface Exercise {
@@ -199,19 +200,34 @@ export const useExercises = (currentUserId: string | null) => {
 
   const assignExercise = async (exerciseId: string, classIds: string[], deadline: string, assignedBy: string, acceptLateSubmissions: boolean = true, acceptingStatus: 'open' | 'closed' = 'open', quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => {
     try {
-      const assignments = classIds.map(classId => ({
-        exerciseId,
-        classId,
-        deadline,
-        assignedBy,
-        acceptLateSubmissions,
-        acceptingStatus,
-        quarter,
-        createdAt: new Date().toISOString(),
-      }));
-
-      const promises = assignments.map(assignment => pushData('/assignedExercises', assignment));
-      await Promise.all(promises);
+      // Create assigned exercises with readable IDs (ASSIGNED-0001, ASSIGNED-0002, etc.)
+      console.log('[AssignExercise] Creating assignments with readable IDs...');
+      
+      const promises = classIds.map(async (classId) => {
+        const result = await createAssignedExercise({
+          exerciseId,
+          classId,
+          assignedBy,
+          deadline,
+          acceptLateSubmissions,
+          acceptingStatus,
+          quarter
+        });
+        
+        if (result.success && result.assignedId) {
+          console.log(`[AssignExercise] Created assignment: ${result.assignedId} for class: ${classId}`);
+        }
+        
+        return result;
+      });
+      
+      const results = await Promise.all(promises);
+      
+      // Check if any failed
+      const failed = results.filter(r => !r.success);
+      if (failed.length > 0) {
+        throw new Error(`Failed to create ${failed.length} assignment(s)`);
+      }
 
       await loadAssignedExercises();
       return { success: true };

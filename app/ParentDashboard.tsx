@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Alert, Animated, Dimensions, Easing, Image, KeyboardAvoidingView, Modal, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import { useResponsive } from '../hooks/useResponsive';
 import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
+import { collectAppMetadata } from '../lib/app-metadata';
 import { logError, logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -91,6 +92,17 @@ interface Task {
   timeSpent?: number;
   resultId?: string;
   quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4';
+  // Student information (for completed tasks)
+  studentInfo?: {
+    studentId: string;
+    name: string;
+    sex?: string;
+    gradeSection?: string;
+  };
+  studentId?: string;
+  studentName?: string;
+  studentSex?: string;
+  studentGradeSection?: string;
 }
 
 const { width: staticWidth, height: staticHeight } = Dimensions.get('window');
@@ -213,6 +225,7 @@ export default function ParentDashboard() {
   const responsive = useResponsive();
   const layout = useResponsiveLayout();
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const [pulseAnim] = useState(new Animated.Value(1)); // For loading skeleton pulse animation
   
   // Responsive values
   const containerPadding = useResponsiveValue({
@@ -249,7 +262,8 @@ export default function ParentDashboard() {
   
   // Tasks state
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [tasksLoading, setTasksLoading] = useState(false);
+  const [tasksLoading, setTasksLoading] = useState(true); // Start as true to show loading skeleton
+  const [initialTasksLoaded, setInitialTasksLoaded] = useState(false); // Track if tasks have been loaded at least once
   
   // Refresh state
   const [refreshing, setRefreshing] = useState(false);
@@ -312,6 +326,74 @@ export default function ParentDashboard() {
     }
   }, [parentData]);
 
+  // Real-time listener for ExerciseResults to auto-update task completion status
+  useEffect(() => {
+    if (!parentData) return;
+    
+    let intervalId: ReturnType<typeof setInterval>;
+    
+    const setupRealTimeListener = async () => {
+      // Poll for updates every 10 seconds (lightweight approach)
+      intervalId = setInterval(async () => {
+        try {
+          const studentId = await getStudentId();
+          if (!studentId) return;
+          
+          // Check for new results
+          const exerciseResultsResult = await readData('/ExerciseResults');
+          if (exerciseResultsResult.data) {
+            const results = Object.values(exerciseResultsResult.data) as any[];
+            
+            // Update tasks with new completion data
+            setTasks(prevTasks => {
+              return prevTasks.map(task => {
+                if (!task.isAssignedExercise || task.status === 'completed') {
+                  return task; // Skip non-exercise tasks and already completed tasks
+                }
+                
+                // Check if there's a new completion for this task
+                const completionData = results.find((result: any) => {
+                  const resultExerciseId = result.exerciseInfo?.exerciseId || result.exerciseId;
+                  const resultAssignedExerciseId = result.assignmentMetadata?.assignedExerciseId || result.assignedExerciseId;
+                  const resultStudentId = result.studentInfo?.studentId || result.studentId;
+                  
+                  return resultExerciseId === task.exerciseId && 
+                         resultAssignedExerciseId === task.assignedExerciseId &&
+                         resultStudentId === studentId;
+                });
+                
+                if (completionData && !task.resultId) {
+                  console.log('✅ Auto-updating task to completed:', task.title);
+                  // Task just completed - update it
+                  return {
+                    ...task,
+                    status: 'completed' as const,
+                    completedAt: completionData.exerciseSession?.completedAt || new Date().toISOString(),
+                    score: completionData.resultsSummary?.meanPercentageScore || completionData.scorePercentage,
+                    timeSpent: completionData.resultsSummary?.totalTimeSpentSeconds ? completionData.resultsSummary.totalTimeSpentSeconds * 1000 : completionData.totalTimeSpent,
+                    resultId: completionData.exerciseResultId || completionData.resultId,
+                  };
+                }
+                
+                return task;
+              });
+            });
+          }
+        } catch (error) {
+          console.error('Real-time update error:', error);
+        }
+      }, 10000); // Check every 10 seconds
+    };
+    
+    setupRealTimeListener();
+    
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [parentData]);
+
   const loadParentData = async () => {
     try {
       // Get parent key from AsyncStorage
@@ -369,6 +451,27 @@ export default function ParentDashboard() {
         useNativeDriver: true,
       }),
     ]).start();
+    
+    // Pulse animation for loading skeletons
+    const pulseAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 0.5,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulseAnimation.start();
+    
+    return () => {
+      pulseAnimation.stop();
+    };
   }, [fadeAnim, translateAnim]);
 
   const loadAnnouncements = async () => {
@@ -571,11 +674,34 @@ export default function ParentDashboard() {
           enhancedQuestionResults = [];
         }
         
-        setSelectedResult({
+        // Ensure all important fields are always available with proper fallbacks
+        const mergedResult = {
           ...task,
           ...resultData.data,
-          questionResults: enhancedQuestionResults
-        });
+          questionResults: enhancedQuestionResults,
+          // Ensure studentInfo is always present
+          studentInfo: resultData.data.studentInfo || task.studentInfo || {
+            studentId: resultData.data.studentId || task.studentId,
+            name: resultData.data.studentName || task.studentName || 'Student',
+            sex: resultData.data.studentSex || task.studentSex,
+            gradeSection: resultData.data.studentGradeSection || task.studentGradeSection || 'Unknown Grade'
+          },
+          // Ensure exerciseInfo is present
+          exerciseInfo: resultData.data.exerciseInfo || {
+            exerciseId: task.exerciseId || resultData.data.exerciseId,
+            title: task.title || resultData.data.exerciseTitle,
+            category: resultData.data.exerciseCategory || 'Mathematics'
+          },
+          // Ensure assignmentMetadata is present
+          assignmentMetadata: resultData.data.assignmentMetadata || {
+            assignedExerciseId: task.assignedExerciseId || resultData.data.assignedExerciseId,
+            classId: task.classIds?.[0] || resultData.data.classId,
+            parentId: resultData.data.parentId
+          }
+        };
+        
+        console.log('Setting selected result with studentInfo:', mergedResult.studentInfo);
+        setSelectedResult(mergedResult);
         
         // Check if performance metrics already exist
         if (performanceData.data && performanceData.data.performanceMetrics) {
@@ -710,8 +836,8 @@ export default function ParentDashboard() {
     );
     
     return {
-      studentId: resultData.studentId,
-      parentId: resultData.parentId,
+      studentId: resultData.studentInfo?.studentId || resultData.studentId,
+      parentId: resultData.assignmentMetadata?.parentId || resultData.parentId,
       efficiencyScore: Math.round(efficiencyScore),
       consistencyScore: Math.round(consistencyScore),
       masteryScore: Math.round(masteryScore),
@@ -721,7 +847,7 @@ export default function ParentDashboard() {
       avgAttemptsPerQuestion: Math.round(avgAttemptsPerQuestion * 10) / 10,
       avgTimePerQuestion: Math.round(avgTimePerQuestion),
       quickCorrectAnswers: correctAnswers,
-      scorePercentage: resultData.scorePercentage || 0
+      scorePercentage: resultData.scorePercentage || resultData.resultsSummary?.meanPercentageScore || 0
     };
   };
 
@@ -744,11 +870,15 @@ export default function ParentDashboard() {
         // Handle new structure: get exerciseId from nested object
         const resultExerciseId = result.exerciseInfo?.exerciseId || result.exerciseId;
         const resultClassId = result.assignmentMetadata?.classId || result.classId;
-        const resultParentId = result.studentInfo?.studentId || result.parentId;
+        const resultStudentId = result.studentInfo?.studentId || result.studentId;
         
-        return resultExerciseId === resultData.exerciseId &&
-               resultClassId === resultData.classId &&
-               resultParentId !== resultData.parentId; // Exclude current student's result
+        const currentExerciseId = resultData.exerciseInfo?.exerciseId || resultData.exerciseId;
+        const currentClassId = resultData.assignmentMetadata?.classId || resultData.classId;
+        const currentStudentId = resultData.studentInfo?.studentId || resultData.studentId;
+        
+        return resultExerciseId === currentExerciseId &&
+               resultClassId === currentClassId &&
+               resultStudentId !== currentStudentId; // Exclude current student's result
       });
 
       console.log('calculatePerformanceMetrics: Same exercise results found:', sameExerciseResults.length);
@@ -833,8 +963,8 @@ export default function ParentDashboard() {
         );
         
         return {
-          studentId: result.studentId,
-          studentName: result.studentName || 'Unknown Student',
+          studentId: result.studentInfo?.studentId || result.studentId,
+          studentName: result.studentInfo?.name || result.studentName || 'Unknown Student',
           totalAttempts,
           totalTime,
           avgAttemptsPerQuestion,
@@ -1058,19 +1188,23 @@ export default function ParentDashboard() {
           // Handle new structure: get exerciseId from nested object
           const resultExerciseId = result.exerciseInfo?.exerciseId || result.exerciseId;
           const resultClassId = result.assignmentMetadata?.classId || result.classId;
-          const resultParentId = result.studentInfo?.studentId || result.parentId;
+          const resultStudentId = result.studentInfo?.studentId || result.studentId;
           
-          return resultExerciseId === resultData.exerciseId && 
-                 resultClassId === resultData.classId &&
-                 resultParentId !== resultData.parentId; // Exclude current student's result
+          const currentExerciseId = resultData.exerciseInfo?.exerciseId || resultData.exerciseId;
+          const currentClassId = resultData.assignmentMetadata?.classId || resultData.classId;
+          const currentStudentId = resultData.studentInfo?.studentId || resultData.studentId;
+          
+          return resultExerciseId === currentExerciseId && 
+                 resultClassId === currentClassId &&
+                 resultStudentId !== currentStudentId; // Exclude current student's result
         });
         
         console.log('Same exercise results found:', sameExerciseResults.length);
         
         if (sameExerciseResults.length > 0) {
-          const totalTime = (sameExerciseResults || []).reduce((sum, r) => sum + (r.totalTimeSpent || 0), 0);
+          const totalTime = (sameExerciseResults || []).reduce((sum, r) => sum + (r.resultsSummary?.totalTimeSpentSeconds * 1000 || r.totalTimeSpent || 0), 0);
           const avgTime = totalTime / sameExerciseResults.length;
-          const avgScore = (sameExerciseResults || []).reduce((sum, r) => sum + (r.scorePercentage || 0), 0) / sameExerciseResults.length;
+          const avgScore = (sameExerciseResults || []).reduce((sum, r) => sum + (r.resultsSummary?.meanPercentageScore || r.scorePercentage || 0), 0) / sameExerciseResults.length;
           
           // Calculate per-question averages
           const questionAverages: any = {};
@@ -1657,26 +1791,36 @@ Focus on:
 
   // Helper function to get student class ID
   const getStudentClassId = async (): Promise<string | null> => {
-    if (!parentData?.parentKey) return null;
+    if (!parentData?.parentKey) {
+      console.warn('getStudentClassId: No parent key available');
+      return null;
+    }
     
     try {
       // Resolve parent key to actual parent ID
       const parentIdResult = await readData(`/parentLoginCodes/${parentData.parentKey}`);
       if (parentIdResult.data) {
         const actualParentId = parentIdResult.data;
+        console.log('getStudentClassId: Resolved parent key to parent ID:', actualParentId);
         
         // Find the student associated with this parent
         const studentsData = await readData('/students');
         if (studentsData.data) {
           const student = Object.values(studentsData.data).find((s: any) => s.parentId === actualParentId) as any;
           if (student && student.classId) {
-            console.log('Found student class ID:', student.classId);
+            console.log('getStudentClassId: Found student class ID:', student.classId, 'for parent:', actualParentId);
             return student.classId;
+          } else {
+            console.warn('getStudentClassId: No student found with parentId:', actualParentId);
           }
+        } else {
+          console.warn('getStudentClassId: No students data available');
         }
+      } else {
+        console.warn('getStudentClassId: Invalid parent key, no mapping found:', parentData.parentKey);
       }
     } catch (error) {
-      console.warn('Could not get student class information:', error);
+      console.error('getStudentClassId: Error retrieving student class information:', error);
     }
     
     return null;
@@ -1684,26 +1828,60 @@ Focus on:
 
   // Helper function to get student ID
   const getStudentId = async (): Promise<string | null> => {
-    if (!parentData?.parentKey) return null;
+    if (!parentData?.parentKey) {
+      console.warn('getStudentId: No parent key available');
+      return null;
+    }
     
     try {
       // Resolve parent key to actual parent ID
       const parentIdResult = await readData(`/parentLoginCodes/${parentData.parentKey}`);
       if (parentIdResult.data) {
         const actualParentId = parentIdResult.data;
+        console.log('getStudentId: Resolved parent key to parent ID:', actualParentId);
         
         // Find the student associated with this parent
         const studentsData = await readData('/students');
         if (studentsData.data) {
           const student = Object.values(studentsData.data).find((s: any) => s.parentId === actualParentId) as any;
           if (student && student.studentId) {
-            console.log('Found student ID:', student.studentId);
+            console.log('getStudentId: Found student ID:', student.studentId, 'for parent:', actualParentId);
             return student.studentId;
+          } else {
+            console.warn('getStudentId: No student found with parentId:', actualParentId);
           }
+        } else {
+          console.warn('getStudentId: No students data available');
         }
+      } else {
+        console.warn('getStudentId: Invalid parent key, no mapping found:', parentData.parentKey);
       }
     } catch (error) {
-      console.warn('Could not get student ID:', error);
+      console.error('getStudentId: Error retrieving student ID:', error);
+    }
+    
+    return null;
+  };
+
+  // Helper function to get actual parent ID
+  const getActualParentId = async (): Promise<string | null> => {
+    if (!parentData?.parentKey) {
+      console.warn('getActualParentId: No parent key available');
+      return null;
+    }
+    
+    try {
+      // Resolve parent key to actual parent ID
+      const parentIdResult = await readData(`/parentLoginCodes/${parentData.parentKey}`);
+      if (parentIdResult.data) {
+        const actualParentId = parentIdResult.data;
+        console.log('getActualParentId: Resolved parent key to parent ID:', actualParentId);
+        return actualParentId;
+      } else {
+        console.warn('getActualParentId: Invalid parent key, no mapping found:', parentData.parentKey);
+      }
+    } catch (error) {
+      console.error('getActualParentId: Error retrieving actual parent ID:', error);
     }
     
     return null;
@@ -1808,17 +1986,24 @@ Focus on:
     try {
       setTasksLoading(true);
       
-      // Get student class ID and student ID for filtering
-      const [studentClassId, studentId] = await Promise.all([
+      // Get student class ID, student ID, and actual parent ID for filtering
+      console.log('loadTasks: Starting to load tasks for parent:', parentData?.parentKey);
+      const [studentClassId, studentId, actualParentId] = await Promise.all([
         getStudentClassId(),
-        getStudentId()
+        getStudentId(),
+        getActualParentId()
       ]);
       
+      console.log('loadTasks: Retrieved studentClassId:', studentClassId, 'studentId:', studentId, 'actualParentId:', actualParentId);
+      
       if (!studentClassId || !studentId) {
-        console.warn('Could not determine student class or student ID, skipping task loading');
+        console.error('loadTasks: Missing required data - studentClassId:', studentClassId, 'studentId:', studentId);
         setTasksLoading(false);
+        setInitialTasksLoaded(true); // Mark as loaded even if no data
         return;
       }
+      
+      console.log('loadTasks: Successfully identified student. ClassId:', studentClassId, 'StudentId:', studentId, 'ActualParentId:', actualParentId);
       
       // Load tasks, assigned exercises, and exercise results
       const [tasksResult, assignedExercises, exerciseResultsResult] = await Promise.all([
@@ -1867,6 +2052,9 @@ Focus on:
       }
       
       // Convert assigned exercises to tasks and check completion status from ExerciseResults
+      // CRITICAL FIX: Ensure completion status is matched ONLY to the specific student
+      // Previously, the logic used loose OR conditions that would match ANY student's completion
+      // of an assignment, causing all parents to see exercises as completed incorrectly.
       const assignedExerciseTasks: Task[] = await Promise.all(
         assignedExercises
           .filter(assignedExercise => assignedExercise.exercise) // Only include exercises that were loaded successfully
@@ -1875,26 +2063,32 @@ Focus on:
             let completionData = null;
             if (exerciseResultsResult.data) {
               const results = Object.values(exerciseResultsResult.data) as any[];
-              console.log(`Looking for completion data for exercise ${assignedExercise.exerciseId}, assignment ${assignedExercise.id}`);
+              console.log(`Looking for completion data for exercise ${assignedExercise.exerciseId}, assignment ${assignedExercise.id}, student ${studentId}`);
               console.log(`Available results:`, results.length);
               
               completionData = results.find((result: any) => {
                 // Handle new structure: get exerciseId and assignedExerciseId from nested objects
                 const resultExerciseId = result.exerciseInfo?.exerciseId || result.exerciseId;
                 const resultAssignedExerciseId = result.assignmentMetadata?.assignedExerciseId || result.assignedExerciseId;
+                const resultStudentId = result.studentInfo?.studentId || result.studentId;
+                const resultParentId = result.assignmentMetadata?.parentId || result.parentId;
                 
                 // Check if this result matches the assigned exercise
                 const exerciseMatches = resultExerciseId === assignedExercise.exerciseId;
                 const assignmentMatches = resultAssignedExerciseId === assignedExercise.id;
                 
-                // Check parent/student matching (try multiple approaches for compatibility)
-                const parentMatches = result.parentId === parentData?.parentKey || 
-                                    result.studentInfo?.studentId === studentId ||
-                                    result.assignedExerciseId === assignedExercise.id;
+                // CRITICAL: Must match BOTH the student AND the assignment
+                // Don't use OR conditions - all must match for THIS specific student
+                const studentMatches = resultStudentId === studentId;
                 
-                console.log(`Result ${result.exerciseResultId || result.resultId}: exerciseMatches=${exerciseMatches}, assignmentMatches=${assignmentMatches}, parentMatches=${parentMatches}`);
+                // CRITICAL FIX: Parent verification should use actualParentId (resolved ID), not login code
+                // The result stores actualParentId, not the login code (parentKey)
+                const parentVerified = !resultParentId || resultParentId === actualParentId;
                 
-                return exerciseMatches && assignmentMatches && parentMatches;
+                console.log(`Result ${result.exerciseResultId || result.resultId}: exerciseMatches=${exerciseMatches}, assignmentMatches=${assignmentMatches}, studentMatches=${studentMatches}, parentVerified=${parentVerified}, actualParentId=${actualParentId}, resultParentId=${resultParentId}`);
+                
+                // All conditions must be true - exercise, assignment, AND student must match
+                return exerciseMatches && assignmentMatches && studentMatches && parentVerified;
               });
               
               if (completionData) {
@@ -1914,7 +2108,7 @@ Focus on:
               classIds: [assignedExercise.classId],
               exerciseId: assignedExercise.exerciseId,
               status: completionData ? 'completed' as const : 'pending' as const,
-              completedAt: completionData?.submittedAt,
+              completedAt: completionData?.submittedAt || completionData?.exerciseSession?.completedAt,
               teacherName: assignedExercise.teacherName,
               teacherProfilePictureUrl: assignedExercise.teacherProfilePictureUrl,
               teacherGender: assignedExercise.teacherGender,
@@ -1924,7 +2118,12 @@ Focus on:
               score: completionData?.resultsSummary?.meanPercentageScore || completionData?.scorePercentage,
               timeSpent: completionData?.resultsSummary?.totalTimeSpentSeconds ? completionData.resultsSummary.totalTimeSpentSeconds * 1000 : completionData?.totalTimeSpent,
               resultId: completionData?.exerciseResultId || completionData?.resultId,
-              quarter: assignedExercise.quarter
+              quarter: assignedExercise.quarter,
+              // Include student info for proper display
+              studentInfo: completionData?.studentInfo || {
+                studentId: completionData?.studentId,
+                name: completionData?.studentName || 'Student'
+              }
             };
           })
       );
@@ -1936,8 +2135,10 @@ Focus on:
       );
       
       setTasks(sortedTasks);
+      setInitialTasksLoaded(true); // Mark as loaded
     } catch (error) {
       console.error('Failed to load tasks:', error);
+      setInitialTasksLoaded(true); // Mark as loaded even on error
     } finally {
       setTasksLoading(false);
     }
@@ -2474,7 +2675,13 @@ Focus on:
     setSubmittingReport(true);
     try {
       const timestamp = new Date().toISOString();
-      const reportId = `report_${Date.now()}`;
+      const random = Math.floor(Math.random() * 9000);
+      const ticketNumber = `TICKET${random.toString().padStart(4, '0')}`;
+      const reportId = ticketNumber;
+
+      // Collect app and device metadata
+      const metadata = await collectAppMetadata();
+      console.log('Collected app metadata for ticket:', metadata);
 
       // Upload screenshots to Firebase Storage
       const uploadedUrls: string[] = [];
@@ -2492,14 +2699,26 @@ Focus on:
 
       const report = {
         id: reportId,
+        ticketNumber: reportId,
         reportedBy: parentData?.parentKey || 'unknown',
         reportedByEmail: parentData?.email || 'unknown',
         reportedByName: parentData ? `${parentData.firstName} ${parentData.lastName}` : 'Unknown Parent',
-        userRole: 'parent',
+        userRole: 'parent' as const,
         timestamp,
         description: reportDescription.trim(),
         screenshots: uploadedUrls,
-        status: 'pending',
+        status: 'pending' as const,
+        // Add comprehensive metadata
+        appVersion: metadata.appVersion,
+        updateId: metadata.updateId,
+        runtimeVersion: metadata.runtimeVersion,
+        platform: metadata.platform,
+        platformVersion: metadata.platformVersion,
+        deviceInfo: metadata.deviceInfo,
+        environment: metadata.environment,
+        buildProfile: metadata.buildProfile,
+        expoVersion: metadata.expoVersion,
+        submittedAt: metadata.timestamp,
       };
 
       const { success, error } = await writeData(`/technicalReports/${reportId}`, report);
@@ -2698,38 +2917,63 @@ Focus on:
                 <Text style={styles.tasksPreviewTitle}>Tasks Overview</Text>
               </View>
               
-              <TouchableOpacity 
-                style={styles.tasksPreviewCard}
-                onPress={() => setActiveSection('tasks')}
-              >
-                <View style={styles.tasksPreviewContent}>
-                  <View style={styles.tasksPreviewInfo}>
-                    {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length > 0 ? (
-                      <>
-                        <Text style={styles.tasksPreviewCount}>
-                          {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} Task{tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length !== 1 ? 's' : ''} Pending
-                        </Text>
-                        <Text style={styles.tasksPreviewDescription}>
-                          {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length === 1 
-                            ? 'You have 1 exercise waiting to be completed'
-                            : `You have ${tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} exercises waiting to be completed`
-                          }
-                        </Text>
-                      </>
-                    ) : (
-                      <>
-                        <Text style={styles.tasksPreviewCount}>
-                          No Pending Tasks
-                        </Text>
-                        <Text style={styles.tasksPreviewDescription}>
-                          All exercises are completed! Check back for new assignments.
-                        </Text>
-                      </>
-                    )}
+              {tasksLoading && !initialTasksLoaded ? (
+                // Loading Skeleton
+                <Animated.View style={[styles.tasksPreviewCard, styles.loadingSkeleton, { opacity: pulseAnim }]}>
+                  <View style={styles.tasksPreviewContent}>
+                    <View style={styles.tasksPreviewInfo}>
+                      <View style={[styles.skeletonLine, styles.skeletonTitle]} />
+                      <View style={[styles.skeletonLine, styles.skeletonDescription]} />
+                    </View>
+                    <View style={styles.skeletonChevron} />
                   </View>
-                  <MaterialIcons name="chevron-right" size={24} color="#3b82f6" />
-                </View>
-              </TouchableOpacity>
+                </Animated.View>
+              ) : (
+                <Animated.View style={{ opacity: fadeAnim }}>
+                  <TouchableOpacity 
+                    style={[
+                      styles.tasksPreviewCard,
+                      tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length > 0 && styles.tasksPreviewCardPending
+                    ]}
+                    onPress={() => setActiveSection('tasks')}
+                    activeOpacity={0.8}
+                  >
+                    <View style={styles.tasksPreviewContent}>
+                      <View style={styles.tasksPreviewInfo}>
+                        {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length > 0 ? (
+                          <>
+                            <View style={styles.pendingBadge}>
+                              <MaterialCommunityIcons name="alert-circle" size={20} color="#f59e0b" />
+                              <Text style={styles.tasksPreviewCount}>
+                                {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} Task{tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length !== 1 ? 's' : ''} Pending
+                              </Text>
+                            </View>
+                            <Text style={styles.tasksPreviewDescription}>
+                              {tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length === 1 
+                                ? 'You have 1 exercise waiting to be completed'
+                                : `You have ${tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length} exercises waiting to be completed`
+                              }
+                            </Text>
+                          </>
+                        ) : (
+                          <>
+                            <View style={styles.completedBadge}>
+                              <MaterialCommunityIcons name="check-circle" size={20} color="#10b981" />
+                              <Text style={styles.tasksPreviewCountCompleted}>
+                                All Caught Up!
+                              </Text>
+                            </View>
+                            <Text style={styles.tasksPreviewDescriptionCompleted}>
+                              Great job! All exercises are completed. Check back for new assignments.
+                            </Text>
+                          </>
+                        )}
+                      </View>
+                      <MaterialIcons name="chevron-right" size={24} color={tasks.filter(t => t.isAssignedExercise && t.status === 'pending').length > 0 ? "#f59e0b" : "#10b981"} />
+                    </View>
+                  </TouchableOpacity>
+                </Animated.View>
+              )}
             </View>
 
             {/* Daily Quote Section */}
@@ -2771,10 +3015,25 @@ Focus on:
               </View>
             </View>
             
-            {tasksLoading ? (
-              <View style={styles.loadingContainer}>
-                <MaterialCommunityIcons name="loading" size={32} color="#3b82f6" />
-                <Text style={styles.loadingText}>Loading tasks...</Text>
+            {tasksLoading && !initialTasksLoaded ? (
+              // Loading Skeleton for Tasks
+              <View style={styles.tasksLoadingContainer}>
+                <Animated.View style={[styles.taskSkeletonCard, { opacity: pulseAnim }]}>
+                  <View style={styles.taskSkeletonHeader}>
+                    <View style={[styles.skeletonLine, { width: '70%', height: 20 }]} />
+                    <View style={[styles.skeletonLine, { width: 80, height: 24, borderRadius: 12 }]} />
+                  </View>
+                  <View style={[styles.skeletonLine, { width: '100%', height: 16, marginTop: 8 }]} />
+                  <View style={[styles.skeletonLine, { width: '60%', height: 14, marginTop: 12 }]} />
+                </Animated.View>
+                <Animated.View style={[styles.taskSkeletonCard, { opacity: pulseAnim }]}>
+                  <View style={styles.taskSkeletonHeader}>
+                    <View style={[styles.skeletonLine, { width: '70%', height: 20 }]} />
+                    <View style={[styles.skeletonLine, { width: 80, height: 24, borderRadius: 12 }]} />
+                  </View>
+                  <View style={[styles.skeletonLine, { width: '100%', height: 16, marginTop: 8 }]} />
+                  <View style={[styles.skeletonLine, { width: '60%', height: 14, marginTop: 12 }]} />
+                </Animated.View>
               </View>
             ) : tasks.filter(t => t.isAssignedExercise).length > 0 ? (
               <ScrollView 
@@ -2783,8 +3042,11 @@ Focus on:
                 showsVerticalScrollIndicator={false}
               >
                 {(() => {
-                  // Filter out completed tasks and group by quarter
-                  const filteredTasks = tasks.filter(t => t.isAssignedExercise && t.status !== 'completed');
+                  // Separate pending and completed tasks
+                  const pendingTasks = tasks.filter(t => t.isAssignedExercise && t.status !== 'completed');
+                  const completedTasks = tasks.filter(t => t.isAssignedExercise && t.status === 'completed');
+                  
+                  const filteredTasks = pendingTasks;
                   
                   // Sort tasks by deadline (nearest first)
                   const sortedTasks = filteredTasks.sort((a, b) => {
@@ -2928,18 +3190,23 @@ Focus on:
                   const statusInfo = getStatusInfo(task.status);
 
                   return (
-                    <View key={task.id} style={[
-                      styles.enhancedTaskItem,
-                      isOverdue && styles.overdueTaskItem,
-                      task.status === 'completed' && styles.completedTaskItem,
-                      isFirstTask && styles.firstTaskItem
-                    ]}>
+                    <Animated.View 
+                      key={task.id} 
+                      style={[
+                        styles.enhancedTaskItem,
+                        task.status === 'pending' && styles.pendingTaskItem,
+                        isOverdue && styles.overdueTaskItem,
+                        task.status === 'completed' && styles.completedTaskItem,
+                        isFirstTask && styles.firstTaskItem,
+                        { opacity: fadeAnim }
+                      ]}
+                    >
                       {/* Task Header with Icon and Status */}
                       <View style={styles.taskHeaderRow}>
                         <View style={styles.taskTitleContainer}>
                           <Text style={[
                             styles.enhancedTaskTitle,
-                            task.status === 'completed' && styles.completedTaskTitle
+                            task.status === 'completed' && styles.completedTaskTitleStrikethrough
                           ]}>
                             {task.title}
                           </Text>
@@ -3067,11 +3334,89 @@ Focus on:
                           </Text>
                         </TouchableOpacity>
                       )}
-                    </View>
+                    </Animated.View>
                   );
                       })}
                     </View>
                   ));
+                })()}
+                
+                {/* Completed Tasks Section */}
+                {(() => {
+                  const completedTasks = tasks.filter(t => t.isAssignedExercise && t.status === 'completed');
+                  
+                  if (completedTasks.length === 0) return null;
+                  
+                  return (
+                    <View style={styles.completedTasksSection}>
+                      <View style={styles.completedTasksHeader}>
+                        <MaterialCommunityIcons name="check-circle-outline" size={20} color="#10b981" />
+                        <Text style={styles.completedTasksHeaderText}>Recently Completed</Text>
+                        <View style={styles.completedBadgeSmall}>
+                          <Text style={styles.completedBadgeText}>{completedTasks.length}</Text>
+                        </View>
+                      </View>
+                      
+                      {completedTasks
+                        .sort((a, b) => new Date(b.completedAt || b.createdAt).getTime() - new Date(a.completedAt || a.createdAt).getTime())
+                        .slice(0, 3) // Show only the 3 most recent
+                        .map((task) => (
+                          <Animated.View 
+                            key={task.id}
+                            style={[styles.completedTaskItemCompact, { opacity: fadeAnim }]}
+                          >
+                            <View style={styles.completedTaskLeft}>
+                              <MaterialCommunityIcons name="check-circle" size={24} color="#10b981" />
+                              <View style={styles.completedTaskInfo}>
+                                <Text style={styles.completedTaskTitle}>{task.title}</Text>
+                                <View style={styles.completedTaskMeta}>
+                                  {task.score && (
+                                    <View style={styles.completedTaskMetaItem}>
+                                      <MaterialIcons name="star" size={14} color="#f59e0b" />
+                                      <Text style={styles.completedTaskMetaText}>{task.score}%</Text>
+                                    </View>
+                                  )}
+                                  {task.completedAt && (
+                                    <Text style={styles.completedTaskDate}>
+                                      {(() => {
+                                        const completedDate = new Date(task.completedAt);
+                                        const now = new Date();
+                                        const diffTime = now.getTime() - completedDate.getTime();
+                                        const diffHours = Math.floor(diffTime / (1000 * 60 * 60));
+                                        const diffDays = Math.floor(diffHours / 24);
+                                        
+                                        if (diffHours < 1) return 'Just now';
+                                        if (diffHours < 24) return `${diffHours}h ago`;
+                                        if (diffDays < 7) return `${diffDays}d ago`;
+                                        return completedDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                                      })()}
+                                    </Text>
+                                  )}
+                                </View>
+                              </View>
+                            </View>
+                            <TouchableOpacity 
+                              onPress={() => handleTaskAction(task)}
+                              style={styles.completedTaskViewButton}
+                            >
+                              <MaterialIcons name="visibility" size={18} color="#64748b" />
+                            </TouchableOpacity>
+                          </Animated.View>
+                        ))}
+                      
+                      {completedTasks.length > 3 && (
+                        <TouchableOpacity 
+                          style={styles.viewAllCompletedButton}
+                          onPress={() => setActiveSection('history')}
+                        >
+                          <Text style={styles.viewAllCompletedText}>
+                            View All {completedTasks.length} Completed Tasks
+                          </Text>
+                          <MaterialIcons name="arrow-forward" size={16} color="#3b82f6" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  );
                 })()}
               </ScrollView>
             ) : (
@@ -4233,7 +4578,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   welcomeTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
   },
@@ -4247,7 +4592,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   announcementTitle: {
-    fontSize: Math.min(16, staticWidth * 0.04),
+    fontSize: Math.min(15, staticWidth * 0.04),
     fontWeight: '700',
     color: '#1e293b',
   },
@@ -4287,7 +4632,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   teacherName: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: '#1e293b',
     marginBottom: 2,
@@ -4327,7 +4672,7 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   announcementTitleText: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
     color: '#1e293b',
   },
@@ -4340,7 +4685,7 @@ const styles = StyleSheet.create({
     marginBottom: 100,
   },
   studentProfileTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
     marginBottom: 16,
@@ -4375,7 +4720,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   studentName: {
-    fontSize: 20,
+    fontSize: 17,
     fontWeight: '700',
     color: '#1e293b',
     marginBottom: 4,
@@ -4413,7 +4758,7 @@ const styles = StyleSheet.create({
     marginRight: 16,
   },
   progressText: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: '#ffffff',
   },
@@ -4529,7 +4874,7 @@ const styles = StyleSheet.create({
     borderBottomColor: 'rgba(0,170,255,0.2)',
   },
   modalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
     color: 'rgb(40, 127, 214)',
   },
@@ -4544,7 +4889,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   inputLabel: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: '#1e293b',
     marginBottom: 10,
@@ -4563,7 +4908,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 15,
     paddingVertical: 12,
-    fontSize: 16,
+    fontSize: 14,
     color: '#1e293b',
     marginBottom: 10,
   },
@@ -4587,7 +4932,7 @@ const styles = StyleSheet.create({
   },
   cancelButtonText: {
     color: '#1e293b',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
   },
   createButton: {
@@ -4602,7 +4947,7 @@ const styles = StyleSheet.create({
   },
   createButtonText: {
     color: '#ffffff',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: 'bold',
   },
   buttonDisabled: {
@@ -4614,7 +4959,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   photoLabel: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: '#1e293b',
     marginBottom: 8,
@@ -4756,7 +5101,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   noAnnouncementsText: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#64748b',
     textAlign: 'center',
     paddingVertical: 20,
@@ -4807,8 +5152,8 @@ const styles = StyleSheet.create({
   },
   // Section Styles
   sectionTitle: {
-    fontSize: 25,
-    fontWeight: '700',
+    fontSize: 16,
+    fontWeight: '800',
     color: '#1e293b',
     marginBottom: 16,
     marginTop: 15,
@@ -4835,7 +5180,7 @@ const styles = StyleSheet.create({
     borderLeftColor: '#3b82f6',
   },
   quarterHeaderText: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     color: '#1e40af',
     marginLeft: 8,
@@ -4880,7 +5225,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   tasksMainTitle: {
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: '800',
     color: '#374151',
     marginBottom: 16,
@@ -4930,7 +5275,7 @@ const styles = StyleSheet.create({
     borderColor: '#e2e8f0',
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#64748b',
     fontWeight: '600',
     marginTop: 12,
@@ -4959,7 +5304,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 4,
     elevation: 2,
-    borderWidth: 0,
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
   taskItem: {
     flexDirection: 'row',
@@ -4986,9 +5332,22 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 6,
   },
+  pendingTaskItem: {
+    backgroundColor: '#fffbeb', // Light yellow background
+    borderWidth: 2,
+    borderColor: '#fcd34d', // Yellow border
+    borderLeftWidth: 6,
+    borderLeftColor: '#f59e0b', // Thick orange left accent
+    shadowColor: '#f59e0b',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 4,
+  },
   completedTaskItem: {
     opacity: 0.8,
     backgroundColor: '#f8fafc',
+    borderColor: '#e2e8f0',
   },
   firstTaskItem: {
     borderWidth: 2,
@@ -4998,6 +5357,27 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 8,
     elevation: 6,
+  },
+  // Tasks Loading Skeleton
+  tasksLoadingContainer: {
+    gap: 16,
+  },
+  taskSkeletonCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  taskSkeletonHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   taskHeaderRow: {
     flexDirection: 'row',
@@ -5023,7 +5403,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
   },
   enhancedTaskTitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: '#374151',
     marginBottom: 8,
@@ -5218,12 +5598,12 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   taskTitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
     color: '#1e293b',
     flex: 1,
   },
-  completedTaskTitle: {
+  completedTaskTitleStrikethrough: {
     textDecorationLine: 'line-through',
     color: '#9ca3af',
   },
@@ -5352,7 +5732,7 @@ const styles = StyleSheet.create({
     borderColor: '#e2e8f0',
   },
   emptyHistoryTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     color: '#1e293b',
     marginTop: 16,
@@ -5400,7 +5780,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   tasksPreviewTitle: {
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: '700',
     color: '#1e293b',
     marginLeft: 8,
@@ -5417,6 +5797,16 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 3,
   },
+  tasksPreviewCardPending: {
+    backgroundColor: '#fffbeb', // Light yellow background for pending
+    borderLeftColor: '#f59e0b', // Orange border for pending
+    borderWidth: 2,
+    borderColor: '#fcd34d',
+    shadowColor: '#f59e0b',
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 5,
+  },
   tasksPreviewContent: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -5428,13 +5818,60 @@ const styles = StyleSheet.create({
   tasksPreviewCount: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#1e40af',
+    color: '#d97706',
+    marginBottom: 4,
+  },
+  tasksPreviewCountCompleted: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#059669',
     marginBottom: 4,
   },
   tasksPreviewDescription: {
     fontSize: 14,
-    color: '#1e40af',
+    color: '#92400e',
     lineHeight: 20,
+  },
+  tasksPreviewDescriptionCompleted: {
+    fontSize: 14,
+    color: '#065f46',
+    lineHeight: 20,
+  },
+  pendingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  completedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  // Loading Skeleton Styles
+  loadingSkeleton: {
+    backgroundColor: '#f1f5f9',
+    borderLeftColor: '#cbd5e1',
+  },
+  skeletonLine: {
+    backgroundColor: '#e2e8f0',
+    borderRadius: 4,
+  },
+  skeletonTitle: {
+    width: '60%',
+    height: 20,
+    marginBottom: 8,
+  },
+  skeletonDescription: {
+    width: '100%',
+    height: 16,
+  },
+  skeletonChevron: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#e2e8f0',
   },
   quoteSection: {
     marginTop: 20,
@@ -6877,5 +7314,108 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#64748b',
     textAlign: 'center',
+  },
+  // Completed Tasks Section Styles
+  completedTasksSection: {
+    marginTop: 32,
+    paddingTop: 24,
+    borderTopWidth: 2,
+    borderTopColor: '#e2e8f0',
+  },
+  completedTasksHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 8,
+  },
+  completedTasksHeaderText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: 8,
+    flex: 1,
+  },
+  completedBadgeSmall: {
+    backgroundColor: '#10b981',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  completedBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  completedTaskItemCompact: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  completedTaskLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  completedTaskInfo: {
+    marginLeft: 12,
+    flex: 1,
+  },
+  completedTaskTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  completedTaskMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  completedTaskMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  completedTaskMetaText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  completedTaskDate: {
+    fontSize: 12,
+    color: '#94a3b8',
+    fontWeight: '500',
+  },
+  completedTaskViewButton: {
+    padding: 8,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+  },
+  viewAllCompletedButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#eff6ff',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginTop: 8,
+    gap: 8,
+  },
+  viewAllCompletedText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#3b82f6',
   },
 });

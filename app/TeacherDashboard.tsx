@@ -54,8 +54,10 @@ import { AssignedExercise, useExercises } from '../hooks/useExercises';
 
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
 
-import { deleteData, pushData, readData, updateData, writeData } from '../lib/firebase-database';
+import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
 
+import { collectAppMetadata } from '../lib/app-metadata';
+import { createAnnouncement, createClass, createParent, createStudent } from '../lib/entity-helpers';
 import { logError, logErrorWithStack } from '../lib/error-logger';
 import { uploadFile } from '../lib/firebase-storage';
 
@@ -1958,6 +1960,9 @@ export default function TeacherDashboard() {
 
   const [selectedClassForStudent, setSelectedClassForStudent] = useState<{ id: string; name: string } | null>(null);
 
+  // When set, modal operates in edit mode instead of create
+  const [selectedStudentForEdit, setSelectedStudentForEdit] = useState<any | null>(null);
+
   const [studentFullName, setStudentFullName] = useState('');
 
   const [studentGender, setStudentGender] = useState<'male' | 'female'>('male');
@@ -2744,47 +2749,53 @@ export default function TeacherDashboard() {
 
     try {
 
-      const { data } = await readData('/sections');
+      // Primary source of truth: /classes (this is where createClass writes)
+      const [{ data: classesData, error: classesErr }, { data: sectionsData }] = await Promise.all([
+        readData('/classes'),
+        readData('/sections'), // optional: for legacy fields like schoolName/status
+      ]);
 
-      const list = Object.entries(data || {})
+      if (classesErr) {
+        console.error('[LoadTeacherClasses] Error reading classes:', classesErr);
+        logError('LoadTeacherClasses', classesErr);
+        return;
+      }
 
+      // Build a quick lookup for any matching section extras by classId
+      const sectionExtrasById: Record<string, any> = Object.fromEntries(
+        Object.entries(sectionsData || {}).map(([sid, sv]: any) => [sid, sv || {}])
+      );
+
+      const list = Object.entries(classesData || {})
         .map(([id, v]: any) => ({ id, ...(v || {}) }))
+        .filter((c: any) => c.teacherId === teacherId)
+        .map((c: any) => {
+          const extras = sectionExtrasById[c.id] || {};
+          return {
+            id: c.id,
+            name: c.name ?? 'Untitled',
+            schoolYear: c.schoolYear ?? extras.schoolYear,
+            schoolName: c.schoolName ?? extras.schoolName,
+            status: c.status ?? extras.status ?? 'active',
+          };
+        });
 
-        .filter((s: any) => s.teacherId === teacherId)
-
-        .map((s: any) => ({
-
-          id: s.id,
-
-          name: s.name ?? 'Untitled',
-
-          schoolYear: s.schoolYear,
-
-          schoolName: s.schoolName,
-
-          status: s.status ?? 'active',
-
-        }));
+      console.log(`[LoadTeacherClasses] Found ${list.length} classes for teacher ${teacherId}`);
 
       setTeacherClasses(list);
-
       setActiveClasses(list.filter((c) => c.status !== 'inactive'));
 
       // After classes load, refresh related data
-
       await Promise.all([
-
         loadStudentsAndParents(list.map((c) => c.id)),
-
         loadAssignments(list.map((c) => c.id)),
-
         loadClassAnalytics(list.map((c) => c.id)),
-
       ]);
 
-    } catch (e) {
+    } catch (e: any) {
 
-      // ignore
+      console.error('[LoadTeacherClasses] Exception:', e);
+      logError('LoadTeacherClasses', e?.message || String(e));
 
     }
 
@@ -5773,6 +5784,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     setSelectedClassForStudent(cls);
 
+    setSelectedStudentForEdit(null);
+
     setStudentFullName('');
 
     setStudentGender('male');
@@ -5793,7 +5806,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       setSavingStudent(true);
 
-      const loginCode = await generateUniqueLoginCode();
+      // Generate login code
+      const loginCode = await generateLoginCode();
 
       // Parse full name
       const { firstName, middleInitial, surname } = parseFullName(studentFullName);
@@ -5804,53 +5818,41 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         return;
       }
 
-      // Create parent placeholder (details will be collected on first login)
-
-      const parentPayload = {
-
+      // Create parent with readable ID (PARENT-0001, PARENT-0002, etc.)
+      const parentResult = await createParent({
         loginCode,
+        infoStatus: 'pending'
+      });
 
-        infoStatus: 'pending',
+      if (!parentResult.success || !parentResult.parentId) {
+        showAlert('Error', parentResult.error || 'Failed to create parent.', undefined, 'error');
+        setSavingStudent(false);
+        return;
+      }
 
-        createdAt: new Date().toISOString(),
+      const parentId = parentResult.parentId;
+      console.log(`[CreateStudent] Created parent with ID: ${parentId}, login code: ${loginCode}`);
 
-      };
-
-      const { key: parentId, error: parentErr } = await pushData('/parents', parentPayload);
-
-      if (parentErr || !parentId) { showAlert('Error', parentErr || 'Failed to create parent.', undefined, 'error'); return; }
-
-      await writeData(`/parentLoginCodes/${loginCode}`, parentId);
-
-      // Create student with parsed name components
-
-      const studentPayload = {
-
+      // Create student with readable ID (STUDENT-SECTION-0001, etc.)
+      const studentResult = await createStudent({
         classId: selectedClassForStudent.id,
-
         parentId,
-
-        firstName: firstName,
-
-        middleInitial: middleInitial,
-
-        surname: surname,
-
+        firstName,
+        middleInitial: middleInitial || '',
+        surname,
         fullName: studentFullName.trim(),
-
         gender: studentGender,
+        gradeSection: selectedClassForStudent.name || 'DEFAULT'
+      });
 
-        createdAt: new Date().toISOString(),
+      if (!studentResult.success || !studentResult.studentId) {
+        showAlert('Error', studentResult.error || 'Failed to create student.', undefined, 'error');
+        setSavingStudent(false);
+        return;
+      }
 
-      };
-
-      const { key: studentId, error: studentErr } = await pushData('/students', studentPayload);
-
-      if (studentErr || !studentId) { showAlert('Error', studentErr || 'Failed to create student.', undefined, 'error'); return; }
-
-      await updateData(`/students/${studentId}`, { studentId });
-
-      await updateData(`/parents/${parentId}`, { parentId });
+      const studentId = studentResult.studentId;
+      console.log(`[CreateStudent] Created student with ID: ${studentId}`);
 
       // Refresh lists
 
@@ -5919,6 +5921,54 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   };
 
 
+  const handleUpdateStudent = async () => {
+
+    if (!selectedClassForStudent || !selectedStudentForEdit) return;
+
+    if (!studentFullName.trim()) { showAlert('Error', 'Please enter student full name.', undefined, 'error'); return; }
+
+    try {
+
+      setSavingStudent(true);
+
+      // Parse full name
+      const { firstName, middleInitial, surname } = parseFullName(studentFullName);
+
+      if (!firstName || !surname) {
+        showAlert('Error', 'Please enter at least a first name and surname (e.g., "Juan Dela Cruz").', undefined, 'error');
+        setSavingStudent(false);
+        return;
+      }
+
+      // Update the existing student record
+      await updateData(`/students/${selectedStudentForEdit.studentId}`, {
+        firstName,
+        middleInitial: middleInitial || '',
+        surname,
+        fullName: studentFullName.trim(),
+        gender: studentGender,
+      });
+
+      // Refresh lists for affected class only
+      await loadStudentsAndParents([selectedClassForStudent.id]);
+
+      // Close modal
+      setShowAddStudentModal(false);
+      setSavingStudent(false);
+      setSelectedStudentForEdit(null);
+
+      showAlert('Updated', 'Student details saved.', undefined, 'success');
+
+    } catch (e) {
+
+      showAlert('Error', 'Failed to update student.', undefined, 'error');
+      setSavingStudent(false);
+
+    }
+
+  };
+
+
 
   // Student menu handlers
 
@@ -5933,6 +5983,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     setStudentFullName(fullName);
 
     setStudentGender(String(student.gender || 'male') === 'female' ? 'female' : 'male');
+
+    setSelectedStudentForEdit(student);
 
     setShowAddStudentModal(true);
 
@@ -6546,15 +6598,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       const timestamp = new Date().toISOString();
 
-      // Generate a unique numeric-only ticket number (15 digits)
+      const random = Math.floor(Math.random() * 9000);
 
-      const now = Date.now(); // 13 digits
-
-      const random = Math.floor(Math.random() * 100); // 2 digits
-
-      const ticketNumber = `${now}${random.toString().padStart(2, '0')}`;
+      const ticketNumber = `TICKET${random.toString().padStart(4, '0')}`;
 
       const reportId = ticketNumber;
+
+      
+      // Collect app and device metadata
+      const metadata = await collectAppMetadata();
+      console.log('Collected app metadata for ticket:', metadata);
 
 
 
@@ -6598,7 +6651,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         reportedByName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
 
-        userRole: 'teacher',
+        userRole: 'teacher' as const,
 
         timestamp,
 
@@ -6606,7 +6659,19 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         screenshots: uploadedUrls,
 
-        status: 'pending',
+        status: 'pending' as const,
+
+        // Add comprehensive metadata
+        appVersion: metadata.appVersion,
+        updateId: metadata.updateId,
+        runtimeVersion: metadata.runtimeVersion,
+        platform: metadata.platform,
+        platformVersion: metadata.platformVersion,
+        deviceInfo: metadata.deviceInfo,
+        environment: metadata.environment,
+        buildProfile: metadata.buildProfile,
+        expoVersion: metadata.expoVersion,
+        submittedAt: metadata.timestamp,
 
       };
 
@@ -10250,36 +10315,42 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     const syValue = schoolYear.replace('-', ''); // store as 2223
 
-                    const section = {
-
+                    // Create class with readable ID (CLASS-SECTION-0001, etc.)
+                    const result = await createClass({
                       name: className.trim(),
+                      section: className.trim(), // Use class name as section identifier
+                      teacherId: currentUserId || '',
+                      gradeLevel: '1', // Default grade level
+                      schoolYear: syValue
+                    });
 
-                      schoolName: resolvedSchool,
+                    if (!result.success || !result.classId) {
 
-                      schoolYear: syValue,
-
-                      teacherId: currentUserId,
-
-                      status: 'active',
-
-                      createdAt: new Date().toISOString(),
-
-                    };
-
-                    const { key, error } = await pushData('/sections', section);
-
-                    if (error || !key) {
-
-                      showAlert('Error', error || 'Failed to create section.', undefined, 'error');
+                      showAlert('Error', result.error || 'Failed to create section.', undefined, 'error');
 
                     } else {
 
-                      await updateData(`/sections/${key}`, { id: key });
+                      const classId = result.classId;
+                      console.log(`[CreateClass] Created class with ID: ${classId}`);
 
+                      // Update with additional fields for sections table
+                      const updateResult = await updateData(`/sections/${classId}`, {
+                        schoolName: resolvedSchool,
+                        status: 'active'
+                      });
+
+                      if (updateResult.error) {
+                        console.error('[CreateClass] Error updating class data:', updateResult.error);
+                      }
+
+                      console.log('[CreateClass] Class data saved, refreshing class list...');
+
+                      // Small delay to ensure Firebase has persisted the data
+                      await new Promise(resolve => setTimeout(resolve, 500));
+
+                      // Refresh the classes list before closing modal
                       if (currentUserId) {
-
                         await loadTeacherClasses(currentUserId);
-
                       }
 
                       setShowAddClassModal(false);
@@ -10516,33 +10587,21 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     setSendingAnn(true);
 
-                    const now = new Date();
-
-                    const id = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
-
-                    const payload = {
-
-                      id,
-
-                      classIds: targetIds,
-
-                      dateTime: now.toISOString(),
-
-                      message: annMessage.trim(),
-
+                    // Create announcement with readable ID (ANNOUNCEMENT-0001, etc.)
+                    const result = await createAnnouncement({
                       title: annTitle.trim(),
+                      message: annMessage.trim(),
+                      teacherId: currentUserId || '',
+                      classIds: targetIds
+                    });
 
-                      teacherId: currentUserId,
+                    if (!result.success) {
 
-                    };
-
-                    const { success, error } = await writeData(`/announcements/${id}`, payload);
-
-                    if (!success) {
-
-                      showAlert('Error', error || 'Failed to send', undefined, 'error');
+                      showAlert('Error', result.error || 'Failed to send', undefined, 'error');
 
                     } else {
+
+                      console.log(`[CreateAnnouncement] Created announcement: ${result.announcementId}`);
 
                       setShowAnnModal(false);
 
@@ -10622,7 +10681,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             <View style={styles.modalHeader}>
 
-              <Text style={styles.modalTitle}>Add Student{selectedClassForStudent ? ` — ${selectedClassForStudent.name}` : ''}</Text>
+              <Text style={styles.modalTitle}>
+                {selectedStudentForEdit ? 'Edit Student' : 'Add Student'}
+                {selectedClassForStudent ? ` — ${selectedClassForStudent.name}` : ''}
+              </Text>
 
               <TouchableOpacity onPress={() => setShowAddStudentModal(false)} style={styles.closeButton}>
 
@@ -10739,15 +10801,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             <View style={styles.modalActions}>
 
-              <TouchableOpacity style={styles.cancelButton} onPress={() => setShowAddStudentModal(false)} disabled={savingStudent}>
+              <TouchableOpacity style={styles.cancelButton} onPress={() => { setShowAddStudentModal(false); setSelectedStudentForEdit(null); }} disabled={savingStudent}>
 
                 <Text style={styles.cancelButtonText}>Cancel</Text>
 
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.saveButton} onPress={handleCreateStudent} disabled={savingStudent}>
+              <TouchableOpacity style={styles.saveButton} onPress={selectedStudentForEdit ? handleUpdateStudent : handleCreateStudent} disabled={savingStudent}>
 
-                <Text style={styles.saveButtonText}>{savingStudent ? 'Creating...' : 'Create'}</Text>
+                <Text style={styles.saveButtonText}>{savingStudent ? (selectedStudentForEdit ? 'Saving...' : 'Creating...') : (selectedStudentForEdit ? 'Save Changes' : 'Create')}</Text>
 
               </TouchableOpacity>
 
@@ -13359,7 +13421,7 @@ const styles = StyleSheet.create({
 
   announcementModalTitle: {
 
-    fontSize: 20,
+    fontSize: 18,
 
     fontWeight: '700',
 
@@ -13389,7 +13451,7 @@ const styles = StyleSheet.create({
 
   announcementFieldLabel: {
 
-    fontSize: 16,
+    fontSize: 14,
 
     fontWeight: '600',
 
@@ -13411,7 +13473,7 @@ const styles = StyleSheet.create({
 
     paddingVertical: 12,
 
-    fontSize: 16,
+    fontSize: 14,
 
     color: '#1f2937',
 
@@ -13555,7 +13617,7 @@ const styles = StyleSheet.create({
 
   announcementClassName: {
 
-    fontSize: 16,
+    fontSize: 15,
 
     fontWeight: '600',
 
@@ -13641,7 +13703,7 @@ const styles = StyleSheet.create({
 
   announcementCancelButtonText: {
 
-    fontSize: 16,
+    fontSize: 14,
 
     fontWeight: '600',
 
@@ -13709,7 +13771,7 @@ const styles = StyleSheet.create({
 
   announcementSendButtonText: {
 
-    fontSize: 16,
+    fontSize: 14,
 
     fontWeight: '700',
 
@@ -13808,8 +13870,7 @@ const styles = StyleSheet.create({
   },
 
   sectionTitle: {
-
-    fontSize: Math.max(20, Math.min(24, staticWidth * 0.06)),
+    fontSize: Math.min(16, staticWidth * 0.045),
 
     fontWeight: '800',
 
@@ -13818,7 +13879,7 @@ const styles = StyleSheet.create({
   },
 
   sectionSubtitle: {
-    fontSize: Math.max(13, Math.min(15, staticWidth * 0.038)),
+    fontSize: Math.min(14, staticWidth * 0.04),
     color: '#64748b',
     fontWeight: '500',
     marginTop: 4,
@@ -13840,7 +13901,7 @@ const styles = StyleSheet.create({
 
   classroomBadgeText: {
     color: '#ffffff',
-    fontSize: Math.max(16, Math.min(18, staticWidth * 0.045)),
+    fontSize: Math.min(14, staticWidth * 0.042),
     fontWeight: '700',
   },
 
@@ -13852,7 +13913,7 @@ const styles = StyleSheet.create({
   },
 
   emptyStateTitle: {
-    fontSize: Math.max(18, Math.min(22, staticWidth * 0.055)),
+    fontSize: Math.min(16, staticWidth * 0.045),
     fontWeight: '700',
     color: '#1e293b',
     marginTop: Math.min(16, staticHeight * 0.02),
@@ -13860,7 +13921,7 @@ const styles = StyleSheet.create({
   },
 
   emptyStateText: {
-    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontSize: Math.min(14, staticWidth * 0.04),
     color: '#64748b',
     textAlign: 'center',
   },
@@ -13953,7 +14014,7 @@ const styles = StyleSheet.create({
 
   classroomTitle: {
 
-    fontSize: Math.max(16, Math.min(18, staticWidth * 0.045)),
+    fontSize: Math.max(15, Math.min(16, staticWidth * 0.045)),
 
     fontWeight: '700',
 
@@ -14144,7 +14205,7 @@ const styles = StyleSheet.create({
 
   exerciseTitle: {
 
-    fontSize: Math.max(14, Math.min(18, staticWidth * 0.045)),
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.045)),
 
     fontWeight: '700',
 

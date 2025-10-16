@@ -1,13 +1,11 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
-import * as ImagePicker from 'expo-image-picker';
-import { Accelerometer } from 'expo-sensors';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, Easing, FlatList, Image, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useResponsive } from '../hooks/useResponsive';
 import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
+import { createAnnouncement } from '../lib/entity-helpers';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
-import { deleteData, listenToData, readData, stopListening, updateData, writeData } from '../lib/firebase-database';
-import { uploadFile } from '../lib/firebase-storage';
+import { deleteData, listenToData, readData, stopListening, updateData } from '../lib/firebase-database';
 
 type TabKey = 'home' | 'teacher' | 'blocklist' | 'reports';
 
@@ -41,6 +39,17 @@ interface TechnicalReport {
   category?: string;
   resolvedAt?: string;
   resolvedBy?: string;
+  // App metadata fields
+  appVersion?: string;
+  updateId?: string | null;
+  runtimeVersion?: string | null;
+  platform?: string;
+  platformVersion?: string;
+  deviceInfo?: string;
+  environment?: string;
+  buildProfile?: string;
+  expoVersion?: string;
+  submittedAt?: string;
 }
 
 export default function AdminDashboard() {
@@ -91,15 +100,6 @@ export default function AdminDashboard() {
   // Technical reports state
   const [technicalReports, setTechnicalReports] = useState<TechnicalReport[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
-  
-  // Technical Report Modal state
-  const [showTechReportModal, setShowTechReportModal] = useState(false);
-  const [reportDescription, setReportDescription] = useState('');
-  const [reportScreenshots, setReportScreenshots] = useState<string[]>([]);
-  const [submittingReport, setSubmittingReport] = useState(false);
-  
-  // Shake detection state
-  const [shakeSubscription, setShakeSubscription] = useState<any>(null);
 
   // Admin identity for welcome header
   const [adminName, setAdminName] = useState<string>('');
@@ -133,21 +133,32 @@ export default function AdminDashboard() {
   const computeTeacherStats = async (teacherList: Teacher[]) => {
     try {
       setStatsLoading(true);
-      const [{ data: sectionsData }, { data: studentsData }] = await Promise.all([
+      // Source of truth for classes is /classes; still read /sections for legacy mapping
+      const [{ data: classesData }, { data: sectionsData }, { data: studentsData }] = await Promise.all([
+        readData('/classes'),
         readData('/sections'),
         readData('/students'),
       ]);
+      const classesArray: Array<any & { id: string }> = Object.entries(classesData || {}).map(([id, v]: any) => ({ id, ...(v || {}) }));
       const sectionsArray: Array<any & { id: string }> = Object.entries(sectionsData || {}).map(([id, v]: any) => ({ id, ...(v || {}) }));
       const studentsArray: Array<any & { id: string }> = Object.entries(studentsData || {}).map(([id, v]: any) => ({ id, ...(v || {}) }));
 
       const result: Record<string, { sectionCount: number; studentCount: number }> = {};
 
       for (const teacher of teacherList) {
-        const teacherSectionIds = sectionsArray
-          .filter(s => s.teacherId === teacher.uid)
-          .map(s => s.id);
-        const sectionCount = teacherSectionIds.length;
-        const studentCount = studentsArray.filter(stu => teacherSectionIds.includes(stu.classId || stu.sectionId)).length;
+        // Prefer classes for section count; fallback to sections if any exist
+        const teacherClassIds = classesArray
+          .filter(c => c.teacherId === teacher.uid)
+          .map(c => c.id);
+        const sectionCount = teacherClassIds.length > 0
+          ? teacherClassIds.length
+          : sectionsArray.filter(s => s.teacherId === teacher.uid).length;
+
+        const classIdsForCount = teacherClassIds.length > 0
+          ? teacherClassIds
+          : sectionsArray.filter(s => s.teacherId === teacher.uid).map(s => s.id);
+
+        const studentCount = studentsArray.filter(stu => classIdsForCount.includes(stu.classId || stu.sectionId)).length;
         result[teacher.uid] = { sectionCount, studentCount };
       }
 
@@ -400,165 +411,6 @@ export default function AdminDashboard() {
       };
     }
   }, [activeTab]);
-
-  // Shake detection for Reports tab
-  useEffect(() => {
-    if (activeTab === 'reports') {
-      let lastShake = 0;
-      const SHAKE_THRESHOLD = 2.5;
-      const SHAKE_TIMEOUT = 1000; // Prevent multiple triggers
-
-      const subscription = Accelerometer.addListener(({ x, y, z }) => {
-        const acceleration = Math.sqrt(x * x + y * y + z * z);
-        const now = Date.now();
-
-        if (acceleration > SHAKE_THRESHOLD && now - lastShake > SHAKE_TIMEOUT) {
-          lastShake = now;
-          setShowTechReportModal(true);
-        }
-      });
-
-      Accelerometer.setUpdateInterval(100);
-      setShakeSubscription(subscription);
-
-      return () => {
-        subscription?.remove();
-      };
-    } else {
-      // Clean up when leaving Reports tab
-      shakeSubscription?.remove();
-      setShakeSubscription(null);
-    }
-  }, [activeTab]);
-
-  // Pick image from gallery
-  const pickImage = async () => {
-    try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Please grant permission to access photos.');
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsMultipleSelection: true,
-        quality: 0.8,
-        selectionLimit: 5 - reportScreenshots.length, // Max 5 total screenshots
-      });
-
-      if (!result.canceled && result.assets) {
-        const newUris = result.assets.map(asset => asset.uri);
-        setReportScreenshots(prev => [...prev, ...newUris].slice(0, 5));
-      }
-    } catch (error) {
-      console.error('Error picking image:', error);
-      Alert.alert('Error', 'Failed to pick image. Please try again.');
-    }
-  };
-
-  // Take photo with camera
-  const takePhoto = async () => {
-    try {
-      const { status } = await ImagePicker.requestCameraPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Please grant permission to access camera.');
-        return;
-      }
-
-      const result = await ImagePicker.launchCameraAsync({
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets && result.assets[0]) {
-        if (reportScreenshots.length < 5) {
-          setReportScreenshots(prev => [...prev, result.assets[0].uri]);
-        } else {
-          Alert.alert('Limit Reached', 'You can only attach up to 5 screenshots.');
-        }
-      }
-    } catch (error) {
-      console.error('Error taking photo:', error);
-      Alert.alert('Error', 'Failed to take photo. Please try again.');
-    }
-  };
-
-  // Remove screenshot
-  const removeScreenshot = (uri: string) => {
-    setReportScreenshots(prev => prev.filter(s => s !== uri));
-  };
-
-  // Submit technical report
-  const submitTechnicalReport = async () => {
-    if (!reportDescription.trim()) {
-      Alert.alert('Missing Information', 'Please describe the problem.');
-      return;
-    }
-
-    setSubmittingReport(true);
-    try {
-      const user = getCurrentUser();
-      const timestamp = new Date().toISOString();
-      // Generate a unique numeric-only ticket number (15 digits)
-      const now = Date.now(); // 13 digits
-      const random = Math.floor(Math.random() * 100); // 2 digits
-      const ticketNumber = `${now}${random.toString().padStart(2, '0')}`;
-      const reportId = ticketNumber;
-
-      // Upload screenshots to Firebase Storage
-      const uploadedUrls: string[] = [];
-      for (let i = 0; i < reportScreenshots.length; i++) {
-        const uri = reportScreenshots[i];
-        const fileName = `technical-reports/${reportId}/screenshot_${i + 1}.jpg`;
-        
-        // Convert URI to Blob for upload
-        const response = await fetch(uri);
-        const blob = await response.blob();
-        const { downloadURL } = await uploadFile(fileName, blob);
-        if (downloadURL) {
-          uploadedUrls.push(downloadURL);
-        }
-      }
-
-      // Determine user role based on current user context
-      const userRole: 'teacher' | 'parent' | 'admin' = 'admin'; // Admin dashboard context
-
-      const report: TechnicalReport = {
-        id: reportId,
-        ticketNumber: ticketNumber,
-        reportedBy: user?.uid || 'unknown',
-        reportedByEmail: user?.email || 'unknown',
-        reportedByName: user?.displayName || user?.email?.split('@')[0] || 'Admin User',
-        userRole: userRole,
-        timestamp: timestamp,
-        description: reportDescription.trim(),
-        screenshots: uploadedUrls,
-        status: 'pending',
-        priority: 'medium', // Default priority
-        category: 'technical', // Default category
-      };
-
-      const { success, error } = await writeData(`/technicalReports/${reportId}`, report);
-      
-      if (success) {
-        Alert.alert(
-          'Success', 
-          `Report submitted successfully!\n\nYour Ticket Number:\n${ticketNumber}\n\nPlease save this number for reference. Your report has been sent to the Super Admin for review.`
-        );
-        setShowTechReportModal(false);
-        setReportDescription('');
-        setReportScreenshots([]);
-        fetchTechnicalReports(); // Refresh the list
-      } else {
-        throw new Error(error || 'Failed to submit report');
-      }
-    } catch (error) {
-      console.error('Error submitting report:', error);
-      Alert.alert('Error', 'Failed to submit report. Please try again.');
-    } finally {
-      setSubmittingReport(false);
-    }
-  };
 
   // Mark technical report as done (resolved)
   const handleMarkReportAsDone = async (reportId: string) => {
@@ -1025,20 +877,6 @@ export default function AdminDashboard() {
             </View>
           </View>
 
-          {/* Shake to report hint */}
-          <View style={styles.shakeHintCard}>
-            <View style={styles.shakeHintIconContainer}>
-              <MaterialCommunityIcons name="cellphone" size={32} color="#0ea5e9" />
-            </View>
-            <View style={styles.shakeHintTextContainer}>
-              <Text style={styles.shakeHintTitle}>Quick Report</Text>
-              <Text style={styles.shakeHintText}>Shake your device anytime to quickly report a technical problem</Text>
-            </View>
-            <View style={styles.shakeHintBadge}>
-              <MaterialCommunityIcons name="lightning-bolt" size={16} color="#ffffff" />
-            </View>
-          </View>
-
           {/* Technical Reports Section */}
           <View style={styles.reportsCard}>
             <View style={styles.reportsHeader}>
@@ -1430,21 +1268,22 @@ export default function AdminDashboard() {
                   if (!annTitle.trim() || !annMessage.trim()) return;
                   try {
                     setSendingAnn(true);
-                    const now = new Date();
-                    const id = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
-                    const payload = {
-                      id,
-                      classIds: ['ALL_PARENTS'],
-                      dateTime: now.toISOString(),
-                      message: annMessage.trim(),
+                    
+                    // Create announcement with readable ID (ANNOUNCEMENT-0001, etc.)
+                    const result = await createAnnouncement({
                       title: annTitle.trim(),
+                      message: annMessage.trim(),
                       teacherId: 'admin',
-                    };
-                    const { success } = await writeData(`/announcements/${id}`, payload);
-                    if (success) {
+                      classIds: ['ALL_PARENTS']
+                    });
+                    
+                    if (result.success) {
+                      console.log(`[CreateAnnouncement] Admin created announcement: ${result.announcementId}`);
                       setShowAnnModal(false);
                       setAnnTitle('');
                       setAnnMessage('');
+                    } else {
+                      Alert.alert('Error', result.error || 'Failed to send announcement');
                     }
                   } finally {
                     setSendingAnn(false);
@@ -1460,138 +1299,6 @@ export default function AdminDashboard() {
                   <View style={styles.announcementSendContainer}>
                     <MaterialCommunityIcons name="send" size={18} color="#ffffff" />
                     <Text style={styles.announcementSendButtonText}>Send</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Technical Report Modal */}
-      <Modal visible={showTechReportModal} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.techReportModal}>
-            <View style={styles.techReportModalHeader}>
-              <View style={styles.techReportModalTitleContainer}>
-                <MaterialCommunityIcons name="bug-outline" size={24} color="#ef4444" />
-                <Text style={styles.techReportModalTitle}>Report Technical Problem</Text>
-              </View>
-              <TouchableOpacity 
-                onPress={() => {
-                  setShowTechReportModal(false);
-                  setReportDescription('');
-                  setReportScreenshots([]);
-                }} 
-                style={styles.closeButton}
-                disabled={submittingReport}
-              >
-                <AntDesign name="close" size={24} color="#64748b" />
-              </TouchableOpacity>
-            </View>
-            
-            <ScrollView 
-              style={styles.techReportModalContent} 
-              showsVerticalScrollIndicator={false} 
-              keyboardShouldPersistTaps="handled"
-            >
-              <View style={styles.techReportForm}>
-                <Text style={styles.techReportHint}>
-                  Please describe the issue you're experiencing. Be as detailed as possible and attach screenshots if available.
-                </Text>
-
-                <View style={styles.techReportField}>
-                  <Text style={styles.techReportFieldLabel}>Problem Description *</Text>
-                  <TextInput
-                    style={[styles.techReportFieldInput, styles.techReportMessageInput]}
-                    value={reportDescription}
-                    onChangeText={setReportDescription}
-                    placeholder="Describe the bug or error you encountered..."
-                    placeholderTextColor="#94a3b8"
-                    multiline
-                    textAlignVertical="top"
-                    editable={!submittingReport}
-                  />
-                </View>
-
-                <View style={styles.techReportField}>
-                  <Text style={styles.techReportFieldLabel}>Screenshots (Optional)</Text>
-                  <Text style={styles.techReportFieldHint}>
-                    You can attach up to 5 screenshots
-                  </Text>
-                  
-                  {reportScreenshots.length > 0 && (
-                    <ScrollView 
-                      horizontal 
-                      showsHorizontalScrollIndicator={false} 
-                      style={styles.screenshotsPreviewContainer}
-                    >
-                      {reportScreenshots.map((uri, idx) => (
-                        <View key={idx} style={styles.screenshotPreviewWrapper}>
-                          <Image source={{ uri }} style={styles.screenshotPreview} />
-                          <TouchableOpacity
-                            style={styles.removeScreenshotButton}
-                            onPress={() => removeScreenshot(uri)}
-                            disabled={submittingReport}
-                          >
-                            <AntDesign name="close" size={16} color="#ffffff" />
-                          </TouchableOpacity>
-                        </View>
-                      ))}
-                    </ScrollView>
-                  )}
-
-                  <View style={styles.screenshotButtons}>
-                    <TouchableOpacity
-                      style={styles.screenshotButton}
-                      onPress={takePhoto}
-                      disabled={submittingReport || reportScreenshots.length >= 5}
-                    >
-                      <MaterialIcons name="photo-camera" size={20} color="#0ea5e9" />
-                      <Text style={styles.screenshotButtonText}>Take Photo</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.screenshotButton}
-                      onPress={pickImage}
-                      disabled={submittingReport || reportScreenshots.length >= 5}
-                    >
-                      <MaterialIcons name="photo-library" size={20} color="#0ea5e9" />
-                      <Text style={styles.screenshotButtonText}>Choose from Gallery</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-            </ScrollView>
-
-            <View style={styles.techReportModalFooter}>
-              <TouchableOpacity 
-                style={styles.techReportCancelButton} 
-                onPress={() => {
-                  setShowTechReportModal(false);
-                  setReportDescription('');
-                  setReportScreenshots([]);
-                }} 
-                disabled={submittingReport}
-              >
-                <Text style={styles.techReportCancelButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.techReportSubmitButton,
-                  (!reportDescription.trim() || submittingReport) && styles.techReportSubmitButtonDisabled
-                ]}
-                disabled={submittingReport || !reportDescription.trim()}
-                onPress={submitTechnicalReport}
-              >
-                {submittingReport ? (
-                  <View style={styles.techReportLoadingContainer}>
-                    <ActivityIndicator size="small" color="#ffffff" />
-                    <Text style={styles.techReportSubmitButtonText}>Submitting...</Text>
-                  </View>
-                ) : (
-                  <View style={styles.techReportSubmitContainer}>
-                    <MaterialIcons name="send" size={18} color="#ffffff" />
-                    <Text style={styles.techReportSubmitButtonText}>Submit Report</Text>
                   </View>
                 )}
               </TouchableOpacity>
@@ -1629,7 +1336,7 @@ const styles = StyleSheet.create({
   },
   placeholderTitle: {
     color: '#1e293b',
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
   },
   placeholderSubtitle: {
@@ -1650,7 +1357,7 @@ const styles = StyleSheet.create({
   },
   welcomeTitle: {
     color: '#1e293b',
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: '800',
     letterSpacing: -0.5,
   },
@@ -1683,7 +1390,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   announcementCardTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -1719,7 +1426,7 @@ const styles = StyleSheet.create({
   announcementPrimaryButtonText: {
     color: '#ffffff',
     fontWeight: '700',
-    fontSize: 15,
+    fontSize: 14,
     letterSpacing: 0.3,
   },
   // Home - Teachers overview styles
@@ -1741,7 +1448,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   homeTeachersTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
   },
@@ -1858,7 +1565,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   teacherPageTitle: {
-    fontSize: 26,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -1877,7 +1584,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   sectionTitle: {
-    fontSize: 28,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -1902,7 +1609,7 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#64748b',
     marginTop: 16,
     fontWeight: '500',
@@ -1938,13 +1645,13 @@ const styles = StyleSheet.create({
     borderColor: '#bbf7d0',
   },
   emptyTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginTop: 8,
   },
   emptySubtitle: {
-    fontSize: 15,
+    fontSize: 14,
     color: '#64748b',
     marginTop: 8,
     textAlign: 'center',
@@ -1987,7 +1694,7 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    fontSize: 15,
+    fontSize: 14,
     color: '#0f172a',
     fontWeight: '500',
   },
@@ -2122,7 +1829,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   teacherName: {
-    fontSize: 19,
+    fontSize: 15,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -2197,7 +1904,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   blocklistPageTitle: {
-    fontSize: 26,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -2268,7 +1975,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#6366f1',
   },
   actionButtonText: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
     color: '#ffffff',
     letterSpacing: 0.3,
@@ -2291,7 +1998,7 @@ const styles = StyleSheet.create({
   modalActionText: {
     color: '#ffffff',
     fontWeight: '700',
-    fontSize: 15,
+    fontSize: 14,
     letterSpacing: 0.3,
   },
   // Modal Styles
@@ -2308,6 +2015,8 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 32,
     maxHeight: '90%',
     minHeight: '70%',
+    width: '92%',
+    maxWidth: 460,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -8 },
     shadowOpacity: 0.25,
@@ -2324,7 +2033,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#f1f5f9',
   },
   modalTitle: {
-    fontSize: 22,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -2385,7 +2094,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   adminWelcomeTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
   },
@@ -2421,7 +2130,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   announcementModalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -2534,7 +2243,7 @@ const styles = StyleSheet.create({
     elevation: 16,
   },
   confirmModalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 10,
@@ -2613,7 +2322,7 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   profileName: {
-    fontSize: 26,
+    fontSize: 20,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 20,
@@ -2648,7 +2357,7 @@ const styles = StyleSheet.create({
     paddingVertical: 32,
   },
   detailsTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 24,
@@ -2672,7 +2381,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   detailValue: {
-    fontSize: 17,
+    fontSize: 15,
     color: '#1e293b',
     fontWeight: '600',
     lineHeight: 24,
@@ -2742,7 +2451,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   reportsPageTitle: {
-    fontSize: 26,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -2788,14 +2497,14 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   shakeHintTitle: {
-    fontSize: 17,
+    fontSize: 15,
     fontWeight: '800',
     color: '#1e40af',
     marginBottom: 4,
     letterSpacing: -0.3,
   },
   shakeHintText: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#3b82f6',
     fontWeight: '600',
     lineHeight: 19,
@@ -2864,7 +2573,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   reportsTitle: {
-    fontSize: 19,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -2894,7 +2603,7 @@ const styles = StyleSheet.create({
   },
   reportsBadgeText: {
     color: '#ffffff',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
     letterSpacing: 0.3,
   },
@@ -2906,7 +2615,7 @@ const styles = StyleSheet.create({
     paddingVertical: 40,
   },
   logsLoadingText: {
-    fontSize: 15,
+    fontSize: 13,
     color: '#64748b',
     fontWeight: '600',
   },
@@ -2918,13 +2627,13 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   emptyLogsTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 6,
   },
   emptyLogsText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#94a3b8',
     fontWeight: '500',
   },
@@ -3305,7 +3014,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   techReportModalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -3487,7 +3196,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   reportListItemId: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
     color: '#1e293b',
     letterSpacing: 0.2,
@@ -3595,7 +3304,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   reportDetailsModalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
   },

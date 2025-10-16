@@ -1,7 +1,8 @@
 import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Animated, Dimensions, Image, ImageBackground, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { collectAppMetadata, getVersionString, type AppMetadata } from '../lib/app-metadata';
 
 const { width } = Dimensions.get('window');
 const LOGO_WIDTH = width * 0.75;
@@ -9,6 +10,27 @@ const LOGO_WIDTH = width * 0.75;
 export default function RoleSelection() {
   const router = useRouter();
   const heartbeatAnim = useRef(new Animated.Value(1)).current;
+  const [metadata, setMetadata] = useState<AppMetadata | null>(null);
+
+  // Collect app metadata on mount (non-blocking, won't crash if fails)
+  useEffect(() => {
+    const loadMetadata = async () => {
+      try {
+        const data = await collectAppMetadata();
+        setMetadata(data);
+        console.log('App metadata loaded successfully:', data);
+      } catch (error) {
+        console.error('Failed to load app metadata (non-critical):', error);
+        // Don't set metadata - component will simply not show version info
+        // This prevents crashes while still allowing the app to function
+      }
+    };
+    
+    // Run asynchronously to not block component mount
+    loadMetadata().catch(err => {
+      console.warn('Metadata loading promise rejected (non-critical):', err);
+    });
+  }, []);
 
   useEffect(() => {
     // Heartbeat animation
@@ -81,6 +103,18 @@ export default function RoleSelection() {
             </TouchableOpacity>
           </View>
         </View>
+        
+        {/* Version Info Display for Debugging */}
+        {metadata && (
+          <View style={styles.versionInfoContainer}>
+            <Text style={styles.versionInfoText}>
+              {getVersionString(metadata)}
+            </Text>
+            <Text style={styles.versionInfoSubtext}>
+              {metadata.deviceInfo}
+            </Text>
+          </View>
+        )}
       </View>
     </ImageBackground>
   );
@@ -191,6 +225,33 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     textShadowColor: 'rgba(0,0,0,0.3)',
     textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
+  },
+  versionInfoContainer: {
+    position: 'absolute',
+    bottom: 20,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  versionInfoText: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontWeight: '500',
+    textAlign: 'center',
+    textShadowColor: 'rgba(0,0,0,0.3)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+    marginBottom: 4,
+  },
+  versionInfoSubtext: {
+    fontSize: 9,
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontWeight: '400',
+    textAlign: 'center',
+    textShadowColor: 'rgba(0,0,0,0.3)',
+    textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
 }); 

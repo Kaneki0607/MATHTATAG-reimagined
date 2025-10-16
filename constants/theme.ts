@@ -51,3 +51,15 @@ export const Fonts = Platform.select({
     mono: "SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
   },
 });
+
+// Unified typography scale for consistent, educational-friendly UI
+export const Typography = {
+  display: { fontSize: 28, lineHeight: 34, fontWeight: '800' as const },
+  h1: { fontSize: 22, lineHeight: 28, fontWeight: '800' as const },
+  h2: { fontSize: 18, lineHeight: 24, fontWeight: '700' as const },
+  h3: { fontSize: 16, lineHeight: 22, fontWeight: '700' as const },
+  body: { fontSize: 14, lineHeight: 20, fontWeight: '500' as const },
+  bodySmall: { fontSize: 13, lineHeight: 18, fontWeight: '500' as const },
+  caption: { fontSize: 12, lineHeight: 16, fontWeight: '600' as const },
+  helper: { fontSize: 11, lineHeight: 14, fontWeight: '500' as const },
+};

@@ -2,7 +2,7 @@
   "expo": {
     "name": "MATHTATAG",
     "slug": "MATHTATAG",
-    "version": "1.0.1",
+    "version": "1.0.3",
     "orientation": "portrait",
     "icon": "./assets/images/logo-zoomedout.png",
     "scheme": "mathtatagreimagined",
@@ -16,9 +16,9 @@
       "package": "com.mathtatag.reimagined",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/logo-zoomedout.png"
+        "foregroundImage": "./assets/images/and.png"
       },
-      "edgeToEdgeEnabled": true,
+      "edgeToEdgeEnabled": false,
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -56,7 +56,10 @@
       "policy": "appVersion"
     },
     "updates": {
-      "url": "https://u.expo.dev/f64c3081-3b9d-476a-b777-401604c59e6b"
+      "url": "https://u.expo.dev/f64c3081-3b9d-476a-b777-401604c59e6b",
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
     }
   }
 }
