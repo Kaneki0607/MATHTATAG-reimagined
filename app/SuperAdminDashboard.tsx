@@ -1,7 +1,7 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View, useWindowDimensions } from 'react-native';
 import { useResponsive } from '../hooks/useResponsive';
 import { addApiKey, deleteApiKey, getApiKeyStatus } from '../lib/elevenlabs-keys';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
@@ -145,6 +145,8 @@ export default function SuperAdminDashboard() {
   // Technical reports state
   const [showReportDetailsModal, setShowReportDetailsModal] = useState(false);
   const [selectedReport, setSelectedReport] = useState<TechnicalReport | null>(null);
+  const [showStatusDropdown, setShowStatusDropdown] = useState(false);
+  const [showPriorityDropdown, setShowPriorityDropdown] = useState(false);
   
   // Fullscreen image viewer state
   const [showFullscreenImage, setShowFullscreenImage] = useState(false);
@@ -253,7 +255,7 @@ export default function SuperAdminDashboard() {
         readData('/teachers'),
         readData('/admins'),
         readData('/teacherLogs'),
-        readData('/elevenlabsKeys'),
+        readData('/elevenlabskeys'),
         readData('/technicalReports'),
       ]);
 
@@ -310,6 +312,17 @@ export default function SuperAdminDashboard() {
           category: data.category,
           resolvedAt: data.resolvedAt,
           resolvedBy: data.resolvedBy,
+          // Technical metadata fields
+          appVersion: data.appVersion,
+          updateId: data.updateId,
+          runtimeVersion: data.runtimeVersion,
+          platform: data.platform,
+          platformVersion: data.platformVersion,
+          deviceInfo: data.deviceInfo,
+          environment: data.environment,
+          buildProfile: data.buildProfile,
+          expoVersion: data.expoVersion,
+          submittedAt: data.submittedAt,
         })).sort((a, b) => {
           const aTime = a.timestamp ? new Date(a.timestamp).getTime() : 0;
           const bTime = b.timestamp ? new Date(b.timestamp).getTime() : 0;
@@ -425,11 +438,16 @@ export default function SuperAdminDashboard() {
   const openReportDetails = (report: TechnicalReport) => {
     setSelectedReport(report);
     setShowReportDetailsModal(true);
+    // Reset dropdown states when opening
+    setShowStatusDropdown(false);
+    setShowPriorityDropdown(false);
   };
 
   const closeReportDetails = () => {
     setShowReportDetailsModal(false);
     setSelectedReport(null);
+    setShowStatusDropdown(false);
+    setShowPriorityDropdown(false);
   };
 
   const openFullscreenImage = (imageUrl: string) => {
@@ -645,7 +663,7 @@ export default function SuperAdminDashboard() {
   const updateApiKeyStatus = async (keyId: string, newStatus: 'active' | 'low_credits' | 'failed') => {
     try {
       setActionBusy(true);
-      await updateData(`/apiKeys/${keyId}`, { status: newStatus });
+      await updateData(`/elevenlabskeys/${keyId}`, { status: newStatus });
       
       // Update local state
       setApiKeys(prevKeys => 
@@ -885,7 +903,7 @@ export default function SuperAdminDashboard() {
                       }},
                       { text: 'Reset API Keys', onPress: async () => {
                         try {
-                          await deleteData('/elevenlabsKeys');
+                          await deleteData('/elevenlabskeys');
                           Alert.alert('Success', 'All API keys cleared');
                           await fetchAll();
                         } catch (error) {
@@ -2148,24 +2166,33 @@ export default function SuperAdminDashboard() {
         </View>
       </Modal>
 
-      {/* Report Details Modal */}
+      {/* Report Details Modal - Fullscreen */}
       <Modal
         visible={showReportDetailsModal}
         animationType="slide"
-        transparent={true}
+        transparent={false}
         onRequestClose={closeReportDetails}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Report Details</Text>
-              <TouchableOpacity style={styles.closeButton} onPress={closeReportDetails}>
-                <AntDesign name="close" size={24} color="#64748b" />
-              </TouchableOpacity>
-            </View>
+        <View style={styles.fullscreenModalContainer}>
+          <View style={styles.fullscreenModalHeader}>
+            <Text style={styles.fullscreenModalTitle}>Report Details</Text>
+            <TouchableOpacity 
+              style={styles.fullscreenCloseButton} 
+              onPress={closeReportDetails}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <AntDesign name="close" size={24} color="#64748b" />
+            </TouchableOpacity>
+          </View>
 
-            {selectedReport && (
-              <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+          {selectedReport && (
+            <ScrollView 
+              style={styles.fullscreenModalBody}
+              contentContainerStyle={styles.fullscreenModalBodyContent}
+              showsVerticalScrollIndicator={true}
+              bounces={true}
+              scrollEventThrottle={16}
+            >
                 {/* Report Header */}
                 <View style={styles.reportDetailsHeader}>
                   <View style={styles.reportDetailsHeaderTop}>
@@ -2195,64 +2222,141 @@ export default function SuperAdminDashboard() {
                 </View>
 
                 {/* Status & Priority Management */}
-                <View style={styles.reportDetailsManagement}>
-                  <Text style={styles.reportDetailsManagementTitle}>Ticket Management</Text>
-                  
-                  {/* Status Control */}
-                  <View style={styles.reportDetailsControlGroup}>
-                    <Text style={styles.reportDetailsControlLabel}>Status</Text>
-                    <View style={styles.reportDetailsControlButtons}>
-                      {(['pending', 'in_progress', 'resolved'] as const).map(status => (
+                <TouchableWithoutFeedback onPress={() => {
+                  setShowStatusDropdown(false);
+                  setShowPriorityDropdown(false);
+                }}>
+                  <View style={styles.reportDetailsManagement}>
+                    <Text style={styles.reportDetailsManagementTitle}>Ticket Management</Text>
+                    
+                    {/* Status Dropdown - Higher z-index */}
+                    <View style={[styles.reportDetailsControlGroup, showStatusDropdown && styles.activeDropdownGroup]}>
+                      <Text style={styles.reportDetailsControlLabel}>Status</Text>
+                      <View style={[styles.dropdownContainer, showStatusDropdown && { zIndex: 10000 }]}>
                         <TouchableOpacity
-                          key={status}
                           style={[
-                            styles.reportDetailsControlButton,
-                            selectedReport.status === status && styles.reportDetailsControlButtonActive,
-                            status === 'pending' && styles.reportDetailsControlPending,
-                            status === 'in_progress' && styles.reportDetailsControlInProgress,
-                            status === 'resolved' && styles.reportDetailsControlResolved
+                            styles.dropdownButton,
+                            selectedReport.status === 'pending' && styles.dropdownButtonPending,
+                            selectedReport.status === 'in_progress' && styles.dropdownButtonInProgress,
+                            selectedReport.status === 'resolved' && styles.dropdownButtonResolved
                           ]}
-                          onPress={() => updateReportStatus(selectedReport.id, status)}
+                          onPress={() => {
+                            setShowStatusDropdown(!showStatusDropdown);
+                            setShowPriorityDropdown(false);
+                          }}
+                          activeOpacity={0.7}
                         >
                           <Text style={[
-                            styles.reportDetailsControlButtonText,
-                            selectedReport.status === status && styles.reportDetailsControlButtonTextActive
+                            styles.dropdownButtonText,
+                            selectedReport.status === 'resolved' && styles.dropdownButtonTextActive
                           ]}>
-                            {status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                            {(selectedReport.status || 'pending').replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
                           </Text>
+                          <MaterialIcons 
+                            name={showStatusDropdown ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                            size={20} 
+                            color="#64748b" 
+                          />
                         </TouchableOpacity>
-                      ))}
+                        
+                        {showStatusDropdown && (
+                          <View style={styles.dropdownMenu}>
+                            {(['pending', 'in_progress', 'resolved'] as const).map(status => (
+                              <TouchableOpacity
+                                key={status}
+                                style={[
+                                  styles.dropdownItem,
+                                  selectedReport.status === status && styles.dropdownItemActive,
+                                  status === 'pending' && styles.dropdownItemPending,
+                                  status === 'in_progress' && styles.dropdownItemInProgress,
+                                  status === 'resolved' && styles.dropdownItemResolved
+                                ]}
+                                onPress={() => {
+                                  updateReportStatus(selectedReport.id, status);
+                                  setShowStatusDropdown(false);
+                                }}
+                                activeOpacity={0.7}
+                              >
+                                <Text style={[
+                                  styles.dropdownItemText,
+                                  selectedReport.status === status && styles.dropdownItemTextActive
+                                ]}>
+                                  {status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </View>
                     </View>
-                  </View>
 
-                  {/* Priority Control */}
-                  <View style={styles.reportDetailsControlGroup}>
-                    <Text style={styles.reportDetailsControlLabel}>Priority</Text>
-                    <View style={styles.reportDetailsControlButtons}>
-                      {(['low', 'medium', 'high', 'critical'] as const).map(priority => (
+                    {/* Divider */}
+                    <View style={styles.dropdownDivider} />
+
+                    {/* Priority Dropdown - Lower z-index */}
+                    <View style={[styles.reportDetailsControlGroup, showPriorityDropdown && styles.activeDropdownGroup]}>
+                      <Text style={styles.reportDetailsControlLabel}>Priority</Text>
+                      <View style={[styles.dropdownContainer, showPriorityDropdown && { zIndex: 9999 }]}>
                         <TouchableOpacity
-                          key={priority}
                           style={[
-                            styles.reportDetailsControlButton,
-                            selectedReport.priority === priority && styles.reportDetailsControlButtonActive,
-                            priority === 'critical' && styles.reportDetailsControlCritical,
-                            priority === 'high' && styles.reportDetailsControlHigh,
-                            priority === 'medium' && styles.reportDetailsControlMedium,
-                            priority === 'low' && styles.reportDetailsControlLow
+                            styles.dropdownButton,
+                            selectedReport.priority === 'critical' && styles.dropdownButtonCritical,
+                            selectedReport.priority === 'high' && styles.dropdownButtonHigh,
+                            selectedReport.priority === 'medium' && styles.dropdownButtonMedium,
+                            selectedReport.priority === 'low' && styles.dropdownButtonLow
                           ]}
-                          onPress={() => updateReportPriority(selectedReport.id, priority)}
+                          onPress={() => {
+                            setShowPriorityDropdown(!showPriorityDropdown);
+                            setShowStatusDropdown(false);
+                          }}
+                          activeOpacity={0.7}
                         >
                           <Text style={[
-                            styles.reportDetailsControlButtonText,
-                            selectedReport.priority === priority && styles.reportDetailsControlButtonTextActive
+                            styles.dropdownButtonText,
+                            selectedReport.priority === 'critical' && styles.dropdownButtonTextActive
                           ]}>
-                            {priority.charAt(0).toUpperCase() + priority.slice(1)}
+                            {(selectedReport.priority || 'medium').charAt(0).toUpperCase() + (selectedReport.priority || 'medium').slice(1)}
                           </Text>
+                          <MaterialIcons 
+                            name={showPriorityDropdown ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+                            size={20} 
+                            color="#64748b" 
+                          />
                         </TouchableOpacity>
-                      ))}
+                        
+                        {showPriorityDropdown && (
+                          <View style={styles.dropdownMenu}>
+                            {(['low', 'medium', 'high', 'critical'] as const).map(priority => (
+                              <TouchableOpacity
+                                key={priority}
+                                style={[
+                                  styles.dropdownItem,
+                                  selectedReport.priority === priority && styles.dropdownItemActive,
+                                  priority === 'critical' && styles.dropdownItemCritical,
+                                  priority === 'high' && styles.dropdownItemHigh,
+                                  priority === 'medium' && styles.dropdownItemMedium,
+                                  priority === 'low' && styles.dropdownItemLow
+                                ]}
+                                onPress={() => {
+                                  updateReportPriority(selectedReport.id, priority);
+                                  setShowPriorityDropdown(false);
+                                }}
+                                activeOpacity={0.7}
+                              >
+                                <Text style={[
+                                  styles.dropdownItemText,
+                                  selectedReport.priority === priority && styles.dropdownItemTextActive
+                                ]}>
+                                  {priority.charAt(0).toUpperCase() + priority.slice(1)}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </View>
                     </View>
                   </View>
-                </View>
+                </TouchableWithoutFeedback>
 
                 {/* Report Information */}
                 <View style={styles.reportDetailsInfo}>
@@ -2313,65 +2417,126 @@ export default function SuperAdminDashboard() {
                   <Text style={styles.reportDetailsDescription}>{selectedReport.description || 'No description provided'}</Text>
                 </View>
 
-                {/* App Metadata Section */}
-                {(selectedReport.appVersion || selectedReport.platform || selectedReport.deviceInfo) && (
-                  <View style={styles.reportDetailsMetadataContainer}>
-                    <Text style={styles.reportDetailsMetadataTitle}>Technical Information</Text>
-                    <View style={styles.reportDetailsMetadataContent}>
-                      {selectedReport.appVersion && (
-                        <View style={styles.metadataRow}>
-                          <MaterialIcons name="info" size={16} color="#0ea5e9" />
-                          <Text style={styles.metadataLabel}>App Version:</Text>
-                          <Text style={styles.metadataValue}>{selectedReport.appVersion}</Text>
-                        </View>
-                      )}
-                      
-                      {selectedReport.updateId && (
-                        <View style={styles.metadataRow}>
-                          <MaterialIcons name="update" size={16} color="#0ea5e9" />
-                          <Text style={styles.metadataLabel}>Update ID:</Text>
-                          <Text style={styles.metadataValue}>{selectedReport.updateId.substring(0, 12)}...</Text>
-                        </View>
-                      )}
-                      
-                      {selectedReport.platform && (
-                        <View style={styles.metadataRow}>
-                          <MaterialIcons name="phone-android" size={16} color="#0ea5e9" />
-                          <Text style={styles.metadataLabel}>Platform:</Text>
-                          <Text style={styles.metadataValue}>
-                            {selectedReport.platform.charAt(0).toUpperCase() + selectedReport.platform.slice(1)} {selectedReport.platformVersion}
-                          </Text>
-                        </View>
-                      )}
-                      
-                      {selectedReport.deviceInfo && (
-                        <View style={styles.metadataRow}>
-                          <MaterialIcons name="devices" size={16} color="#0ea5e9" />
-                          <Text style={styles.metadataLabel}>Device:</Text>
-                          <Text style={styles.metadataValue}>{selectedReport.deviceInfo}</Text>
-                        </View>
-                      )}
-                      
-                      {selectedReport.environment && (
-                        <View style={styles.metadataRow}>
-                          <MaterialIcons name="cloud" size={16} color="#0ea5e9" />
-                          <Text style={styles.metadataLabel}>Environment:</Text>
-                          <Text style={styles.metadataValue}>
-                            {selectedReport.environment.charAt(0).toUpperCase() + selectedReport.environment.slice(1)}
-                          </Text>
-                        </View>
-                      )}
-                      
-                      {selectedReport.buildProfile && selectedReport.buildProfile !== 'Unknown' && (
-                        <View style={styles.metadataRow}>
-                          <MaterialIcons name="build" size={16} color="#0ea5e9" />
-                          <Text style={styles.metadataLabel}>Build Profile:</Text>
-                          <Text style={styles.metadataValue}>{selectedReport.buildProfile}</Text>
-                        </View>
-                      )}
+                {/* Complete Technical Metadata Section */}
+                <View style={styles.reportDetailsMetadataContainer}>
+                  <Text style={styles.reportDetailsMetadataTitle}>Technical Information</Text>
+                  <View style={styles.reportDetailsMetadataContent}>
+                    {/* App Information */}
+                    {selectedReport.appVersion && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="info" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>App Version:</Text>
+                        <Text style={styles.metadataValue}>{selectedReport.appVersion}</Text>
+                      </View>
+                    )}
+                    
+                    {selectedReport.updateId && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="update" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Update ID:</Text>
+                        <Text style={styles.metadataValue}>{selectedReport.updateId}</Text>
+                      </View>
+                    )}
+                    
+                    {selectedReport.runtimeVersion && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="code" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Runtime Version:</Text>
+                        <Text style={styles.metadataValue}>{selectedReport.runtimeVersion}</Text>
+                      </View>
+                    )}
+                    
+                    {selectedReport.expoVersion && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="extension" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Expo Version:</Text>
+                        <Text style={styles.metadataValue}>{selectedReport.expoVersion}</Text>
+                      </View>
+                    )}
+                    
+                    {/* Platform Information */}
+                    {selectedReport.platform && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="phone-android" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Platform:</Text>
+                        <Text style={styles.metadataValue}>
+                          {selectedReport.platform.charAt(0).toUpperCase() + selectedReport.platform.slice(1)} {selectedReport.platformVersion}
+                        </Text>
+                      </View>
+                    )}
+                    
+                    {selectedReport.deviceInfo && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="devices" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Device:</Text>
+                        <Text style={styles.metadataValue}>{selectedReport.deviceInfo}</Text>
+                      </View>
+                    )}
+                    
+                    {/* Environment Information */}
+                    {selectedReport.environment && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="cloud" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Environment:</Text>
+                        <Text style={styles.metadataValue}>
+                          {selectedReport.environment.charAt(0).toUpperCase() + selectedReport.environment.slice(1)}
+                        </Text>
+                      </View>
+                    )}
+                    
+                    {selectedReport.buildProfile && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="build" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Build Profile:</Text>
+                        <Text style={styles.metadataValue}>{selectedReport.buildProfile}</Text>
+                      </View>
+                    )}
+                    
+                    {/* Timestamps */}
+                    {selectedReport.submittedAt && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="schedule" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Submitted At:</Text>
+                        <Text style={styles.metadataValue}>
+                          {new Date(selectedReport.submittedAt).toLocaleString()}
+                        </Text>
+                      </View>
+                    )}
+                    
+                    {selectedReport.resolvedAt && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="check-circle" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Resolved At:</Text>
+                        <Text style={styles.metadataValue}>
+                          {new Date(selectedReport.resolvedAt).toLocaleString()}
+                        </Text>
+                      </View>
+                    )}
+                    
+                    {selectedReport.resolvedBy && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="verified-user" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Resolved By:</Text>
+                        <Text style={styles.metadataValue}>{selectedReport.resolvedBy}</Text>
+                      </View>
+                    )}
+                    
+                    {/* Report ID Information */}
+                    <View style={styles.metadataRow}>
+                      <MaterialIcons name="fingerprint" size={16} color="#0ea5e9" />
+                      <Text style={styles.metadataLabel}>Report ID:</Text>
+                      <Text style={styles.metadataValue}>{selectedReport.id}</Text>
                     </View>
+                    
+                    {selectedReport.ticketId && (
+                      <View style={styles.metadataRow}>
+                        <MaterialIcons name="confirmation-number" size={16} color="#0ea5e9" />
+                        <Text style={styles.metadataLabel}>Ticket ID:</Text>
+                        <Text style={styles.metadataValue}>{selectedReport.ticketId}</Text>
+                      </View>
+                    )}
                   </View>
-                )}
+                </View>
 
                 {/* Screenshots */}
                 {selectedReport.screenshots && selectedReport.screenshots.length > 0 && (
@@ -2410,29 +2575,28 @@ export default function SuperAdminDashboard() {
                     </Text>
                   </View>
                 )}
-              </ScrollView>
-            )}
+            </ScrollView>
+          )}
 
-            {/* Modal Actions */}
-            <View style={styles.reportDetailsModalActions}>
-              {selectedReport && selectedReport.status !== 'resolved' && selectedReport.id && (
-                <TouchableOpacity
-                  style={styles.reportDetailsMarkDoneButton}
-                  onPress={() => handleMarkReportAsDone(selectedReport.id)}
-                >
-                  <MaterialIcons name="check-circle" size={20} color="#ffffff" />
-                  <Text style={styles.reportDetailsMarkDoneButtonText}>Mark as Resolved</Text>
-                </TouchableOpacity>
-              )}
-              
+          {/* Modal Actions - Fixed at bottom */}
+          <View style={styles.fullscreenModalActions}>
+            {selectedReport && selectedReport.status !== 'resolved' && selectedReport.id && (
               <TouchableOpacity
-                style={styles.reportDetailsRemoveButton}
-                onPress={() => selectedReport && selectedReport.id && handleRemoveReport(selectedReport.id)}
+                style={styles.reportDetailsMarkDoneButton}
+                onPress={() => handleMarkReportAsDone(selectedReport.id)}
               >
-                <MaterialIcons name="delete" size={20} color="#ffffff" />
-                <Text style={styles.reportDetailsRemoveButtonText}>Delete Report</Text>
+                <MaterialIcons name="check-circle" size={20} color="#ffffff" />
+                <Text style={styles.reportDetailsMarkDoneButtonText}>Mark as Resolved</Text>
               </TouchableOpacity>
-            </View>
+            )}
+            
+            <TouchableOpacity
+              style={styles.reportDetailsRemoveButton}
+              onPress={() => selectedReport && selectedReport.id && handleRemoveReport(selectedReport.id)}
+            >
+              <MaterialIcons name="delete" size={20} color="#ffffff" />
+              <Text style={styles.reportDetailsRemoveButtonText}>Delete Report</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -2824,7 +2988,7 @@ export default function SuperAdminDashboard() {
       >
         <View style={styles.fullscreenImageOverlay}>
           <TouchableOpacity 
-            style={styles.fullscreenCloseButton}
+            style={styles.fullscreenImageCloseButton}
             onPress={closeFullscreenImage}
             activeOpacity={0.8}
           >
@@ -3381,43 +3545,45 @@ const styles = StyleSheet.create({
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    backgroundColor: 'transparent',
     justifyContent: 'flex-end',
   },
   modalContent: {
     backgroundColor: '#ffffff',
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-    maxHeight: '90%',
+    borderTopLeftRadius: 12,
+    borderTopRightRadius: 12,
+    maxHeight: '95%',
     minHeight: '70%',
+    width: '100%',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: -8 },
-    shadowOpacity: 0.25,
-    shadowRadius: 24,
-    elevation: 16,
+    shadowOffset: { width: 0, height: -1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 4,
   },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 28,
-    paddingVertical: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
   },
   modalTitle: {
-    fontSize: 18,
-    fontWeight: '800',
+    fontSize: 16,
+    fontWeight: '600',
     color: '#1e293b',
-    letterSpacing: -0.5,
+    letterSpacing: -0.2,
   },
   closeButton: {
     padding: 8,
-    borderRadius: 12,
+    borderRadius: 8,
     backgroundColor: '#f8fafc',
   },
   modalBody: {
     flex: 1,
+    paddingBottom: 20,
   },
   bulkInput: {
     minHeight: 160,
@@ -5308,7 +5474,8 @@ const styles = StyleSheet.create({
 
   // Report Details Modal Styles
   reportDetailsHeader: {
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
   },
@@ -5320,9 +5487,9 @@ const styles = StyleSheet.create({
   reportDetailsStatusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 16,
     gap: 6,
   },
   reportDetailsStatusPending: {
@@ -5335,28 +5502,30 @@ const styles = StyleSheet.create({
     backgroundColor: '#d1fae5',
   },
   reportDetailsStatusText: {
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '700',
     color: '#1f2937',
+    marginLeft: 4,
   },
   reportDetailsTicketId: {
-    fontSize: 18,
-    fontWeight: '700',
+    fontSize: 14,
+    fontWeight: '600',
     color: '#1e293b',
   },
   reportDetailsInfo: {
-    padding: 20,
-    gap: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    gap: 12,
   },
   reportDetailsInfoRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: 12,
+    gap: 8,
   },
   reportDetailsInfoIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: '#f0f9ff',
     justifyContent: 'center',
     alignItems: 'center',
@@ -5365,57 +5534,60 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   reportDetailsInfoLabel: {
-    fontSize: 12,
+    fontSize: 10,
     color: '#64748b',
     fontWeight: '600',
-    marginBottom: 4,
+    marginBottom: 2,
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 0.3,
   },
   reportDetailsInfoValue: {
-    fontSize: 16,
+    fontSize: 12,
     color: '#1e293b',
-    fontWeight: '600',
-    marginBottom: 2,
+    fontWeight: '500',
+    marginBottom: 1,
   },
   reportDetailsInfoSubtext: {
-    fontSize: 14,
+    fontSize: 10,
     color: '#64748b',
   },
   reportDetailsDescriptionContainer: {
     backgroundColor: '#f8fafc',
-    borderRadius: 12,
+    borderRadius: 8,
     padding: 16,
-    margin: 20,
+    marginHorizontal: 20,
+    marginVertical: 12,
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
   reportDetailsDescription: {
-    fontSize: 15,
+    fontSize: 14,
     color: '#374151',
     lineHeight: 22,
+    fontWeight: '500',
   },
   reportDetailsScreenshotsContainer: {
     paddingHorizontal: 20,
-    paddingBottom: 20,
+    paddingVertical: 12,
+    marginBottom: 12,
   },
   reportDetailsScreenshotsTitle: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
     color: '#1e293b',
     marginBottom: 12,
   },
   reportDetailsScreenshotsScroll: {
-    marginTop: 8,
+    marginTop: 4,
   },
   reportDetailsScreenshotWrapper: {
-    marginRight: 12,
+    marginRight: 8,
     position: 'relative',
   },
   reportDetailsScreenshot: {
-    width: 120,
-    height: 120,
-    borderRadius: 12,
+    width: 80,
+    height: 80,
+    borderRadius: 8,
     backgroundColor: '#f1f5f9',
   },
   screenshotOverlay: {
@@ -5425,39 +5597,43 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     backgroundColor: 'rgba(0, 0, 0, 0.3)',
-    borderRadius: 12,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
   },
   reportDetailsResolutionInfo: {
     backgroundColor: '#f0fdf4',
-    borderRadius: 12,
+    borderRadius: 8,
     padding: 16,
-    margin: 20,
+    marginHorizontal: 20,
+    marginVertical: 12,
     borderWidth: 1,
     borderColor: '#bbf7d0',
   },
   reportDetailsResolutionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    gap: 6,
+    marginBottom: 4,
   },
   reportDetailsResolutionText: {
-    fontSize: 14,
+    fontSize: 12,
     color: '#059669',
-    fontWeight: '600',
-  },
-  reportDetailsResolutionBy: {
-    fontSize: 14,
-    color: '#64748b',
     fontWeight: '500',
   },
+  reportDetailsResolutionBy: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '400',
+  },
   reportDetailsModalActions: {
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
     borderTopWidth: 1,
     borderTopColor: '#e2e8f0',
     gap: 12,
+    backgroundColor: '#ffffff',
   },
   reportDetailsMarkDoneButton: {
     flexDirection: 'row',
@@ -5468,9 +5644,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     borderRadius: 12,
     gap: 8,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
   },
   reportDetailsMarkDoneButtonText: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: '#ffffff',
   },
@@ -5483,9 +5664,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     borderRadius: 12,
     gap: 8,
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
   },
   reportDetailsRemoveButtonText: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: '#ffffff',
   },
@@ -5912,25 +6098,32 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
     padding: 16,
     marginHorizontal: 20,
-    marginBottom: 16,
-    borderRadius: 12,
+    marginTop: 12,
+    marginBottom: 12,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
   reportDetailsManagementTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#1e293b',
-    marginBottom: 12,
-  },
-  reportDetailsControlGroup: {
-    marginBottom: 12,
-  },
-  reportDetailsControlLabel: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#64748b',
+    color: '#1e293b',
+    marginBottom: 6,
+  },
+  reportDetailsControlGroup: {
     marginBottom: 8,
+  },
+  dropdownDivider: {
+    height: 1,
+    backgroundColor: '#e2e8f0',
+    marginVertical: 6,
+    marginHorizontal: 0,
+  },
+  reportDetailsControlLabel: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: '#64748b',
+    marginBottom: 4,
   },
   reportDetailsControlButtons: {
     flexDirection: 'row',
@@ -5978,6 +6171,211 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#1e293b',
   },
+
+  // Fullscreen Modal Styles
+  fullscreenModalContainer: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+  },
+  fullscreenModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  fullscreenModalTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.3,
+  },
+  fullscreenCloseButton: {
+    padding: 8,
+    borderRadius: 12,
+    backgroundColor: '#f8fafc',
+  },
+  fullscreenModalBody: {
+    flex: 1,
+  },
+  fullscreenModalBodyContent: {
+    paddingBottom: 120,
+  },
+  fullscreenModalActions: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    gap: 12,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  activeDropdownGroup: {
+    zIndex: 10000,
+    elevation: 10000,
+  },
+  
+  // Dropdown Styles - Updated for better UX
+  dropdownContainer: {
+    position: 'relative',
+    zIndex: 1000,
+    marginBottom: 4,
+    elevation: 1000,
+    backgroundColor: 'transparent',
+  },
+  dropdownButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#ffffff',
+    minWidth: 110,
+    minHeight: 36,
+    elevation: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 1,
+  },
+  dropdownButtonPending: {
+    backgroundColor: '#fef3c7',
+    borderColor: '#f59e0b',
+  },
+  dropdownButtonInProgress: {
+    backgroundColor: '#dbeafe',
+    borderColor: '#3b82f6',
+  },
+  dropdownButtonResolved: {
+    backgroundColor: '#d1fae5',
+    borderColor: '#10b981',
+  },
+  dropdownButtonCritical: {
+    backgroundColor: '#fecaca',
+    borderColor: '#ef4444',
+  },
+  dropdownButtonHigh: {
+    backgroundColor: '#fef3c7',
+    borderColor: '#f59e0b',
+  },
+  dropdownButtonMedium: {
+    backgroundColor: '#dbeafe',
+    borderColor: '#3b82f6',
+  },
+  dropdownButtonLow: {
+    backgroundColor: '#f8fafc',
+    borderColor: '#64748b',
+  },
+  dropdownButtonText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#374151',
+    flex: 1,
+    textAlign: 'left',
+  },
+  dropdownButtonTextActive: {
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  dropdownMenu: {
+    position: 'absolute',
+    top: '100%',
+    left: 0,
+    right: 0,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 9999,
+    zIndex: 9999,
+    marginTop: 4,
+    maxHeight: 200,
+    minHeight: 120,
+  },
+  dropdownItem: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+    minHeight: 40,
+    justifyContent: 'center',
+  },
+  dropdownItemActive: {
+    backgroundColor: '#f8fafc',
+  },
+  dropdownItemPending: {
+    backgroundColor: '#fef3c7',
+  },
+  dropdownItemInProgress: {
+    backgroundColor: '#dbeafe',
+  },
+  dropdownItemResolved: {
+    backgroundColor: '#d1fae5',
+  },
+  dropdownItemCritical: {
+    backgroundColor: '#fecaca',
+  },
+  dropdownItemHigh: {
+    backgroundColor: '#fef3c7',
+  },
+  dropdownItemMedium: {
+    backgroundColor: '#dbeafe',
+  },
+  dropdownItemLow: {
+    backgroundColor: '#f8fafc',
+  },
+  dropdownItemText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#374151',
+    textAlign: 'left',
+  },
+  dropdownItemTextActive: {
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  rawMetadataContainer: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    marginTop: 8,
+  },
+  rawMetadataText: {
+    fontFamily: 'monospace',
+    fontSize: 12,
+    color: '#374151',
+    lineHeight: 18,
+  },
   reportsEmptyContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -6016,7 +6414,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#f0f9ff',
     borderRadius: 12,
     padding: 16,
-    margin: 20,
+    marginHorizontal: 20,
+    marginVertical: 12,
     borderWidth: 1,
     borderColor: '#bae6fd',
   },
@@ -6035,14 +6434,14 @@ const styles = StyleSheet.create({
   metadataRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingVertical: 6,
+    gap: 12,
+    paddingVertical: 8,
   },
   metadataLabel: {
     fontSize: 13,
     fontWeight: '600',
     color: '#64748b',
-    minWidth: 100,
+    minWidth: 120,
   },
   metadataValue: {
     fontSize: 13,
@@ -6059,7 +6458,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  fullscreenCloseButton: {
+  fullscreenImageCloseButton: {
     position: 'absolute',
     top: 60,
     right: 20,

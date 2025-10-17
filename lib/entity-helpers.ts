@@ -65,6 +65,7 @@ export interface CreateExerciseParams {
   isPublic?: boolean;
   timeLimitPerItem?: number;
   maxAttemptsPerItem?: number;
+  exerciseCode?: string; // Optional 6-digit code for sharing
 }
 
 export interface CreateAssignedExerciseParams {
@@ -324,9 +325,13 @@ export async function createExercise(params: CreateExerciseParams): Promise<{
       id: `${exerciseId}-Q${String(index + 1).padStart(3, '0')}` // e.g., E-ABC-0001-Q001
     }));
     
+    // Generate exercise code if not provided
+    const exerciseCode = params.exerciseCode || Math.floor(100000 + Math.random() * 900000).toString();
+    
     // Create exercise data (only include defined values to avoid Firebase errors)
     const exerciseData: any = {
       exerciseId,
+      exerciseCode, // 6-digit code for sharing
       title: params.title,
       description: params.description,
       teacherId: params.teacherId,
@@ -569,6 +574,55 @@ export async function createTask(params: CreateTaskParams): Promise<{
   }
 }
 
+/**
+ * Copy an existing exercise with a new readable ID
+ * All local images will be preserved (re-uploaded handled by caller)
+ */
+export async function copyExercise(
+  sourceExercise: CreateExerciseParams & { questions: any[] },
+  newTeacherId: string,
+  newTeacherName: string
+): Promise<{
+  success: boolean;
+  exerciseId?: string;
+  error?: string;
+}> {
+  try {
+    // Create the copied exercise with new ID
+    const result = await createExercise({
+      title: `${sourceExercise.title} (Copy)`,
+      description: sourceExercise.description,
+      teacherId: newTeacherId,
+      teacherName: newTeacherName,
+      questions: sourceExercise.questions,
+      resourceUrl: sourceExercise.resourceUrl,
+      category: sourceExercise.category,
+      timesUsed: 0,
+      isPublic: false, // Copies are always private initially
+      timeLimitPerItem: sourceExercise.timeLimitPerItem,
+      maxAttemptsPerItem: sourceExercise.maxAttemptsPerItem,
+    });
+    
+    if (!result.success || !result.exerciseId) {
+      throw new Error(result.error || 'Failed to create copied exercise');
+    }
+    
+    console.log(`[EntityHelper] Copied exercise as: ${result.exerciseId}`);
+    
+    return {
+      success: true,
+      exerciseId: result.exerciseId
+    };
+    
+  } catch (error) {
+    console.error('[EntityHelper] Failed to copy exercise:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 // Export all helper functions
 export const EntityHelpers = {
   createParent,
@@ -579,7 +633,8 @@ export const EntityHelpers = {
   createAssignedExercise,
   createExerciseResult,
   createAnnouncement,
-  createTask
+  createTask,
+  copyExercise
 };
 
 export default EntityHelpers;

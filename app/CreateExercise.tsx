@@ -4,19 +4,19 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    FlatList,
-    Image,
-    Modal,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  FlatList,
+  Image,
+  Modal,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
 import { getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
@@ -865,6 +865,18 @@ interface Question {
 export default function CreateExercise() {
   const router = useRouter();
   
+  // Scroll references for scroll-to-top functionality
+  const mainScrollRef = useRef<ScrollView>(null);
+  const questionEditorScrollRef = useRef<ScrollView>(null);
+  const stockImagesScrollRef = useRef<ScrollView>(null);
+  
+  // Scroll to top functionality
+  const scrollToTop = useCallback((scrollRef: React.RefObject<ScrollView | null>) => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({ y: 0, animated: true });
+    }
+  }, []);
+  
   // Image preloading for better performance
   const preloadImages = useCallback(async () => {
     try {
@@ -1348,7 +1360,28 @@ export default function CreateExercise() {
 
   // Check if an image URI is local (from require())
   const isLocalImage = (uri: string): boolean => {
-    return uri.includes('assets/') || uri.includes('file://') || uri.includes('content://');
+    if (!uri) return false;
+    
+    // Check for various local URI patterns
+    const localPatterns = [
+      'assets/',           // Bundled assets
+      'file://',           // Local file system
+      'content://',        // Android content provider
+      'http://192.168.',   // Local dev server
+      'http://10.',        // Local dev server
+      'http://localhost:', // Local dev server
+      'http://127.0.0.1:', // Local dev server
+      '/static/media/',    // Webpack static assets
+    ];
+    
+    // Check if URI matches any local pattern
+    const isLocal = localPatterns.some(pattern => uri.includes(pattern));
+    
+    // Also check if URI is NOT a Firebase Storage URL
+    const isFirebaseUrl = uri.includes('firebasestorage.googleapis.com') || 
+                         uri.includes('storage.googleapis.com');
+    
+    return isLocal && !isFirebaseUrl;
   };
 
   // Upload local images to Firebase Storage and return remote URLs
@@ -2105,208 +2138,205 @@ EXERCISE DETAILS:
 
 QUESTION TYPE: ${selectedQuestionType}
 
-AVAILABLE STOCK IMAGES (use these in your questions when relevant but its not necessary):
+AVAILABLE STOCK IMAGES (use these in your questions when relevant):
 ${availableImages}
 
-REQUIREMENTS FOR FILIPINO GRADE 1 STUDENTS:
-1. Use simple Filipino language (Tagalog) mixed with ONLY WHEN English is necessary
-2. Questions should be age-appropriate for 6-7 year old Filipino children
-3. Use familiar Filipino words and concepts (e.g., "bahay", "pamilya", "pagkain", "kulay")
-4. Make questions engaging with Filipino cultural context
-5. Use simple sentence structures
-6. Include visual concepts that Filipino children can relate to
-7. MAXIMIZE USE OF STOCK IMAGES: Reference specific images from the available list in questions and options
-8. When using images, mention the exact image name from the stock images list
-9. CRITICAL: NEVER include the answer in the question text - questions should only ask, not provide answers even if its multiple answer.
-10. CRITICAL: Write questions as PURE QUESTIONS or SCENARIOS ONLY - NO category labels, NO prefixes like "Fruits:", "Animals:", "[Category: Item]", etc.
-11. Make questions natural and conversational - like a teacher talking to students
-12. Examples of GOOD questions: "Ano ito?", "Ilan ang mga ito?", "Anong kulay ito?"
-13. Examples of BAD questions: "Fruits: Ano ito?", "[Animals] What is this?", "Numbers: Ilan ito?"
+=== PREMIUM VISUAL PRESENTATION STANDARDS ===
 
-QUESTION TYPE SPECIFIC RULES:
+VISUAL ACCURACY REQUIREMENTS:
+1. Every questionImage MUST directly show what the question asks about
+2. Images must be EXACTLY relevant - no approximations or "close enough" matches
+3. The visual should clarify the question, not confuse the student
+4. If asking about a specific object, show THAT object, not a similar one
+5. Images should support understanding, not just decorate
+
+IMAGE MATCHING PRECISION:
+- Question: "Ano ang hugis nito?" → Use questionImage: "Triangle" (show the exact shape)
+- Question: "Ilan ang mga ito?" → Use questionImages: ["Apple", "Apple", "Apple"] (show exact quantity)
+- Question: "Anong kulay ang bulaklak?" → Use questionImage: "Pink Rose" or "Red Rose" (show colored flower)
+- Question: "Alin ang mas malaki?" → Use questionImages with size comparisons
+- WRONG: Asking about dogs but showing cat image
+- WRONG: Asking about numbers but showing letters
+- WRONG: Asking about shapes but showing animals
+
+MULTIPLE CHOICE IMAGE RULES:
+- When using option images, each option MUST have a matching image from stock library
+- Images should be clearly distinguishable from each other
+- All option images should be the same category (all animals, all shapes, all numbers, etc.)
+- Option images should match the question's visual context
+- Example: Question about animals → All options should be animal images
+- Example: Question about shapes → All options should be shape images
+
+PATTERN & SEQUENCE VISUALIZATION:
+- For number sequences: Use questionImages: ["1", "2", "3"] to show the pattern
+- For shape patterns: Use questionImages: ["Circle", "Square", "Circle", "Square"]
+- For quantity visualization: Repeat the same image N times to show quantity
+- Pattern questions MUST use questionImages array (3-4 images minimum)
+- The pattern must be visually clear and obvious to Grade 1 students
+
+QUANTITY VISUALIZATION (CRITICAL):
+- When question mentions a number (e.g., "5 apples", "lima na mansanas"):
+  → Use questionImages to repeat the image that many times
+  → Example: "May 5 apples" → questionImages: ["Red Apple", "Red Apple", "Red Apple", "Red Apple", "Red Apple"]
+  → Example: "3 na pusa" → questionImages: ["Cat", "Cat", "Cat"]
+- This helps students COUNT and VISUALIZE the quantity
+- Maximum 10 repetitions for clarity
+
+=== FILIPINO GRADE 1 STUDENT REQUIREMENTS ===
+
+LANGUAGE:
+1. Use simple Filipino (Tagalog) as primary language (90% Filipino, 10% English when needed)
+2. Age-appropriate for 6-7 year old Filipino children
+3. Use familiar Filipino words: "bahay", "pamilya", "pagkain", "kulay", "bilang", "hayop"
+4. Simple sentence structures only
+5. Engaging Filipino cultural context
+
+QUESTION QUALITY:
+1. Natural and conversational - like a friendly teacher
+2. NO category labels or prefixes
+3. Pure questions only (e.g., "Ano ito?", "Ilan ang mga ito?", "Anong kulay ito?")
+4. NEVER reveal answers in question text
+5. No parenthetical hints or instructions
+
+=== QUESTION TYPE SPECIFIC RULES ===
 
 FOR MULTIPLE CHOICE:
-- Provide 4 simple options with only 1 correct answer
-- The "answer" field should contain the EXACT text that appears in the options array
-- The correct answer must be placed in a RANDOM position in the options array (not always first)
-- All options should be plausible but only one should be correct
-- Use simple, clear language for all options
-- Include image references in options when relevant (e.g., "Apple", "Cat", "Circle")
+- Provide 4 clear, distinct options
+- Only 1 correct answer (unless multiAnswer specified)
+- "answer" field contains EXACT text from options array
+- Correct answer in RANDOM position (not always first)
+- All options should be plausible distractors
+- If using images, ALL options must have images
+- Option images should be from the same visual category
 
 FOR IDENTIFICATION:
 - Ask for specific Filipino words, objects, or concepts
-- The "answer" field should contain the correct answer text
-- Do NOT include options array
-- Do NOT include Emoji in the answer
-- Focus on single-word or short phrase answers
-- Use questionImage to show what students need to identify
-- ALWAYS include alternative answers for Filipino variations
-- Include common Filipino terms, English equivalents, and regional variations
-- Example: If asking for "bahay", include alternatives like "house", "tahanan", "bahay-kubo"
-- CRITICAL: NEVER mention the answer in the question text
-- Use phrases like "Ano ang hugis nito?" (What shape is this?) instead of "Ano ang hugis nito? Tingnan ang 'Triangle'"
-- Use "Ano ito?" (What is this?) instead of "Ano ito? Ito ay isang aso" (What is this? This is a dog)
-- The question should only ask, not provide hints or answers
+- "answer" field contains the correct answer text
+- NO options array
+- NO emojis in answer text
+- Single-word or short phrase answers
+- questionImage shows EXACTLY what student should identify
+- ALWAYS include 6-10 alternative answers (Filipino, English, regional variations)
+- Never reveal answer in question text
 
 FOR MATCHING:
-- Create pairs that Filipino children can easily understand
-- The "answer" field should be an array of correct pair indices
+- Create clear, logical pairs (3-5 pairs recommended)
+- "answer" field is array of correct pair indices [0, 1, 2, ...]
 - Include "pairs" array with left and right items
-- Each pair should have clear, simple concepts
-- Use images in pairs when relevant
+- Use images when they enhance understanding
+- Pairs should have obvious relationships for Grade 1 level
 
 FOR RE-ORDER:
-- Create simple sequences (numbers, letters, daily activities, patterns)
-- The "answer" field should be an array of items in correct order
-- Include "reorderItems" array with text and/or image items
-- Items should be logically connected and age-appropriate
-- For pattern questions, use multiple images to show the sequence
+- Create logical sequences (numbers 1-5, letters A-E, daily activities, size comparisons)
+- "answer" field is array of items in correct order
+- "reorderItems" array with text and/or image items
+- For NUMBER sequences: Use questionImages to show the pattern
+- For PATTERN questions: Use questionImages array (3-4 images)
+- Items should be obvious and age-appropriate
+- Direction: ascending by default (can be descending for advanced)
 
-FOR RE-ORDER PATTERN QUESTIONS:
-- When creating pattern questions (number sequences, shape patterns, color progressions), use multiple images
-- Include "questionImages" array with multiple image references to show the pattern sequence
-- Create logical patterns that children can follow (e.g., 1-2-3-?, circle-square-circle-?, red-blue-red-?)
-- Use numbers, shapes, colors, or objects in sequence
-- The answer should be the next item in the pattern
-- ALWAYS use questionImages array for pattern questions, NOT questionImage
-- Include 3-4 images in the pattern sequence
-- Make sure the pattern is clear and logical for Grade 1 students
+=== CRITICAL IMAGE SELECTION GUIDELINES ===
 
-CRITICAL IMAGE RELEVANCE RULES:
-- questionImage MUST be factually relevant to the main subject of the question
-- If question asks about animals that give milk, questionImage should be a cow, goat, or milk-related image
-- If question asks about shapes, questionImage should show the specific shape being asked about
-- If question asks about colors, questionImage should show objects of that color
-- NEVER use irrelevant images (e.g., pig image for milk question, cat image for dog question)
-- questionImage should help students understand what the question is asking about
-- If no relevant image exists in stock images, do NOT include questionImage
-- For pattern questions, use questionImages array with multiple relevant images
+EXACT MATCHING:
+- Question asks about "Cat" → Use image named "Cat" ONLY
+- Question asks about "Triangle" → Use image named "Triangle" ONLY
+- Question asks about "5" → Use image named "5" ONLY
+- NO approximations, NO substitutions
 
-YOU CAN ALSO USE EMOJIS INSTEAD OF USING ONLY PICTURES
+CONTEXTUAL RELEVANCE:
+- Animals that give milk → Use "Cow" or "Goat" (NOT pig, NOT cat)
+- Round shapes → Use "Circle" or "Ball" (NOT square, NOT triangle)
+- School items → Use from "School Supplies" category ONLY
+- Filipino fruits → Use "Mangga", "Saging", "Bayabas" from Fruits category
 
-CRITICAL FORMATTING RULES:
-- Write questions as NATURAL CONVERSATIONS - like a friendly teacher asking students
-- NO category labels (WRONG: "Fruits: Ano ito?", "Animals: What is this?", "[Money] Magkano ito?")
-- NO metadata in questions (WRONG: "[Category: Item] Question here")
-- Just PURE QUESTIONS (CORRECT: "Ano ito?", "What is this?", "Magkano ito?", "Ilan ang mga ito?")
-- Think like you're talking to a child - simple, direct, natural
-- Examples:
-  * WRONG: "Fruits: Ano ang kulay nito?"
-  * CORRECT: "Ano ang kulay nito?"
-  * WRONG: "[Animals] May ilang paa ang hayop na ito?"
-  * CORRECT: "May ilang paa ang hayop na ito?"
-  * WRONG: "Money: Magkano ang halaga nito?"
-  * CORRECT: "Magkano ang halaga nito?"
+IF NO PERFECT IMAGE EXISTS:
+- Do NOT force an image
+- Leave imageReferences empty or use closest match
+- Focus on clear text instead
+- Better to have no image than wrong image
 
 IMPORTANT: Respond ONLY with valid JSON array. No additional text before or after.
 
-JSON Format for Multiple Choice:
+=== JSON RESPONSE FORMATS ===
+
+Multiple Choice Example (with images):
 [
   {
-    "question": "Ano ito?",
-    "answer": "Exact text that appears in options array",
-    "options": ["Option A", "Correct Answer", "Option C", "Option D"],
-    "imageReferences": ["Image Name 1", "Image Name 2"]
+    "question": "Ano ang hayop na ito?",
+    "answer": "Cat",
+    "options": ["Dog", "Cat", "Bird", "Fish"],
+    "imageReferences": ["Cat", "Dog", "Cat", "Bird", "Fish"]
   }
 ]
 
-JSON Format for Identification:
+Identification Example (with quantity visualization):
+[
+  {
+    "question": "Ilan ang mga mansanas?",
+    "answer": "5",
+    "questionImages": ["Red Apple", "Red Apple", "Red Apple", "Red Apple", "Red Apple"],
+    "alternativeAnswers": ["lima", "five", "5", "limang mansanas", "5 apples", "five apples"]
+  }
+]
+
+Identification Example (with single image):
 [
   {
     "question": "Ano ang hugis nito?",
     "answer": "Triangle",
     "imageReferences": ["Triangle"],
-    "alternativeAnswers": ["tatsulok", "triangle", "shape with three sides"]
+    "alternativeAnswers": ["tatsulok", "triangle", "tatlong gilid", "three sides", "triangulo"]
   }
 ]
 
-JSON Format for Matching:
+Matching Example (with images):
 [
   {
-    "question": "Match the items",
+    "question": "Itambal ang hugis sa pangalan nito",
     "answer": [0, 1, 2],
     "pairs": [
-      {"left": "Item 1", "right": "Match 1"},
-      {"left": "Item 2", "right": "Match 2"},
-      {"left": "Item 3", "right": "Match 3"}
+      {"left": "Circle", "right": "Bilog"},
+      {"left": "Square", "right": "Parisukat"},
+      {"left": "Triangle", "right": "Tatsulok"}
     ],
-    "imageReferences": ["Image Name 1", "Image Name 2"]
+    "imageReferences": ["Circle", "Square", "Triangle"]
   }
 ]
 
-JSON Format for Re-order (regular sequence):
+Re-order Example (number sequence with visual):
 [
   {
-    "question": "Put these in the correct order",
-    "answer": ["First", "Second", "Third"],
+    "question": "Ayusin ang mga numero mula sa pinakamaliit hanggang pinakamalaki",
+    "answer": ["1", "3", "5", "7"],
+    "questionImages": ["1", "3", "5", "7"],
     "reorderItems": [
-      {"type": "text", "content": "First item"},
-      {"type": "text", "content": "Second item"},
-      {"type": "text", "content": "Third item"}
+      {"type": "image", "content": "7", "imageUrl": "7"},
+      {"type": "image", "content": "3", "imageUrl": "3"},
+      {"type": "image", "content": "1", "imageUrl": "1"},
+      {"type": "image", "content": "5", "imageUrl": "5"}
     ],
-    "imageReferences": ["Image Name 1", "Image Name 2"]
+    "imageReferences": ["1", "3", "5", "7"]
   }
 ]
 
-JSON Format for Re-order (pattern with multiple images):
+Re-order Example (pattern completion):
 [
   {
-    "question": "What comes next in this pattern?",
-    "answer": "Next item in pattern",
-    "questionImages": ["Number 1", "Number 2", "Number 3"],
-    "imageReferences": ["Number 1", "Number 2", "Number 3", "Number 4"]
+    "question": "Ano ang susunod sa pattern?",
+    "questionImages": ["Circle", "Square", "Circle", "Square"],
+    "answer": "Circle",
+    "imageReferences": ["Circle", "Square"]
   }
 ]
 
-IMPORTANT FOR PATTERN QUESTIONS:
-- Always use "questionImages" array (not "questionImage") for pattern questions
-- Include 3-4 images in the pattern sequence
-- Use specific image names from the available stock images
-- Make the pattern logical and easy to follow
-- The question should ask "What comes next?" or "What is the next item?"
-
-IMPORTANT FOR IDENTIFICATION ALTERNATIVE ANSWERS:
-- ALWAYS include alternative answers for identification questions
-- Include Filipino variations, English equivalents, and regional terms
-- Examples of good alternative answers:
-  * For "bahay": ["house", "tahanan", "bahay-kubo", "home"]
-  * For "aso": ["dog", "aso", "canine"]
-  * For "tubig": ["water", "tubig", "liquid"]
-  * For "araw": ["sun", "araw", "sunshine", "sikat ng araw"]
-  * For "bulaklak": ["flower", "bulaklak", "bloom"]
-- Include 6-10 alternative answers per question
-- Use simple, common terms that Grade 1 students would know
-
-CRITICAL RULE FOR ALL QUESTIONS:
-- NEVER mention the answer in the question text even if its in the filename of the text.
-- WRONG: "Ano ang [Money:40 pesos] Magkano ang halaga nito?"
-- WRONG: "Ano ang hugis nito? Tingnan ang 'Triangle'"
-- WRONG: "Ano ito? Ito ay isang aso"
-- WRONG: "What is this? This is a house"
-- WRONG: "Ano ang shape na nasa picture? (ipakita ang image ng Square)"
-- WRONG: "What shape is this? (show the image of a Square)"
-- CORRECT: "Ano ang hugis nito?" (What shape is this?)
-- CORRECT: "Ano ito?" (What is this?)
-- CORRECT: "What is this?"
-- CORRECT: "Ano ang shape na nasa picture?" (What shape is in the picture?)
-- The question should ONLY ask, never provide  answers
-- Do NOT include parenthetical hints like "(show the image of X)" or "(ipakita ang image ng X)"
-- Do NOT include the answer in any form within the question text
-
-CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
-- NEVER mention the answer in the question text
-- WRONG: "Ano ang hugis nito? Tingnan ang 'Triangle'"
-- WRONG: "Ano ito? Ito ay isang aso"
-- WRONG: "What is this? This is a house"
-- WRONG: "Ano ang shape na nasa picture? (ipakita ang image ng Square)"
-- WRONG: "What shape is this? (show the image of a Square)"
-- CORRECT: "Ano ang hugis nito?" (What shape is this?)
-- CORRECT: "Ano ito?" (What is this?)
-- CORRECT: "What is this?"
-- CORRECT: "Ano ang shape na nasa picture?" (What shape is in the picture?)
-- The question should ONLY ask, never provide  answers
-- Do NOT include parenthetical hints like "(show the image of X)" or "(ipakita ang image ng X)"
-- Do NOT include the answer in any form within the question text`;
+=== FINAL REMINDERS ===
+- Images must EXACTLY match question content
+- Use questionImages for quantities and patterns
+- All option images must be same category
+- Never reveal answers in question text
+- Keep language simple and Filipino-focused
+- Only use available stock images by exact name
+- Better no image than wrong image`;
 
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
       
@@ -2468,38 +2498,70 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
           return null;
         };
           
-          // Helper function to check if image is relevant to question
-          const isImageRelevant = (imgName: string, questionText: string) => {
+          // Enhanced helper function to check if image is relevant to question
+          const isImageRelevant = (imgName: string, questionText: string, answerText?: string) => {
             const imgLower = imgName.toLowerCase();
             const questionLower = questionText.toLowerCase();
+            const answerLower = answerText ? answerText.toLowerCase() : '';
             
-            // Check for direct mentions
-            if (questionLower.includes(imgLower)) return true;
+            // Priority 1: Check if image name matches the answer exactly
+            if (answerLower && imgLower === answerLower) return true;
             
-          // Check for conceptual relevance
+            // Priority 2: Check for direct mentions in question
+            const imgWords = imgLower.split(/\s+/);
+            const questionWords = questionLower.split(/\s+/);
+            if (imgWords.some(word => questionWords.includes(word))) return true;
+            
+            // Priority 3: Check for conceptual relevance
+            
+            // Animals & their products
             if (questionLower.includes('gatas') || questionLower.includes('milk')) {
-              return imgLower.includes('cow') || imgLower.includes('goat') || imgLower.includes('milk');
+              return imgLower.includes('cow') || imgLower.includes('goat') || imgLower.includes('baka');
             }
+            
+            // Colors - match by color words
+            const colorWords = ['red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink', 'pula', 'asul', 'berde', 'dilaw', 'kahel', 'lila', 'rosas'];
             if (questionLower.includes('kulay') || questionLower.includes('color')) {
-              return imgLower.includes('red') || imgLower.includes('blue') || imgLower.includes('green') || 
-                     imgLower.includes('yellow') || imgLower.includes('orange') || imgLower.includes('purple');
+              return colorWords.some(color => imgLower.includes(color));
             }
+            
+            // Shapes - exact shape matching
+            const shapeWords = ['circle', 'square', 'triangle', 'rectangle', 'oval', 'bilog', 'parisukat', 'tatsulok', 'parihaba'];
             if (questionLower.includes('hugis') || questionLower.includes('shape')) {
-              return imgLower.includes('circle') || imgLower.includes('square') || imgLower.includes('triangle') || 
-                     imgLower.includes('rectangle') || imgLower.includes('oval');
+              return shapeWords.some(shape => imgLower.includes(shape));
             }
-            if (questionLower.includes('numero') || questionLower.includes('number')) {
-              return imgLower.match(/\d/) || imgLower.includes('number');
+            
+            // Numbers - digit matching
+            if (questionLower.includes('numero') || questionLower.includes('number') || questionLower.includes('bilang')) {
+              return /\d/.test(imgLower) || imgLower.includes('number');
             }
-          if (questionLower.includes('pattern') || questionLower.includes('sunod') || 
-              questionLower.includes('next') || questionLower.includes('susunod') ||
-              questionLower.includes('sequence') || questionLower.includes('order')) {
-            return imgLower.includes('number') || imgLower.includes('circle') || 
-                   imgLower.includes('square') || imgLower.includes('triangle') || 
-                   imgLower.includes('rectangle') || imgLower.includes('oval') ||
-                   imgLower.includes('red') || imgLower.includes('blue') || 
-                   imgLower.includes('green') || imgLower.includes('yellow');
-          }
+            
+            // Fruits & Vegetables
+            const fruitWords = ['apple', 'banana', 'orange', 'grape', 'mango', 'mansanas', 'saging', 'dalandan', 'ubas', 'mangga'];
+            if (questionLower.includes('prutas') || questionLower.includes('fruit')) {
+              return fruitWords.some(fruit => imgLower.includes(fruit));
+            }
+            
+            // Animals
+            const animalWords = ['cat', 'dog', 'bird', 'fish', 'cow', 'pig', 'pusa', 'aso', 'ibon', 'isda', 'baka', 'baboy'];
+            if (questionLower.includes('hayop') || questionLower.includes('animal')) {
+              return animalWords.some(animal => imgLower.includes(animal));
+            }
+            
+            // School supplies
+            if (questionLower.includes('school') || questionLower.includes('paaralan') || questionLower.includes('gamit')) {
+              return imgLower.includes('pencil') || imgLower.includes('book') || imgLower.includes('bag') || 
+                     imgLower.includes('lapis') || imgLower.includes('libro') || imgLower.includes('bag');
+            }
+            
+            // Patterns & sequences
+            if (questionLower.includes('pattern') || questionLower.includes('sunod') || 
+                questionLower.includes('next') || questionLower.includes('susunod') ||
+                questionLower.includes('sequence') || questionLower.includes('order') ||
+                questionLower.includes('ayusin')) {
+              // For patterns, numbers and shapes are most relevant
+              return /\d/.test(imgLower) || shapeWords.some(shape => imgLower.includes(shape));
+            }
             
             return false;
           };
@@ -2659,8 +2721,10 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
           for (const category of Object.keys(stockImages)) {
             for (const img of stockImages[category]) {
               const imgName = img.name.toLowerCase();
+              const answerText = typeof processedQuestion.answer === 'string' ? processedQuestion.answer : '';
+              
               // Only use image if it's relevant to question AND not used in options
-              if (isImageRelevant(imgName, questionText) && !usedOptionImages.has(imgName)) {
+              if (isImageRelevant(imgName, questionText, answerText) && !usedOptionImages.has(imgName)) {
                 if (selectedQuestionType === 're-order' || isPatternQuestion || (q.questionImages && q.questionImages.length > 1)) {
                   // For pattern questions or re-order questions, collect multiple images
                   if (!questionImages) {
@@ -4073,6 +4137,7 @@ Please respond with a JSON object in this exact format:
         teacherName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
         questionCount: finalQuestions.length,
         timesUsed: 0,
+        exerciseCode: finalExerciseCode,
         questions: finalQuestions.map(q => {
           // Create a clean question object, removing all undefined values
           const cleanQuestion: any = {
@@ -4139,7 +4204,6 @@ Please respond with a JSON object in this exact format:
           return cleanQuestion;
         }),
         isPublic: Boolean(isPublic),
-        exerciseCode: finalExerciseCode,
         category: exerciseCategory,
         timeLimitPerItem: timeLimitPerItem,
         maxAttemptsPerItem: maxAttemptsPerItem,
@@ -4202,7 +4266,8 @@ Please respond with a JSON object in this exact format:
           timesUsed: finalCleanPayload.timesUsed,
           isPublic: finalCleanPayload.isPublic,
           timeLimitPerItem: finalCleanPayload.timeLimitPerItem,
-          maxAttemptsPerItem: finalCleanPayload.maxAttemptsPerItem
+          maxAttemptsPerItem: finalCleanPayload.maxAttemptsPerItem,
+          exerciseCode: finalExerciseCode
         });
         
         key = result.exerciseId || null;
@@ -4742,94 +4807,6 @@ Please respond with a JSON object in this exact format:
     updateQuestion(questionId, { reorderItems: newItems });
   };
 
-  // Render function for draggable reorder items
-  const renderReorderItem = ({ item, drag, isActive, getIndex }: RenderItemParams<ReorderItem>) => {
-    const index = getIndex?.() ?? 0;
-    const question = questions.find(q => q.id === editingQuestion?.id);
-    if (!question || !question.reorderItems) return null;
-
-    return (
-      <TouchableOpacity
-        style={[
-          styles.reorderItemContainer,
-          isActive && styles.reorderItemActive
-        ]}
-        onLongPress={drag}
-        disabled={isActive}
-      >
-        <View style={styles.reorderItemContent}>
-          <View style={styles.reorderItemNumber}>
-            <Text style={styles.reorderItemNumberText}>{index + 1}</Text>
-          </View>
-          
-          {item.type === 'text' ? (
-            <TextInput
-              style={styles.reorderTextInput}
-              value={item.content}
-              onChangeText={(text) => updateReorderItem(editingQuestion!.id, index, { content: text })}
-              placeholder={`Item ${index + 1}`}
-              placeholderTextColor="#9ca3af"
-            />
-          ) : (
-            <View style={styles.reorderImageContainer}>
-              {item.imageUrl && item.imageUrl.trim() !== '' ? (
-                <Image 
-                  source={{ uri: item.imageUrl }} 
-                  style={styles.reorderImageThumbnail}
-                  resizeMode="cover"
-                  loadingIndicatorSource={require('../assets/images/icon.png')}
-                />
-              ) : (
-                <View style={styles.reorderImagePlaceholder}>
-                  <MaterialCommunityIcons name="image" size={24} color="#9ca3af" />
-                </View>
-              )}
-            </View>
-          )}
-          
-          <View style={styles.reorderItemActions}>
-            {item.type === 'text' ? (
-              <TouchableOpacity
-                style={styles.reorderActionButton}
-                onPress={() => pickReorderItemImage(editingQuestion!.id, index)}
-              >
-                <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.reorderItemActionGroup}>
-                <TouchableOpacity
-                  style={styles.reorderActionButton}
-                  onPress={() => pickReorderItemImage(editingQuestion!.id, index)}
-                >
-                  <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.reorderActionButton}
-                  onPress={() => updateReorderItem(editingQuestion!.id, index, { type: 'text', content: '', imageUrl: undefined })}
-                >
-                  <MaterialCommunityIcons name="text" size={20} color="#3b82f6" />
-                </TouchableOpacity>
-              </View>
-            )}
-            
-            {question.reorderItems.length > 1 && (
-              <TouchableOpacity
-                style={styles.reorderActionButton}
-                onPress={() => removeReorderItem(editingQuestion!.id, index)}
-              >
-                <AntDesign name="close" size={16} color="#ef4444" />
-              </TouchableOpacity>
-            )}
-          </View>
-        </View>
-        
-        <View style={styles.reorderDragHandle}>
-          <MaterialCommunityIcons name="drag" size={20} color="#9ca3af" />
-        </View>
-      </TouchableOpacity>
-    );
-  };
-
   const renderQuestionTypeModal = () => (
       <Modal
         visible={showQuestionTypeModal && getCurrentModal() === 'questionType'}
@@ -4900,10 +4877,23 @@ Please respond with a JSON object in this exact format:
             <Text style={styles.fullScreenTitle}>
               Edit {questionTypes.find(t => t.id === editingQuestion.type)?.title} Question
             </Text>
-            <View style={styles.placeholder} />
+            <TouchableOpacity 
+              onPress={() => scrollToTop(questionEditorScrollRef)} 
+              style={styles.scrollToTopButton}
+            >
+              <AntDesign name="arrow-up" size={20} color="#64748b" />
+            </TouchableOpacity>
           </View>
             
-          <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
+          <ScrollView 
+            ref={questionEditorScrollRef}
+            style={styles.fullScreenContent} 
+            showsVerticalScrollIndicator={true}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            bounces={true}
+            contentContainerStyle={styles.fullScreenScrollContainer}
+          >
             <View style={styles.inputGroup}>
               <Text style={styles.inputLabel}>Question</Text>
               <View style={styles.questionInputContainer}>
@@ -5026,8 +5016,9 @@ Please respond with a JSON object in this exact format:
                       keyExtractor={(item, index) => `${editingQuestion.id}-img-${index}`}
                       onDragEnd={({ data }) => reorderQuestionImages(editingQuestion.id, data)}
                       horizontal
-                      showsHorizontalScrollIndicator={false}
+                      showsHorizontalScrollIndicator={true}
                       scrollEnabled={true}
+                      bounces={true}
                     />
                   </View>
                 </View>
@@ -5300,7 +5291,8 @@ Please respond with a JSON object in this exact format:
                         style={styles.pairsPreviewVScroll}
                         showsVerticalScrollIndicator={true}
                         contentContainerStyle={styles.pairsPreviewVContainer}
-                          nestedScrollEnabled={true}
+                        nestedScrollEnabled={true}
+                        bounces={true}
                       >
                         {(editingQuestion.pairs || []).map((pair, idx) => (
                           <View key={`pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
@@ -5477,15 +5469,119 @@ Please respond with a JSON object in this exact format:
                     </TouchableOpacity>
                   </View>
                   
-                  {/* Draggable Reorder Items */}
+                  {/* Reorder Items with Arrow Controls */}
                   <View style={styles.reorderContainer}>
-                    <DraggableFlatList
-                      data={editingQuestion.reorderItems || []}
-                      renderItem={renderReorderItem}
-                      keyExtractor={(item) => item.id}
-                      onDragEnd={({ data }) => reorderItems(editingQuestion.id, data)}
-                      scrollEnabled={false}
-                    />
+                    {(editingQuestion.reorderItems || []).map((item, index) => (
+                      <View
+                        key={item.id}
+                        style={[
+                          styles.reorderItemContainer,
+                        ]}
+                      >
+                        <View style={styles.reorderItemContent}>
+                          <View style={styles.reorderItemNumber}>
+                            <Text style={styles.reorderItemNumberText}>{index + 1}</Text>
+                          </View>
+                          
+                          {item.type === 'text' ? (
+                            <TextInput
+                              style={styles.reorderTextInput}
+                              value={item.content}
+                              onChangeText={(text) => updateReorderItem(editingQuestion.id, index, { content: text })}
+                              placeholder={`Item ${index + 1}`}
+                              placeholderTextColor="#9ca3af"
+                            />
+                          ) : (
+                            <View style={styles.reorderImageContainer}>
+                              {item.imageUrl && item.imageUrl.trim() !== '' ? (
+                                <Image 
+                                  source={{ uri: item.imageUrl }} 
+                                  style={styles.reorderImageThumbnail}
+                                  resizeMode="cover"
+                                  loadingIndicatorSource={require('../assets/images/icon.png')}
+                                />
+                              ) : (
+                                <View style={styles.reorderImagePlaceholder}>
+                                  <MaterialCommunityIcons name="image" size={24} color="#9ca3af" />
+                                </View>
+                              )}
+                            </View>
+                          )}
+                          
+                          <View style={styles.reorderItemActions}>
+                            {item.type === 'text' ? (
+                              <TouchableOpacity
+                                style={styles.reorderActionButton}
+                                onPress={() => pickReorderItemImage(editingQuestion.id, index)}
+                              >
+                                <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
+                              </TouchableOpacity>
+                            ) : (
+                              <View style={styles.reorderItemActionGroup}>
+                                <TouchableOpacity
+                                  style={styles.reorderActionButton}
+                                  onPress={() => pickReorderItemImage(editingQuestion.id, index)}
+                                >
+                                  <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  style={styles.reorderActionButton}
+                                  onPress={() => updateReorderItem(editingQuestion.id, index, { type: 'text', content: '', imageUrl: undefined })}
+                                >
+                                  <MaterialCommunityIcons name="text" size={20} color="#3b82f6" />
+                                </TouchableOpacity>
+                              </View>
+                            )}
+                            
+                            {(editingQuestion.reorderItems || []).length > 1 && (
+                              <TouchableOpacity
+                                style={styles.reorderActionButton}
+                                onPress={() => removeReorderItem(editingQuestion.id, index)}
+                              >
+                                <AntDesign name="close" size={16} color="#ef4444" />
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+                        
+                        <View style={styles.reorderArrowControls}>
+                          <TouchableOpacity 
+                            style={[styles.reorderArrowButton, index === 0 && styles.reorderArrowButtonDisabled]}
+                            onPress={() => {
+                              if (index > 0) {
+                                const newItems = [...(editingQuestion.reorderItems || [])];
+                                [newItems[index - 1], newItems[index]] = [newItems[index], newItems[index - 1]];
+                                reorderItems(editingQuestion.id, newItems);
+                              }
+                            }}
+                            disabled={index === 0}
+                          >
+                            <MaterialCommunityIcons 
+                              name="arrow-up" 
+                              size={20} 
+                              color={index === 0 ? "#d1d5db" : "#64748b"} 
+                            />
+                          </TouchableOpacity>
+                          <TouchableOpacity 
+                            style={[styles.reorderArrowButton, index === (editingQuestion.reorderItems || []).length - 1 && styles.reorderArrowButtonDisabled]}
+                            onPress={() => {
+                              if (index < (editingQuestion.reorderItems || []).length - 1) {
+                                const newItems = [...(editingQuestion.reorderItems || [])];
+                                [newItems[index], newItems[index + 1]] = [newItems[index + 1], newItems[index]];
+                                reorderItems(editingQuestion.id, newItems);
+                              }
+                            }}
+                            disabled={index === (editingQuestion.reorderItems || []).length - 1}
+                          >
+                            <MaterialCommunityIcons 
+                              name="arrow-down" 
+                              size={20} 
+                              color={index === (editingQuestion.reorderItems || []).length - 1 ? "#d1d5db" : "#64748b"} 
+                            />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
                   </View>
                   
                   {/* Add Item Buttons */}
@@ -5745,7 +5841,8 @@ Please respond with a JSON object in this exact format:
                                   style={styles.pairsPreviewVScroll}
                                   showsVerticalScrollIndicator={true}
                                   contentContainerStyle={styles.pairsPreviewVContainer}
-                                    nestedScrollEnabled={true}
+                                  nestedScrollEnabled={true}
+                                  bounces={true}
                                 >
                                   {(sub.pairs || []).map((pair, idx) => (
                                     <View key={`sub-pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
@@ -6106,7 +6203,13 @@ Please respond with a JSON object in this exact format:
                 <View style={styles.textReviewHeaderSpacer} />
               </View>
               
-              <ScrollView style={styles.textReviewContent} showsVerticalScrollIndicator={false}>
+              <ScrollView 
+                style={styles.textReviewContent} 
+                showsVerticalScrollIndicator={true}
+                keyboardShouldPersistTaps="handled"
+                keyboardDismissMode="on-drag"
+                bounces={true}
+              >
                 <View style={styles.textReviewSection}>
                   <Text style={styles.textReviewLabel}>Processed Text:</Text>
                   <TextInput
@@ -6211,9 +6314,13 @@ Please respond with a JSON object in this exact format:
       <Stack.Screen options={{ headerShown: false }} />
       <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
         <ScrollView 
+          ref={mainScrollRef}
           style={styles.scrollView} 
-          contentContainerStyle={{ paddingBottom: 20 }}
-          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContentContainer}
+          showsVerticalScrollIndicator={true}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          bounces={true}
         >
         {/* Header */}
         <View style={styles.header}>
@@ -6221,7 +6328,12 @@ Please respond with a JSON object in this exact format:
             <AntDesign name="arrow-left" size={24} color="#1e293b" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{isEditing ? 'Edit Exercise' : 'Create Exercise'}</Text>
-          <View style={styles.placeholder} />
+          <TouchableOpacity 
+            onPress={() => scrollToTop(mainScrollRef)} 
+            style={styles.scrollToTopButton}
+          >
+            <AntDesign name="arrow-up" size={20} color="#64748b" />
+          </TouchableOpacity>
         </View>
 
         {/* Exercise Details */}
@@ -6610,8 +6722,10 @@ Please respond with a JSON object in this exact format:
         <View style={styles.aiModalOverlay}>
           <ScrollView 
             contentContainerStyle={styles.aiModalScrollContainer}
-            showsVerticalScrollIndicator={false}
+            showsVerticalScrollIndicator={true}
             keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            bounces={true}
           >
             <View style={styles.aiModal}>
               <View style={styles.aiModalHeader}>
@@ -6856,7 +6970,14 @@ Please respond with a JSON object in this exact format:
           </View>
 
           {/* Content */}
-          <ScrollView style={{ flex: 1, paddingHorizontal: 20 }}>
+          <ScrollView 
+            style={{ flex: 1, paddingHorizontal: 20 }}
+            showsVerticalScrollIndicator={true}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            bounces={true}
+            contentContainerStyle={{ paddingBottom: 20 }}
+          >
             {!selectedCategory ? (
               // Category Selection
               <View style={{ paddingVertical: 20 }}>
@@ -6978,8 +7099,9 @@ Please respond with a JSON object in this exact format:
                   data={stockImageCategories.find(c => c.id === selectedCategory)?.images || []}
                   numColumns={3}
                   keyExtractor={(item) => item.name}
-                  showsVerticalScrollIndicator={false}
+                  showsVerticalScrollIndicator={true}
                   contentContainerStyle={{ paddingBottom: 20 }}
+                  bounces={true}
                   columnWrapperStyle={{ justifyContent: 'space-between' }}
                   initialNumToRender={12}
                   maxToRenderPerBatch={6}
@@ -7038,16 +7160,30 @@ Please respond with a JSON object in this exact format:
                 <AntDesign name="arrow-left" size={24} color="#1e293b" />
               </TouchableOpacity>
               <Text style={styles.fullScreenTitle}>Choose Image</Text>
-              <View style={styles.placeholder} />
-            </View>
+              <TouchableOpacity 
+                onPress={() => scrollToTop(stockImagesScrollRef)} 
+                style={styles.scrollToTopButton}
+              >
+                <AntDesign name="arrow-up" size={20} color="#64748b" />
+              </TouchableOpacity>
+          </View>
             
-            <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
+            <ScrollView 
+              ref={stockImagesScrollRef}
+              style={styles.fullScreenContent} 
+              showsVerticalScrollIndicator={true}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              bounces={true}
+              contentContainerStyle={styles.fullScreenScrollContainer}
+            >
             {/* Animals Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Animals</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `animal-${index}`}
                 renderItem={({ item }: any) => {
@@ -7088,7 +7224,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Alphabet</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Alphabet'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `alphabet-${index}`}
                 renderItem={({ item }: any) => {
@@ -7129,7 +7266,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Fruits</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Fruits and Vegetables'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `fruit-${index}`}
                 renderItem={({ item }: any) => {
@@ -7170,7 +7308,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>3D Alphabet</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['3D Alphabet'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `3d-alphabet-${index}`}
                 renderItem={({ item }: any) => {
@@ -7211,7 +7350,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Boxed Alphabet</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Boxed Alphabet'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `boxed-alphabet-${index}`}
                 renderItem={({ item }: any) => {
@@ -7252,7 +7392,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Boxed Numbers 1-9</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Boxed Numbers 1-9'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `boxed-number-${index}`}
                 renderItem={({ item }: any) => {
@@ -7293,7 +7434,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Comparing Quantities</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Comparing Quantities'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `comparing-${index}`}
                 renderItem={({ item }: any) => {
@@ -7334,7 +7476,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Dates</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Dates'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `date-${index}`}
                 renderItem={({ item }: any) => {
@@ -7375,7 +7518,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Extra Objects</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Extra Objects'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `extra-object-${index}`}
                 renderItem={({ item }: any) => {
@@ -7416,7 +7560,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Fractions</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Fractions'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `fraction-${index}`}
                 renderItem={({ item }: any) => {
@@ -7457,7 +7602,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Length and Distance</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Length and Distance'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `length-${index}`}
                 renderItem={({ item }: any) => {
@@ -7498,7 +7644,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Money</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Money'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `money-${index}`}
                 renderItem={({ item }: any) => {
@@ -7539,7 +7686,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Patterns</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Patterns'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `pattern-${index}`}
                 renderItem={({ item }: any) => {
@@ -7580,7 +7728,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Time and Position</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Time and Position'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `time-${index}`}
                 renderItem={({ item }: any) => {
@@ -7621,7 +7770,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Land Animals</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).filter((_, index) => index < 32).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `land-animal-${index}`}
                 renderItem={({ item }: any) => {
@@ -7662,7 +7812,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Sea Animals</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).filter((_, index) => index >= 32).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `sea-animal-${index}`}
                 renderItem={({ item }: any) => {
@@ -7703,7 +7854,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Math Symbols</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Math Symbols'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `math-symbol-${index}`}
                 renderItem={({ item }: any) => {
@@ -7744,7 +7896,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Numbers</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...stockImages['Numbers'].map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `number-${index}`}
                 renderItem={({ item }: any) => {
@@ -7785,7 +7938,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>School Supplies</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['School Supplies'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `school-supply-${index}`}
                 renderItem={({ item }: any) => {
@@ -7826,7 +7980,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Shapes</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Shapes'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `shape-${index}`}
                 renderItem={({ item }: any) => {
@@ -7867,7 +8022,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Toys</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(stockImages['Toys'] || []).map(img => ({ image: img }))]}
                 keyExtractor={(item, index) => `toy-${index}`}
                 renderItem={({ item }: any) => {
@@ -7909,7 +8065,8 @@ Please respond with a JSON object in this exact format:
                 <Text style={styles.categoryTitle}>{categoryName}</Text>
                 <FlatList
                   horizontal
-                  showsHorizontalScrollIndicator={false}
+                  showsHorizontalScrollIndicator={true}
+                bounces={true}
                   data={[{ isAddButton: true }, ...customCategories[categoryName].map(url => ({ imageUrl: url }))]}
                   keyExtractor={(item, index) => `custom-${categoryName}-${index}`}
                   renderItem={({ item }: any) => {
@@ -7951,7 +8108,8 @@ Please respond with a JSON object in this exact format:
               <Text style={styles.categoryTitle}>Custom Uploads</Text>
               <FlatList
                 horizontal
-                showsHorizontalScrollIndicator={false}
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
                 data={[{ isAddButton: true }, ...(customCategories['Custom Uploads'] || []).map(url => ({ imageUrl: url }))]}
                 keyExtractor={(item, index) => `custom-uploads-${index}`}
                 renderItem={({ item }: any) => {
@@ -8210,6 +8368,10 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
   },
+  scrollContentContainer: {
+    paddingBottom: 20,
+    flexGrow: 1,
+  },
   
   // Header Styles
   header: {
@@ -8225,6 +8387,12 @@ const styles = StyleSheet.create({
   },
   backButton: {
     padding: 8,
+  },
+  scrollToTopButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#f8fafc',
+    opacity: 0.8,
   },
   headerTitle: {
     fontSize: 24,
@@ -8852,6 +9020,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 16,
   },
+  fullScreenScrollContainer: {
+    paddingBottom: 20,
+    flexGrow: 1,
+  },
   fullScreenActions: {
     paddingHorizontal: 20,
     paddingVertical: 20,
@@ -9055,6 +9227,8 @@ const styles = StyleSheet.create({
   },
   scrollContainer: {
     position: 'relative',
+    borderRadius: 8,
+    overflow: 'hidden',
   },
   optionLabel: {
     fontSize: 16,
@@ -9200,6 +9374,8 @@ const styles = StyleSheet.create({
   pairsPreviewVScroll: {
     maxHeight: 300,
     marginVertical: 8,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
   },
   pairsPreviewVContainer: {
     paddingBottom: 12,
@@ -10101,9 +10277,25 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
     marginLeft: 4,
   },
-  reorderDragHandle: {
-    padding: 8,
+  reorderArrowControls: {
+    flexDirection: 'column',
+    gap: 4,
     marginLeft: 8,
+  },
+  reorderArrowButton: {
+    padding: 8,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    minWidth: 36,
+    minHeight: 36,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reorderArrowButtonDisabled: {
+    backgroundColor: '#f8fafc',
+    opacity: 0.5,
   },
   reorderAddButtons: {
     flexDirection: 'row',

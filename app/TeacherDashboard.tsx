@@ -8,38 +8,40 @@ import * as Print from 'expo-print';
 
 import { useRouter } from 'expo-router';
 
+import { Accelerometer } from 'expo-sensors';
+
 import * as Sharing from 'expo-sharing';
 
 import { useEffect, useRef, useState } from 'react';
 
 import {
-  ActivityIndicator,
+    ActivityIndicator,
 
-  Animated,
-  Dimensions,
+    Animated,
+    Dimensions,
 
-  Image,
+    Image,
 
-  Modal,
+    Modal,
 
-  PanResponder,
-  Platform,
-  RefreshControl,
+    PanResponder,
+    Platform,
+    RefreshControl,
 
-  ScrollView,
+    ScrollView,
 
-  StyleSheet,
+    StyleSheet,
 
-  Text,
+    Text,
 
-  TextInput,
+    TextInput,
 
-  TouchableOpacity,
+    TouchableOpacity,
 
-  TouchableWithoutFeedback,
+    TouchableWithoutFeedback,
 
-  View,
-  useWindowDimensions
+    View,
+    useWindowDimensions
 } from 'react-native';
 
 import { ResponsiveCards } from '../components/ResponsiveGrid';
@@ -1850,6 +1852,11 @@ export default function TeacherDashboard() {
   const opacity = useRef(new Animated.Value(1)).current;
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   
+  // Shake detection state
+  const [isShakeEnabled, setIsShakeEnabled] = useState(true);
+  const lastShakeTime = useRef(0);
+  const shakeThreshold = 12; // Lowered for better sensitivity (was 15)
+  
   // Function to fade out the button after inactivity
   const fadeOut = () => {
     Animated.timing(opacity, {
@@ -1898,11 +1905,14 @@ export default function TeacherDashboard() {
     };
   }, []);
   
-  // PanResponder for dragging
+  // PanResponder for dragging with improved tap detection
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        // Only set responder if moved more than 5 pixels (this allows taps to work)
+        return Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5;
+      },
       onPanResponderGrant: () => {
         resetInactivityTimer();
         pan.setOffset({
@@ -1917,6 +1927,14 @@ export default function TeacherDashboard() {
       ),
       onPanResponderRelease: (_, gesture) => {
         pan.flattenOffset();
+        
+        // Check if this was a tap (minimal movement)
+        const wasTap = Math.abs(gesture.dx) < 5 && Math.abs(gesture.dy) < 5;
+        
+        if (wasTap) {
+          // This was a tap, let the TouchableOpacity handle it
+          return;
+        }
         
         // Get current position
         const currentX = (pan.x as any)._value;
@@ -1952,6 +1970,93 @@ export default function TeacherDashboard() {
     })
   ).current;
   
+  // Shake detection with improved compatibility
+  useEffect(() => {
+    if (!isShakeEnabled) return;
+    
+    let subscription: any;
+    let isSubscribed = true;
+    
+    const startShakeDetection = async () => {
+      try {
+        console.log('🚀 Starting shake detection...');
+        
+        // Platform check - only enable on Android/iOS
+        if (Platform.OS !== 'android' && Platform.OS !== 'ios') {
+          console.log('⚠️ Shake detection only available on mobile devices');
+          return;
+        }
+        
+        console.log('✓ Platform check passed:', Platform.OS);
+        
+        // Check if accelerometer is available with timeout
+        const availabilityPromise = Accelerometer.isAvailableAsync();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout checking accelerometer')), 2000)
+        );
+        
+        const isAvailable = await Promise.race([availabilityPromise, timeoutPromise])
+          .catch(() => false) as boolean;
+        
+        if (!isAvailable) {
+          console.log('❌ Accelerometer not available on this device');
+          return;
+        }
+        
+        console.log('✓ Accelerometer available, threshold:', shakeThreshold);
+        
+        // Set update interval (60fps) - works on all Android versions
+        Accelerometer.setUpdateInterval(16);
+        
+        subscription = Accelerometer.addListener(({ x, y, z }) => {
+          if (!isSubscribed) return;
+          
+          // Calculate total acceleration (magnitude of acceleration vector)
+          const acceleration = Math.sqrt(x * x + y * y + z * z);
+          
+          // Check if acceleration exceeds threshold
+          if (acceleration > shakeThreshold) {
+            const currentTime = Date.now();
+            
+            // Prevent multiple triggers within 1 second
+            if (currentTime - lastShakeTime.current > 1000) {
+              console.log('🔔 Shake detected! Acceleration:', acceleration.toFixed(2));
+              lastShakeTime.current = currentTime;
+              
+              // Trigger FAB action
+              handleShakeTrigger();
+            }
+          }
+        });
+      } catch (error) {
+        console.log('Shake detection not available:', error);
+        // Silently fail - shake is optional feature
+      }
+    };
+    
+    const handleShakeTrigger = () => {
+      // Show FAB if hidden
+      fadeIn();
+      resetInactivityTimer();
+      
+      // Open tech report modal
+      setShowTechReportModal(true);
+    };
+    
+    startShakeDetection();
+    
+    return () => {
+      isSubscribed = false;
+      if (subscription) {
+        try {
+          subscription.remove();
+        } catch (error) {
+          console.log('Error removing accelerometer subscription:', error);
+        }
+      }
+    };
+  }, [isShakeEnabled]);
+  
   const [closingClassId, setClosingClassId] = useState<string | null>(null);
 
   // Add Student state
@@ -1985,7 +2090,7 @@ export default function TeacherDashboard() {
 
   // Results sorting state
 
-  const [resultsSortBy, setResultsSortBy] = useState<'attempts' | 'time'>('attempts');
+  const [resultsSortBy, setResultsSortBy] = useState<'name' | 'correct' | 'score' | 'remarks' | 'attempts' | 'time'>('attempts');
 
   const [resultsSortOrder, setResultsSortOrder] = useState<'asc' | 'desc'>('asc');
   
@@ -8641,7 +8746,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                          // Handle sorting function
 
-                        const handleSort = (newSortBy: 'attempts' | 'time') => {
+                        const handleSort = (newSortBy: 'name' | 'correct' | 'score' | 'remarks' | 'attempts' | 'time') => {
 
                           if (resultsSortBy === newSortBy) {
 
@@ -8744,17 +8849,92 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                bValue = bQuestionResults.length > 0 ? bTotalAttempts / bQuestionResults.length : 1;
 
-                             } else {
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
+                             } else if (resultsSortBy === 'time') {
 
                                aValue = a.totalTimeSpent || 0;
 
                                bValue = b.totalTimeSpent || 0;
 
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
+                             } else if (resultsSortBy === 'name') {
+
+                               // Find student names for comparison
+
+                               let studentA = Object.values(studentsByClass).flat().find((s: any) => s.studentId === a.studentId);
+
+                               if (!studentA && a.studentInfo?.name) {
+                                 studentA = Object.values(studentsByClass).flat().find((s: any) => 
+                                   s.fullName && s.fullName.toLowerCase().trim() === a.studentInfo.name.toLowerCase().trim()
+                                 );
+                               }
+
+                               let studentB = Object.values(studentsByClass).flat().find((s: any) => s.studentId === b.studentId);
+
+                               if (!studentB && b.studentInfo?.name) {
+                                 studentB = Object.values(studentsByClass).flat().find((s: any) => 
+                                   s.fullName && s.fullName.toLowerCase().trim() === b.studentInfo.name.toLowerCase().trim()
+                                 );
+                               }
+
+                               const nameA = studentA ? formatStudentName(studentA) : (a.studentInfo?.name || 'Unknown Student');
+
+                               const nameB = studentB ? formatStudentName(studentB) : (b.studentInfo?.name || 'Unknown Student');
+
+                               const comparison = nameA.localeCompare(nameB);
+
+                               return resultsSortOrder === 'asc' ? comparison : -comparison;
+
+                             } else if (resultsSortBy === 'correct') {
+
+                               const aCorrect = a.resultsSummary?.totalCorrect || aQuestionResults.filter((q: any) => q.isCorrect).length;
+
+                               const bCorrect = b.resultsSummary?.totalCorrect || bQuestionResults.filter((q: any) => q.isCorrect).length;
+
+                               aValue = aCorrect;
+
+                               bValue = bCorrect;
+
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
+                             } else if (resultsSortBy === 'score') {
+
+                               aValue = a.scorePercentage || 0;
+
+                               bValue = b.scorePercentage || 0;
+
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
+                             } else if (resultsSortBy === 'remarks') {
+
+                               const getRemarks = (score: number) => {
+                                 if (score >= 90) return 'Excellent';
+                                 if (score >= 75) return 'Good';
+                                 if (score >= 60) return 'Fair';
+                                 return 'Needs Work';
+                               };
+
+                               const remarksA = getRemarks(a.scorePercentage || 0);
+
+                               const remarksB = getRemarks(b.scorePercentage || 0);
+
+                               // Define order for remarks
+
+                               const remarksOrder = { 'Needs Work': 0, 'Fair': 1, 'Good': 2, 'Excellent': 3 };
+
+                               aValue = remarksOrder[remarksA as keyof typeof remarksOrder] || 0;
+
+                               bValue = remarksOrder[remarksB as keyof typeof remarksOrder] || 0;
+
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
                              }
 
                              
 
-                             return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+                             return 0;
 
                            });
 
@@ -8926,11 +9106,95 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        <Text style={[styles.tableHeaderText, { width: 35 }]}>#</Text>
 
-                                       <Text style={[styles.tableHeaderText, { flex: 2 }]}>Student</Text>
+                                       <TouchableOpacity 
 
-                                       <Text style={[styles.tableHeaderText, { flex: 1 }]}>Correct</Text>
+                                         style={[styles.sortableHeaderCell, { flex: 2 }]}
 
-                                       <Text style={[styles.tableHeaderText, { flex: 1 }]}>Score</Text>
+                                         onPress={() => handleSort('name')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'name' && styles.activeSort]}>
+
+                                           Student
+
+                                         </Text>
+
+                                         {resultsSortBy === 'name' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
+
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1 }]}
+
+                                         onPress={() => handleSort('correct')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'correct' && styles.activeSort]}>
+
+                                           Correct
+
+                                         </Text>
+
+                                         {resultsSortBy === 'correct' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
+
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1 }]}
+
+                                         onPress={() => handleSort('score')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'score' && styles.activeSort]}>
+
+                                           Score
+
+                                         </Text>
+
+                                         {resultsSortBy === 'score' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
 
                                        <TouchableOpacity 
 
@@ -8992,7 +9256,35 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        </TouchableOpacity>
 
-                                       <Text style={[styles.tableHeaderText, { flex: 1.5 }]}>Remarks</Text>
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1.5 }]}
+
+                                         onPress={() => handleSort('remarks')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'remarks' && styles.activeSort]}>
+
+                                           Remarks
+
+                                         </Text>
+
+                                         {resultsSortBy === 'remarks' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
 
                                      </View>
 
@@ -12661,7 +12953,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
       {/* Floating Customer Service Button */}
-
       <Animated.View
         {...panResponder.panHandlers}
         style={[
@@ -12672,19 +12963,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           },
         ]}
       >
-      <TouchableOpacity 
-
+        <TouchableOpacity 
           style={styles.floatingReportButtonInner}
-        onPress={() => {
-          resetInactivityTimer();
-          setShowTechReportModal(true);
-        }}
-
-        activeOpacity={0.85}
-
-      >
-
-        <MaterialCommunityIcons name="headset" size={26} color="#ffffff" />
+          onPress={() => {
+            console.log('📞 FAB button pressed - opening tech report modal');
+            resetInactivityTimer();
+            setShowTechReportModal(true);
+          }}
+          activeOpacity={0.85}
+        >
+          <MaterialCommunityIcons name="headset" size={26} color="#ffffff" />
 
       </TouchableOpacity>
 

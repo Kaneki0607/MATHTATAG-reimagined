@@ -130,6 +130,8 @@ export async function generateResultId(
   const maxAttempts = 100;
   let attempt = 0;
   
+  console.log(`[IDGenerator] Starting result ID generation for exercise: ${exerciseId}`);
+  
   while (attempt < maxAttempts) {
     try {
       // Get current counter for results
@@ -141,11 +143,13 @@ export async function generateResultId(
       const resultPart = `R-${randomCode}-${padNumber(nextCount)}`;
       const hierarchicalId = `${exerciseId}-${resultPart}`;
       
+      console.log(`[IDGenerator] Generated candidate ID: ${hierarchicalId} (attempt ${attempt + 1})`);
+      
       // Check for collisions if database path provided
       if (databasePath) {
         const exists = await idExists(databasePath, hierarchicalId);
         if (exists) {
-          console.warn(`[IDGenerator] Result ID collision detected, regenerating...`);
+          console.warn(`[IDGenerator] Result ID collision detected for ${hierarchicalId}, regenerating...`);
           attempt++;
           continue;
         }
@@ -153,20 +157,23 @@ export async function generateResultId(
       
       // No collision, increment counter and return
       await incrementCounter('RESULT', nextCount);
-      console.log(`[IDGenerator] Generated result ID: ${hierarchicalId}`);
+      console.log(`[IDGenerator] Successfully generated result ID: ${hierarchicalId}`);
       return hierarchicalId;
       
     } catch (error) {
-      console.error(`[IDGenerator] Error generating result ID:`, error);
+      console.error(`[IDGenerator] Error generating result ID (attempt ${attempt + 1}):`, error);
       attempt++;
       
       if (attempt >= maxAttempts) {
-        throw new Error(`Failed to generate unique result ID after ${maxAttempts} attempts`);
+        throw new Error(`Failed to generate unique result ID after ${maxAttempts} attempts: ${error}`);
       }
+      
+      // Add small delay before retry to avoid rapid-fire requests
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
   
-  throw new Error('Failed to generate unique result ID');
+  throw new Error('Failed to generate unique result ID - maximum attempts reached');
 }
 
 /**
