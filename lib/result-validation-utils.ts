@@ -51,6 +51,9 @@ export interface QuestionResult {
   ttsPlayed: boolean;
   ttsPlayCount: number;
   interactionTypes: string[];
+  // For identification questions with alternative answers
+  altAnswers?: string[];
+  caseSensitive?: boolean;
   [key: string]: any;
 }
 
@@ -121,11 +124,20 @@ export function normalizeArrayAnswer(answer: string | string[]): string[] {
 /**
  * Compare two answers based on question type
  * Returns true if answers match, false otherwise
+ * 
+ * @param questionType - Type of question (identification, multiple-choice, etc.)
+ * @param studentAnswer - The student's answer
+ * @param correctAnswer - The correct answer
+ * @param options - Additional options like altAnswers and caseSensitive
  */
 export function compareAnswers(
   questionType: string,
   studentAnswer: string,
-  correctAnswer: string
+  correctAnswer: string,
+  options?: {
+    altAnswers?: string[];
+    caseSensitive?: boolean;
+  }
 ): boolean {
   // Handle empty answers
   if (!studentAnswer || studentAnswer.trim() === '') {
@@ -138,6 +150,33 @@ export function compareAnswers(
   }
   
   const type = questionType.toLowerCase();
+  const { altAnswers, caseSensitive = false } = options || {};
+  
+  // For identification/fill-in-blank questions, check altAnswers
+  if (type === 'identification' || type === 'fill-in-blank' || type === 'fill') {
+    // Normalize function that respects case sensitivity
+    const norm = (s: string) => {
+      const trimmed = s.trim();
+      return caseSensitive ? trimmed : trimmed.toLowerCase();
+    };
+    
+    const normalizedStudent = norm(studentAnswer);
+    const normalizedCorrect = norm(correctAnswer);
+    
+    // Check against main answer first
+    if (normalizedStudent === normalizedCorrect) {
+      return true;
+    }
+    
+    // Check against alternative answers if provided
+    if (altAnswers && altAnswers.length > 0) {
+      return altAnswers.some(altAnswer => 
+        norm(altAnswer) === normalizedStudent
+      );
+    }
+    
+    return false;
+  }
   
   // For reorder/sort questions, compare as ordered arrays
   if (type === 'reorder' || type === 're-order' || type === 'sort' || type === 'ordering') {
@@ -175,7 +214,7 @@ export function compareAnswers(
     return studentPairs.every((pair, index) => pair === correctPairs[index]);
   }
   
-  // For all other question types (multiple-choice, fill-in-blank, etc.)
+  // For all other question types (multiple-choice, etc.)
   // Use simple normalized string comparison
   return normalizeAnswer(studentAnswer) === normalizeAnswer(correctAnswer);
 }
@@ -240,7 +279,11 @@ export function validateAndRepairQuestionResult(
       const revalidatedIsCorrect = compareAnswers(
         repaired.questionType,
         attempt.selectedAnswer,
-        repaired.correctAnswer
+        repaired.correctAnswer,
+        {
+          altAnswers: repaired.altAnswers,
+          caseSensitive: repaired.caseSensitive
+        }
       );
       
       if (attempt.isCorrect !== revalidatedIsCorrect) {
