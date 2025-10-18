@@ -1885,9 +1885,11 @@ export default function CreateExercise() {
     }
     
     if (type === 're-order') {
+      const initialItem = { id: Date.now().toString(), type: 'text', content: '' };
       newQuestion.order = [''];
-      newQuestion.reorderItems = [{ id: Date.now().toString(), type: 'text', content: '' }];
+      newQuestion.reorderItems = [initialItem];
       newQuestion.reorderDirection = 'asc';
+      newQuestion.answer = []; // Empty array to be filled when items are added
     }
     
     if (type === 'reading-passage') {
@@ -2123,10 +2125,12 @@ export default function CreateExercise() {
       const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
       
       
-      // Get available stock images for reference
-      const availableImages = Object.keys(stockImages).map(category => 
-        `${category}: ${stockImages[category].map(img => img.name).join(', ')}`
-      ).join('\n');
+      // Get available stock images for reference (without category names)
+      const allAvailableImages = Object.keys(stockImages)
+        .flatMap(category => stockImages[category].map(img => img.name))
+        .join(', ');
+      
+      const availableImages = `Available images: ${allAvailableImages}`;
 
       const prompt = `You are an expert educational content creator for Grade 1 students in the Philippines. Generate ${numberOfQuestions} ${selectedQuestionType} questions based on the following exercise details:
 
@@ -2141,23 +2145,35 @@ QUESTION TYPE: ${selectedQuestionType}
 AVAILABLE STOCK IMAGES (use these in your questions when relevant):
 ${availableImages}
 
+**CRITICAL IMAGE NAMING RULE:**
+When referencing images, use ONLY the image name itself. 
+❌ NEVER write: "Fruits and Vegetables: Banana"
+✅ ALWAYS write: "Banana"
+❌ NEVER write: "Animals: Cat"  
+✅ ALWAYS write: "Cat"
+❌ NEVER write: "Numbers: 5"
+✅ ALWAYS write: "5"
+
 === PREMIUM VISUAL PRESENTATION STANDARDS ===
 
 VISUAL ACCURACY REQUIREMENTS:
-1. Every questionImage MUST directly show what the question asks about
+1. **questionImages should provide CONTEXT, NEVER reveal the answer**
 2. Images must be EXACTLY relevant - no approximations or "close enough" matches
-3. The visual should clarify the question, not confuse the student
-4. If asking about a specific object, show THAT object, not a similar one
+3. The visual should clarify what to look at, not give away the answer
+4. If asking about a specific object, show THAT object (answer is the name/color/count, not the object itself)
 5. Images should support understanding, not just decorate
 
-IMAGE MATCHING PRECISION:
-- Question: "Ano ang hugis nito?" → Use questionImage: "Triangle" (show the exact shape)
-- Question: "Ilan ang mga ito?" → Use questionImages: ["Apple", "Apple", "Apple"] (show exact quantity)
-- Question: "Anong kulay ang bulaklak?" → Use questionImage: "Pink Rose" or "Red Rose" (show colored flower)
-- Question: "Alin ang mas malaki?" → Use questionImages with size comparisons
+IMAGE MATCHING PRECISION & WHEN TO USE IMAGES:
+- Question: "Ano ang hugis nito?" → Use questionImages: ["Triangle"] (show shape, answer is the NAME)
+- Question: "Ilan ang mga ito?" → Use questionImages: ["Apple", "Apple", "Apple"] (show objects, answer is the COUNT)
+- Question: "Anong kulay ang bulaklak?" → Use questionImages: ["Pink Rose"] (show flower, answer is the COLOR)
+- Question: "Alin ang mas malaki?" → Use questionImages with size comparisons (show comparison context)
+- Question: "Ano ang sagot sa 2 + 3?" → NO questionImages (math problem, no visual needed)
+- Question: "Ano ang tawag sa...?" → Only use questionImages if the "ito" refers to something visual
 - WRONG: Asking about dogs but showing cat image
 - WRONG: Asking about numbers but showing letters
 - WRONG: Asking about shapes but showing animals
+- WRONG: Adding decorative images that don't help answer the question
 
 MULTIPLE CHOICE IMAGE RULES:
 - When using option images, each option MUST have a matching image from stock library
@@ -2167,20 +2183,49 @@ MULTIPLE CHOICE IMAGE RULES:
 - Example: Question about animals → All options should be animal images
 - Example: Question about shapes → All options should be shape images
 
+**MATCHING & RE-ORDER IMAGE RULES (VERY IMPORTANT):**
+- Each matching pair or reorder item can only show ONE image (not multiple)
+- Use COMPOSITE/MULTI-ITEM images from these categories:
+  ✅ "Comparing Quantities" (e.g., "2 Apples", "3 Candies", "5 Pencils")
+  ✅ "Money" (e.g., "16 Pesos", "23 Pesos", "Piso (1 peso coin)")
+  ✅ "Patterns" (e.g., "2 Boy 2 Girl", "Blue Pink", "Heart Star")
+  ✅ "Time and Position" (e.g., "1:00", "2:30", "Quarter Turn")
+  ✅ "Boxed Numbers" (numbers in boxes)
+  ✅ "Numbers" (for number sequences)
+- ❌ DON'T use single fruits like "Red Apple" alone - use "2 Apples" from Comparing Quantities
+- ❌ DON'T use single animals like "Cat" alone for counting - use quantity images
+- Each item should be a complete visual unit
+
 PATTERN & SEQUENCE VISUALIZATION:
-- For number sequences: Use questionImages: ["1", "2", "3"] to show the pattern
-- For shape patterns: Use questionImages: ["Circle", "Square", "Circle", "Square"]
-- For quantity visualization: Repeat the same image N times to show quantity
+- For number sequences in questionImages: Use ["1", "2", "3"] to show the pattern
+- For shape patterns in questionImages: Use ["Circle", "Square", "Circle", "Square"]
+- For quantity visualization in questionImages: Repeat the same image N times
 - Pattern questions MUST use questionImages array (3-4 images minimum)
 - The pattern must be visually clear and obvious to Grade 1 students
 
+**FOR MATCHING/RE-ORDER ITEMS - USE COMPOSITE IMAGES:**
+- ✅ Counting/Quantities: Use "2 Apples", "3 Candies", "5 Boys" (one image shows multiple items)
+- ✅ Money: Use "16 Pesos", "23 Pesos", "40 pesos" (one image shows the amount)
+- ✅ Time: Use "1:00", "2:30", "6:00" (one clock image)
+- ✅ Patterns: Use "2 Boy 2 Girl", "Blue Pink", "Heart Star"
+- ❌ Don't use "Red Apple" alone when asking about quantities
+- ❌ Don't combine multiple single-item images - use pre-made composite images
+
 QUANTITY VISUALIZATION (CRITICAL):
-- When question mentions a number (e.g., "5 apples", "lima na mansanas"):
+**IMPORTANT DISTINCTION:**
+- **questionImages** (for IDENTIFICATION questions) = Can repeat images to show quantity
+  ✅ questionImages: ["Red Apple", "Red Apple", "Red Apple"] (shows 3 apples to count)
+- **reorderItems/pairs** (for MATCHING/RE-ORDER) = Must use ONE composite image per item
+  ✅ reorderItems: [{"type": "image", "imageUrl": "3 Apples"}] (one image showing 3 apples)
+  ❌ reorderItems: Can't use multiple images like ["Red Apple", "Red Apple", "Red Apple"]
+
+- When question mentions a number (e.g., "5 apples", "lima na mansanas") in IDENTIFICATION:
   → Use questionImages to repeat the image that many times
   → Example: "May 5 apples" → questionImages: ["Red Apple", "Red Apple", "Red Apple", "Red Apple", "Red Apple"]
-  → Example: "3 na pusa" → questionImages: ["Cat", "Cat", "Cat"]
-- This helps students COUNT and VISUALIZE the quantity
-- Maximum 10 repetitions for clarity
+- For MATCHING/RE-ORDER with quantities:
+  → Use composite images from "Comparing Quantities"
+  → Example: Use "3 Apples" as ONE image, not three separate apple images
+- Maximum 10 repetitions for questionImages clarity
 
 === FILIPINO GRADE 1 STUDENT REQUIREMENTS ===
 
@@ -2223,19 +2268,31 @@ FOR MATCHING:
 - Create clear, logical pairs (3-5 pairs recommended)
 - "answer" field is array of correct pair indices [0, 1, 2, ...]
 - Include "pairs" array with left and right items
-- Use images when they enhance understanding
+- **Use COMPOSITE images** from "Comparing Quantities", "Money", "Time and Position", "Patterns"
+- Each pair item = ONE image only (no multiple images per item)
+- Good examples: Match times ("7:00", "12:00"), money amounts ("16 Pesos", "23 Pesos"), quantities ("2 Apples", "3 Candies")
+- ❌ BAD: Don't use just "Red Apple" - use "2 Apples" or "3 Apples" from Comparing Quantities
 - Pairs should have obvious relationships for Grade 1 level
 
 FOR RE-ORDER:
-- Create logical sequences (numbers 1-5, letters A-E, daily activities, size comparisons)
+- Create logical sequences (numbers, money amounts, time sequences, quantity comparisons)
 - "answer" field is array of items in correct order
 - "reorderItems" array with text and/or image items
-- For NUMBER sequences: Use questionImages to show the pattern
-- For PATTERN questions: Use questionImages array (3-4 images)
+- **Use COMPOSITE images** that show complete units (money amounts, quantities, times, boxed numbers)
+- Each reorderItem = ONE image only (no multiple images per item)
+- Good examples: Order money amounts ("16 Pesos", "23 Pesos", "40 pesos"), times ("1:00", "2:00", "3:00"), numbers ("1", "2", "3")
+- ❌ BAD: Don't use just "Cat" - use "2 + 8", "3 Girls", "5 Boys" from Comparing Quantities
 - Items should be obvious and age-appropriate
 - Direction: ascending by default (can be descending for advanced)
 
 === CRITICAL IMAGE SELECTION GUIDELINES ===
+
+**STRICT IMAGE USAGE RULES:**
+1. **NEVER add answer images to questionImage or questionImages** - These should only show context, NOT the answer!
+2. **ALWAYS use questionImages array** (even for single images) - NEVER use questionImage field
+3. **Image names only** - Use just "Banana" NOT "Fruits and Vegetables: Banana"
+4. **Only add relevant images** - If question asks "Ano ang kulay ng langit?" (What color is sky?), don't add any image
+5. **Context only** - Images should provide context for the question, NOT reveal the answer
 
 EXACT MATCHING:
 - Question asks about "Cat" → Use image named "Cat" ONLY
@@ -2243,15 +2300,19 @@ EXACT MATCHING:
 - Question asks about "5" → Use image named "5" ONLY
 - NO approximations, NO substitutions
 
-CONTEXTUAL RELEVANCE:
+CONTEXTUAL RELEVANCE (NOT ANSWER REVEALING):
+- Question about counting animals → Show animals in questionImages, answer is the COUNT
+  Example: questionImages: ["Cat", "Cat", "Cat"] (shows context, answer is "3")
+- Question about shape names → Show the shape in questionImages, answer is the NAME
+  Example: questionImages: ["Triangle"] (shows shape, answer is "Triangle" or "Tatsulok")
+- Question about colors → Show colored objects in questionImages, answer is the COLOR
+  Example: questionImages: ["Red Apple"] (shows object, answer is "Red" or "Pula")
 - Animals that give milk → Use "Cow" or "Goat" (NOT pig, NOT cat)
-- Round shapes → Use "Circle" or "Ball" (NOT square, NOT triangle)
-- School items → Use from "School Supplies" category ONLY
-- Filipino fruits → Use "Mangga", "Saging", "Bayabas" from Fruits category
+- Filipino fruits → Use "Mangga", "Saging", "Bayabas" (clean names, no folder prefix)
 
 IF NO PERFECT IMAGE EXISTS:
 - Do NOT force an image
-- Leave imageReferences empty or use closest match
+- Simply omit the questionImages or optionImages field
 - Focus on clear text instead
 - Better to have no image than wrong image
 
@@ -2259,17 +2320,19 @@ IMPORTANT: Respond ONLY with valid JSON array. No additional text before or afte
 
 === JSON RESPONSE FORMATS ===
 
-Multiple Choice Example (with images):
+Multiple Choice Example (with option images - CLEAN NAMES ONLY):
 [
   {
     "question": "Ano ang hayop na ito?",
     "answer": "Cat",
     "options": ["Dog", "Cat", "Bird", "Fish"],
-    "imageReferences": ["Cat", "Dog", "Cat", "Bird", "Fish"]
+    "optionImages": ["Dog", "Cat", "Bird", "Fish"]
   }
 ]
+❌ WRONG: "optionImages": ["Animals: Dog", "Animals: Cat", "Animals: Bird", "Animals: Fish"]
+✅ CORRECT: "optionImages": ["Dog", "Cat", "Bird", "Fish"]
 
-Identification Example (with quantity visualization):
+Identification Example (with quantity visualization - SHOWS CONTEXT, NOT ANSWER):
 [
   {
     "question": "Ilan ang mga mansanas?",
@@ -2278,62 +2341,121 @@ Identification Example (with quantity visualization):
     "alternativeAnswers": ["lima", "five", "5", "limang mansanas", "5 apples", "five apples"]
   }
 ]
+❌ WRONG: "questionImages": ["Fruits and Vegetables: Red Apple", ...]
+✅ CORRECT: "questionImages": ["Red Apple", "Red Apple", ...]
 
-Identification Example (with single image):
+Identification Example (with context image - SHOWS WHAT TO IDENTIFY, NOT THE ANSWER TEXT):
 [
   {
     "question": "Ano ang hugis nito?",
     "answer": "Triangle",
-    "imageReferences": ["Triangle"],
+    "questionImages": ["Triangle"],
     "alternativeAnswers": ["tatsulok", "triangle", "tatlong gilid", "three sides", "triangulo"]
   }
 ]
 
-Matching Example (with images):
+Matching Example (using composite images - ONE IMAGE PER ITEM):
+[
+  {
+    "question": "Itambal ang oras sa tamang panahon",
+    "answer": [0, 1, 2],
+    "pairs": [
+      {"left": "Umaga", "right": "7:00", "rightImage": "7:00"},
+      {"left": "Tanghali", "right": "12:00", "rightImage": "12:00"},
+      {"left": "Gabi", "right": "6:00", "rightImage": "6:00"}
+    ]
+  }
+]
+❌ WRONG: "leftImage": "Time and Position: 7:00"
+✅ CORRECT: "rightImage": "7:00"
+
+Matching Example (shapes - single items OK for shapes):
 [
   {
     "question": "Itambal ang hugis sa pangalan nito",
     "answer": [0, 1, 2],
     "pairs": [
-      {"left": "Circle", "right": "Bilog"},
-      {"left": "Square", "right": "Parisukat"},
-      {"left": "Triangle", "right": "Tatsulok"}
-    ],
-    "imageReferences": ["Circle", "Square", "Triangle"]
+      {"left": "Bilog", "right": "Circle", "leftImage": "Circle"},
+      {"left": "Parisukat", "right": "Square", "leftImage": "Square"},
+      {"left": "Tatsulok", "right": "Triangle", "leftImage": "Triangle"}
+    ]
   }
 ]
 
-Re-order Example (number sequence with visual):
+Re-order Example (using composite images - EACH ITEM IS ONE IMAGE):
+[
+  {
+    "question": "Ayusin ayon sa dami ng pera",
+    "answer": ["16 Pesos", "23 Pesos", "27 pesos", "40 pesos"],
+    "reorderItems": [
+      {"type": "image", "content": "40 pesos", "imageUrl": "40 pesos"},
+      {"type": "image", "content": "16 Pesos", "imageUrl": "16 Pesos"},
+      {"type": "image", "content": "27 pesos", "imageUrl": "27 pesos"},
+      {"type": "image", "content": "23 Pesos", "imageUrl": "23 Pesos"}
+    ]
+  }
+]
+❌ WRONG: Using "Isandaan (100 peso bill)" + "Singkwenta (50 peso bill)" separately
+✅ CORRECT: Using "40 pesos" (one composite image showing the amount)
+
+Re-order Example (number sequence - CLEAN NAMES):
 [
   {
     "question": "Ayusin ang mga numero mula sa pinakamaliit hanggang pinakamalaki",
     "answer": ["1", "3", "5", "7"],
-    "questionImages": ["1", "3", "5", "7"],
     "reorderItems": [
       {"type": "image", "content": "7", "imageUrl": "7"},
       {"type": "image", "content": "3", "imageUrl": "3"},
       {"type": "image", "content": "1", "imageUrl": "1"},
       {"type": "image", "content": "5", "imageUrl": "5"}
-    ],
-    "imageReferences": ["1", "3", "5", "7"]
+    ]
   }
 ]
+❌ WRONG: "imageUrl": "Numbers: 1"
+✅ CORRECT: "imageUrl": "1"
 
 Re-order Example (pattern completion):
 [
   {
     "question": "Ano ang susunod sa pattern?",
     "questionImages": ["Circle", "Square", "Circle", "Square"],
-    "answer": "Circle",
-    "imageReferences": ["Circle", "Square"]
+    "answer": "Circle"
   }
 ]
 
 === FINAL REMINDERS ===
-- Images must EXACTLY match question content
-- Use questionImages for quantities and patterns
-- All option images must be same category
-- Never reveal answers in question text
+
+**IMAGE NAMING (CRITICAL):**
+- Use ONLY image names: "Banana", "Cat", "Triangle", "1", "16 Pesos", "2 Apples"
+- NEVER include folder names: ❌ "Fruits and Vegetables: Banana" ✅ "Banana"
+- NEVER include categories: ❌ "Animals: Cat" ✅ "Cat"
+- Clean names for ALL image fields: questionImages, optionImages, leftImage, rightImage, imageUrl
+
+**IMAGE USAGE (CRITICAL):**
+- questionImages = CONTEXT only (what to look at), NOT the answer
+- optionImages = Answer choices (each option gets its own image)
+- ALWAYS use questionImages array (even for 1 image), NEVER use imageReferences field
+- Only add images when they truly help understand the question
+
+**MATCHING & RE-ORDER IMAGES (CRITICAL):**
+- Each item = ONE single image (can't use multiple images per item)
+- Use COMPOSITE images that show complete concepts:
+  ✅ "2 Apples", "3 Candies", "16 Pesos", "7:00", "2 Boy 2 Girl"
+  ❌ Don't use single items like "Red Apple" alone for quantity questions
+- Prefer images from: Comparing Quantities, Money, Time and Position, Patterns, Boxed Numbers
+- For shapes/alphabet: Single items are OK ("Circle", "A", "Triangle")
+
+**EXAMPLES OF GOOD IMAGE CHOICES:**
+- Re-order by money amount: "16 Pesos", "23 Pesos", "27 pesos", "40 pesos"
+- Re-order by quantity: "1 Apple", "2 Apples", "3 Apples", "4 Apples" (from Comparing Quantities)
+- Re-order by time: "1:00", "2:00", "3:00", "4:00"
+- Match quantities with numbers: Left="2 Candies", Right="2"
+- ❌ BAD: Using "Cat", "Cat", "Cat" as separate reorder items
+- ✅ GOOD: Using "3 Girls" as ONE reorder item
+
+**QUALITY STANDARDS:**
+- All option images must be same category (all animals, all shapes, etc.)
+- Never reveal answers in question text or images
 - Keep language simple and Filipino-focused
 - Only use available stock images by exact name
 - Better no image than wrong image`;
@@ -2575,10 +2697,21 @@ Re-order Example (pattern completion):
             
             if (q.options && Array.isArray(q.options)) {
               processedOptions = q.options.map((opt: any) => String(opt).trim());
-              optionImages = q.options.map((opt: any) => {
-                const imageName = String(opt).trim();
-                return findStockImageByName(imageName);
-              });
+              
+              // Process optionImages if provided by AI
+              if (q.optionImages && Array.isArray(q.optionImages)) {
+                optionImages = q.optionImages.map((imgName: string) => {
+                  // Clean image name (remove any folder prefixes like "Fruits and Vegetables: Banana")
+                  const cleanName = imgName.split(':').pop()?.trim() || imgName;
+                  return findStockImageByName(cleanName);
+                });
+              } else {
+                // Fallback: try to find images from option text
+                optionImages = q.options.map((opt: any) => {
+                  const imageName = String(opt).trim();
+                  return findStockImageByName(imageName);
+                });
+              }
         }
 
         // Find the correct answer letter by matching the answer text with options
@@ -2633,15 +2766,21 @@ Re-order Example (pattern completion):
             break;
 
           case 'matching':
-            // Process pairs
+            // Process pairs with image support
             let processedPairs = undefined;
             if (q.pairs && Array.isArray(q.pairs)) {
-              processedPairs = q.pairs.map((pair: any) => ({
-                left: pair.left?.trim() || '',
-                right: pair.right?.trim() || '',
-                leftImage: pair.leftImage ? findStockImageByName(pair.leftImage) : null,
-                rightImage: pair.rightImage ? findStockImageByName(pair.rightImage) : null
-              }));
+              processedPairs = q.pairs.map((pair: any) => {
+                // Clean image names (remove any folder prefixes)
+                const cleanLeftImage = pair.leftImage ? pair.leftImage.split(':').pop()?.trim() : null;
+                const cleanRightImage = pair.rightImage ? pair.rightImage.split(':').pop()?.trim() : null;
+                
+                return {
+                  left: pair.left?.trim() || '',
+                  right: pair.right?.trim() || '',
+                  leftImage: cleanLeftImage ? findStockImageByName(cleanLeftImage) : null,
+                  rightImage: cleanRightImage ? findStockImageByName(cleanRightImage) : null
+                };
+              });
             }
 
             processedQuestion = {
@@ -2652,22 +2791,68 @@ Re-order Example (pattern completion):
             break;
 
           case 're-order':
-            // Process reorder items
+            // Process reorder items with safety checks
             let processedReorderItems = undefined;
-            if (q.reorderItems && Array.isArray(q.reorderItems)) {
-              processedReorderItems = q.reorderItems.map((item: any) => ({
-                id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                type: item.type || 'text',
-                content: item.content?.trim() || '',
-                imageUrl: item.imageUrl || (item.type === 'image' ? findStockImageByName(item.content) : undefined)
+            
+            if (q.reorderItems && Array.isArray(q.reorderItems) && q.reorderItems.length > 0) {
+              processedReorderItems = q.reorderItems.map((item: any, idx: number) => {
+                // Clean image names (remove any folder prefixes)
+                let imageUrl = undefined;
+                if (item.imageUrl) {
+                  const cleanName = item.imageUrl.split(':').pop()?.trim() || item.imageUrl;
+                  imageUrl = findStockImageByName(cleanName);
+                } else if (item.type === 'image' && item.content) {
+                  const cleanName = item.content.split(':').pop()?.trim() || item.content;
+                  imageUrl = findStockImageByName(cleanName);
+                }
+                
+                return {
+                  id: `item_${Date.now()}_${idx}_${Math.random().toString(36).substr(2, 9)}`,
+                  type: item.type || 'text',
+                  content: item.content?.trim() || '',
+                  imageUrl: imageUrl
+                };
+              });
+            } else if (q.answer && Array.isArray(q.answer) && q.answer.length > 0) {
+              // Fallback: Create reorderItems from answer array if reorderItems not provided
+              processedReorderItems = q.answer.map((answerItem: string, idx: number) => ({
+                id: `item_${Date.now()}_${idx}_${Math.random().toString(36).substr(2, 9)}`,
+                type: 'text' as const,
+                content: String(answerItem).trim(),
               }));
+            }
+
+            // Ensure items are properly sorted according to answer array (which should be in correct order)
+            const reorderDirection = q.reorderDirection || 'asc';
+            const answerArray = Array.isArray(q.answer) ? q.answer : [];
+            
+            // If we have both reorderItems and answer array, order reorderItems to match answer array
+            let finalReorderItems = processedReorderItems || [];
+            if (answerArray.length > 0 && finalReorderItems.length > 0) {
+              // Create a map of items by content
+              const itemsMap = new Map<string, ReorderItem>(
+                finalReorderItems.map((item: ReorderItem) => [item.content, item])
+              );
+              
+              // Reorder items to match answer array order
+              finalReorderItems = answerArray
+                .map((answerItem: string) => itemsMap.get(String(answerItem)))
+                .filter((item: ReorderItem | undefined): item is ReorderItem => item !== undefined);
+              
+              // Add any items not in answer array at the end
+              const allMapValues = Array.from(itemsMap.values()) as ReorderItem[];
+              finalReorderItems.push(
+                ...allMapValues.filter(
+                  (item: ReorderItem) => !answerArray.includes(item.content)
+                )
+              );
             }
 
             processedQuestion = {
               ...processedQuestion,
-              answer: Array.isArray(q.answer) ? q.answer : [],
-              reorderItems: processedReorderItems,
-              reorderDirection: 'asc'
+              answer: answerArray,
+              reorderItems: finalReorderItems,
+              reorderDirection: reorderDirection
             };
             break;
 
@@ -2681,78 +2866,19 @@ Re-order Example (pattern completion):
         }
 
         // Handle images based on question type
-        let questionImage = null;
         let questionImages = undefined;
 
-        // Check if this is a pattern question (has questionImages or multiple imageReferences)
-        const isPatternQuestion = (q.questionImages && Array.isArray(q.questionImages) && q.questionImages.length > 0) ||
-                                 (q.imageReferences && Array.isArray(q.imageReferences) && q.imageReferences.length > 1 && 
-                                  (q.question.toLowerCase().includes('pattern') || q.question.toLowerCase().includes('sunod') || 
-                                   q.question.toLowerCase().includes('next') || q.question.toLowerCase().includes('susunod')));
-
-        if (q.imageReferences && Array.isArray(q.imageReferences) && q.imageReferences.length > 0) {
-          if (selectedQuestionType === 're-order' && (q.imageReferences.length > 1 || isPatternQuestion)) {
-            // For re-order questions with multiple images or pattern questions, use questionImages array
-            questionImages = q.imageReferences.map((imgRef: string) => findStockImageByName(imgRef)).filter(Boolean);
-          } else {
-            // For other question types, use single questionImage
-            questionImage = findStockImageByName(q.imageReferences[0]);
-          }
-        }
-
-        // Handle special case for pattern questions with multiple images
+        // Process questionImages if provided (NEVER use questionImage field)
         if (q.questionImages && Array.isArray(q.questionImages) && q.questionImages.length > 0) {
-          questionImages = q.questionImages.map((imgRef: string) => findStockImageByName(imgRef)).filter(Boolean);
+          questionImages = q.questionImages.map((imgRef: string) => {
+            // Clean image name (remove any folder prefixes like "Fruits and Vegetables: Banana")
+            const cleanName = imgRef.split(':').pop()?.trim() || imgRef;
+            return findStockImageByName(cleanName);
+          }).filter(Boolean);
         }
 
-        // If no specific image references, try to find images from question text
-        if (!questionImage && !questionImages) {
-          const questionText = q.question.toLowerCase();
-          const usedOptionImages = new Set(
-            (processedQuestion.optionImages || [])
-              .filter((img: any) => img)
-              .map((img: any) => img.toLowerCase())
-          );
-          
-          // For pattern questions, collect up to 4 images
-          const maxImages = isPatternQuestion ? 4 : 1;
-          let imageCount = 0;
-          
-          for (const category of Object.keys(stockImages)) {
-            for (const img of stockImages[category]) {
-              const imgName = img.name.toLowerCase();
-              const answerText = typeof processedQuestion.answer === 'string' ? processedQuestion.answer : '';
-              
-              // Only use image if it's relevant to question AND not used in options
-              if (isImageRelevant(imgName, questionText, answerText) && !usedOptionImages.has(imgName)) {
-                if (selectedQuestionType === 're-order' || isPatternQuestion || (q.questionImages && q.questionImages.length > 1)) {
-                  // For pattern questions or re-order questions, collect multiple images
-                  if (!questionImages) {
-                    questionImages = [];
-                  }
-                  questionImages.push(Image.resolveAssetSource(img.uri).uri);
-                  imageCount++;
-                  console.log(`✅ Selected relevant question image: ${imgName} for pattern question: ${q.question.substring(0, 50)}...`);
-                  
-                  // Stop collecting images if we have enough or if it's not a pattern question
-                  if (imageCount >= maxImages || !isPatternQuestion) {
-                    break;
-                  }
-                } else {
-                  questionImage = Image.resolveAssetSource(img.uri).uri;
-                  console.log(`✅ Selected relevant question image: ${imgName} for question: ${q.question.substring(0, 50)}...`);
-                  break;
-                }
-              }
-            }
-            if (questionImage || (questionImages && imageCount >= maxImages)) break;
-          }
-          
-          // If no relevant image found, log it
-          if (!questionImage && !questionImages) {
-            console.log(`⚠️ No relevant image found for question: ${q.question.substring(0, 50)}...`);
-          }
-        }
+        // AI should provide questionImages - we don't auto-add anymore to prevent answer leakage
+        // This section is now intentionally minimal to respect the AI's image choices
 
         // Quantity-based multi-visualization (e.g., "There are 5 apples")
         // If the question implies multiple instances of the same object, create multiple images to visualize quantity
@@ -2857,16 +2983,8 @@ Re-order Example (pattern completion):
 
         const finalQuestion = {
           ...processedQuestion,
-          questionImage: questionImage,
           questionImages: questionImages
         };
-
-        // Debug logging for pattern questions
-        if (isPatternQuestion) {
-          console.log(`🔍 Pattern question detected: ${q.question.substring(0, 50)}...`);
-          console.log(`📸 Question images:`, questionImages);
-          console.log(`🖼️ Single image:`, questionImage);
-        }
 
         // Debug logging for identification questions with alternative answers
         if (selectedQuestionType === 'identification' && finalQuestion.fillSettings?.altAnswers?.length) {
@@ -3782,16 +3900,18 @@ Requirements for TITLE:
 - Make kids excited to play!
 
 Requirements for DESCRIPTION:
-- Write a compelling description that explains what students will learn and practice
-- Use educational terminology that teachers will understand
-- Highlight the key learning objectives and skills
-- Keep it concise but informative
-- Make it sound professional for sharing in a teacher community
+- **MAXIMUM 2-3 SENTENCES ONLY!** Keep it short and concise!
+- Write a simple, clear description that explains what students will learn
+- Use simple language that both teachers AND parents can easily understand
+- Highlight the key learning objectives briefly
+- NO complex educational jargon, NO long paragraphs
+- Easy to digest and quick to read
+- Examples: "Students practice counting from 1-10 with fun animal images." OR "Mag-aaral ng mga hugis at kulay gamit ang larawan."
 
 Please respond with a JSON object in this exact format:
 {
   "title": "Short 3-word title here",
-  "description": "Improved description here"
+  "description": "Short 2-3 sentence description here"
 }`;
 
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
@@ -4758,6 +4878,56 @@ Please respond with a JSON object in this exact format:
     }
   };
 
+  // Helper function to sort reorder items based on direction
+  const sortReorderItems = (items: ReorderItem[], direction: 'asc' | 'desc' = 'asc'): ReorderItem[] => {
+    if (!items || items.length === 0) return items;
+    
+    const sorted = [...items].sort((a, b) => {
+      const aContent = a.content || '';
+      const bContent = b.content || '';
+      
+      // Try to extract numeric values from currency strings (e.g., "20 PISO" -> 20)
+      const extractNumericValue = (text: string): number => {
+        // Match patterns like "20 PISO", "5 peso", "1 PISO", etc.
+        const currencyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:PISO|peso|PESO)/i);
+        if (currencyMatch) {
+          return parseFloat(currencyMatch[1]);
+        }
+        
+        // Try to parse as regular number
+        const num = parseFloat(text);
+        if (!isNaN(num)) {
+          return num;
+        }
+        
+        // Return a large number for non-numeric values to sort them last
+        return Infinity;
+      };
+      
+      const aNum = extractNumericValue(aContent);
+      const bNum = extractNumericValue(bContent);
+      
+      // If both are valid numbers (including currency values)
+      if (aNum !== Infinity && bNum !== Infinity) {
+        return direction === 'asc' ? aNum - bNum : bNum - aNum;
+      }
+      
+      // If one is a number and one isn't, numbers come first
+      if (aNum !== Infinity && bNum === Infinity) {
+        return -1;
+      }
+      if (aNum === Infinity && bNum !== Infinity) {
+        return 1;
+      }
+      
+      // Both are non-numeric, fall back to string comparison
+      const comparison = aContent.localeCompare(bContent, 'en', { numeric: true, sensitivity: 'base' });
+      return direction === 'asc' ? comparison : -comparison;
+    });
+    
+    return sorted;
+  };
+
   // Reorder item functions
   const addReorderItem = (questionId: string, type: 'text' | 'image' = 'text') => {
     const newItem: ReorderItem = {
@@ -4770,11 +4940,23 @@ Please respond with a JSON object in this exact format:
     const question = questions.find(q => q.id === questionId);
     if (question) {
       const currentItems = question.reorderItems || [];
-      updateQuestion(questionId, { reorderItems: [...currentItems, newItem] });
+      const updatedItems = [...currentItems, newItem];
+      
+      // Sort items based on current direction
+      const sortedItems = sortReorderItems(updatedItems, question.reorderDirection || 'asc');
+      
+      // Update answer to match sorted order
+      const answer = sortedItems.map(item => item.content).filter(Boolean);
+      
+      updateQuestion(questionId, { 
+        reorderItems: sortedItems,
+        answer: answer
+      });
       
       // If it's an image item, automatically open the image picker
       if (type === 'image') {
-        const newItemIndex = currentItems.length; // Index of the newly added item
+        // Find the index of the new item after sorting
+        const newItemIndex = sortedItems.findIndex(item => item.id === newItem.id);
         pickReorderItemImage(questionId, newItemIndex);
       }
     }
@@ -4785,7 +4967,17 @@ Please respond with a JSON object in this exact format:
     if (question && question.reorderItems) {
       const newItems = [...question.reorderItems];
       newItems[itemIndex] = { ...newItems[itemIndex], ...updates };
-      updateQuestion(questionId, { reorderItems: newItems });
+      
+      // Sort items based on current direction
+      const sortedItems = sortReorderItems(newItems, question.reorderDirection || 'asc');
+      
+      // Update answer to match sorted order
+      const answer = sortedItems.map(item => item.content).filter(Boolean);
+      
+      updateQuestion(questionId, { 
+        reorderItems: sortedItems,
+        answer: answer
+      });
     }
   };
 
@@ -4793,7 +4985,17 @@ Please respond with a JSON object in this exact format:
     const question = questions.find(q => q.id === questionId);
     if (question && question.reorderItems && question.reorderItems.length > 1) {
       const newItems = question.reorderItems.filter((_, index) => index !== itemIndex);
-      updateQuestion(questionId, { reorderItems: newItems });
+      
+      // Sort items based on current direction
+      const sortedItems = sortReorderItems(newItems, question.reorderDirection || 'asc');
+      
+      // Update answer to match sorted order
+      const answer = sortedItems.map(item => item.content).filter(Boolean);
+      
+      updateQuestion(questionId, { 
+        reorderItems: sortedItems,
+        answer: answer
+      });
     }
   };
 
@@ -4804,7 +5006,16 @@ Please respond with a JSON object in this exact format:
   };
 
   const reorderItems = (questionId: string, newItems: ReorderItem[]) => {
-    updateQuestion(questionId, { reorderItems: newItems });
+    const question = questions.find(q => q.id === questionId);
+    if (!question) return;
+    
+    // Update answer to match new order
+    const answer = newItems.map(item => item.content).filter(Boolean);
+    
+    updateQuestion(questionId, { 
+      reorderItems: newItems,
+      answer: answer
+    });
   };
 
   const renderQuestionTypeModal = () => (
@@ -5454,20 +5665,66 @@ Please respond with a JSON object in this exact format:
               {editingQuestion.type === 're-order' && (
                 <View style={styles.inputGroup}>
                   <Text style={styles.inputLabel}>Items to Reorder</Text>
-                  <View style={{ flexDirection: 'row', marginBottom: 12 }}>
+                  <View style={{ flexDirection: 'row', marginBottom: 4 }}>
                     <TouchableOpacity
                       style={[styles.choiceModeButton, (editingQuestion.reorderDirection || 'asc') === 'asc' && styles.choiceModeActive]}
-                      onPress={() => updateQuestion(editingQuestion.id, { reorderDirection: 'asc' })}
+                      onPress={() => {
+                        const newDirection = 'asc';
+                        const sortedItems = sortReorderItems(editingQuestion.reorderItems || [], newDirection);
+                        const answer = sortedItems.map(item => item.content).filter(Boolean);
+                        updateQuestion(editingQuestion.id, { 
+                          reorderDirection: newDirection,
+                          reorderItems: sortedItems,
+                          answer: answer
+                        });
+                      }}
                     >
                       <Text style={[styles.choiceModeText, (editingQuestion.reorderDirection || 'asc') === 'asc' && styles.choiceModeTextActive]}>Ascending order</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.choiceModeButton, editingQuestion.reorderDirection === 'desc' && styles.choiceModeActive]}
-                      onPress={() => updateQuestion(editingQuestion.id, { reorderDirection: 'desc' })}
+                      onPress={() => {
+                        const newDirection = 'desc';
+                        const sortedItems = sortReorderItems(editingQuestion.reorderItems || [], newDirection);
+                        const answer = sortedItems.map(item => item.content).filter(Boolean);
+                        updateQuestion(editingQuestion.id, { 
+                          reorderDirection: newDirection,
+                          reorderItems: sortedItems,
+                          answer: answer
+                        });
+                      }}
                     >
                       <Text style={[styles.choiceModeText, editingQuestion.reorderDirection === 'desc' && styles.choiceModeTextActive]}>Descending order</Text>
                     </TouchableOpacity>
                   </View>
+                  <Text style={{ fontSize: 12, color: '#64748b', marginBottom: 8, fontStyle: 'italic' }}>
+                    Items are automatically sorted in {(editingQuestion.reorderDirection || 'asc') === 'asc' ? 'ascending' : 'descending'} order. Students will see them shuffled.
+                  </Text>
+                  <TouchableOpacity
+                    style={{
+                      backgroundColor: '#f3f4f6',
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 6,
+                      marginBottom: 12,
+                      alignSelf: 'flex-start',
+                      flexDirection: 'row',
+                      alignItems: 'center'
+                    }}
+                    onPress={() => {
+                      const sortedItems = sortReorderItems(editingQuestion.reorderItems || [], editingQuestion.reorderDirection || 'asc');
+                      const answer = sortedItems.map(item => item.content).filter(Boolean);
+                      updateQuestion(editingQuestion.id, { 
+                        reorderItems: sortedItems,
+                        answer: answer
+                      });
+                    }}
+                  >
+                    <MaterialCommunityIcons name="sort" size={16} color="#64748b" />
+                    <Text style={{ marginLeft: 6, fontSize: 12, color: '#64748b' }}>
+                      Sort Items Now
+                    </Text>
+                  </TouchableOpacity>
                   
                   {/* Reorder Items with Arrow Controls */}
                   <View style={styles.reorderContainer}>
@@ -5551,7 +5808,13 @@ Please respond with a JSON object in this exact format:
                               if (index > 0) {
                                 const newItems = [...(editingQuestion.reorderItems || [])];
                                 [newItems[index - 1], newItems[index]] = [newItems[index], newItems[index - 1]];
-                                reorderItems(editingQuestion.id, newItems);
+                                
+                                // Update answer to match new manual order
+                                const answer = newItems.map(item => item.content).filter(Boolean);
+                                updateQuestion(editingQuestion.id, { 
+                                  reorderItems: newItems,
+                                  answer: answer
+                                });
                               }
                             }}
                             disabled={index === 0}
@@ -5568,7 +5831,13 @@ Please respond with a JSON object in this exact format:
                               if (index < (editingQuestion.reorderItems || []).length - 1) {
                                 const newItems = [...(editingQuestion.reorderItems || [])];
                                 [newItems[index], newItems[index + 1]] = [newItems[index + 1], newItems[index]];
-                                reorderItems(editingQuestion.id, newItems);
+                                
+                                // Update answer to match new manual order
+                                const answer = newItems.map(item => item.content).filter(Boolean);
+                                updateQuestion(editingQuestion.id, { 
+                                  reorderItems: newItems,
+                                  answer: answer
+                                });
                               }
                             }}
                             disabled={index === (editingQuestion.reorderItems || []).length - 1}

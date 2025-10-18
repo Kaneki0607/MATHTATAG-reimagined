@@ -135,11 +135,11 @@ export const useExercises = (currentUserId: string | null) => {
         updatedAssignments.map(async (assignment) => {
           try {
             const { data: exerciseData } = await readData(`/exercises/${assignment.exerciseId}`);
-            const { data: classData } = await readData(`/sections/${assignment.classId}`);
+            const { data: classData } = await readData(`/classes/${assignment.classId}`);
             return {
               ...assignment,
               exercise: exerciseData,
-              className: classData?.name || 'Unknown Class',
+              className: classData?.section || classData?.name || 'Unknown Class',
             };
           } catch (err) {
             return assignment;
@@ -407,7 +407,24 @@ export const useExercises = (currentUserId: string | null) => {
         throw new Error(`Failed to create ${failed.length} assignment(s)`);
       }
 
-      await loadAssignedExercises();
+      // Increment the timesUsed counter for the exercise
+      try {
+        const { data: exerciseData } = await readData(`/exercises/${exerciseId}`);
+        if (exerciseData) {
+          const currentTimesUsed = exerciseData.timesUsed || 0;
+          await writeData(`/exercises/${exerciseId}/timesUsed`, currentTimesUsed + classIds.length);
+          console.log(`[AssignExercise] Incremented timesUsed for exercise ${exerciseId}: ${currentTimesUsed} -> ${currentTimesUsed + classIds.length}`);
+        }
+      } catch (incrementErr) {
+        console.error('[AssignExercise] Failed to increment timesUsed:', incrementErr);
+        // Don't fail the entire operation if we can't increment the counter
+      }
+
+      // Reload both assigned exercises and all exercises to reflect the updated counter
+      await Promise.all([
+        loadAssignedExercises(),
+        loadAllExercises()
+      ]);
       return { success: true };
     } catch (err) {
       setError('Failed to assign exercise');
@@ -417,8 +434,33 @@ export const useExercises = (currentUserId: string | null) => {
 
   const deleteAssignment = async (assignmentId: string) => {
     try {
+      // Get the assignment data before deleting to know which exercise to decrement
+      const { data: assignmentData } = await readData(`/assignedExercises/${assignmentId}`);
+      const exerciseId = assignmentData?.exerciseId;
+      
       await deleteData(`/assignedExercises/${assignmentId}`);
-      await loadAssignedExercises();
+      
+      // Decrement the timesUsed counter for the exercise
+      if (exerciseId) {
+        try {
+          const { data: exerciseData } = await readData(`/exercises/${exerciseId}`);
+          if (exerciseData) {
+            const currentTimesUsed = exerciseData.timesUsed || 0;
+            const newTimesUsed = Math.max(0, currentTimesUsed - 1); // Ensure it doesn't go negative
+            await writeData(`/exercises/${exerciseId}/timesUsed`, newTimesUsed);
+            console.log(`[DeleteAssignment] Decremented timesUsed for exercise ${exerciseId}: ${currentTimesUsed} -> ${newTimesUsed}`);
+          }
+        } catch (decrementErr) {
+          console.error('[DeleteAssignment] Failed to decrement timesUsed:', decrementErr);
+          // Don't fail the entire operation if we can't decrement the counter
+        }
+      }
+      
+      // Reload both assigned exercises and all exercises to reflect the updated counter
+      await Promise.all([
+        loadAssignedExercises(),
+        loadAllExercises()
+      ]);
       return { success: true };
     } catch (err) {
       setError('Failed to delete assignment');

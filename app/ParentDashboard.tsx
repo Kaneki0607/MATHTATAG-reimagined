@@ -128,8 +128,9 @@ const QuarterSection: React.FC<{
   avgScore: number;
   totalTime: number;
   onTaskPress: (task: Task) => void;
-}> = ({ quarter, quarterTasks, avgScore, totalTime, onTaskPress }) => {
-  const [collapsed, setCollapsed] = useState(false);
+  defaultOpen?: boolean;
+}> = ({ quarter, quarterTasks, avgScore, totalTime, onTaskPress, defaultOpen = false }) => {
+  const [collapsed, setCollapsed] = useState(!defaultOpen);
 
   return (
     <View style={styles.quarterSection}>
@@ -145,7 +146,9 @@ const QuarterSection: React.FC<{
           <View style={styles.quarterInfo}>
             <Text style={styles.quarterTitle}>{quarter}</Text>
             <Text style={styles.quarterSummary}>
-              {quarterTasks.length} gawain · Average: {avgScore.toFixed(0)}%
+              {quarterTasks.length > 0 
+                ? `${quarterTasks.length} gawain · Average: ${avgScore.toFixed(0)}%`
+                : 'Walang natapos na gawain'}
             </Text>
           </View>
         </View>
@@ -156,7 +159,14 @@ const QuarterSection: React.FC<{
         />
       </TouchableOpacity>
 
-      {!collapsed && quarterTasks.map((task, index) => {
+      {!collapsed && (
+        quarterTasks.length === 0 ? (
+          <View style={styles.emptyQuarterContent}>
+            <MaterialCommunityIcons name="clipboard-text-outline" size={32} color="#cbd5e1" />
+            <Text style={styles.emptyQuarterText}>Walang natapos na gawain sa quarter na ito</Text>
+          </View>
+        ) : (
+          quarterTasks.map((task, index) => {
         const completedDate = task.completedAt ? new Date(task.completedAt) : new Date(task.createdAt);
         const now = new Date();
         const diffTime = now.getTime() - completedDate.getTime();
@@ -243,7 +253,9 @@ const QuarterSection: React.FC<{
             </View>
           </TouchableOpacity>
         );
-      })}
+      })
+        )
+      )}
     </View>
   );
 };
@@ -3808,10 +3820,10 @@ Focus on:
 
                   // Group by quarter
                   const groupedByQuarter: Record<string, typeof completedTasks> = {
-                    'Quarter 1': [],
-                    'Quarter 2': [],
-                    'Quarter 3': [],
-                    'Quarter 4': [],
+                    'Unang Quarter': [],
+                    'Ikalawang Quarter': [],
+                    'Ikatlong Quarter': [],
+                    'Ikaapat na Quarter': [],
                     'Walang Quarter': [],
                   };
 
@@ -3828,14 +3840,29 @@ Focus on:
                     groupedByQuarter[filipinoQuarter].push(task);
                   });
 
-                  // Reverse quarter order: Q4, Q3, Q2, Q1 - only show quarters with completed tasks
-                  const quarters = ['Ikaapat na Quarter', 'Ikatlong Quarter', 'Ikalawang Quarter', 'Unang Quarter', 'Walang Quarter']
-                    .filter(q => groupedByQuarter[q] && groupedByQuarter[q].length > 0);
+                  // Find most recent quarter with activity (for defaultOpen)
+                  const quarterOrder = ['Ikaapat na Quarter', 'Ikatlong Quarter', 'Ikalawang Quarter', 'Unang Quarter', 'Walang Quarter'];
+                  let mostRecentQuarterWithActivity: string | null = null;
+                  
+                  for (const q of quarterOrder) {
+                    if (groupedByQuarter[q] && groupedByQuarter[q].length > 0) {
+                      mostRecentQuarterWithActivity = q;
+                      break; // Found the first (most recent) quarter with tasks
+                    }
+                  }
+                  
+                  console.log('[Quarters] Most recent quarter with activity:', mostRecentQuarterWithActivity);
 
-                  return quarters.map((quarter, quarterIndex) => {
-                    const quarterTasks = groupedByQuarter[quarter];
-                    const avgScore = quarterTasks.reduce((sum, t) => sum + (t.score || 0), 0) / quarterTasks.length;
-                    const totalTime = quarterTasks.reduce((sum, t) => sum + (t.timeSpent || 0), 0);
+                  // Show ALL quarters (Q4 at top, Q1 at bottom) even if empty
+                  return quarterOrder.map((quarter, quarterIndex) => {
+                    const quarterTasks = groupedByQuarter[quarter] || [];
+                    const avgScore = quarterTasks.length > 0 
+                      ? quarterTasks.reduce((sum, t) => sum + (t.score || 0), 0) / quarterTasks.length 
+                      : 0;
+                    const totalTime = quarterTasks.length > 0
+                      ? quarterTasks.reduce((sum, t) => sum + (t.timeSpent || 0), 0)
+                      : 0;
+                    const isDefaultOpen = quarter === mostRecentQuarterWithActivity;
 
                     return (
                       <QuarterSection 
@@ -3845,6 +3872,7 @@ Focus on:
                         avgScore={avgScore}
                         totalTime={totalTime}
                         onTaskPress={handleShowQuestionResult}
+                        defaultOpen={isDefaultOpen}
                       />
                     );
                   });
@@ -8169,6 +8197,24 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#64748b',
     fontWeight: '500',
+  },
+  emptyQuarterContent: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 24,
+    marginTop: 8,
+    marginBottom: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderStyle: 'dashed',
+  },
+  emptyQuarterText: {
+    fontSize: 12,
+    color: '#94a3b8',
+    fontWeight: '500',
+    marginTop: 8,
+    textAlign: 'center',
   },
 
   // Modern History Item Styles - Score Emphasized

@@ -18,7 +18,6 @@ import {
   ImageBackground,
   LayoutAnimation,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -30,6 +29,9 @@ import { collectAppMetadata } from '../lib/app-metadata';
 import { logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { generateResultId } from '../lib/id-generator';
+import {
+  validateAndRepairExerciseResult
+} from '../lib/result-validation-utils';
 
 // Standalone component for Re-order interaction to keep hooks valid
 const ReorderQuestion = React.memo(({
@@ -45,7 +47,7 @@ const ReorderQuestion = React.memo(({
   initialAnswer: ReorderItem[];
   onChange: (ordered: ReorderItem[]) => void;
   onComplete?: (isCorrect: boolean) => void;
-  onAttempt?: () => void;
+  onAttempt?: (attemptSequence: string[]) => void;
   currentAttempts?: number;
   maxAttempts?: number | null;
 }) => {
@@ -63,8 +65,6 @@ const ReorderQuestion = React.memo(({
    * KEY FEATURES:
    * ✅ Auto-validates when all slots filled
    * ✅ Locks correct items, returns only wrong items to pool
-   * ✅ X button (28x28px) properly sized and positioned - top-right corner
-   * ✅ X button fully functional - removes item and returns to pool
    * ✅ Prevents dragging from/to locked slots
    * ✅ Prevents duplicate items in pool
    * ✅ Proper attempt tracking and max attempts handling
@@ -86,27 +86,57 @@ const ReorderQuestion = React.memo(({
    * - Max attempts reached → Lock all slots, show state for 2s, mark as wrong, advance
    * - No premature completion - always respects attempt limits
    * 
-   * MANUAL REMOVAL (X BUTTON):
-   * - Click X on any unlocked slot to remove item
-   * - Item immediately returns to pool
-   * - Does NOT affect attempt counter
-   * - Cannot remove locked (correct) items
    * 
    * LOCKING BEHAVIOR:
    * - Correct items cannot be dragged or removed
-   * - X button disabled and grayed out for locked slots
    * - Locked slots reject all drops
    * - Green lock indicator displays on correct items
    * - Locked state persists until question completion
    * ============================================================
    */
 
-  const items: ReorderItem[] = useMemo(() => 
-    (question.reorderItems || []).map((it) => ({ ...it })),
-    [question.id]
-  );
+  const items: ReorderItem[] = useMemo(() => {
+    const originalItems = (question.reorderItems || []).map((it) => ({ ...it }));
+    // Items are already shuffled during validation, so use them as-is
+    console.log('[Reorder] Using validated items:', originalItems.map(item => item.id));
+    return originalItems;
+  }, [question.id]);
   const slotsCount = items.length;
-  const correctSequence = useMemo(() => items.map(i => i.id), [items]);
+  // CRITICAL: correctSequence should be based on the original order before validation shuffling
+  // We need to determine the correct order based on the question's intended sequence
+  const correctSequence = useMemo(() => {
+    // For reorder questions, the correct sequence is typically the order they should be arranged
+    // Since we shuffled during validation, we need to reconstruct the original correct order
+    const originalItems = question.reorderItems || [];
+    
+    // If there's an explicit order specified, use that
+    if (question.order && question.order.length > 0) {
+      return question.order as string[];
+    }
+    
+    // Otherwise, use the original order of reorderItems
+    return originalItems.map(item => item.id);
+  }, [question.reorderItems, question.order]);
+  
+  // Store original order for consistent return behavior
+  const originalOrderRef = useRef<ReorderItem[]>([]);
+
+  // Helper function to restore pool to original order
+  const restorePoolToOriginalOrder = useCallback((currentPool: ReorderItem[]) => {
+    if (originalOrderRef.current.length === 0) {
+      console.warn('[Reorder] No original order stored, returning current pool');
+      return currentPool;
+    }
+    
+    // Create a map of current pool items for quick lookup
+    const poolItemMap = new Map(currentPool.map(item => [item.id, item]));
+    
+    // Reconstruct pool maintaining exact original order
+    const orderedPool = originalOrderRef.current.filter(item => poolItemMap.has(item.id));
+    
+    console.log('[Reorder] Restored pool to original order:', orderedPool.map(item => item.id));
+    return orderedPool;
+  }, []);
 
   const [slotLayouts, setSlotLayouts] = useState<{ x: number; y: number; width: number; height: number }[]>(
     Array(slotsCount).fill(null)
@@ -135,6 +165,33 @@ const ReorderQuestion = React.memo(({
     console.log('[Reorder] Attempt count prop updated from', currentAttemptsRef.current, 'to', currentAttempts);
     currentAttemptsRef.current = currentAttempts;
   }, [currentAttempts]);
+
+  // Reset function to clear all slots and return items to pool
+  const resetToInitialState = useCallback(() => {
+    console.log('[Reorder] Resetting to initial state - clearing all slots and returning items to pool');
+    
+    // Clear all slots
+    setSlots(Array(slotsCount).fill(null));
+    
+    // Return all items to pool
+    setPool([...items]);
+    
+    // Clear locked slots
+    setLockedSlots(new Set());
+    
+    // Reset validation and completion states
+    setIsValidating(false);
+    setIsCompleted(false);
+    isValidatingRef.current = false;
+    isCompletedRef.current = false;
+    isClearingWrongItemsRef.current = false;
+    hasCalledOnCompleteRef.current = false;
+    
+    // Clear dragged item
+    draggedItemRef.current = null;
+    
+    console.log('[Reorder] Reset complete - all items returned to pool');
+  }, [items, slotsCount]);
 
   // CRITICAL FIX: Reset component completely when question changes
   useEffect(() => {
@@ -175,23 +232,22 @@ const ReorderQuestion = React.memo(({
     console.log('[Reorder-Reset] Initial answer provided:', initialAnswer?.map(it => it.id));
     console.log('[Reorder-Reset] Valid initial answer (filtered):', validInitialAnswer.map(it => it.id));
     
-    // Reset state based on validated initial answer or shuffle
-    if (validInitialAnswer.length > 0) {
-      const placed: (ReorderItem | null)[] = Array(slotsCount).fill(null);
-      validInitialAnswer.forEach((it, idx) => {
-        if (idx < placed.length) placed[idx] = it;
-      });
-      const remaining = items.filter((it) => !validInitialAnswer.find((e) => e.id === it.id));
-      console.log('[Reorder-Reset] Using validated initial answer - slots:', validInitialAnswer.length, 'pool:', remaining.length);
-      setSlots(placed);
-      setPool(remaining);
-    } else {
-      // Shuffle items for fresh start
-      const shuffled = [...items].sort(() => Math.random() - 0.5);
-      console.log('[Reorder-Reset] Fresh start - all items shuffled into pool:', shuffled.length);
-      setSlots(Array(slotsCount).fill(null));
-      setPool(shuffled);
-    }
+    // ENHANCED FIX: Always start with a clean state for each question
+    // Don't carry over any previous question's state
+    // Keep original order instead of shuffling for better UX
+    const originalOrderItems = [...items];
+    
+    // Store the original order for consistent return behavior
+    originalOrderRef.current = originalOrderItems;
+    
+    console.log('[Reorder-Reset] Starting with original order items for question:', question.id);
+    console.log('[Reorder-Reset] Original order items:', originalOrderItems.map(it => it.id));
+    
+    // CRITICAL FIX: Always start with original order, ignore any previous state
+    // This ensures no items from previous questions carry over
+    console.log('[Reorder-Reset] Fresh start - all items in original order:', originalOrderItems.length);
+    setSlots(Array(slotsCount).fill(null));
+    setPool(originalOrderItems);
   }, [question.id, items]); // CRITICAL: Reset when question ID or items change, NOT on attempt changes
 
   // Notify parent of changes ONLY when slots actually change (debounced)
@@ -229,33 +285,39 @@ const ReorderQuestion = React.memo(({
           const isCorrect = ordered.every((item, idx) => item.id === correctSequence[idx]);
           
           console.log('[Reorder] Validation result:', isCorrect ? 'CORRECT' : 'WRONG');
-          console.log('[Reorder] Current attempts BEFORE increment:', currentAttemptsRef.current);
+          console.log('[Reorder] Current attempts BEFORE processing:', currentAttemptsRef.current);
           console.log('[Reorder] Current slots state:', ordered.map(item => item.id));
           console.log('[Reorder] Expected sequence:', correctSequence);
           
-          // CRITICAL: Only increment attempt counter once per validation (when ALL slots are filled)
-          // This is ONE attempt, not multiple
-          if (onAttempt) {
-            console.log('[Reorder] Incrementing attempt counter by 1 (all slots were filled)');
-            onAttempt();
-          }
+          // CRITICAL FIX: Only increment attempt counter when answer is WRONG
+          // Correct answers should NOT increment attempts
+          let newAttemptCount = currentAttemptsRef.current || 0;
+          let hasReachedLimit = false;
           
-          // CRITICAL: Calculate the NEW attempt count after increment
-          // Since onAttempt just incremented the counter, the new count is old + 1
-          const newAttemptCount = (currentAttemptsRef.current || 0) + 1;
-          
-          // Check if we've reached the attempt limit AFTER this attempt
-          // If maxAttempts=3, after 3 attempts we stop (3 >= 3 = true)
-          // This means: we just used attempt #newAttemptCount, have we exhausted all attempts?
-          const hasReachedLimit = maxAttempts !== null && newAttemptCount >= maxAttempts;
-          
-          console.log('[Reorder] NEW attempt count (this was attempt #' + newAttemptCount + ')');
-          console.log('[Reorder] Max attempts allowed:', maxAttempts);
-          console.log('[Reorder] Has reached limit?', hasReachedLimit);
-          
-          if (!isCorrect && !hasReachedLimit) {
-            const attemptsLeft = maxAttempts !== null ? (maxAttempts - newAttemptCount) : 'unlimited';
-            console.log('[Reorder] Wrong answer. Attempts remaining:', attemptsLeft);
+          if (!isCorrect) {
+            // WRONG ANSWER - Increment attempts
+            if (onAttempt) {
+              console.log('[Reorder] Wrong answer - incrementing attempt counter by 1');
+              onAttempt(ordered.map(item => item.id));
+            }
+            
+            // Calculate the NEW attempt count after increment
+            newAttemptCount = (currentAttemptsRef.current || 0) + 1;
+            
+            // Check if we've reached the attempt limit AFTER this attempt
+            hasReachedLimit = maxAttempts !== null && newAttemptCount >= maxAttempts;
+            
+            console.log('[Reorder] NEW attempt count after wrong answer:', newAttemptCount);
+            console.log('[Reorder] Max attempts allowed:', maxAttempts);
+            console.log('[Reorder] Has reached limit?', hasReachedLimit);
+            
+            if (!hasReachedLimit) {
+              const attemptsLeft = maxAttempts !== null ? (maxAttempts - newAttemptCount) : 'unlimited';
+              console.log('[Reorder] Attempts remaining:', attemptsLeft);
+            }
+          } else {
+            // CORRECT ANSWER - Don't increment attempts
+            console.log('[Reorder] Correct answer - NO attempt increment');
           }
           
           if (isCorrect) {
@@ -327,6 +389,9 @@ const ReorderQuestion = React.memo(({
             
             // Return incorrect items to pool after a short delay, but KEEP correct items locked in place
             setTimeout(() => {
+              try {
+                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              } catch {}
               const wrongIndices: number[] = [];
               const wrongItems: ReorderItem[] = [];
               const correctIndices: number[] = [];
@@ -380,16 +445,15 @@ const ReorderQuestion = React.memo(({
                   return next;
                 });
                 
-                // Step 2: Add wrong items back to pool (separate state update with uniqueness check)
+                // Step 2: Add wrong items back to pool maintaining original order
                 setPool((prevPool) => {
                   console.log('[Reorder] Adding', wrongItems.length, 'items back to pool');
-                  const combined = [...prevPool, ...wrongItems];
-                  // Ensure no duplicates
-                  const uniquePool = combined.filter((item, index, self) => 
-                    index === self.findIndex((t) => t.id === item.id)
-                  );
-                  console.log('[Reorder] Pool after returning items:', uniquePool.length, 'items total');
-                  return uniquePool;
+                  
+                  // Add wrong items to current pool
+                  const combinedPool = [...prevPool, ...wrongItems];
+                  
+                  // Restore to original order using helper function
+                  return restorePoolToOriginalOrder(combinedPool);
                 });
               } else {
                 console.log('[Reorder] All items in their correct positions!');
@@ -412,44 +476,59 @@ const ReorderQuestion = React.memo(({
     // Don't allow placing if validating or completed (use refs for immediate check)
     if (isValidatingRef.current || isCompletedRef.current || lockedSlots.has(slotIndex)) {
       console.log('[Reorder] Cannot place - validating, completed, or slot is locked');
-      return;
+      return false;
+    }
+    
+    // Validate slot index
+    if (slotIndex < 0 || slotIndex >= slotsCount) {
+      console.log('[Reorder] Invalid slot index:', slotIndex);
+      return false;
     }
     
     console.log('[Reorder] Placing item', item.id, 'into slot', slotIndex);
-    
-    // Haptic feedback for successful placement
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     
     // Get previous item before state updates
     const currentSlots = slots;
     const prevAtSlot = currentSlots[slotIndex];
     
+    // Check if item is already in this slot
+    if (prevAtSlot && prevAtSlot.id === item.id) {
+      console.log('[Reorder] Item already in this slot - no change needed');
+      return true;
+    }
+    
+    // Animate layout change for smooth placement
+    try {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    } catch {}
+    
     // Update slots: place new item
     setSlots((prev) => {
       const next = [...prev];
       next[slotIndex] = item;
+      console.log('[Reorder] Slot', slotIndex, 'updated with item', item.id);
       return next;
     });
     
-    // Update pool: remove placed item and optionally add swapped item (separate state updates)
+    // Update pool: remove placed item and optionally add swapped item maintaining original order
     setPool((p) => {
       // Remove the item being placed
       let newPool = p.filter((x) => x.id !== item.id);
       
-      // Add the previous slot item if it exists
-      if (prevAtSlot) {
+      // Add the previous slot item if it exists and is different
+      if (prevAtSlot && prevAtSlot.id !== item.id) {
         // Check for duplicates before adding
         if (!newPool.some(poolItem => poolItem.id === prevAtSlot.id)) {
           newPool = [...newPool, prevAtSlot];
         }
       }
       
-      // Final uniqueness check
-      return newPool.filter((item, index, self) => 
-        index === self.findIndex((t) => t.id === item.id)
-      );
+      // Restore to original order using helper function
+      return restorePoolToOriginalOrder(newPool);
     });
-  }, [slots, lockedSlots]);
+    
+    return true;
+  }, [slots, lockedSlots, slotsCount, restorePoolToOriginalOrder]);
 
   // Remove item from slot when dragging starts
   const removeFromSlotForDrag = useCallback((slotIndex: number) => {
@@ -465,66 +544,6 @@ const ReorderQuestion = React.memo(({
     return true;
   }, [lockedSlots]);
   
-  // CRITICAL FIX: Allow removing items from slots via X button (using same logic as returning wrong items)
-  const removeFromSlot = useCallback((slotIndex: number) => {
-    // Don't allow removing if validating or completed (use refs for immediate check)
-    if (isValidatingRef.current) {
-      console.log('[Reorder] Cannot remove - currently validating');
-      return;
-    }
-    
-    if (isCompletedRef.current) {
-      console.log('[Reorder] Cannot remove - exercise completed');
-      return;
-    }
-    
-    if (lockedSlots.has(slotIndex)) {
-      console.log('[Reorder] Cannot remove - slot', slotIndex, 'is locked (item is correct)');
-      return;
-    }
-    
-    console.log('[Reorder] X button handler executing for slot', slotIndex);
-    
-    // Get current item reference before any state updates
-    const currentSlots = slots;
-    const item = currentSlots[slotIndex];
-    
-    if (!item) {
-      console.log('[Reorder] No item in slot', slotIndex, '- slot is empty');
-      return;
-    }
-    
-    console.log('[Reorder] Removing item', item.id, 'from slot', slotIndex, 'and returning to pool');
-    
-    // Haptic feedback for removal
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    
-    // Remove from slot (same as wrong item logic)
-    setSlots((prev) => {
-      const next = [...prev];
-      next[slotIndex] = null;
-      console.log('[Reorder] Slot', slotIndex, 'cleared - item removed');
-      return next;
-    });
-    
-    // Add back to pool (separate state update - same as wrong item logic)
-    setPool((p) => {
-      // Check if already in pool (should not happen, but safety check)
-      const alreadyExists = p.some(poolItem => poolItem.id === item.id);
-      if (alreadyExists) {
-        console.warn('[Reorder] Item', item.id, 'already in pool, not adding duplicate');
-        return p;
-      }
-      console.log('[Reorder] Item', item.id, 'successfully returned to pool');
-      const newPool = [...p, item];
-      // Ensure uniqueness
-      const uniquePool = newPool.filter((item, index, self) => 
-        index === self.findIndex((t) => t.id === item.id)
-      );
-      console.log('[Reorder] Pool now has', uniquePool.length, 'items');
-      return uniquePool;
-    });
-  }, [slots, lockedSlots]);
 
   // Create or get pan responder for an item in the pool - STABLE VERSION WITH FIXED RETURN LOGIC
   const getPanResponder = useCallback((item: ReorderItem, fromSlotIndex?: number) => {
@@ -591,42 +610,107 @@ const ReorderQuestion = React.memo(({
         console.log('[Drag] Release at:', { dropX, dropY, wasFromPool, wasFromSlot });
         
         let targetSlot = -1;
+        let bestDistance = Infinity;
+        
+        // Improved drop zone detection with better accuracy
         slotLayoutsRef.current.forEach((layout, idx) => {
-          if (!layout) {
-            console.log(`[Drag] Slot ${idx} has no layout yet`);
+          if (!layout || lockedSlots.has(idx)) {
+            console.log(`[Drag] Slot ${idx} skipped - no layout or locked`);
             return;
           }
+          
+          // Calculate center point of the slot for more accurate detection
+          const centerX = layout.x + layout.width / 2;
+          const centerY = layout.y + layout.height / 2;
+          
+          // Check if drop point is within slot bounds with some tolerance
+          const tolerance = 20; // pixels of tolerance for easier dropping
           const within = 
-            dropX >= layout.x && 
-            dropX <= layout.x + layout.width && 
-            dropY >= layout.y && 
-            dropY <= layout.y + layout.height;
-          console.log(`[Drag] Checking slot ${idx}:`, { 
-            layout, 
-            within,
-            dropX, 
-            dropY,
-            isLocked: lockedSlots.has(idx)
-          });
-          // Only accept drops into unlocked slots
-          if (within && !lockedSlots.has(idx)) {
-            targetSlot = idx;
+            dropX >= layout.x - tolerance && 
+            dropX <= layout.x + layout.width + tolerance && 
+            dropY >= layout.y - tolerance && 
+            dropY <= layout.y + layout.height + tolerance;
+          
+          if (within) {
+            // Calculate distance to center for better accuracy
+            const distance = Math.sqrt(
+              Math.pow(dropX - centerX, 2) + Math.pow(dropY - centerY, 2)
+            );
+            
+            console.log(`[Drag] Checking slot ${idx}:`, { 
+              layout, 
+              within,
+              dropX, 
+              dropY,
+              centerX,
+              centerY,
+              distance,
+              isLocked: lockedSlots.has(idx)
+            });
+            
+            // Choose the closest slot if multiple are within range
+            if (distance < bestDistance) {
+              targetSlot = idx;
+              bestDistance = distance;
+            }
           }
         });
         
-        console.log('[Drag] Target slot:', targetSlot);
+        console.log('[Drag] Target slot:', targetSlot, 'Distance:', bestDistance);
         
         if (targetSlot >= 0) {
           // Item was dropped in a valid slot
           console.log('[Drag] ✅ Placing into slot:', targetSlot);
+          
+          // Haptic feedback for successful placement
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          
           placeIntoSlot(item, targetSlot);
+          
+          // Animate to center of slot for better visual feedback
+          const targetLayout = slotLayoutsRef.current[targetSlot];
+          if (targetLayout) {
+            const centerX = targetLayout.x + targetLayout.width / 2;
+            const centerY = targetLayout.y + targetLayout.height / 2;
+            
+            Animated.spring(position, {
+              toValue: { x: centerX - dropX, y: centerY - dropY },
+              useNativeDriver: false,
+              friction: 8,
+              tension: 100,
+            }).start(() => {
+              // Reset position after animation
+              position.setValue({ x: 0, y: 0 });
+            });
+          }
         } else {
-          // Item was NOT dropped in any slot
+          // Item was NOT dropped in any valid slot - return to original position
+          console.log('[Drag] ❌ No valid slot found - returning to original position');
+          
+          // Haptic feedback for failed placement
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          
           if (wasFromPool) {
-            // Item was from pool and not placed - it's still in pool, do nothing
-            console.log('[Drag] ℹ️ Item from pool not placed - stays in pool');
+            // Item was from pool and not placed - return to pool maintaining original order
+            console.log('[Drag] ℹ️ Item from pool not placed - returning to pool');
+            
+            setPool((prev) => {
+              // Safety check: only add if not already in pool
+              const alreadyInPool = prev.some(p => p.id === item.id);
+              if (alreadyInPool) {
+                console.log('[Drag] Item already in pool, not adding duplicate');
+                return prev;
+              }
+              console.log('[Drag] Adding item back to pool maintaining original order');
+              
+              // Add item to current pool
+              const newPool = [...prev, item];
+              
+              // Restore to original order using helper function
+              return restorePoolToOriginalOrder(newPool);
+            });
           } else if (wasFromSlot !== undefined) {
-            // Item was from a slot and not placed - return to pool
+            // Item was from a slot and not placed - return to pool maintaining original order
             console.log('[Drag] ⚠️ Item from slot not placed - returning to pool');
             setPool((prev) => {
               // Safety check: only add if not already in pool
@@ -635,14 +719,23 @@ const ReorderQuestion = React.memo(({
                 console.log('[Drag] Item already in pool, not adding duplicate');
                 return prev;
               }
-              console.log('[Drag] Adding item back to pool');
+              console.log('[Drag] Adding item back to pool maintaining original order');
+              
+              // Add item to current pool
               const newPool = [...prev, item];
-              // Ensure uniqueness
-              return newPool.filter((item, index, self) => 
-                index === self.findIndex((t) => t.id === item.id)
-              );
+              
+              // Restore to original order using helper function
+              return restorePoolToOriginalOrder(newPool);
             });
           }
+          
+          // Smooth animation back to original position
+          Animated.spring(position, {
+            toValue: { x: 0, y: 0 },
+            useNativeDriver: false,
+            friction: 6,
+            tension: 120,
+          }).start();
         }
         
         // Clear dragged item ref
@@ -651,22 +744,14 @@ const ReorderQuestion = React.memo(({
         // Reset dragging flag after a small delay to allow state updates
         setTimeout(() => {
           isDraggingRef.current = false;
-        }, 100);
-        
-        // Animate back to original position
-        Animated.spring(position, {
-          toValue: { x: 0, y: 0 },
-          useNativeDriver: false,
-          friction: 7,
-          tension: 40,
-        }).start();
+        }, 150);
       },
     });
 
     const panResponderData = { position, responder };
     panRespondersRef.current.set(key, panResponderData);
     return panResponderData;
-  }, [placeIntoSlot, removeFromSlotForDrag]);
+  }, [placeIntoSlot, removeFromSlotForDrag, restorePoolToOriginalOrder]);
 
   const Slot = ({ index }: { index: number }) => {
     const item = slots[index];
@@ -700,8 +785,39 @@ const ReorderQuestion = React.memo(({
         }}
         style={[
           styles.reorderSlot,
-          isCorrect && { borderColor: '#22c55e', shadowColor: '#22c55e', backgroundColor: 'rgba(240, 253, 244, 0.95)' },
-          isIncorrect && { borderColor: '#ef4444', shadowColor: '#ef4444', backgroundColor: 'rgba(254, 242, 242, 0.95)' }
+          // Enhanced visual states for better user feedback
+          isCorrect && { 
+            borderColor: '#22c55e', 
+            shadowColor: '#22c55e', 
+            backgroundColor: 'rgba(240, 253, 244, 0.95)',
+            borderWidth: 3,
+            shadowOffset: { width: 0, height: 3 },
+            shadowOpacity: 0.2,
+            shadowRadius: 4,
+            elevation: 4
+          },
+          isIncorrect && { 
+            borderColor: '#ef4444', 
+            shadowColor: '#ef4444', 
+            backgroundColor: 'rgba(254, 242, 242, 0.95)',
+            borderWidth: 3,
+            shadowOffset: { width: 0, height: 3 },
+            shadowOpacity: 0.2,
+            shadowRadius: 4,
+            elevation: 4
+          },
+          // Visual feedback for locked slots
+          isLocked && { 
+            borderColor: '#10b981', 
+            backgroundColor: 'rgba(236, 253, 245, 0.8)',
+            borderWidth: 2
+          },
+          // Visual feedback for empty slots (drop zones)
+          !item && !isLocked && {
+            borderColor: '#f59e0b',
+            borderStyle: 'dashed',
+            backgroundColor: 'rgba(255, 251, 235, 0.3)'
+          }
         ]}
       >
         {item ? (
@@ -748,38 +864,6 @@ const ReorderQuestion = React.memo(({
                 )}
               </View>
               
-              {/* X button - positioned absolutely to avoid drag capture */}
-              <Pressable 
-                style={[
-                  styles.removeSlotButtonFixed, 
-                  { 
-                    position: 'absolute', 
-                    top: 4, 
-                    right: 4, 
-                    zIndex: 999,
-                    pointerEvents: isLocked ? 'none' : 'auto' // Ensure it's tappable when not locked
-                  }
-                ]}
-                onPress={(e) => {
-                  if (e && e.stopPropagation) {
-                    e.stopPropagation();
-                  }
-                  console.log('[Reorder] X button pressed for slot', index);
-                  if (!isLocked && !isValidatingRef.current && !isCompletedRef.current) {
-                    removeFromSlot(index);
-                  } else {
-                    console.log('[Reorder] X button press blocked: locked=', isLocked, 'validating=', isValidatingRef.current, 'completed=', isCompletedRef.current);
-                  }
-                }}
-                hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
-                disabled={isLocked}
-              >
-                <MaterialCommunityIcons 
-                  name="close-circle"
-                  size={28} 
-                  color={isLocked ? "#cbd5e0" : "#64748b"} 
-                />
-              </Pressable>
             </Animated.View>
           ) : (
             <View 
@@ -832,8 +916,28 @@ const ReorderQuestion = React.memo(({
             </View>
           )
         ) : (
-          <View style={styles.slotPlaceholder}>
-            <Text style={styles.slotPlaceholderText}>Drop here</Text>
+          <View style={[
+            styles.slotPlaceholder,
+            // Enhanced visual feedback for empty drop zones
+            !isLocked && {
+              backgroundColor: 'rgba(255, 251, 235, 0.5)',
+              borderColor: '#f59e0b',
+              borderWidth: 2,
+              borderStyle: 'dashed'
+            }
+          ]}>
+            <MaterialCommunityIcons 
+              name="plus-circle-outline" 
+              size={24} 
+              color={isLocked ? "#cbd5e0" : "#f59e0b"} 
+              style={{ marginBottom: 4 }}
+            />
+            <Text style={[
+              styles.slotPlaceholderText,
+              { color: isLocked ? "#cbd5e0" : "#f59e0b" }
+            ]}>
+              {isLocked ? "Locked" : "Drop here"}
+            </Text>
           </View>
         )}
         {/* Lock indicator for correct items */}
@@ -846,21 +950,14 @@ const ReorderQuestion = React.memo(({
     );
   };
 
-  // Memoize ChoiceCard rendering with duplicate prevention
+  // Memoize ChoiceCard rendering with duplicate prevention and enhanced visual feedback
   const renderChoiceCards = useMemo(() => {
     // Remove duplicates from pool before rendering (safety check)
     const uniquePool = pool.filter((item, index, self) => 
       index === self.findIndex((t) => t.id === item.id)
     );
     
-    if (uniquePool.length !== pool.length) {
-      console.warn('[Reorder] Detected duplicate items in pool, filtering...', {
-        originalCount: pool.length,
-        uniqueCount: uniquePool.length
-      });
-    }
-    
-    return uniquePool.map((choice) => {
+    return uniquePool.map((choice, index) => {
       const pan = getPanResponder(choice);
       
       return (
@@ -872,7 +969,13 @@ const ReorderQuestion = React.memo(({
               transform: [
                 { translateX: pan.position.x },
                 { translateY: pan.position.y }
-              ]
+              ],
+              // Add subtle shadow and border for better visual feedback
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.1,
+              shadowRadius: 3,
+              elevation: 2,
             }
           ]}
           {...pan.responder.panHandlers}
@@ -895,8 +998,59 @@ const ReorderQuestion = React.memo(({
     });
   }, [pool, question.id, getPanResponder]);
 
+  // Reset function to return all items to original position
+  const resetItems = useCallback(() => {
+    console.log('[Reorder] Reset button pressed - returning all items to original position');
+    
+    // Haptic feedback
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    
+    // Animate the reset
+    try {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    } catch {}
+    
+    // Clear all slots
+    setSlots(Array(slotsCount).fill(null));
+    
+    // Reset pool to original order
+    setPool([...items]);
+    
+    // Clear locked slots
+    setLockedSlots(new Set());
+    
+    // Reset validation and completion states
+    setIsValidating(false);
+    setIsCompleted(false);
+    isValidatingRef.current = false;
+    isCompletedRef.current = false;
+    isDraggingRef.current = false;
+    isClearingWrongItemsRef.current = false;
+    draggedItemRef.current = null;
+    lastNotifiedRef.current = '';
+    hasCalledOnCompleteRef.current = false;
+    
+    console.log('[Reorder] Reset complete - all items returned to original position');
+  }, [items, slotsCount]);
+
   return (
     <View style={{ width: '100%', paddingHorizontal: 0 }}>
+      {/* Reset Button */}
+      <View style={styles.resetButtonContainer}>
+        <TouchableOpacity 
+          style={styles.resetButton}
+          onPress={resetItems}
+          disabled={isValidating || isCompleted}
+        >
+          <MaterialCommunityIcons 
+            name="refresh" 
+            size={20} 
+            color="#ffffff" 
+          />
+          <Text style={styles.resetButtonText}>Reset</Text>
+        </TouchableOpacity>
+      </View>
+      
       {/* Drop Slots - Full Width */}
       <View style={styles.reorderSlotsRow}>
         {Array.from({ length: slotsCount }).map((_, i) => (
@@ -1039,6 +1193,7 @@ interface AttemptHistory {
 interface QuestionResult {
   questionNumber: number;
   questionId: string;
+  questionType: string;
   questionText: string;
   choices?: string[];
   correctAnswer: string;
@@ -1100,6 +1255,150 @@ const getResponsiveFontSize = (baseSize: number) => {
 const getResponsivePadding = (basePadding: number) => {
   const scale = Math.min(screenWidth / 375, 1.2);
   return Math.max(basePadding * scale, basePadding * 0.8);
+};
+
+// Validation functions to ensure fair question layouts
+const validateMatchingQuestion = (question: Question): boolean => {
+  if (question.type !== 'matching' || !question.pairs) return true;
+  
+  const pairs = question.pairs;
+  // Check if any pair has the same index (left[i] matches right[i])
+  for (let i = 0; i < pairs.length; i++) {
+    if (pairs[i].left === pairs[i].right) {
+      console.warn(`[Validation] Matching question ${question.id} has aligned pair at index ${i}: "${pairs[i].left}"`);
+      return false;
+    }
+  }
+  return true;
+};
+
+const validateReorderQuestion = (question: Question): boolean => {
+  if (question.type !== 're-order' || !question.reorderItems) return true;
+  
+  const items = question.reorderItems;
+  const correctSequence = items.map(item => item.id);
+  
+  // Check if items are already in correct order
+  const isAlreadyCorrect = items.every((item, index) => {
+    // For ascending order (default)
+    if (!question.reorderDirection || question.reorderDirection === 'asc') {
+      return item.id === correctSequence[index];
+    }
+    // For descending order
+    return item.id === correctSequence[correctSequence.length - 1 - index];
+  });
+  
+  if (isAlreadyCorrect) {
+    console.warn(`[Validation] Reorder question ${question.id} has items already in correct order`);
+    return false;
+  }
+  
+  return true;
+};
+
+const shuffleArray = (array: any[]): any[] => {
+  const shuffled = [...array];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+};
+
+const fixMatchingQuestion = (question: Question): Question => {
+  if (question.type !== 'matching' || !question.pairs) return question;
+  
+  const pairs = question.pairs;
+  const leftItems = pairs.map(p => p.left);
+  const rightItems = pairs.map(p => p.right);
+  
+  // Shuffle right items until no alignment occurs
+  let shuffledRight = shuffleArray(rightItems);
+  let attempts = 0;
+  const maxAttempts = 100; // Prevent infinite loop
+  
+  while (attempts < maxAttempts) {
+    let hasAlignment = false;
+    for (let i = 0; i < leftItems.length; i++) {
+      if (leftItems[i] === shuffledRight[i]) {
+        hasAlignment = true;
+        break;
+      }
+    }
+    
+    if (!hasAlignment) break;
+    
+    shuffledRight = shuffleArray(rightItems);
+    attempts++;
+  }
+  
+  if (attempts >= maxAttempts) {
+    console.warn(`[Validation] Could not fix matching question ${question.id} after ${maxAttempts} attempts`);
+    return question;
+  }
+  
+  // Create new pairs with shuffled right items
+  const fixedPairs = pairs.map((pair, index) => ({
+    ...pair,
+    right: shuffledRight[index]
+  }));
+  
+  console.log(`[Validation] Fixed matching question ${question.id}:`, {
+    original: pairs.map(p => `${p.left} → ${p.right}`),
+    fixed: fixedPairs.map(p => `${p.left} → ${p.right}`)
+  });
+  
+  return {
+    ...question,
+    pairs: fixedPairs
+  };
+};
+
+const fixReorderQuestion = (question: Question): Question => {
+  if (question.type !== 're-order' || !question.reorderItems) return question;
+  
+  const items = question.reorderItems;
+  const correctSequence = items.map(item => item.id);
+  
+  // Shuffle items until they're not in correct order
+  let shuffledItems = shuffleArray(items);
+  let attempts = 0;
+  const maxAttempts = 100; // Prevent infinite loop
+  
+  while (attempts < maxAttempts) {
+    const shuffledSequence = shuffledItems.map(item => item.id);
+    
+    // Check if shuffled sequence matches correct order
+    const isCorrectOrder = shuffledSequence.every((id, index) => {
+      if (!question.reorderDirection || question.reorderDirection === 'asc') {
+        return id === correctSequence[index];
+      }
+      return id === correctSequence[correctSequence.length - 1 - index];
+    });
+    
+    if (!isCorrectOrder) break;
+    
+    shuffledItems = shuffleArray(items);
+    attempts++;
+  }
+  
+  if (attempts >= maxAttempts) {
+    console.warn(`[Validation] Could not fix reorder question ${question.id} after ${maxAttempts} attempts`);
+    return question;
+  }
+  
+  console.log(`[Validation] Fixed reorder question ${question.id}:`, {
+    original: correctSequence,
+    shuffled: shuffledItems.map(item => item.id),
+    direction: question.reorderDirection || 'asc'
+  });
+  
+  // Store the original correct order in the question.order field
+  return {
+    ...question,
+    reorderItems: shuffledItems,
+    order: correctSequence // Store the correct order for validation
+  };
 };
 
 // Animated touchable for shake feedback
@@ -1170,6 +1469,11 @@ export default function StudentExerciseAnswering() {
   // CRITICAL FIX: Use ref to track attempts synchronously for immediate access during submission
   const attemptLogsRef = useRef<{[questionId: string]: Array<{answer: string, timeSpent: number, timestamp: number, attemptType: string, hesitationTime: number, isSignificantChange: boolean, questionPhase: string, confidence: string}>}>({});
   
+  // CRITICAL FIX: Store saved question results for accurate UI display after submission
+  const [savedQuestionResults, setSavedQuestionResults] = useState<QuestionResult[]>([]);
+  // CRITICAL FIX: Store saved results summary for accurate aggregate display
+  const [savedResultsSummary, setSavedResultsSummary] = useState<ResultsSummary | null>(null);
+  
   // Enhanced interaction tracking
   const [interactionLogs, setInteractionLogs] = useState<{[questionId: string]: Array<{
     type: 'option_hover' | 'option_click' | 'help_used' | 'navigation' | 'answer_change',
@@ -1196,6 +1500,7 @@ export default function StudentExerciseAnswering() {
   // Resource preloading state
   const [isPreloadingResources, setIsPreloadingResources] = useState(false);
   const [preloadProgress, setPreloadProgress] = useState(0);
+  const [animatedProgress, setAnimatedProgress] = useState(0);
   const [preloadStatus, setPreloadStatus] = useState('');
   const [preloadError, setPreloadError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
@@ -1204,6 +1509,33 @@ export default function StudentExerciseAnswering() {
   const [resourcesReady, setResourcesReady] = useState(false);
   const [exerciseStarted, setExerciseStarted] = useState(false);
   const [officialStartTime, setOfficialStartTime] = useState<number | null>(null);
+
+  // Smooth progress animation effect
+  useEffect(() => {
+    const duration = 300; // Animation duration in ms
+    const startValue = animatedProgress;
+    const endValue = preloadProgress;
+    const startTime = Date.now();
+    
+    const animate = () => {
+      const elapsed = Date.now() - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      
+      // Easing function for smooth animation
+      const easeOutCubic = 1 - Math.pow(1 - progress, 3);
+      const currentValue = startValue + (endValue - startValue) * easeOutCubic;
+      
+      setAnimatedProgress(currentValue);
+      
+      if (progress < 1) {
+        requestAnimationFrame(animate);
+      }
+    };
+    
+    if (preloadProgress !== animatedProgress) {
+      requestAnimationFrame(animate);
+    }
+  }, [preloadProgress]);
 
   // Animation states for loading screen
   const [bounceAnim] = useState(new Animated.Value(0));
@@ -1419,18 +1751,32 @@ export default function StudentExerciseAnswering() {
         
         // Auto-submit when time runs out
         if (remaining === 0 && !submittingRef.current && !isAdvancingRef.current) {
-          // Prevent multiple timeout triggers
+          // CRITICAL: Stop the timer immediately to prevent multiple triggers
+          if (rafIdRef.current) {
+            cancelAnimationFrame(rafIdRef.current);
+            rafIdRef.current = null;
+          }
+          
+          // Set flag to prevent multiple timeout triggers
           isAdvancingRef.current = true;
           
           // Mark current question as failed due to timeout
           const currentQuestion = exercise.questions[currentQuestionIndex];
           if (currentQuestion) {
+            // CRITICAL: Ensure timeout answer is always marked as incorrect
             const timeoutAnswer: StudentAnswer = {
               questionId: currentQuestion.id,
-              answer: '',
-              isCorrect: false,
+              answer: currentAnswer || '', // Use current answer if any (or empty string)
+              isCorrect: false, // ALWAYS false for timeout
               timeSpent: questionElapsedRef.current,
             };
+            
+            console.log('[Timeout] Creating timeout answer:', {
+              questionId: currentQuestion.id,
+              hasAnswer: !!(currentAnswer && currentAnswer !== ''),
+              isCorrect: timeoutAnswer.isCorrect,
+              timeSpent: timeoutAnswer.timeSpent
+            });
             
             // CRITICAL FIX: Use updateAnswers to update both state and ref
             updateAnswers(prev => {
@@ -1443,12 +1789,42 @@ export default function StudentExerciseAnswering() {
                 return [...prev, timeoutAnswer];
               }
             });
+            
+            // Log the timeout as a final attempt with special marker
+            logAttempt(currentQuestion, currentAnswer || '', 'final');
+            
+            // Mark as incorrect and increment attempt count for timeout
+            setQuestionCorrect(currentQuestion.id, false);
+            incrementAttemptCount(currentQuestion.id);
+            
+            console.log('[Timeout] Time limit reached - marking question as incorrect', {
+              questionId: currentQuestion.id,
+              timeLimit: exercise.timeLimitPerItem,
+              attempts: (attemptCountsRef.current[currentQuestion.id] || 0) + 1
+            });
           }
           
-          // Show "Times Up" briefly before advancing
-          setTimeout(() => {
-            advanceToNextOrFinish();
-          }, 1500); // Show "Times Up" for 1.5 seconds
+          // Show clear "Times Up" alert before advancing (no visual flash, just alert)
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          
+          showCustomAlert(
+            'Time\'s Up! ⏰',
+            `The time limit has been reached. This question will be marked as incorrect and we'll move to the next one.`,
+            () => {
+              // CRITICAL FIX: Reset the flag and advance with small delay for smooth transition
+              isAdvancingRef.current = false;
+              console.log('[Timeout] User clicked OK, advancing to next question');
+              
+              // Small delay to ensure smooth state transition
+              setTimeout(() => {
+                advanceToNextOrFinish();
+              }, 100);
+            },
+            'warning'
+          );
+          
+          // Exit early to prevent further timer ticks
+          return;
         }
       } else {
         setTimeRemaining(null);
@@ -1563,6 +1939,28 @@ export default function StudentExerciseAnswering() {
     setQuestionStartTime(Date.now());
     setQuestionElapsed(0);
     
+    // CRITICAL FIX: Reset attempts counter for the new question
+    // This ensures attempts start at 0 for each new question
+    if (exercise && currentQuestionIndex >= 0 && currentQuestionIndex < exercise.questions.length) {
+      const currentQid = exercise.questions[currentQuestionIndex].id;
+      console.log('[QuestionChange] Resetting attempts for question:', currentQid);
+      
+      // CRITICAL FIX: Reset both state and ref immediately to prevent stale values
+      const newAttemptCounts = { ...attemptCounts };
+      newAttemptCounts[currentQid] = 0; // Reset to 0 for the new question
+      attemptCountsRef.current = { ...attemptCountsRef.current, [currentQid]: 0 };
+      setAttemptCounts(newAttemptCounts);
+      
+      // CRITICAL FIX: Clear reorder answers for the new question to prevent duplicate options
+      setReorderAnswers(prev => {
+        const newAnswers = { ...prev };
+        newAnswers[currentQid] = []; // Clear any previous reorder state
+        return newAnswers;
+      });
+      
+      console.log('[QuestionChange] Attempt count reset complete for question:', currentQid, 'attempts:', 0);
+    }
+    
     // Log initial attempt when question is displayed (only if there's an existing answer)
     if (exercise && exercise.questions[currentQuestionIndex]) {
       const currentQuestion = exercise.questions[currentQuestionIndex];
@@ -1635,29 +2033,39 @@ export default function StudentExerciseAnswering() {
     }
   };
 
-  // Enhanced resource collection and preloading system
+  // Enhanced resource collection and preloading system - OPTIMIZED
   const collectAllResources = (exercise: Exercise): ResourceItem[] => {
     const resources: ResourceItem[] = [];
     
+    console.log(`[CollectResources] Starting collection for ${exercise.questions.length} questions`);
+    
     exercise.questions.forEach((question, questionIndex) => {
+      // OPTIMIZATION: Priority system for efficient loading
       const priority: 'high' | 'medium' | 'low' = 
-        questionIndex < 3 ? 'high' : 
-        questionIndex < 6 ? 'medium' : 'low';
+        questionIndex < 3 ? 'high' :    // First 3 questions - load first
+        questionIndex < 7 ? 'medium' :  // Next 4 questions - load second
+        'low';                          // Last questions - load last
+      
+      console.log(`[CollectResources] Q${questionIndex + 1} (${question.id}): priority=${priority}`);
       
       // Collect question images
+      let questionResourceCount = 0;
       if (question.questionImage) {
         if (Array.isArray(question.questionImage)) {
           question.questionImage.filter(Boolean).forEach(url => {
             resources.push({ url, type: 'image', priority, questionId: question.id });
+            questionResourceCount++;
           });
         } else {
           resources.push({ url: question.questionImage, type: 'image', priority, questionId: question.id });
+          questionResourceCount++;
         }
       }
       
       if (question.questionImages && question.questionImages.length) {
         question.questionImages.filter(Boolean).forEach(url => {
           resources.push({ url, type: 'image', priority, questionId: question.id });
+          questionResourceCount++;
         });
       }
       
@@ -1665,8 +2073,11 @@ export default function StudentExerciseAnswering() {
       if (question.optionImages && question.optionImages.length) {
         question.optionImages.filter(Boolean).forEach(url => {
           resources.push({ url: url!, type: 'image', priority, questionId: question.id });
+          questionResourceCount++;
         });
       }
+      
+      console.log(`[CollectResources] Q${questionIndex + 1}: Added ${questionResourceCount} image resources`);
       
       // Collect reorder item images
       if (question.reorderItems && question.reorderItems.length) {
@@ -1689,9 +2100,10 @@ export default function StudentExerciseAnswering() {
         });
       }
       
-      // Collect TTS audio
+      // Collect TTS audio files for preloading
       if (question.ttsAudioUrl) {
         resources.push({ url: question.ttsAudioUrl, type: 'audio', priority, questionId: question.id });
+        console.log(`[CollectResources] Q${questionIndex + 1}: Added TTS audio resource`);
       }
       
       // Collect sub-question resources
@@ -1703,6 +2115,18 @@ export default function StudentExerciseAnswering() {
       }
     });
     
+    console.log(`[CollectResources] Collection complete: ${resources.length} total resources`, {
+      byType: {
+        images: resources.filter(r => r.type === 'image').length,
+        audio: resources.filter(r => r.type === 'audio').length
+      },
+      byPriority: {
+        high: resources.filter(r => r.priority === 'high').length,
+        medium: resources.filter(r => r.priority === 'medium').length,
+        low: resources.filter(r => r.priority === 'low').length
+      }
+    });
+    
     return resources;
   };
   const preloadResource = async (resource: ResourceItem): Promise<PreloadResult> => {
@@ -1710,19 +2134,68 @@ export default function StudentExerciseAnswering() {
     
     try {
       if (resource.type === 'image') {
-        await Image.prefetch(resource.url);
-      } else if (resource.type === 'audio') {
-        // For audio, we'll just validate the URL exists
-        const response = await fetch(resource.url, { method: 'HEAD' });
-        if (!response.ok) {
-          throw new Error(`Audio resource failed: ${response.status}`);
+        // CRITICAL FIX: Only preload HTTP/HTTPS URLs
+        // Asset paths and require() references will be handled by ExpoImage on-demand
+        if (!resource.url.startsWith('http://') && !resource.url.startsWith('https://')) {
+          const loadTime = Date.now() - startTime;
+          console.log(`[Preload] ⏭ Skipping non-HTTP image (will load on-demand): ${resource.url.substring(0, 50)}`);
+          return { 
+            success: true, // Mark as success since ExpoImage will handle it
+            url: resource.url, 
+            loadTime 
+          };
         }
+        
+        // OPTIMIZATION: Add timeout to prevent hanging on slow images (15 seconds)
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout after 15s')), 15000)
+        );
+        
+        // Prefetch using React Native Image component for HTTP(S) URLs only
+        await Promise.race([
+          Image.prefetch(resource.url),
+          timeoutPromise
+        ]);
+        
+        const loadTime = Date.now() - startTime;
+        const filename = resource.url.substring(resource.url.lastIndexOf('/') + 1, resource.url.indexOf('?') > 0 ? resource.url.indexOf('?') : resource.url.length);
+        console.log(`[Preload] ✓ Image loaded (${loadTime}ms): ${filename}`);
+        return { success: true, url: resource.url, loadTime };
+      } else if (resource.type === 'audio') {
+        // Preload TTS audio files for faster playback
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Audio preload timeout after 10s')), 10000)
+        );
+        
+        // Create audio player to preload the audio file
+        const source: AudioSource = { uri: resource.url };
+        const player = createAudioPlayer(source);
+        
+        // Simple preload by creating the player and waiting a short time
+        // The actual loading happens when the player is created
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            // Give the player time to load
+            setTimeout(() => resolve(), 1000);
+          }),
+          timeoutPromise
+        ]);
+        
+        const loadTime = Date.now() - startTime;
+        const filename = resource.url.substring(resource.url.lastIndexOf('/') + 1, resource.url.indexOf('?') > 0 ? resource.url.indexOf('?') : resource.url.length);
+        console.log(`[Preload] ✓ Audio preloaded (${loadTime}ms): ${filename}`);
+        return { success: true, url: resource.url, loadTime };
       }
       
       const loadTime = Date.now() - startTime;
       return { success: true, url: resource.url, loadTime };
     } catch (error) {
       const loadTime = Date.now() - startTime;
+      // Log but don't fail - images will load on-demand via ExpoImage
+      console.warn(`[Preload] ⚠ Failed to preload (will load on-demand): ${resource.url.substring(0, 60)}`, {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        loadTime
+      });
       return { 
         success: false, 
         url: resource.url, 
@@ -1741,25 +2214,30 @@ export default function StudentExerciseAnswering() {
       return priorityOrder[a.priority] - priorityOrder[b.priority];
     });
     
-    // Process resources in batches for better performance
-    const batchSize = 5;
+    // CRITICAL FIX: Smaller batches for smoother progress bar animation
+    const batchSize = 3;
     const batches = [];
     for (let i = 0; i < sortedResources.length; i += batchSize) {
       batches.push(sortedResources.slice(i, i + batchSize));
     }
     
+    console.log(`[Preload] Processing ${totalResources} resources in ${batches.length} batches (max ${batchSize} per batch)`);
+    
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
+      const batchStart = results.length + 1;
+      const batchEnd = Math.min(results.length + batch.length, totalResources);
       
-      setPreloadStatus(`Loading resources ${batchIndex * batchSize + 1}-${Math.min((batchIndex + 1) * batchSize, totalResources)} of ${totalResources}...`);
+      setPreloadStatus(`Loading resources ${batchStart}-${batchEnd} of ${totalResources}...`);
+      console.log(`[Preload] Batch ${batchIndex + 1}/${batches.length}: Loading ${batch.length} resources`);
       
-      // Process batch in parallel
-      const batchPromises = batch.map(async (resource) => {
+      // CRITICAL FIX: Process resources sequentially for smooth progress animation
+      // Sequential processing ensures progress updates are visible and smooth
+      const batchResults: PreloadResult[] = [];
+      for (let resourceIndex = 0; resourceIndex < batch.length; resourceIndex++) {
+        const resource = batch[resourceIndex];
         const result = await preloadResource(resource);
-        
-        // Update progress
-        const currentProgress = Math.round(((results.length + 1) / totalResources) * 100);
-        setPreloadProgress(currentProgress);
+        batchResults.push(result);
         
         // Update loaded/failed resources
         if (result.success) {
@@ -1768,16 +2246,22 @@ export default function StudentExerciseAnswering() {
           setFailedResources(prev => new Set([...prev, resource.url]));
         }
         
-        return result;
-      });
+        // Update progress after each individual resource for smoother animation
+        const completedResources = results.length + resourceIndex + 1;
+        const currentProgress = Math.round((completedResources / totalResources) * 100);
+        setPreloadProgress(currentProgress);
+        
+        // CRITICAL FIX: Longer delay for smooth progress animation (150ms per resource)
+        // This ensures the progress bar animates smoothly and is visible to users
+        // Even skipped resources get this delay for consistent animation
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
       
-      const batchResults = await Promise.all(batchPromises);
       results.push(...batchResults);
       
-      // Small delay between batches to prevent overwhelming the network
-      if (batchIndex < batches.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
+      console.log(`[Preload] Batch ${batchIndex + 1} completed: ${results.length}/${totalResources} resources loaded`);
+      
+      // No delay between batches since we already have 150ms delay per resource
     }
     
     return results;
@@ -2280,20 +2764,22 @@ export default function StudentExerciseAnswering() {
     setAnswers(prev => {
       const updated = updater(prev);
       
-      // CRITICAL: Validate that we're not setting questionable answers
-      updated.forEach((ans, idx) => {
+      // CRITICAL: Validate and auto-fix questionable answers (e.g., timeout with no answer)
+      const validated = updated.map((ans, idx) => {
         if (ans.isCorrect === true && (!ans.answer || ans.answer === '')) {
-          console.error('[UpdateAnswers] WARNING: Question marked correct with empty answer!', {
+          console.warn('[UpdateAnswers] Auto-fixing: Question marked correct with empty answer (likely timeout)', {
             index: idx,
             questionId: ans.questionId,
-            answer: ans.answer,
-            isCorrect: ans.isCorrect
+            answer: ans.answer
           });
+          // Auto-fix: Force to incorrect if no answer
+          return { ...ans, isCorrect: false };
         }
+        return ans;
       });
       
-      answersRef.current = updated; // Update ref synchronously
-      return updated;
+      answersRef.current = validated; // Update ref synchronously
+      return validated;
     });
   };
   
@@ -2312,6 +2798,21 @@ export default function StudentExerciseAnswering() {
   const setQuestionCorrect = (questionId: string, isCorrect: boolean) => {
     correctQuestionsRef.current = { ...correctQuestionsRef.current, [questionId]: isCorrect };
     setCorrectQuestions(prev => ({ ...prev, [questionId]: isCorrect }));
+  };
+
+  // CRITICAL FIX: Single source of truth for attempt counting
+  // Always count ALL attempts from attemptHistory - no filtering or deduplication
+  const getQuestionAttemptCount = (questionId: string): number => {
+    const attempts = attemptLogsRef.current[questionId] || [];
+    
+    // Simply return the total count of all attempts
+    // This matches what gets saved to database as attemptHistory.length
+    return attempts.length;
+  };
+
+  const getTotalAttemptCount = (): number => {
+    if (!exercise) return 0;
+    return exercise.questions.reduce((sum, q) => sum + getQuestionAttemptCount(q.id), 0);
   };
 
   const logAttempt = (question: Question, ans: any, attemptType: 'initial' | 'change' | 'final' = 'change') => {
@@ -2542,34 +3043,63 @@ export default function StudentExerciseAnswering() {
             id: actualExerciseId,
           };
           
-          setExercise(exerciseData);
+          // Validate and fix question fairness before setting exercise
+          console.log('[Validation] Validating exercise questions for fairness...');
+          const validatedQuestions = exerciseData.questions.map((question: Question) => {
+            if (question.type === 'matching') {
+              if (!validateMatchingQuestion(question)) {
+                console.log(`[Validation] Fixing matching question ${question.id}`);
+                return fixMatchingQuestion(question);
+              }
+            } else if (question.type === 're-order') {
+              if (!validateReorderQuestion(question)) {
+                console.log(`[Validation] Fixing reorder question ${question.id}`);
+                return fixReorderQuestion(question);
+              }
+            }
+            return question;
+          });
+          
+          const validatedExerciseData = {
+            ...exerciseData,
+            questions: validatedQuestions
+          };
+          
+          setExercise(validatedExerciseData);
           
           // Start comprehensive resource preloading
           setIsPreloadingResources(true);
           setPreloadProgress(0);
+          setAnimatedProgress(0);
           setPreloadStatus('Preparing resources...');
           setPreloadError(null);
           
           try {
-            const allResources = collectAllResources(exerciseData);
-            console.log(`Found ${allResources.length} resources to preload`);
+            const allResources = collectAllResources(validatedExerciseData);
+            console.log(`[Preload] Found ${allResources.length} resources to preload:`, {
+              images: allResources.filter(r => r.type === 'image').length,
+              audio: allResources.filter(r => r.type === 'audio').length,
+              highPriority: allResources.filter(r => r.priority === 'high').length,
+              mediumPriority: allResources.filter(r => r.priority === 'medium').length,
+              lowPriority: allResources.filter(r => r.priority === 'low').length
+            });
             
-            if (allResources.length > 0) {
+              if (allResources.length > 0) {
               const preloadResults = await preloadResourcesWithProgress(allResources);
               
               const successCount = preloadResults.filter(r => r.success).length;
               const failCount = preloadResults.filter(r => !r.success).length;
               
-              console.log(`Preloading completed: ${successCount} successful, ${failCount} failed`);
+              console.log(`[Preload] Completed: ${successCount} successful, ${failCount} failed (will load on-demand)`);
               
               if (failCount > 0) {
-                console.warn('Some resources failed to load:', preloadResults.filter(r => !r.success));
+                console.log(`[Preload] ${failCount} resources will load on-demand (optimized for speed)`);
               }
               
-              setPreloadStatus(`Preloading completed! ${successCount}/${allResources.length} resources loaded successfully.`);
+              setPreloadStatus(`Ready! Loaded ${successCount} essential resources. 🚀`);
               setResourcesReady(true);
             } else {
-              setPreloadStatus('No resources to preload.');
+              setPreloadStatus('Ready to start! 🎉');
               setResourcesReady(true);
             }
           } catch (error) {
@@ -2807,21 +3337,20 @@ export default function StudentExerciseAnswering() {
       maxAttempts
     });
     
-    // Always increment attempt count first
-    const newAttemptCount = currentAttempts + 1;
-    updateAttemptCount(q.id, newAttemptCount);
-    
-    // Save the answer (correct or incorrect) to the answers array
-    updateAnswers(prev => {
-      const updated = prev.map(a => 
-        a.questionId === q.id ? { ...a, answer: currentAns || '', isCorrect: correct } : a
-      );
-      console.log('[HandleNext] Updated answers array:', { correct, attemptCount: newAttemptCount });
-      return updated;
-    });
-    
+    // CRITICAL FIX: Only increment attempt count on WRONG answers
     if (!correct) {
+      const newAttemptCount = currentAttempts + 1;
+      updateAttemptCount(q.id, newAttemptCount);
       console.log('[HandleNext-Wrong] Incorrect answer, attempt:', newAttemptCount);
+    
+      // Save the wrong answer to the answers array
+      updateAnswers(prev => {
+        const updated = prev.map(a => 
+          a.questionId === q.id ? { ...a, answer: currentAns || '', isCorrect: false } : a
+        );
+        console.log('[HandleNext] Updated answers array with wrong answer');
+        return updated;
+      });
       
       // Check if attempt limit is reached after wrong answer
       if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
@@ -2843,6 +3372,18 @@ export default function StudentExerciseAnswering() {
       // Log attempt and show feedback for wrong answer
       logAttempt(q, currentAns, 'change');
       
+      // CRITICAL FIX: Mark the last attempt as 'final' when manually advancing
+      // This ensures the final answer is properly categorized in attempt history
+      const attempts = attemptLogsRef.current[q.id] || [];
+      if (attempts.length > 0) {
+        const lastAttempt = attempts[attempts.length - 1];
+        if (lastAttempt.attemptType === 'change') {
+          // Update the last attempt to be 'final' instead of creating a duplicate
+          lastAttempt.attemptType = 'final';
+          console.log('[HandleNext] Updated last attempt to final type for manual advancement');
+        }
+      }
+      
       // Show remaining attempts if limit is set
       const remainingAttempts = maxAttempts !== null && maxAttempts !== undefined ? maxAttempts - newAttemptCount : null;
       const attemptMessage = remainingAttempts 
@@ -2862,10 +3403,21 @@ export default function StudentExerciseAnswering() {
       return;
     }
     
+    // CORRECT ANSWER - Don't increment attempts
     // Stop TTS immediately when answer is correct
     stopCurrentTTS();
     
-    console.log('[HandleNext-Correct] Correct answer, advancing');
+    console.log('[HandleNext-Correct] Correct answer, NO attempt increment, advancing');
+    
+    // Save the correct answer to the answers array
+    updateAnswers(prev => {
+      const updated = prev.map(a => 
+        a.questionId === q.id ? { ...a, answer: currentAns || '', isCorrect: true } : a
+      );
+      console.log('[HandleNext] Updated answers array with correct answer');
+      return updated;
+    });
+    
     setQuestionCorrect(q.id, true);
     logAttempt(q, currentAns, 'final');
     triggerCorrectFeedback(() => advanceToNextOrFinish());
@@ -2914,6 +3466,11 @@ export default function StudentExerciseAnswering() {
         if (nextQuestion.type === 'matching' && typeof initialAnswer === 'object' && !Array.isArray(initialAnswer)) {
           setMatchingPairs(prev => ({ ...prev, [nextQuestion.id]: initialAnswer }));
         }
+        }
+        
+        // Reset time remaining for fresh start on new question
+        if (exercise.timeLimitPerItem) {
+          setTimeRemaining(exercise.timeLimitPerItem * 1000);
         }
         
         // Reset the advancing flag after moving to next question
@@ -3157,6 +3714,13 @@ export default function StudentExerciseAnswering() {
     const extracted = extractFileName(value);
     return normalize(extracted, caseSensitive);
   };
+  // Helper: strip leading option letters like "C. 34" → "34" for robust comparisons
+  const stripLeadingLetterPrefix = (text: string): string => {
+    if (!text) return '';
+    const trimmed = String(text).trim();
+    const match = trimmed.match(/^([A-Z])\s*\.\s*(.*)$/i);
+    return match ? match[2] : trimmed;
+  };
   const letterToIndex = (letter: string) => {
     const upper = letter.trim().toUpperCase();
     if (upper.length !== 1) return -1;
@@ -3196,12 +3760,14 @@ export default function StudentExerciseAnswering() {
     const expectedRaw = question.answer;
     if (Array.isArray(expectedRaw)) {
       const expectedValues = (expectedRaw as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
-      // CRITICAL: Extract filenames before comparing
-      return expectedValues.map(v => normalizeValue(v)).includes(normalizeValue(optionValue));
+      // CRITICAL: Extract filenames before comparing and strip letter prefixes from optionValue
+      const normExpectedSet = new Set(expectedValues.map(v => normalizeValue(v)));
+      const normalizedCandidate = normalizeValue(stripLeadingLetterPrefix(optionValue));
+      return normExpectedSet.has(normalizedCandidate);
     }
     const expectedValue = mapAnswerTokenToOptionValue(question, String(expectedRaw));
-    // CRITICAL: Extract filenames before comparing
-    return normalizeValue(optionValue) === normalizeValue(expectedValue);
+    // CRITICAL: Extract filenames before comparing and strip letter prefix from optionValue
+    return normalizeValue(stripLeadingLetterPrefix(optionValue)) === normalizeValue(expectedValue);
   };
 
   const isAnswerCorrect = (question: Question, ans: any): boolean => {
@@ -3229,8 +3795,10 @@ export default function StudentExerciseAnswering() {
         
         if (Array.isArray(expectedRaw)) {
           const expectedValues = (expectedRaw as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
-          const givenValues = (Array.isArray(ans) ? ans : [ans]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
-          // CRITICAL: Extract filenames before normalizing for comparison
+          const givenValues = (Array.isArray(ans) ? ans : [ans])
+            .map(t => stripLeadingLetterPrefix(String(t)))
+            .map(t => mapAnswerTokenToOptionValue(question, String(t)));
+          // CRITICAL: Extract filenames before normalizing for comparison, support letter-prefixed inputs
           const normExpected = expectedValues.map(v => normalizeValue(v));
           const normGiven = givenValues.map(v => normalizeValue(v));
           normExpected.sort();
@@ -3238,7 +3806,7 @@ export default function StudentExerciseAnswering() {
           return normExpected.length === normGiven.length && normExpected.every((v, i) => v === normGiven[i]);
         }
         const expectedValue = mapAnswerTokenToOptionValue(question, String(expectedRaw));
-        const givenValue = mapAnswerTokenToOptionValue(question, String(ans));
+        const givenValue = mapAnswerTokenToOptionValue(question, String(stripLeadingLetterPrefix(String(ans))));
         // CRITICAL: Extract filenames before comparing
         return normalizeValue(givenValue) === normalizeValue(expectedValue);
       }
@@ -3272,6 +3840,9 @@ export default function StudentExerciseAnswering() {
         return false;
       }
       if (question.type === 're-order') {
+        // CRITICAL FIX: Compare serialized answers instead of raw IDs
+        // This ensures consistency with how answers are displayed and stored
+        
         // Get the expected order from reorderItems (this is the correct sequence)
         const expectedItems = question.reorderItems || [];
         const expected: string[] = expectedItems.map(it => it.id);
@@ -3303,23 +3874,34 @@ export default function StudentExerciseAnswering() {
         
         // Return false if not all items are placed
         if (given.length === 0 || given.length < finalExpected.length) {
-        console.log('[Re-order] Incomplete answer:', {
-          questionId: question.id,
-          expectedLength: finalExpected.length,
-          givenLength: given.length,
-          finalExpected,
-          given
-        });
+          console.log('[Re-order] Incomplete answer:', {
+            questionId: question.id,
+            expectedLength: finalExpected.length,
+            givenLength: given.length,
+            finalExpected,
+            given
+          });
           return false;
         }
         
-        // Check if the order matches exactly
-        const isCorrect = finalExpected.length === given.length && finalExpected.every((v, i) => v === given[i]);
+        // CRITICAL FIX: Compare serialized answers for consistency
+        const expectedSerialized = serializeAnswer(question, finalExpected);
+        const givenSerialized = serializeAnswer(question, given);
+        
+        // Normalize both answers for comparison (case-insensitive, trimmed)
+        const normalizedExpected = normalizeValue(expectedSerialized);
+        const normalizedGiven = normalizeValue(givenSerialized);
+        
+        const isCorrect = normalizedExpected === normalizedGiven;
         
         console.log('[Re-order] Final validation result:', {
           questionId: question.id,
           expected: finalExpected,
           given,
+          expectedSerialized,
+          givenSerialized,
+          normalizedExpected,
+          normalizedGiven,
           isCorrect,
           direction: question.reorderDirection || 'asc'
         });
@@ -3327,10 +3909,39 @@ export default function StudentExerciseAnswering() {
         return isCorrect;
       }
       if (question.type === 'matching') {
-        // FIXED: Validate actual pair correctness, not just completion
+        // CRITICAL FIX: Handle both object format (during quiz) and serialized string format (in attempt history)
         const pairs = question.pairs || [];
         if (pairs.length === 0) return false;
         
+        // If ans is a string (serialized format from attempt history), compare directly
+        if (typeof ans === 'string') {
+          const correctAnswerSerialized = formatCorrectAnswer(question);
+          console.log('[Matching] String comparison:', {
+            studentAnswer: ans,
+            correctAnswer: correctAnswerSerialized,
+            exactMatch: ans === correctAnswerSerialized
+          });
+          
+          // Direct string comparison first
+          if (ans === correctAnswerSerialized) {
+            return true;
+          }
+          
+          // Try normalizing whitespace
+          const normalizedStudent = String(ans).replace(/\s+/g, ' ').trim();
+          const normalizedCorrect = String(correctAnswerSerialized).replace(/\s+/g, ' ').trim();
+          const normalizedMatch = normalizedStudent === normalizedCorrect;
+          
+          console.log('[Matching] After normalization:', {
+            normalizedStudent,
+            normalizedCorrect,
+            normalizedMatch
+          });
+          
+          return normalizedMatch;
+        }
+        
+        // If ans is an object (during quiz), validate the pairing logic
         const studentPairs = ans && typeof ans === 'object' ? ans as {[leftIndex: string]: number} : {};
         
         // Check if all pairs are matched
@@ -3487,8 +4098,37 @@ export default function StudentExerciseAnswering() {
       const incorrectAnswers = finalAnswers.filter(answer => answer.isCorrect === false).length;
       const totalQuestions = exercise?.questions.length || 0;
       const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
-      const totalAttempts = Object.values(attemptCounts).reduce((sum, v) => sum + (v || 0), 0);
-      const totalTimeSpentSeconds = Math.floor(elapsedTime / 1000);
+      // CRITICAL FIX: Calculate total attempts from attemptHistory (source of truth)
+      // Sum up the actual logged attempts, not the counter values which can drift
+      const totalAttempts = exercise?.questions.reduce((sum, q) => {
+        const questionAttempts = attemptLogsRef.current[q.id]?.length || 0;
+        return sum + questionAttempts;
+      }, 0) || 0;
+      
+      console.log('[Submission] Total Attempts Calculation:', {
+        totalAttempts,
+        breakdown: exercise?.questions.map(q => ({
+          questionId: q.id,
+          attemptHistoryLength: attemptLogsRef.current[q.id]?.length || 0,
+          attemptCountsValue: attemptCounts[q.id] || 0
+        }))
+      });
+      
+      // CRITICAL FIX: Calculate total time from individual question times for accuracy
+      const totalTimeSpentSeconds = finalAnswers.reduce((total, answer) => {
+        const questionTime = Math.floor((answer.timeSpent || 0) / 1000);
+        return total + questionTime;
+      }, 0);
+      
+      console.log('[Submission] Time Calculation:', {
+        elapsedTimeFromSession: Math.floor(elapsedTime / 1000),
+        totalTimeFromQuestions: totalTimeSpentSeconds,
+        individualQuestionTimes: finalAnswers.map(a => ({
+          questionId: a.questionId,
+          timeSpentMs: a.timeSpent || 0,
+          timeSpentSeconds: Math.floor((a.timeSpent || 0) / 1000)
+        }))
+      });
       
       console.log('[Submission] Score Calculation:', {
         correctAnswers,
@@ -3713,7 +4353,7 @@ export default function StudentExerciseAnswering() {
           questionsWithoutAnswers.map(a => a.questionId));
       }
       
-      // Create question results
+      // CRITICAL FIX: Create question results with accurate attempt tracking
       const questionResults: QuestionResult[] = exercise?.questions.map((q, idx) => {
         console.log(`[ResultCreation] Processing Q${idx + 1}/${exercise.questions.length} - ${q.id}`);
         
@@ -3751,8 +4391,9 @@ export default function StudentExerciseAnswering() {
         }
         
         const correctAnswer = formatCorrectAnswer(q);
-        // CRITICAL FIX: Use attemptCountsRef for synchronous access to latest counts
-        let attempts = attemptCountsRef.current[q.id] || 1;
+        // CRITICAL FIX: Use attemptHistory.length as source of truth, not attemptCounts
+        // attemptHistory is the actual record of what happened
+        let attempts = 0; // Will be set from attemptHistory after it's created
         let timeSpentSeconds = Math.floor(getTimeMsForQuestion(q) / 1000);
         const ttsPlayed = helpUsage[q.id]?.ttsCount > 0;
         const ttsPlayCount = helpUsage[q.id]?.ttsCount || 0;
@@ -3780,51 +4421,61 @@ export default function StudentExerciseAnswering() {
           ? questionAttempts.slice(0, maxAttemptsForThisQuestion)
           : questionAttempts;
         
-        // CRITICAL FIX: If no attempts were logged but we have an answer, create at least one attempt entry
+        // CRITICAL FIX: Build attempt history with proper correctness validation
         let attemptHistory: AttemptHistory[] = cappedAttempts.map((attempt, attemptIdx) => {
           // CRITICAL FIX: For attempt history, deserialize display format answers properly
           let rawAnswer = attempt.answer;
           let attemptIsCorrect = false;
           
-          // CRITICAL FIX: For 'final' attempt type, this is always the correct answer
-          // (Only logged when answer is verified as correct)
-          if (attempt.attemptType === 'final') {
-            attemptIsCorrect = true;
-            console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1}: Marked correct (final attempt)`);
-          } else {
-            // For other attempt types, try to validate
-            
-            // If the answer is in display format (e.g., "C. 5"), extract the raw value
-            if (typeof rawAnswer === 'string' && rawAnswer.includes('. ')) {
-              const parts = rawAnswer.split('. ');
-              if (parts.length >= 2) {
-                // Extract the letter and convert back to raw format
-                const letter = parts[0];
-                const value = parts.slice(1).join('. ');
-                // Convert letter back to raw answer format
+          console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1} Processing:`, {
+            questionType: q.type,
+            attemptType: attempt.attemptType,
+            rawAnswer: attempt.answer
+          });
+          
+          // Parse display format answers (e.g., "C. 5") back to raw format for validation
+          if (typeof rawAnswer === 'string' && rawAnswer.includes('. ')) {
+            const parts = rawAnswer.split('. ');
+            if (parts.length >= 2) {
+              // Extract the letter and convert back to raw format
+              const letter = parts[0];
+              const value = parts.slice(1).join('. ');
+              // Convert letter back to raw answer format if it's a multiple choice
+              if (q.type === 'multiple-choice') {
                 const letterIndex = letterToIndex(letter);
                 if (letterIndex >= 0 && q.options && q.options[letterIndex]) {
                   rawAnswer = q.options[letterIndex];
-                  console.log(`[AttemptHistory] Converted display format "${attempt.answer}" to raw "${rawAnswer}"`);
+                  console.log(`[AttemptHistory] Converted MC display format "${attempt.answer}" to raw "${rawAnswer}"`);
                 }
               }
             }
-            
-            // Validate the deserialized answer
-            try {
-              attemptIsCorrect = isAnswerCorrect(q, rawAnswer);
-            } catch (error) {
-              console.warn(`[AttemptHistory] Failed to validate attempt ${attemptIdx + 1}:`, error);
-              attemptIsCorrect = false;
-            }
-            
-            console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1}:`, {
-              rawAnswer,
-              displayAnswer: attempt.answer,
-              isCorrect: attemptIsCorrect,
-              attemptType: attempt.attemptType
-            });
           }
+          
+          // CRITICAL FIX: For all question types, use the centralized isAnswerCorrect function
+          // This ensures consistent validation logic across all contexts
+          try {
+            attemptIsCorrect = isAnswerCorrect(q, rawAnswer);
+            console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1} Validation result:`, {
+              questionType: q.type,
+              rawAnswer,
+              isCorrect: attemptIsCorrect
+            });
+          } catch (error) {
+            console.warn(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1}: Failed to validate:`, error);
+            attemptIsCorrect = false;
+          }
+          
+          // All validation is now handled by the centralized isAnswerCorrect function above
+          
+        console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1} RESULT:`, {
+          rawAnswer,
+          displayAnswer: attempt.answer,
+          isCorrect: attemptIsCorrect,
+          attemptType: attempt.attemptType,
+          validationMethod: q.type,
+          questionId: q.id,
+          correctAnswer: q.type === 'matching' ? formatCorrectAnswer(q) : q.answer
+        });
           
           return {
             attemptNumber: attemptIdx + 1,
@@ -3855,30 +4506,47 @@ export default function StudentExerciseAnswering() {
           console.log(`[ResultCreation] Q${idx + 1} has NO attempts and NO answer - marking as unanswered`);
         }
 
-        // FINAL SAFETY NETS: if state hadn't committed yet, derive from attempts
-        // Fallback studentAnswer and correctness from last attempt when needed
+        // CRITICAL FIX: Determine final correctness from LAST attempt in history
+        // The last attempt is the final answer that determines correctness
         const lastAttempt = attemptHistory.length > 0 ? attemptHistory[attemptHistory.length - 1] : undefined;
         const derivedStudentAnswer = studentAnswer || (lastAttempt?.selectedAnswer ?? '');
         
-        // CRITICAL: Only use derived isCorrect if there's actually a correct attempt in history
-        // Don't assume correct if there's just any attempt
-        const derivedIsCorrect = isCorrect || (attemptHistory.some(a => a.isCorrect === true));
+        // CRITICAL FIX: Use LAST attempt's correctness as the final result
+        // If we have attempt history, the last attempt determines correctness
+        // Otherwise, use the isCorrect flag from answerData
+        let derivedIsCorrect = lastAttempt ? lastAttempt.isCorrect : isCorrect;
         
         console.log(`[ResultCreation] Q${idx + 1} Final Derivation:`, {
           originalIsCorrect: isCorrect,
           derivedIsCorrect,
-          hasCorrectAttemptInHistory: attemptHistory.some(a => a.isCorrect === true),
-          studentAnswer: derivedStudentAnswer
+          lastAttemptIsCorrect: lastAttempt?.isCorrect,
+          studentAnswer: derivedStudentAnswer,
+          attemptHistoryLength: attemptHistory.length
         });
         
-        // CRITICAL FIX: Ensure attempts count reflects history when available
-        // But use at least 1 if we have an answer (prevents 0 attempts with correct answer)
+        // CRITICAL FIX: Use attemptHistory.length as the ONLY source of truth for attempts
+        // This ensures the "attempts" field always matches the actual recorded history
+        attempts = attemptHistory.length;
+        
+        // CRITICAL FIX: Final isCorrect is determined ONLY by the last attempt in history
+        // This ensures consistency: the last thing the student did determines the result
         if (attemptHistory.length > 0) {
-          attempts = Math.max(attemptHistory.length, attempts);
-        } else if (derivedStudentAnswer) {
-          // If we have an answer but no history, ensure at least 1 attempt
-          attempts = Math.max(1, attempts);
+          const lastAttemptInHistory = attemptHistory[attemptHistory.length - 1];
+          derivedIsCorrect = lastAttemptInHistory.isCorrect;
+          console.log(`[ResultCreation] Q${idx + 1} - isCorrect from LAST attempt:`, {
+            lastAttemptNumber: lastAttemptInHistory.attemptNumber,
+            lastAttemptAnswer: lastAttemptInHistory.selectedAnswer,
+            lastAttemptIsCorrect: lastAttemptInHistory.isCorrect,
+            overridingPrevious: derivedIsCorrect !== isCorrect
+          });
         }
+        
+        console.log(`[ResultCreation] Q${idx + 1} - Attempts set from history:`, {
+          attemptHistoryLength: attemptHistory.length,
+          attemptCountsValue: attemptCountsRef.current[q.id],
+          finalAttempts: attempts,
+          finalIsCorrect: derivedIsCorrect
+        });
         
         // CRITICAL FIX: Ensure timeSpent is at least 1 second if question was answered
         if (derivedStudentAnswer && timeSpentSeconds === 0) {
@@ -3955,27 +4623,31 @@ export default function StudentExerciseAnswering() {
           derivedStudentAnswer.join(', ') : 
           String(derivedStudentAnswer || '');
         
-        // CRITICAL: Validate consistency between studentAnswer and isCorrect
+        // CRITICAL FIX: Final isCorrect is ALWAYS based on the last attempt in history
+        // No need to recompute - attemptHistory already contains validated attempts
+        let finalIsCorrect = derivedIsCorrect;
+        
+        // Safety check: If no answer provided, force to incorrect
         if (!finalStudentAnswer || finalStudentAnswer.trim() === '') {
-          // No answer provided - must not be correct
-          if (derivedIsCorrect) {
-            console.error(`[ResultCreation] FIXING Q${idx + 1}: Marked correct but no answer! Setting isCorrect to false`);
+          if (finalIsCorrect) {
+            console.warn(`[ResultCreation] Q${idx + 1}: No answer provided but marked correct - forcing to incorrect`);
+            finalIsCorrect = false;
           }
         }
-        
-        const finalIsCorrect = (finalStudentAnswer && finalStudentAnswer.trim() !== '') ? derivedIsCorrect : false;
         
         console.log(`[ResultCreation] Q${idx + 1} Final Result:`, {
           studentAnswer: finalStudentAnswer,
           isCorrect: finalIsCorrect,
           hasAnswer: !!(finalStudentAnswer && finalStudentAnswer.trim() !== ''),
           attemptCount: attempts,
-          attemptHistoryCount: attemptHistory.length
+          attemptHistoryCount: attemptHistory.length,
+          lastAttemptCorrect: attemptHistory.length > 0 ? attemptHistory[attemptHistory.length - 1].isCorrect : 'N/A'
         });
         
         return {
           questionNumber: idx + 1,
           questionId: q.id,
+          questionType: q.type || 'unknown', // Add question type for validation
           questionText: q.question || '',
           choices: choices || [],
           correctAnswer: Array.isArray(correctAnswer) ? correctAnswer.join(', ') : String(correctAnswer),
@@ -4150,10 +4822,13 @@ export default function StudentExerciseAnswering() {
       
       console.log('[Submission] ========================================');
       
-      // CRITICAL: Recalculate summary based on final validated questionResults
+      // CRITICAL FIX: Recalculate ALL summary fields from finalized questionResults
       const finalCorrectCount = questionResults.filter(qr => qr.isCorrect === true).length;
       const finalIncorrectCount = questionResults.filter(qr => qr.isCorrect === false).length;
       const finalScorePercentage = totalQuestions > 0 ? Math.round((finalCorrectCount / totalQuestions) * 100) : 0;
+      
+      // CRITICAL FIX: Recalculate total attempts from attemptHistory (source of truth)
+      const finalTotalAttempts = questionResults.reduce((sum, qr) => sum + qr.attemptHistory.length, 0);
       
       // Update resultsSummary with final validated counts
       resultsSummary.totalCorrect = finalCorrectCount;
@@ -4161,13 +4836,41 @@ export default function StudentExerciseAnswering() {
       resultsSummary.meanPercentageScore = finalScorePercentage;
       resultsSummary.score = finalCorrectCount;
       resultsSummary.remarks = getRemarks(finalScorePercentage);
+      resultsSummary.totalAttempts = finalTotalAttempts; // CRITICAL FIX: Use recalculated value
+      resultsSummary.meanAttemptsPerItem = totalQuestions > 0 ? finalTotalAttempts / totalQuestions : 0;
       
       console.log('[Submission] Final Validated Summary:', {
         totalCorrect: finalCorrectCount,
         totalIncorrect: finalIncorrectCount,
         scorePercentage: finalScorePercentage,
+        totalAttempts: finalTotalAttempts,
+        meanAttemptsPerItem: resultsSummary.meanAttemptsPerItem,
         remarks: resultsSummary.remarks
       });
+      
+      // MOVED: State update will happen AFTER validation to ensure UI shows validated data
+      
+      // CRITICAL FIX: Verify totals match across all data sources
+      console.log('[Submission] ========== VERIFICATION CHECK ==========');
+      console.log('[Submission] Verifying data consistency:');
+      console.log('  Total Questions:', totalQuestions);
+      console.log('  Question Results Count:', questionResults.length);
+      console.log('  Summary Total Items:', resultsSummary.totalItems);
+      console.log('  Match:', totalQuestions === questionResults.length && questionResults.length === resultsSummary.totalItems ? '✓' : '✗');
+      console.log('');
+      console.log('  Correct Count from questionResults:', finalCorrectCount);
+      console.log('  Correct Count in Summary:', resultsSummary.totalCorrect);
+      console.log('  Match:', finalCorrectCount === resultsSummary.totalCorrect ? '✓' : '✗');
+      console.log('');
+      console.log('  Total Attempts from History:', finalTotalAttempts);
+      console.log('  Total Attempts in Summary:', resultsSummary.totalAttempts);
+      console.log('  Match:', finalTotalAttempts === resultsSummary.totalAttempts ? '✓' : '✗');
+      console.log('');
+      console.log('  Individual Question Breakdown:');
+      questionResults.forEach((qr, i) => {
+        console.log(`    Q${i + 1}: attempts=${qr.attempts}, history=${qr.attemptHistory.length}, correct=${qr.isCorrect}, lastAttempt=${qr.attemptHistory[qr.attemptHistory.length - 1]?.isCorrect}`);
+      });
+      console.log('[Submission] =======================================');
       
       // Save to ExerciseResults table
       console.log('[Submission] ========== DATABASE WRITE ==========');
@@ -4176,22 +4879,82 @@ export default function StudentExerciseAnswering() {
       console.log('[Submission] Correct Answers:', finalCorrectCount);
       console.log('[Submission] Incorrect Answers:', finalIncorrectCount);
       console.log('[Submission] Score:', finalScorePercentage + '%');
+      console.log('[Submission] Total Attempts (Summary):', totalAttempts);
       console.log('[Submission] Question Details Being Saved:');
+      
+      // CRITICAL VALIDATION: Verify attempts match history
+      let calculatedTotalAttempts = 0;
       questionResults.forEach((qr, idx) => {
+        calculatedTotalAttempts += qr.attemptHistory.length;
+        
+        // Warn if attempts field doesn't match history length
+        if (qr.attempts !== qr.attemptHistory.length) {
+          console.warn(`  [MISMATCH] Q${idx + 1}: attempts=${qr.attempts} but history length=${qr.attemptHistory.length}`);
+        }
+        
         console.log(`  Q${idx + 1}:`, {
           id: qr.questionId,
           studentAnswer: qr.studentAnswer,
           correctAnswer: qr.correctAnswer,
           isCorrect: qr.isCorrect,
           attempts: qr.attempts,
-          hasAttemptHistory: qr.attemptHistory.length > 0
+          attemptHistoryLength: qr.attemptHistory.length,
+          match: qr.attempts === qr.attemptHistory.length ? '✓' : '✗ MISMATCH'
         });
       });
+      
+      console.log('[Submission] Calculated Total Attempts from History:', calculatedTotalAttempts);
+      console.log('[Submission] Summary Total Attempts:', resultsSummary.totalAttempts);
+      console.log('[Submission] Match:', calculatedTotalAttempts === resultsSummary.totalAttempts ? '✓ CORRECT' : '✗ MISMATCH');
       console.log('[Submission] =====================================');
       console.log('[Submission] About to save with result ID:', exerciseResultId);
       console.log('[Submission] Full database path:', `/ExerciseResults/${exerciseResultId}`);
       
-      const exerciseResult = await writeData(`/ExerciseResults/${exerciseResultId}`, resultData);
+      // CRITICAL FIX: Apply unified validation and repair before saving
+      console.log('[Submission] ========== APPLYING UNIFIED VALIDATION ==========');
+      const { result: validatedResultData, validation: validationReport } = validateAndRepairExerciseResult(
+        resultData as any,
+        { verbose: true }
+      );
+      
+      if (validationReport.correctedFields.length > 0) {
+        console.log('[Submission] Validation applied corrections:', {
+          correctedFieldsCount: validationReport.correctedFields.length,
+          fields: validationReport.correctedFields
+        });
+      }
+      
+      if (validationReport.errors.length > 0) {
+        console.error('[Submission] Validation found errors:', validationReport.errors);
+      }
+      
+      if (validationReport.warnings.length > 0) {
+        console.warn('[Submission] Validation warnings:', validationReport.warnings);
+      }
+      
+      console.log('[Submission] Validation complete:', {
+        isValid: validationReport.isValid,
+        errorsCount: validationReport.errors.length,
+        warningsCount: validationReport.warnings.length,
+        correctionsApplied: validationReport.correctedFields.length
+      });
+      console.log('[Submission] ====================================================');
+      
+      // Use the validated data for saving
+      const finalResultData = validatedResultData;
+      
+      // CRITICAL FIX: Store VALIDATED questionResults and summary in state for accurate UI display
+      // This ensures UI reads from the same data that was saved to database
+      setSavedQuestionResults(validatedResultData.questionResults);
+      setSavedResultsSummary(validatedResultData.resultsSummary);
+      console.log('[Submission] Stored VALIDATED questionResults and resultsSummary in state for UI display');
+      console.log('[Submission] UI will now show:', {
+        totalCorrect: validatedResultData.resultsSummary.totalCorrect,
+        meanPercentageScore: validatedResultData.resultsSummary.meanPercentageScore,
+        remarks: validatedResultData.resultsSummary.remarks
+      });
+      
+      const exerciseResult = await writeData(`/ExerciseResults/${exerciseResultId}`, finalResultData);
       if (!exerciseResult.success) {
         throw new Error(`Failed to save exercise result: ${exerciseResult.error}`);
       }
@@ -4199,19 +4962,48 @@ export default function StudentExerciseAnswering() {
       console.log('[Submission] ========== SAVE SUCCESSFUL ==========');
       console.log('[Submission] Result ID:', exerciseResultId);
       console.log('[Submission] Database path used:', `/ExerciseResults/${exerciseResultId}`);
-      console.log('[Submission] Saved Data Summary:');
+      console.log('[Submission] Saved Data Summary (VALIDATED):');
       console.log('  - Student:', studentInfoData.name);
       console.log('  - Exercise:', exerciseInfo.title);
-      console.log('  - Total Questions:', resultsSummary.totalItems);
-      console.log('  - Correct:', resultsSummary.totalCorrect);
-      console.log('  - Incorrect:', resultsSummary.totalIncorrect);
-      console.log('  - Score:', resultsSummary.meanPercentageScore + '%');
-      console.log('  - Remarks:', resultsSummary.remarks);
+      console.log('  - Total Questions:', validatedResultData.resultsSummary.totalItems);
+      console.log('  - Correct:', validatedResultData.resultsSummary.totalCorrect);
+      console.log('  - Incorrect:', validatedResultData.resultsSummary.totalIncorrect);
+      console.log('  - Total Attempts:', validatedResultData.resultsSummary.totalAttempts);
+      console.log('  - Mean Attempts/Item:', validatedResultData.resultsSummary.meanAttemptsPerItem.toFixed(2));
+      console.log('  - Score:', validatedResultData.resultsSummary.meanPercentageScore + '%');
+      console.log('  - Remarks:', validatedResultData.resultsSummary.remarks);
       console.log('[Submission] All question results saved with:');
-      questionResults.forEach((qr, idx) => {
+      validatedResultData.questionResults.forEach((qr, idx) => {
         const status = qr.isCorrect ? '✓ CORRECT' : '✗ WRONG';
         const answerPreview = qr.studentAnswer.substring(0, 30) + (qr.studentAnswer.length > 30 ? '...' : '');
-        console.log(`  Q${idx + 1} ${status}: "${answerPreview}" (${qr.attemptHistory.length} attempts)`);
+        console.log(`  Q${idx + 1} ${status}: "${answerPreview}" (${qr.attempts} attempts, ${qr.attemptHistory.length} in history)`);
+      });
+      console.log('[Submission] FINAL VERIFICATION (VALIDATED DATA):');
+      console.log('  Total Attempts (Summary):', validatedResultData.resultsSummary.totalAttempts);
+      console.log('  Total Attempts (Calculated):', validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attempts, 0));
+      console.log('  Total Attempts (History):', validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attemptHistory.length, 0));
+      console.log('  All Match:', validatedResultData.resultsSummary.totalAttempts === validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attempts, 0) && validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attempts, 0) === validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attemptHistory.length, 0) ? '✓ YES' : '✗ NO');
+      console.log('');
+      console.log('  Detailed Question-by-Question Validation:');
+      validatedResultData.questionResults.forEach((qr, i) => {
+        const allAttemptsCorrect = qr.attemptHistory.every(a => a.isCorrect);
+        const anyAttemptCorrect = qr.attemptHistory.some(a => a.isCorrect);
+        const lastAttempt = qr.attemptHistory[qr.attemptHistory.length - 1];
+        
+        console.log(`    Q${i + 1} (${qr.questionId}):`);
+        console.log(`      Final isCorrect: ${qr.isCorrect}`);
+        console.log(`      Total Attempts: ${qr.attempts}`);
+        console.log(`      History Length: ${qr.attemptHistory.length}`);
+        console.log(`      Match: ${qr.attempts === qr.attemptHistory.length ? '✓' : '✗'}`);
+        console.log(`      Student Answer: "${qr.studentAnswer}"`);
+        console.log(`      Correct Answer: "${qr.correctAnswer}"`);
+        console.log(`      Last Attempt isCorrect: ${lastAttempt?.isCorrect}`);
+        console.log(`      All Attempts Correct: ${allAttemptsCorrect}`);
+        console.log(`      Any Attempt Correct: ${anyAttemptCorrect}`);
+        console.log(`      Attempt History:`);
+        qr.attemptHistory.forEach((ah, ahIdx) => {
+          console.log(`        ${ahIdx + 1}. ${ah.isCorrect ? '✓' : '✗'} "${ah.selectedAnswer}"`);
+        });
       });
       console.log('[Submission] =====================================');
       
@@ -4265,6 +5057,7 @@ export default function StudentExerciseAnswering() {
         }
         
         if (!correct) {
+          // WRONG ANSWER - Increment attempts
           const newAttemptCount = currentAttempts + 1;
           
           // CRITICAL FIX: Save the wrong answer to the answers array
@@ -4282,9 +5075,11 @@ export default function StudentExerciseAnswering() {
             return updated;
           });
           
+          // Increment attempt counter for wrong answer
+          updateAttemptCount(q.id, newAttemptCount);
+          
           // Check if attempt limit is reached
           if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
-            updateAttemptCount(q.id, newAttemptCount);
             logAttempt(q, currentAns, 'final'); // Log as final attempt
             
             // Mark question as completed (with wrong answer)
@@ -4304,7 +5099,6 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
-          updateAttemptCount(q.id, newAttemptCount);
           logAttempt(q, currentAns, 'change');
           
           // Show remaining attempts if limit is set
@@ -4327,12 +5121,14 @@ export default function StudentExerciseAnswering() {
           submittingRef.current = false;
           return;
         } else {
+          // CORRECT ANSWER - Don't increment attempts
+          console.log('[HandleSubmit-Correct] Correct answer - NO attempt increment');
+          
           // Update the answer with isCorrect: true
           updateAnswers(prev => prev.map(a => 
             a.questionId === q.id ? { ...a, answer: currentAns || a.answer, isCorrect: true } : a
           ));
-          // Count the final successful attempt
-          incrementAttemptCount(q.id);
+          // FIXED: Don't increment attempts on correct answer
         }
         setQuestionCorrect(q.id, true);
       }
@@ -4358,16 +5154,20 @@ export default function StudentExerciseAnswering() {
     const currentAns = answers.find(a => a.questionId === q.id)?.answer;
     const correct = isAnswerCorrect(q, currentAns);
     if (correct) {
+      // CORRECT ANSWER - Don't increment attempts
+      console.log('[LevelComplete-Correct] Correct answer - NO attempt increment');
+      
       // Accumulate time for the level question
       const delta = Date.now() - questionStartTime;
       updateAnswers(prev => prev.map(a => a.questionId === q.id ? { ...a, timeSpent: (a.timeSpent || 0) + delta, isCorrect: true } : a));
       setQuestionCorrect(q.id, true);
-      // Count the final successful attempt
-      incrementAttemptCount(q.id);
+      // FIXED: Don't increment attempts on correct answer
       await unlockNextLevel();
       showCustomAlert('Great job!', 'Level cleared!', () => router.replace({ pathname: '/Homepage', params: { exerciseId: exercise.id, session: String(Date.now()) } } as any), 'success');
     } else {
+      // WRONG ANSWER - Increment attempts
       incrementAttemptCount(q.id);
+      console.log('[LevelComplete-Wrong] Wrong answer - attempt incremented');
       showCustomAlert('Not yet correct', 'Try again!', undefined, 'warning');
     }
   };
@@ -4442,7 +5242,10 @@ export default function StudentExerciseAnswering() {
           <View style={styles.questionImageContainer}>
             {Array.isArray(question.questionImage) ? (
               (question.questionImage.length <= 3 ? (
-                <View style={[styles.questionImagesRow, { justifyContent: 'space-between' }]}>
+                <View style={[
+                  styles.questionImagesRow,
+                  question.questionImage.length === 1 ? styles.imageRowCenter : styles.imageRowLeft,
+                ]}> 
                   {question.questionImage.map((img, idx) => (
                     <ExpoImage 
                       key={`qi-${idx}`} 
@@ -4475,7 +5278,7 @@ export default function StudentExerciseAnswering() {
             ) : question.questionImage ? (
               <ExpoImage 
                 source={{ uri: question.questionImage }} 
-                style={styles.questionImage} 
+                style={[styles.questionImage, styles.singleImageCentered]} 
                 contentFit="contain" 
                 transition={150} 
                 cachePolicy="memory-disk" 
@@ -4485,7 +5288,11 @@ export default function StudentExerciseAnswering() {
             ) : null}
             {question.questionImages && question.questionImages.length ? (
               question.questionImages.length <= 3 ? (
-                <View style={[styles.questionImagesRow, { justifyContent: 'space-between', marginTop: 8 }]}>
+                <View style={[
+                  styles.questionImagesRow,
+                  question.questionImages.length === 1 ? styles.imageRowCenter : styles.imageRowLeft,
+                  { marginTop: 8 },
+                ]}> 
                   {question.questionImages.map((img, idx) => (
                     <ExpoImage 
                       key={`qis-${idx}`} 
@@ -4520,10 +5327,7 @@ export default function StudentExerciseAnswering() {
         )}
         
         {typeof question.question === 'string' && question.question.trim().length > 0 && (
-          <View style={[
-            styles.questionTextContainer,
-            { backgroundColor: 'transparent', borderWidth: 0, shadowColor: 'transparent', elevation: 0 }
-          ]}>
+          <View style={styles.questionTextContainer}>
             <Text style={styles.questionText}>{question.question}</Text>
             {renderTTSButton(question.ttsAudioUrl)}
           </View>
@@ -4619,7 +5423,7 @@ export default function StudentExerciseAnswering() {
                         triggerWrongFeedback();
                         return;
                       }
-                      // Correct -> set answer and move next
+                      // Correct -> set answer and move next (NO attempt increment on correct)
                       // Stop TTS immediately when correct answer is selected
                       stopCurrentTTS();
                       logInteraction(question.id, 'option_click', optionValue, 0);
@@ -4630,7 +5434,7 @@ export default function StudentExerciseAnswering() {
                         const updated = prev.map(a => 
                           a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: true } : a
                         );
-                        console.log('[MC-Grid-Correct] Updated answers state:', updated.map(a => ({
+                        console.log('[MC-Grid-Correct] Updated answers state - NO attempt increment:', updated.map(a => ({
                           qId: a.questionId,
                           hasAnswer: !!a.answer,
                           isCorrect: a.isCorrect
@@ -4640,8 +5444,8 @@ export default function StudentExerciseAnswering() {
                       
                       // Use helper functions to update both state and ref
                       setQuestionCorrect(question.id, true);
-                      // Count the final successful attempt
-                      incrementAttemptCount(question.id);
+                      // FIXED: Don't increment attempts on correct answer
+                      console.log('[MC-Grid-Correct] Answer correct on first try - no attempt logged');
                       logAttempt(question, optionValue, 'final');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
@@ -4771,6 +5575,7 @@ export default function StudentExerciseAnswering() {
                         triggerWrongFeedback();
                         return;
                       }
+                      // CORRECT ANSWER - Don't increment attempts
                       // Stop TTS immediately when correct answer is selected
                       stopCurrentTTS();
                       handleAnswerChange(optionValue);
@@ -4780,7 +5585,7 @@ export default function StudentExerciseAnswering() {
                         const updated = prev.map(a => 
                           a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: true } : a
                         );
-                        console.log('[MC-List-Correct] Updated answers state:', updated.map(a => ({
+                        console.log('[MC-List-Correct] Updated answers state - NO attempt increment:', updated.map(a => ({
                           qId: a.questionId,
                           hasAnswer: !!a.answer,
                           isCorrect: a.isCorrect
@@ -4790,7 +5595,8 @@ export default function StudentExerciseAnswering() {
                       
                       // Use helper functions to update both state and ref
                       setQuestionCorrect(question.id, true);
-                      incrementAttemptCount(question.id);
+                      // FIXED: Don't increment attempts on correct answer
+                      console.log('[MC-List-Correct] Answer correct on first try - no attempt logged');
                       logAttempt(question, optionValue, 'final');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
@@ -4870,7 +5676,13 @@ export default function StudentExerciseAnswering() {
         <View style={styles.identificationContainer}>
           {/* Question Image */}
           {(question.questionImage || (question.questionImages && question.questionImages.length)) && (
-            <View style={styles.questionImageContainer}>
+            <View style={[
+              styles.questionImageContainer,
+              // Center single images, auto-adjust for multiple
+              Array.isArray(question.questionImage) || (question.questionImages && question.questionImages.length > 1) 
+                ? styles.questionImageContainerMultiple 
+                : styles.questionImageContainerSingle
+            ]}>
               {Array.isArray(question.questionImage) ? (
                 question.questionImage.map((img, idx) => (
                   <ExpoImage 
@@ -4969,7 +5781,13 @@ export default function StudentExerciseAnswering() {
         <View style={styles.identificationContainer}>
           {/* Question Images */}
           {(question.questionImage || (question.questionImages && question.questionImages.length)) && (
-            <View style={styles.questionImageContainer}>
+            <View style={[
+              styles.questionImageContainer,
+              // Center single images, auto-adjust for multiple
+              Array.isArray(question.questionImage) || (question.questionImages && question.questionImages.length > 1) 
+                ? styles.questionImageContainerMultiple 
+                : styles.questionImageContainerSingle
+            ]}>
               {Array.isArray(question.questionImage) ? (
                 question.questionImage.map((img, idx) => (
                   <ExpoImage 
@@ -5299,11 +6117,9 @@ export default function StudentExerciseAnswering() {
                             a.questionId === question.id ? { ...a, answer: newPairs, isCorrect: true } : a
                           ));
                           
-                          // CRITICAL FIX: Increment attempt counter and log final successful attempt
-                          // This counts as ONE successful attempt (completing all pairs)
-                          incrementAttemptCount(question.id);
-                          const finalAttemptCount = (attemptCounts[question.id] || 0) + 1;
-                          console.log('[Matching] All pairs complete - logging as final successful attempt #' + finalAttemptCount);
+                          // FIXED: Don't increment attempts on correct completion
+                          const currentAttempts = attemptCounts[question.id] || 0;
+                          console.log('[Matching] All pairs correct - NO attempt increment, current attempts:', currentAttempts);
                           logAttempt(question, newPairs, 'final');
                           
                           // Trigger correct feedback with green flash animation
@@ -5449,7 +6265,9 @@ export default function StudentExerciseAnswering() {
   };
 
   const renderReorder = (question: Question) => {
-    const initial = (reorderAnswers[question.id] as any) as ReorderItem[] | undefined;
+    // CRITICAL FIX: Always start with empty initial answer for each question
+    // Don't carry over previous question's reorder answers
+    const initial: ReorderItem[] | undefined = [];
     
     return (
       <View style={styles.questionContainer}>
@@ -5504,6 +6322,7 @@ export default function StudentExerciseAnswering() {
           {renderTTSButton(question.ttsAudioUrl)}
         </View>
         <ReorderQuestion
+          key={question.id} // CRITICAL FIX: Force remount when question changes to ensure clean state
           question={question}
           initialAnswer={initial || []}
           currentAttempts={attemptCounts[question.id] || 0}
@@ -5512,13 +6331,19 @@ export default function StudentExerciseAnswering() {
             setReorderAnswers((prev) => ({ ...prev, [question.id]: ordered }));
             handleAnswerChange(ordered.map((o) => o.id));
           }}
-          onAttempt={() => {
+          onAttempt={(attemptSequence) => {
             // Increment attempt counter for this question
             incrementAttemptCount(question.id);
-            console.log('[Reorder] Attempt incremented for', question.id);
+            // Log the attempt history with the sequence tried
+            logAttempt(question, attemptSequence, 'change');
+            console.log('[Reorder] Attempt incremented for', question.id, 'with sequence:', attemptSequence);
           }}
           onComplete={(isCorrect) => {
             console.log('[Reorder] Complete callback received, isCorrect:', isCorrect);
+            
+            // NOTE: Don't log final attempt here - attempts are already logged in onAttempt callback
+            // Logging here would create duplicate attempts
+            
             if (isCorrect) {
               // Mark question as correct
               setQuestionCorrect(question.id, true);
@@ -5642,7 +6467,7 @@ export default function StudentExerciseAnswering() {
               )}
 
               {/* Sub-question Text container */}
-              <View style={index === 0 ? styles.subQuestionTextContainer : [styles.questionTextContainer, { backgroundColor: 'transparent', borderWidth: 0, shadowColor: 'transparent', elevation: 0 }]}>
+              <View style={index === 0 ? styles.subQuestionTextContainer : styles.questionTextContainer}>
                 <Text style={styles.questionText}>{subQuestion.question}</Text>
                 {renderTTSButton((subQuestion as any).ttsAudioUrl)}
               </View>
@@ -6055,7 +6880,7 @@ export default function StudentExerciseAnswering() {
                 })();
                 return (
                   <>
-                    <View style={index === 0 ? styles.subQuestionTextContainer : [styles.questionTextContainer, { backgroundColor: 'transparent', borderWidth: 0, shadowColor: 'transparent', elevation: 0 }]}>
+                    <View style={index === 0 ? styles.subQuestionTextContainer : styles.questionTextContainer}>
                       <Text style={styles.questionText}>{subQuestion.question}</Text>
                     </View>
                     <ReorderQuestion
@@ -6216,7 +7041,7 @@ export default function StudentExerciseAnswering() {
                 <View style={styles.progressHeader}>
                   <Text style={styles.progressTitle}>Progress</Text>
                   <Text style={styles.progressPercentage}>
-                    {loading ? '...' : `${preloadProgress}%`}
+                    {loading ? '...' : `${Math.round(animatedProgress)}%`}
                   </Text>
                 </View>
                 
@@ -6225,7 +7050,7 @@ export default function StudentExerciseAnswering() {
                     <Animated.View 
                       style={[
                         styles.loadingProgressBarFill, 
-                        { width: `${loading ? 0 : preloadProgress}%` }
+                        { width: `${loading ? 0 : Math.round(animatedProgress)}%` }
                       ]} 
                     />
                   </View>
@@ -6475,7 +7300,7 @@ export default function StudentExerciseAnswering() {
           <View style={styles.attemptLimitContainer}>
             <MaterialCommunityIcons name="repeat" size={16} color="#64748b" />
             <Text style={styles.attemptLimitText}>
-              Attempts: {attemptCounts[exercise.questions[currentQuestionIndex]?.id] || 0} / {exercise.maxAttemptsPerItem}
+              Attempts: {attemptLogsRef.current[exercise.questions[currentQuestionIndex]?.id]?.length || 0} / {exercise.maxAttemptsPerItem}
             </Text>
           </View>
         )}
@@ -6576,6 +7401,18 @@ export default function StudentExerciseAnswering() {
                   <View style={styles.scoreBadge}>
                     <Text style={styles.scoreBadgeText}>
                       {(() => {
+                        // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                        if (savedResultsSummary) {
+                          return `${savedResultsSummary.meanPercentageScore}% Complete`;
+                        }
+                        // Fallback to savedQuestionResults
+                        if (savedQuestionResults.length > 0) {
+                          const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                          const total = exercise?.questions.length || 0;
+                          const percentage = total > 0 ? Math.round((correct / total) * 100) : 0;
+                          return `${percentage}% Complete`;
+                        }
+                        // Final fallback to local state
                         const correct = answers.filter(a => a.isCorrect).length;
                         const total = exercise?.questions.length || 0;
                         const percentage = total > 0 ? Math.round((correct / total) * 100) : 0;
@@ -6595,6 +7432,17 @@ export default function StudentExerciseAnswering() {
                   </View>
                   <Text style={styles.statNumber}>
                     {(() => {
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      if (savedResultsSummary) {
+                        return `${savedResultsSummary.totalCorrect}/${savedResultsSummary.totalItems}`;
+                      }
+                      // Fallback to savedQuestionResults
+                      if (savedQuestionResults.length > 0) {
+                        const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        return `${correct}/${total}`;
+                      }
+                      // Final fallback to local state
                       const correct = answers.filter(a => a.isCorrect).length;
                       const total = exercise?.questions.length || 0;
                       return `${correct}/${total}`;
@@ -6611,6 +7459,16 @@ export default function StudentExerciseAnswering() {
                   </View>
                   <Text style={styles.statNumber}>
                     {(() => {
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      if (savedResultsSummary) {
+                        return formatTime(savedResultsSummary.totalTimeSpentSeconds * 1000);
+                      }
+                      // Fallback to savedQuestionResults
+                      if (savedQuestionResults.length > 0) {
+                        const totalMs = savedQuestionResults.reduce((sum, sr) => sum + (sr.timeSpentSeconds * 1000), 0);
+                        return formatTime(totalMs);
+                      }
+                      // Final fallback to local state
                       const totalMs = (answers || []).reduce((sum, a) => sum + (a.timeSpent || 0), 0);
                       return formatTime(totalMs);
                     })()}
@@ -6626,8 +7484,16 @@ export default function StudentExerciseAnswering() {
                   </View>
                   <Text style={styles.statNumber}>
                     {(() => {
-                      const totalAttempts = Object.values(attemptCounts).reduce((sum, count) => sum + count, 0);
-                      return totalAttempts;
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      if (savedResultsSummary) {
+                        return savedResultsSummary.totalAttempts;
+                      }
+                      // Fallback to savedQuestionResults
+                      if (savedQuestionResults.length > 0) {
+                        return savedQuestionResults.reduce((sum, sr) => sum + sr.attempts, 0);
+                      }
+                      // Final fallback to local state
+                      return getTotalAttemptCount();
                     })()}
                   </Text>
                   <Text style={styles.statLabel}>Total Attempts</Text>
@@ -6639,9 +7505,19 @@ export default function StudentExerciseAnswering() {
                 <View style={styles.performanceHeader}>
                   <Text style={styles.performanceEmoji}>
                     {(() => {
-                      const correct = answers.filter(a => a.isCorrect).length;
-                      const total = exercise?.questions.length || 0;
-                      const percentage = total > 0 ? (correct / total) * 100 : 0;
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      let percentage = 0;
+                      if (savedResultsSummary) {
+                        percentage = savedResultsSummary.meanPercentageScore;
+                      } else if (savedQuestionResults.length > 0) {
+                        const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        percentage = total > 0 ? (correct / total) * 100 : 0;
+                      } else {
+                        const correct = answers.filter(a => a.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        percentage = total > 0 ? (correct / total) * 100 : 0;
+                      }
                       
                       if (percentage >= 80) return '🌟';
                       if (percentage >= 60) return '👍';
@@ -6651,9 +7527,19 @@ export default function StudentExerciseAnswering() {
                   </Text>
                   <View style={styles.performanceStars}>
                     {(() => {
-                      const correct = answers.filter(a => a.isCorrect).length;
-                      const total = exercise?.questions.length || 0;
-                      const percentage = total > 0 ? (correct / total) * 100 : 0;
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      let percentage = 0;
+                      if (savedResultsSummary) {
+                        percentage = savedResultsSummary.meanPercentageScore;
+                      } else if (savedQuestionResults.length > 0) {
+                        const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        percentage = total > 0 ? (correct / total) * 100 : 0;
+                      } else {
+                        const correct = answers.filter(a => a.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        percentage = total > 0 ? (correct / total) * 100 : 0;
+                      }
                       const stars = Math.floor(percentage / 20);
                       return Array.from({ length: 5 }, (_, i) => (
                         <Text key={i} style={[styles.star, { opacity: i < stars ? 1 : 0.3 }]}>⭐</Text>
@@ -6663,9 +7549,19 @@ export default function StudentExerciseAnswering() {
                 </View>
                 <Text style={styles.performanceMessage}>
                   {(() => {
-                    const correct = answers.filter(a => a.isCorrect).length;
-                    const total = exercise?.questions.length || 0;
-                    const percentage = total > 0 ? (correct / total) * 100 : 0;
+                    // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                    let percentage = 0;
+                    if (savedResultsSummary) {
+                      percentage = savedResultsSummary.meanPercentageScore;
+                    } else if (savedQuestionResults.length > 0) {
+                      const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                      const total = exercise?.questions.length || 0;
+                      percentage = total > 0 ? (correct / total) * 100 : 0;
+                    } else {
+                      const correct = answers.filter(a => a.isCorrect).length;
+                      const total = exercise?.questions.length || 0;
+                      percentage = total > 0 ? (correct / total) * 100 : 0;
+                    }
                     
                     if (percentage >= 80) return 'Outstanding! You\'re a math champion! 🏆';
                     if (percentage >= 60) return 'Excellent work! You\'re doing great! 🌟';
@@ -6684,11 +7580,24 @@ export default function StudentExerciseAnswering() {
                     nestedScrollEnabled={true}
                   >
                     {exercise?.questions.map((q, idx) => {
+                      // CRITICAL FIX: Read from savedQuestionResults if available (after submission)
+                      // Otherwise fallback to local state (during quiz)
+                      const savedResult = savedQuestionResults.find(sr => sr.questionId === q.id);
                       const answer = answers.find(a => a.questionId === q.id);
-                      const isCorrect = answer?.isCorrect || false;
-                      const attempts = attemptCounts[q.id] || 0;
-                      const timeMs = getTimeMsForQuestion(q);
-                      const hasAnswer = answer && answer.answer !== undefined && answer.answer !== '';
+                      
+                      // Use saved data if available, otherwise use local state
+                      const isCorrect = savedResult ? savedResult.isCorrect : (answer?.isCorrect || false);
+                      const attempts = savedResult ? savedResult.attempts : getQuestionAttemptCount(q.id);
+                      const timeMs = savedResult ? (savedResult.timeSpentSeconds * 1000) : getTimeMsForQuestion(q);
+                      const hasAnswer = savedResult ? (savedResult.studentAnswer && savedResult.studentAnswer.trim() !== '') : (answer && answer.answer !== undefined && answer.answer !== '');
+                      
+                      console.log(`[ResultsUI] Q${idx + 1} Display:`, {
+                        hasSavedResult: !!savedResult,
+                        attempts,
+                        isCorrect,
+                        timeMs,
+                        hasAnswer
+                      });
                       
                       return (
                         <View key={q.id} style={styles.questionDetailCard}>
@@ -6739,12 +7648,16 @@ export default function StudentExerciseAnswering() {
                             <View style={styles.questionAnswerPreview}>
                               <Text style={styles.questionAnswerText}>
                                 <Text style={{ fontWeight: '700' }}>Your answer: </Text>
-                                {serializeAnswer(q, answer.answer)}
+                                {(() => {
+                                  if (savedResult) return savedResult.studentAnswer;
+                                  if (answer) return serializeAnswer(q, answer.answer);
+                                  return 'No answer';
+                                })()}
                               </Text>
                               {!isCorrect && (
                                 <Text style={[styles.questionAnswerText, { color: '#10b981', marginTop: 4 }]}>
                                   <Text style={{ fontWeight: '700' }}>Correct answer: </Text>
-                                  {formatCorrectAnswer(q)}
+                                  {savedResult ? savedResult.correctAnswer : formatCorrectAnswer(q)}
                                 </Text>
                               )}
                             </View>
@@ -7086,21 +7999,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    marginHorizontal: 0,
-    marginTop: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    marginHorizontal: 20,
+    marginTop: 0,
+    marginBottom: 8, // CRITICAL FIX: Add bottom margin to prevent overlap with question type
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    borderRadius: 12,
     borderWidth: 1,
-    width: '100%',
     borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+    alignSelf: 'center',
+    maxWidth: 200,
   },
   attemptLimitText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
     color: '#64748b',
-    marginLeft: 6,
+    marginLeft: 4,
   },
   
   // Interactive loading screen styles
@@ -7882,26 +8802,35 @@ const styles = StyleSheet.create({
   },
   questionImagesGrid: {
     flexDirection: 'row',
-    flexWrap: 'nowrap',
+    flexWrap: 'wrap',
     justifyContent: 'center',
     alignItems: 'center',
-    marginTop: 12,
-    gap: 12,
-    paddingHorizontal: 8,
+    marginTop: 8,
+    gap: 8,
+    paddingHorizontal: 4,
   },
   questionImagesRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-evenly',
+    marginTop: 8,
+    paddingHorizontal: 4,
+    flexWrap: 'wrap',
+  },
+  imageRowCenter: {
+    justifyContent: 'center',
+  },
+  imageRowLeft: {
     justifyContent: 'flex-start',
-    marginTop: 12,
-    paddingHorizontal: 8,
   },
   questionImageThumb: {
-    width: 88,
-    height: 88,
-    borderRadius: 12,
-    marginRight: 8,
-    marginBottom: 8,
+    flex: 1,
+    minWidth: 70,
+    maxWidth: 100,
+    aspectRatio: 1,
+    borderRadius: 8,
+    marginHorizontal: 4,
+    marginVertical: 4,
     borderWidth: 2,
     borderColor: 'rgba(124, 58, 237, 0.3)',
     backgroundColor: '#ffffff',
@@ -7919,29 +8848,43 @@ const styles = StyleSheet.create({
   questionImageContainer: {
     alignItems: 'stretch',
     marginBottom: 12,
-    backgroundColor: 'transparent',
-    borderRadius: 0,
-    paddingVertical: 0,
-    paddingHorizontal: 0,
-    shadowColor: 'transparent',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0,
-    shadowRadius: 0,
-    elevation: 0,
-    borderWidth: 0,
-    borderColor: 'transparent',
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    marginHorizontal: 4,
+  },
+  questionImageContainerSingle: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  questionImageContainerMultiple: {
+    alignItems: 'stretch',
+    justifyContent: 'flex-start',
   },
   questionImage: {
     width: '100%',
-    height: 220,
-    borderRadius: 12,
-    backgroundColor: '#ffffff',
+    height: 200,
+    borderRadius: 8,
+    backgroundColor: '#f8fafc',
+  },
+  singleImageCentered: {
+    alignSelf: 'center',
   },
   questionImageSmall: {
-    width: 88,
-    height: 88,
-    borderRadius: 12,
-    marginHorizontal: 6,
+    flex: 1,
+    minWidth: 80,
+    maxWidth: 120,
+    aspectRatio: 1,
+    borderRadius: 8,
+    marginHorizontal: 4,
     borderWidth: 2,
     borderColor: 'rgba(124, 58, 237, 0.3)',
     backgroundColor: '#ffffff',
@@ -7953,13 +8896,12 @@ const styles = StyleSheet.create({
   },
   // Auto-sized square that fills available row when 1-3 images
   questionImageAuto: {
-    flexGrow: 1,
-    flexBasis: 0,
+    flex: 1,
     aspectRatio: 1,
-    maxWidth: 120,
-    minWidth: 88,
-    borderRadius: 12,
-    marginHorizontal: 6,
+    maxWidth: 140,
+    minWidth: 90,
+    borderRadius: 8,
+    marginHorizontal: 4,
     borderWidth: 2,
     borderColor: 'rgba(124, 58, 237, 0.3)',
     backgroundColor: '#ffffff',
@@ -8004,14 +8946,14 @@ const styles = StyleSheet.create({
   questionTypeLabel: {
     backgroundColor: '#4a90e2',
     borderRadius: 15,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
     marginBottom: 10,
-    marginTop: -50,
+    marginTop: 0, // CRITICAL FIX: Reduced negative margin to prevent overlap with attempts card
     alignSelf: 'center',
   },
   questionTypeText: {
-    fontSize: 14,
+    fontSize: 11,
     fontWeight: '700',
     color: '#ffffff',
     textTransform: 'uppercase',
@@ -8590,28 +9532,54 @@ const styles = StyleSheet.create({
   reorderContainer: {
     gap: 12,
   },
+  resetButtonContainer: {
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 24,
+  },
+  resetButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  resetButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 6,
+  },
   reorderSlotsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
     flexWrap: 'nowrap',
     width: '100%',
-    paddingHorizontal: 4,
-    paddingVertical: 16,
-    marginBottom: 16,
+    paddingHorizontal: getResponsiveSize(4),
+    paddingVertical: getResponsiveSize(8),
+    marginBottom: getResponsiveSize(8),
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
+    borderRadius: getResponsiveSize(12),
+    gap: getResponsiveSize(4),
   },
   reorderChoicesRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
     flexWrap: 'nowrap',
     width: '100%',
-    paddingHorizontal: 4,
-    paddingVertical: 12,
+    paddingHorizontal: getResponsiveSize(4),
+    paddingVertical: getResponsiveSize(8),
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
+    borderRadius: getResponsiveSize(12),
+    gap: getResponsiveSize(4),
   },
   reorderSlotsGrid: {
     flexDirection: 'row',
@@ -8647,23 +9615,24 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   reorderSlot: {
-    flexGrow: 1,
-    flexShrink: 0,
-    flexBasis: 0,
-    height: 90,
-    marginHorizontal: 2,
-    borderRadius: 14,
+    flex: 1,
+    minWidth: getResponsiveSize(60),
+    maxWidth: getResponsiveSize(90),
+    height: getResponsiveSize(70),
+    marginHorizontal: getResponsiveSize(2),
+    borderRadius: getResponsiveSize(12),
     backgroundColor: 'rgba(255, 247, 237, 0.95)',
-    borderWidth: 3,
+    borderWidth: getResponsiveSize(2),
     borderStyle: 'dashed',
     borderColor: '#f59e0b',
     shadowColor: '#f59e0b',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 4,
+    shadowOffset: { width: 0, height: getResponsiveSize(3) },
+    shadowOpacity: 0.25,
+    shadowRadius: getResponsiveSize(3),
+    elevation: 3,
     justifyContent: 'center',
     alignItems: 'center',
+    position: 'relative',
   },
   slotPlaceholder: {
     width: '100%',
@@ -8762,21 +9731,41 @@ const styles = StyleSheet.create({
   reorderChoicesPool: {
     // kept for compatibility if referenced elsewhere
   },
+  reorderResetContainer: {
+    alignItems: 'center',
+    marginBottom: getResponsiveSize(12),
+  },
+  reorderResetButton: {
+    backgroundColor: '#f59e0b',
+    paddingHorizontal: getResponsiveSize(16),
+    paddingVertical: getResponsiveSize(8),
+    borderRadius: getResponsiveSize(20),
+    shadowColor: '#f59e0b',
+    shadowOffset: { width: 0, height: getResponsiveSize(2) },
+    shadowOpacity: 0.3,
+    shadowRadius: getResponsiveSize(4),
+    elevation: 3,
+  },
+  reorderResetButtonText: {
+    color: '#ffffff',
+    fontSize: getResponsiveFontSize(14),
+    fontWeight: '600',
+  },
   reorderChoice: {
-    flexGrow: 1,
-    flexShrink: 0,
-    flexBasis: 0,
-    height: 90,
-    marginHorizontal: 2,
-    borderRadius: 14,
+    flex: 1,
+    minWidth: getResponsiveSize(60),
+    maxWidth: getResponsiveSize(90),
+    height: getResponsiveSize(70),
+    marginHorizontal: getResponsiveSize(2),
+    borderRadius: getResponsiveSize(12),
     backgroundColor: '#ffffff',
-    borderWidth: 3,
+    borderWidth: getResponsiveSize(2),
     borderColor: '#ffa500',
     shadowColor: '#ffa500',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
+    shadowOffset: { width: 0, height: getResponsiveSize(3) },
+    shadowOpacity: 0.25,
+    shadowRadius: getResponsiveSize(3),
+    elevation: 4,
     justifyContent: 'center',
     alignItems: 'center',
     position: 'relative',
@@ -8795,15 +9784,16 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   reorderChoiceImage: {
-    width: 64,
-    height: 64,
-    borderRadius: 12,
+    width: '90%',
+    height: '90%',
+    borderRadius: getResponsiveSize(12),
   },
   reorderChoiceText: {
-    fontSize: 32,
+    fontSize: getResponsiveFontSize(24),
     fontWeight: '700',
     color: '#3b82f6',
     textAlign: 'center',
+    flexShrink: 1,
   },
   reorderInstruction: {
     fontSize: 16,
