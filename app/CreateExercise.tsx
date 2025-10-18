@@ -2132,6 +2132,11 @@ export default function CreateExercise() {
       
       const availableImages = `Available images: ${allAvailableImages}`;
 
+      // Use existing questions as both context (to avoid duplicates) and samples (to match style)
+      const existingQuestionsContext = questions.length > 0 
+        ? `\n\nEXISTING QUESTIONS (Use these as examples for style, difficulty, and topic focus - DO NOT REPEAT THESE):\n${questions.map((q, idx) => `${idx + 1}. [${q.type}] ${q.question}`).join('\n')}\n\n**CRITICAL**: Generate NEW questions that:\n- Match the style and difficulty of the existing questions above\n- Cover different aspects of the same topic\n- DO NOT repeat or closely paraphrase any existing question\n- Maintain the same teaching approach and language mix (Filipino/English ratio)`
+        : '';
+
       const prompt = `You are an expert educational content creator for Grade 1 students in the Philippines. Generate ${numberOfQuestions} ${selectedQuestionType} questions based on the following exercise details:
 
 EXERCISE DETAILS:
@@ -2140,7 +2145,7 @@ EXERCISE DETAILS:
 - Category: ${exerciseCategory}
 - Additional Requirements: ${aiPrompt}
 
-QUESTION TYPE: ${selectedQuestionType}
+QUESTION TYPE: ${selectedQuestionType}${existingQuestionsContext}
 
 AVAILABLE STOCK IMAGES (use these in your questions when relevant):
 ${availableImages}
@@ -7009,12 +7014,21 @@ Please respond with a JSON object in this exact format:
               
               <View style={styles.aiModalContent}>
                 
+                {questions.length > 0 && (
+                  <View style={styles.existingQuestionsInfo}>
+                    <MaterialCommunityIcons name="information" size={20} color="#3b82f6" />
+                    <Text style={styles.existingQuestionsInfoText}>
+                      AI will use your {questions.length} existing question{questions.length > 1 ? 's' : ''} as examples to match your teaching style and avoid duplicates
+                    </Text>
+                  </View>
+                )}
+                
                 <Text style={styles.aiModalLabel}>Additional Requirements (Optional)</Text>
                 <TextInput
                   style={styles.aiModalTextArea}
                   value={aiPrompt}
                   onChangeText={setAiPrompt}
-                  placeholder="Halimbawa: 'Tungkol sa mga hayop sa bahay', 'Mga kulay at hugis', 'Bilang 1-10', 'Mga letra A-Z' (Optional)"
+                  placeholder="Halimbawa: 'Tungkol sa mga hayop sa bahay', 'Mga kulay at hugis', 'Bilang 1-10', 'Mga letra A-Z'"
                   placeholderTextColor="#9ca3af"
                   multiline
                   textAlignVertical="top"
@@ -10703,6 +10717,30 @@ const styles = StyleSheet.create({
     color: '#374151',
     marginBottom: 8,
     marginTop: 16,
+  },
+  aiModalHint: {
+    fontSize: 12,
+    color: '#64748b',
+    marginBottom: 8,
+    fontStyle: 'italic',
+    lineHeight: 16,
+  },
+  existingQuestionsInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+  },
+  existingQuestionsInfoText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#1e40af',
+    marginLeft: 8,
+    lineHeight: 18,
   },
   aiExerciseInfo: {
     backgroundColor: '#f8fafc',
