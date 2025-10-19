@@ -147,71 +147,63 @@ console.error = (...args: any[]) => {
 };
 
 // Standalone component for Re-order interaction to keep hooks valid
+// Validation result types for cleaner communication
+type ReorderValidationResult = 
+  | { type: 'wrong'; attemptSequence: string[] }
+  | { type: 'correct'; finalSequence: string[] }
+  | { type: 'maxAttemptsReached'; finalSequence: string[] };
+
 const ReorderQuestion = React.memo(({
   question,
   initialAnswer,
   onChange,
-  onComplete,
-  onAttempt,
+  onValidationResult,
   currentAttempts = 0,
   maxAttempts = null,
 }: {
   question: Question;
   initialAnswer: ReorderItem[];
   onChange: (ordered: ReorderItem[]) => void;
-  onComplete?: (isCorrect: boolean, finalAnswer: string[]) => void;
-  onAttempt?: (attemptSequence: string[]) => void;
+  onValidationResult?: (result: ReorderValidationResult) => void;
   currentAttempts?: number;
   maxAttempts?: number | null;
 }) => {
   /**
    * ============================================================
-   * RE-ORDER EXERCISE COMPONENT - FIXED & STABLE VERSION
+   * RE-ORDER EXERCISE COMPONENT - ROBUST & STREAMLINED
    * ============================================================
    * 
-   * STATE STRUCTURE (Single Source of Truth):
-   * - slots: (ReorderItem | null)[] - holds items in each slot
-   * - pool: ReorderItem[] - unassigned items available for dragging
-   * - lockedSlots: Set<number> - indices of slots with correct items
-   * - correctSequence: string[] - IDs of items in correct order
+   * SINGLE VALIDATION POINT ARCHITECTURE:
+   * - One validation trigger when all slots are filled
+   * - One callback (onValidationResult) communicates results to parent
+   * - No duplicate checking, no double attempt counting
    * 
-   * KEY FEATURES:
-   * ✅ Auto-validates when all slots filled
-   * ✅ Locks correct items, returns only wrong items to pool
-   * ✅ Prevents dragging from/to locked slots
-   * ✅ Prevents duplicate items in pool
-   * ✅ Proper attempt tracking and max attempts handling
-   * ✅ Lock indicator shows for correct items (green lock icon)
-   * ✅ Status indicators (✓/✗) for validation results
-   * ✅ No ghost items or visual desyncs
-   * ✅ Correct items NEVER disappear during validation
+   * STATE STRUCTURE:
+   * - slots: (ReorderItem | null)[] - items in each slot
+   * - pool: ReorderItem[] - unassigned items
+   * - lockedSlots: Set<number> - indices of correct, locked slots
+   * - correctSequence: string[] - correct order of item IDs
    * 
    * VALIDATION FLOW:
-   * 1. Student fills all slots → Auto-validation triggers
-   * 2. System validates each slot against correctSequence
-   * 3. CORRECT items → Lock in place, stay in slots permanently
-   * 4. WRONG items → Clear from slots, return to pool
-   * 5. Attempt counter increments by 1
-   * 6. Continue until all correct OR max attempts reached
+   * 1. All slots filled → Trigger validation (300ms debounce)
+   * 2. Check correctness against correctSequence
+   * 3. Send ONE result via onValidationResult:
+   *    - 'wrong': Some items incorrect → Lock correct, return wrong to pool
+   *    - 'correct': All items correct → Lock all, advance
+   *    - 'maxAttemptsReached': Limit hit → Lock all, mark wrong, advance
+   * 4. Parent handles attempt counting, feedback, and navigation
    * 
-   * COMPLETION BEHAVIOR:
-   * - All correct before max attempts → Mark as correct, auto-advance
-   * - Max attempts reached → Lock all slots, show state for 2s, mark as wrong, advance
-   * - No premature completion - always respects attempt limits
-   * 
-   * 
-   * LOCKING BEHAVIOR:
-   * - Correct items cannot be dragged or removed
-   * - Locked slots reject all drops
-   * - Green lock indicator displays on correct items
-   * - Locked state persists until question completion
+   * KEY IMPROVEMENTS:
+   * ✅ Single validation point - no double-checking
+   * ✅ Single callback - no attempt/complete separation
+   * ✅ Parent controls all state updates and feedback
+   * ✅ Cleaner, more predictable flow
+   * ✅ No race conditions or duplicate increments
    * ============================================================
    */
 
   const items: ReorderItem[] = useMemo(() => {
     const originalItems = (question.reorderItems || []).map((it) => ({ ...it }));
-    // Items are already shuffled during validation, so use them as-is
-    console.log('[Reorder] Using validated items:', originalItems.map(item => item.id));
     return originalItems;
   }, [question.id]);
   const slotsCount = items.length;
@@ -237,7 +229,6 @@ const ReorderQuestion = React.memo(({
   // Helper function to restore pool to original order
   const restorePoolToOriginalOrder = useCallback((currentPool: ReorderItem[]) => {
     if (originalOrderRef.current.length === 0) {
-      console.warn('[Reorder] No original order stored, returning current pool');
       return currentPool;
     }
     
@@ -247,7 +238,6 @@ const ReorderQuestion = React.memo(({
     // Reconstruct pool maintaining exact original order
     const orderedPool = originalOrderRef.current.filter(item => poolItemMap.has(item.id));
     
-    console.log('[Reorder] Restored pool to original order:', orderedPool.map(item => item.id));
     return orderedPool;
   }, []);
 
@@ -263,6 +253,8 @@ const ReorderQuestion = React.memo(({
   const panRespondersRef = useRef<Map<string, any>>(new Map());
   const slotRefs = useRef<Record<number, any>>({});
   const lastNotifiedRef = useRef<string>('');
+  
+  // Simplified state flags - only what we need
   const [isValidating, setIsValidating] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
   const isValidatingRef = useRef(false);
@@ -270,26 +262,17 @@ const ReorderQuestion = React.memo(({
   const isDraggingRef = useRef(false);
   const currentAttemptsRef = useRef(currentAttempts);
   const draggedItemRef = useRef<{item: ReorderItem, fromPool: boolean, fromSlot?: number} | null>(null);
-  const hasCalledOnCompleteRef = useRef(false);
-  const isClearingWrongItemsRef = useRef(false);
-  // Validation cycle identifier to ensure exactly-once attempt handling per validation
+  
+  // Single validation ID to prevent overlapping validations
   const validationIdRef = useRef(0);
-  // Single-submit guard to avoid overlapping validations/popups/increments
-  const isSubmittingRef = useRef(false);
-  // Per-validation once-only gates
-  const attemptGateRef = useRef<number | null>(null);
-  const completeGateRef = useRef<number | null>(null);
 
   // Keep currentAttemptsRef in sync with prop
   useEffect(() => {
-    console.log('[Reorder] Attempt count prop updated from', currentAttemptsRef.current, 'to', currentAttempts);
     currentAttemptsRef.current = currentAttempts;
   }, [currentAttempts]);
 
   // Reset function to clear all slots and return items to pool
   const resetToInitialState = useCallback(() => {
-    console.log('[Reorder] Resetting to initial state - clearing all slots and returning items to pool');
-    
     // Clear all slots
     setSlots(Array(slotsCount).fill(null));
     
@@ -304,13 +287,9 @@ const ReorderQuestion = React.memo(({
     setIsCompleted(false);
     isValidatingRef.current = false;
     isCompletedRef.current = false;
-    isClearingWrongItemsRef.current = false;
-    hasCalledOnCompleteRef.current = false;
     
     // Clear dragged item
     draggedItemRef.current = null;
-    
-    console.log('[Reorder] Reset complete - all items returned to pool');
   }, [items, slotsCount]);
 
   // CRITICAL FIX: Reset component completely when question changes
@@ -329,347 +308,189 @@ const ReorderQuestion = React.memo(({
     isValidatingRef.current = false;
     isCompletedRef.current = false;
     isDraggingRef.current = false;
-    isClearingWrongItemsRef.current = false;
     draggedItemRef.current = null;
     lastNotifiedRef.current = '';
     currentAttemptsRef.current = currentAttempts;
-    hasCalledOnCompleteRef.current = false;
+    
     // Reset validation cycle id
     validationIdRef.current = 0;
     
     // Reset locked slots
     setLockedSlots(new Set());
     
-    // CRITICAL FIX: Validate that initialAnswer items belong to this question
-    // Create a Set of valid item IDs for this question
+    // Validate that initialAnswer items belong to this question
     const validItemIds = new Set(items.map(it => it.id));
-    
-    // Filter initialAnswer to only include items that belong to this question
     const validInitialAnswer = (initialAnswer && initialAnswer.length > 0)
       ? initialAnswer.filter(it => validItemIds.has(it.id))
       : [];
     
-    console.log('[Reorder-Reset] Question changed to:', question.id);
-    console.log('[Reorder-Reset] Valid item IDs for this question:', Array.from(validItemIds));
-    console.log('[Reorder-Reset] Initial answer provided:', initialAnswer?.map(it => it.id));
-    console.log('[Reorder-Reset] Valid initial answer (filtered):', validInitialAnswer.map(it => it.id));
-    
-    // ENHANCED FIX: Always start with a clean state for each question
-    // Don't carry over any previous question's state
-    // Keep original order instead of shuffling for better UX
+    // Always start with a clean state for each question
     const originalOrderItems = [...items];
     
     // Store the original order for consistent return behavior
     originalOrderRef.current = originalOrderItems;
     
-    console.log('[Reorder-Reset] Starting with original order items for question:', question.id);
-    console.log('[Reorder-Reset] Original order items:', originalOrderItems.map(it => it.id));
-    
-    // CRITICAL FIX: Always start with original order, ignore any previous state
-    // This ensures no items from previous questions carry over
-    console.log('[Reorder-Reset] Fresh start - all items in original order:', originalOrderItems.length);
+    // Start with original order, ignore any previous state
     setSlots(Array(slotsCount).fill(null));
     setPool(originalOrderItems);
   }, [question.id, items]); // CRITICAL: Reset when question ID or items change, NOT on attempt changes
 
-  // Notify parent of changes ONLY when slots actually change (debounced)
+  // SINGLE VALIDATION POINT - Clean and robust
   useEffect(() => {
-    // CRITICAL: Don't process if already completed, validating, dragging, or clearing wrong items
-    if (isCompletedRef.current || isValidatingRef.current || isDraggingRef.current || isClearingWrongItemsRef.current) {
-      console.log('[Reorder] Skipping effect - completed:', isCompletedRef.current, 'validating:', isValidatingRef.current, 'dragging:', isDraggingRef.current, 'clearing:', isClearingWrongItemsRef.current);
+    // Skip if completed, validating, or dragging
+    if (isCompletedRef.current || isValidatingRef.current || isDraggingRef.current) {
       return;
     }
     
     const ordered = slots.filter(Boolean) as ReorderItem[];
     const serialized = JSON.stringify(ordered.map(s => s.id));
     
-    // Only notify parent if the actual order changed AND not in any blocking state
-    if (serialized !== lastNotifiedRef.current && !isCompletedRef.current && !isValidatingRef.current && !isClearingWrongItemsRef.current) {
-      console.log('[Reorder] Slots changed - serialized:', serialized, 'previous:', lastNotifiedRef.current);
+    // Notify parent of changes
+    if (serialized !== lastNotifiedRef.current) {
       lastNotifiedRef.current = serialized;
       onChange(ordered);
-      
-      // Auto-validate when all slots are filled and not already validating or completed
-      const allFilled = slots.every(s => s !== null);
-      if (allFilled && !isValidatingRef.current && !isCompletedRef.current) {
-        // Prevent overlapping validations within a short window
-        if (isSubmittingRef.current) {
-          console.log('[Reorder] Validation suppressed: submit in progress');
-          return;
-        }
-        console.log('[Reorder] ✓ All slots filled (', ordered.length, '/', slotsCount, '), starting validation...');
-        console.log('[Reorder] Current attempt count before validation:', currentAttemptsRef.current);
-        console.log('[Reorder] Validation will fire in 300ms...');
-        setIsValidating(true);
-        isValidatingRef.current = true;
-        isSubmittingRef.current = true;
-        // Start a new validation cycle
-        const thisValidationId = ++validationIdRef.current;
-        // Reset per-validation gates
-        attemptGateRef.current = thisValidationId;
-        completeGateRef.current = thisValidationId;
-        console.log('[Reorder] Set isSubmittingRef=true, validationId=', thisValidationId);
-        
-        setTimeout(() => {
-          // CRITICAL: Double-check completion AND validation status before validating
-          if (isCompletedRef.current || !isValidatingRef.current || validationIdRef.current !== thisValidationId) {
-            console.log('[Reorder] Aborting validation - completed:', isCompletedRef.current, 'validating:', isValidatingRef.current);
-            setIsValidating(false);
-            isValidatingRef.current = false;
-            isSubmittingRef.current = false;
-            console.log('[Reorder] Cleared isSubmittingRef due to abort for validationId=', thisValidationId);
-            return;
-          }
-          // Prevent duplicate validation cycles
-          if (attemptGateRef.current === null || isSubmittingRef.current === false) {
-            console.log('[Reorder] Duplicate or stale validation prevented.');
-            setIsValidating(false);
-            return;
-          }
-          
-          // Validate against exact slot positions to avoid index compression issues
-          const isCorrect = slots.every((slotItem, idx) => slotItem && slotItem.id === correctSequence[idx]);
-          
-          console.log('[Reorder] ========== VALIDATION START ==========');
-          console.log('[Reorder] Validation result:', isCorrect ? 'CORRECT' : 'WRONG');
-          console.log('[Reorder] Current attempts BEFORE processing:', currentAttemptsRef.current);
-          console.log('[Reorder] Current slots state:', slots.map(item => item ? item.id : null));
-          console.log('[Reorder] Expected sequence:', correctSequence);
-          console.log('[Reorder] Timestamp:', new Date().toISOString());
-          console.log('[Reorder] validationId=', thisValidationId, 'attemptGateRef=', attemptGateRef.current, 'completeGateRef=', completeGateRef.current, 'isSubmittingRef=', isSubmittingRef.current);
-          
-          // CRITICAL FIX: Only increment attempt counter when answer is WRONG
-          // Correct answers should NOT increment attempts
-          let newAttemptCount = currentAttemptsRef.current || 0;
-          let hasReachedLimit = false;
-          
-          if (!isCorrect) {
-            // WRONG ANSWER - Always record this validation as a single attempt
-            if (onAttempt && attemptGateRef.current === thisValidationId) {
-              console.log('[Reorder] Wrong answer - calling onAttempt (once), validationId=', thisValidationId);
-              onAttempt(ordered.map(item => item.id));
-              console.log('[Reorder] onAttempt triggered once for validationId:', thisValidationId);
-              // Close the gate to prevent duplicate attempt logging
-              attemptGateRef.current = null;
-              // Optional: delayed ensure-close in case of batched renders
-              setTimeout(() => { attemptGateRef.current = null; }, 500);
-            } else {
-              console.log('[Reorder] Skipping onAttempt - gate closed or validationId mismatch');
-            }
-            
-            // CRITICAL FIX: Use ref value for stable count during validation cycle
-            // The ref is synced at component mount and via useEffect, so it's reliable
-            // Calculate what the count WILL BE after this attempt
-            const currentCount = currentAttemptsRef.current || 0;
-            newAttemptCount = currentCount + 1;
-            
-            // Check if we've reached the attempt limit AFTER this attempt
-            hasReachedLimit = maxAttempts !== null && newAttemptCount >= maxAttempts;
-            
-            console.log('[Reorder] Attempt limit check:');
-            console.log('[Reorder] Current attempts (from ref):', currentCount);
-            console.log('[Reorder] After this wrong attempt will be:', newAttemptCount);
-            console.log('[Reorder] Max attempts allowed:', maxAttempts);
-            console.log('[Reorder] Has reached limit?', hasReachedLimit);
-            console.log('[Reorder] Logic: ' + newAttemptCount + ' >= ' + maxAttempts + ' = ' + hasReachedLimit);
-            
-            if (!hasReachedLimit) {
-              const attemptsLeft = maxAttempts !== null ? (maxAttempts - newAttemptCount) : 'unlimited';
-              console.log('[Reorder] Attempts remaining:', attemptsLeft);
-            }
-          } else {
-            // CORRECT ANSWER - Don't increment attempts
-            console.log('[Reorder] Correct answer - NO attempt increment');
-          }
-          
-          if (isCorrect) {
-            console.log('[Reorder] ✅ All correct! Marking as completed.');
-            
-            // CRITICAL: Set completion flags IMMEDIATELY to prevent re-validation
-            setIsCompleted(true);
-            isCompletedRef.current = true;
-            setIsValidating(false);
-            isValidatingRef.current = false;
-            
-            // Lock all slots
-            const allIndices = new Set(Array.from({ length: slotsCount }, (_, i) => i));
-            setLockedSlots(allIndices);
-            
-            // Do not trigger correct feedback here; parent handles it once
-            
-            // Notify parent that the answer is correct and complete (only once)
-            if (onComplete && completeGateRef.current === thisValidationId && !hasCalledOnCompleteRef.current) {
-              hasCalledOnCompleteRef.current = true;
-              // Close the completion gate for this validation
-              completeGateRef.current = null;
-              setTimeout(() => {
-                console.log('[Reorder] Calling onComplete(true) - all correct, validationId=', thisValidationId);
-                onComplete(true, ordered.map(item => item.id));
-              }, 500);
-            } else {
-              console.log('[Reorder] Skipping onComplete(true) - gate closed or already called');
-            }
-          } else if (hasReachedLimit) {
-            console.log('[Reorder] ========== MAX ATTEMPTS REACHED ==========');
-            console.log('[Reorder] ❌ Attempt limit exhausted');
-            console.log('[Reorder] Final attempt count:', newAttemptCount);
-            console.log('[Reorder] Max attempts allowed:', maxAttempts);
-            console.log('[Reorder] Current answer state:', ordered.map(item => item.id));
-            console.log('[Reorder] =======================================');
-            
-            // CRITICAL: Set completion flags FIRST to prevent any further validation or state changes
-            setIsCompleted(true);
-            isCompletedRef.current = true;
-            setIsValidating(false);
-            isValidatingRef.current = false;
-            
-            // Keep current state visible (don't clear slots) so user can see what they had
-            // Lock ALL slots to prevent further changes
-            const allIndices = new Set(Array.from({ length: slotsCount }, (_, i) => i));
-            setLockedSlots(allIndices);
-            console.log('[Reorder] All slots locked - no more changes allowed');
-            
-            // Do not trigger wrong feedback here; it was already shown in onAttempt
-            
-            // DON'T call onChange here - it will trigger a re-render and validation loop
-            // The parent already has the answer from previous onChange calls
-            console.log('[Reorder] Max attempts exhausted, NOT calling onChange to prevent loop');
-            
-            // CRITICAL FIX: Call onComplete(false) with a delay so user sees the locked state (only once)
-            // This will mark the question as incorrect and trigger advancement
-            if (onComplete && completeGateRef.current === thisValidationId && !hasCalledOnCompleteRef.current) {
-              hasCalledOnCompleteRef.current = true;
-              completeGateRef.current = null;
-              console.log('[Reorder] Scheduling onComplete(false) call after 2s delay, validationId=', thisValidationId);
-              console.log('[Reorder] This will mark question as WRONG and auto-advance');
-              setTimeout(() => {
-                console.log('[Reorder] Calling onComplete(false) after max attempts, validationId=', thisValidationId);
-                onComplete(false, ordered.map(item => item.id));
-              }, 2000);
-            } else if (hasCalledOnCompleteRef.current) {
-              console.log('[Reorder] Already called onComplete, preventing duplicate call');
-            } else {
-              console.log('[Reorder] Skipping onComplete(false) - gate closed or validationId mismatch');
-            }
-          } else {
-            // Some items wrong, return them to pool and let student try again
-            const attemptsLeft = maxAttempts !== null ? (maxAttempts - newAttemptCount) : 'unlimited';
-            console.log('[Reorder] ❌ Some items wrong. Keeping correct ones, returning wrong ones to pool.');
-            console.log('[Reorder] Attempts remaining:', attemptsLeft);
-            // Haptic handled once in triggerWrongFeedback
-            
-            // CRITICAL: Set clearing flag IMMEDIATELY to block effect from running during state updates
-            isClearingWrongItemsRef.current = true;
-            console.log('[Reorder] Set clearing flag to prevent validation loops');
-            
-            // Return incorrect items to pool after a short delay, but KEEP correct items locked in place
-            setTimeout(() => {
-              try {
-                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-              } catch {}
-              const wrongIndices: number[] = [];
-              const wrongItems: ReorderItem[] = [];
-              const correctIndices: number[] = [];
-              
-              // Compare by actual slot index; do not compress nulls
-              slots.forEach((slotItem, idx) => {
-                if (!slotItem) return;
-                if (slotItem.id !== correctSequence[idx]) {
-                  wrongIndices.push(idx);
-                  wrongItems.push(slotItem);
-                  console.log('[Reorder] Item', slotItem.id, 'at slot', idx, 'is WRONG - will return to pool');
-                } else {
-                  correctIndices.push(idx);
-                  console.log('[Reorder] Item', slotItem.id, 'at slot', idx, 'is CORRECT - locking it');
-                }
-              });
-              
-              // Lock the correct slots
-              if (correctIndices.length > 0) {
-                setLockedSlots((prev) => {
-                  const next = new Set(prev);
-                  correctIndices.forEach(idx => next.add(idx));
-                  console.log('[Reorder] Locked slots:', Array.from(next));
-                  return next;
-                });
-              }
-              
-              if (wrongItems.length > 0) {
-                console.log('[Reorder] Returning', wrongItems.length, 'wrong items to pool:', wrongItems.map(i => i.id));
-                console.log('[Reorder] Keeping', correctIndices.length, 'correct items in slots:', correctIndices);
-                
-                // CRITICAL: Batch state updates to prevent multiple re-renders
-                // Use functional updates to ensure we're working with latest state
-                
-                // Step 1: Clear wrong slots (preserving correct ones)
-                setSlots((prev) => {
-                  const next = [...prev];
-                  wrongIndices.forEach(idx => {
-                    // Double-check we're not clearing a correct slot
-                    if (!correctIndices.includes(idx)) {
-                      console.log('[Reorder] Clearing slot', idx, '(wrong item)');
-                      next[idx] = null;
-                    } else {
-                      console.error('[Reorder] ERROR: Attempted to clear correct slot', idx, '- preventing!');
-                    }
-                  });
-                  
-                  // Log final state for debugging
-                  const filledCount = next.filter(Boolean).length;
-                  console.log('[Reorder] After clearing wrong slots:', filledCount, 'items remain in slots');
-                  return next;
-                });
-                
-                // Step 2: Add wrong items back to pool maintaining original order
-                setPool((prevPool) => {
-                  console.log('[Reorder] Adding', wrongItems.length, 'items back to pool');
-                  
-                  // Add wrong items to current pool
-                  const combinedPool = [...prevPool, ...wrongItems];
-                  
-                  // Restore to original order using helper function
-                  return restorePoolToOriginalOrder(combinedPool);
-                });
-              } else {
-                console.log('[Reorder] All items in their correct positions!');
-              }
-              
-              // Reset ALL flags after returning items - critical to do this last
-              console.log('[Reorder] Resetting validation and clearing flags, ready for next attempt');
-              setIsValidating(false);
-              isValidatingRef.current = false;
-              isClearingWrongItemsRef.current = false;
-              
-              // CRITICAL FIX: Reset lastNotifiedRef to allow fresh validation on next fill
-              // This ensures the effect will trigger onChange when slots are refilled
-              lastNotifiedRef.current = '';
-              console.log('[Reorder] Reset lastNotifiedRef to allow next validation');
-              console.log('[Reorder] ========== READY FOR NEXT ATTEMPT ==========');
-            }, 800);
-          }
-          // Reset submission guard at the end of the validation timeout
-          isSubmittingRef.current = false;
-          console.log('[Reorder] Cleared isSubmittingRef at end of validation timeout, validationId=', thisValidationId);
-        }, 300);
-      }
     }
-  }, [slots, slotsCount, correctSequence, onChange, onAttempt, onComplete, maxAttempts]);
+    
+    // Auto-validate when all slots are filled
+    const allFilled = slots.every(s => s !== null);
+    if (!allFilled || isValidatingRef.current || isCompletedRef.current) {
+      return;
+    }
+    
+    setIsValidating(true);
+    isValidatingRef.current = true;
+    
+    // Start a new validation cycle
+    const thisValidationId = ++validationIdRef.current;
+    
+    setTimeout(() => {
+      // Abort if state changed during timeout
+      if (isCompletedRef.current || !isValidatingRef.current || validationIdRef.current !== thisValidationId) {
+        setIsValidating(false);
+        isValidatingRef.current = false;
+        return;
+      }
+      
+      // SINGLE VALIDATION CHECK
+      const isCorrect = slots.every((slotItem, idx) => slotItem && slotItem.id === correctSequence[idx]);
+      const attemptSequence = ordered.map(item => item.id);
+      
+      if (isCorrect) {
+        // ALL CORRECT
+        setIsCompleted(true);
+        isCompletedRef.current = true;
+        setIsValidating(false);
+        isValidatingRef.current = false;
+        
+        // Lock all slots
+        const allIndices = new Set(Array.from({ length: slotsCount }, (_, i) => i));
+        setLockedSlots(allIndices);
+        
+        // Notify parent
+        if (onValidationResult) {
+          setTimeout(() => {
+            onValidationResult({ type: 'correct', finalSequence: attemptSequence });
+          }, 300);
+        }
+        
+      } else {
+        // WRONG ANSWER
+        const currentCount = currentAttemptsRef.current || 0;
+        const willBeAttempts = currentCount + 1;
+        const hasReachedLimit = maxAttempts !== null && willBeAttempts >= maxAttempts;
+        
+        if (hasReachedLimit) {
+          // MAX ATTEMPTS REACHED
+          setIsCompleted(true);
+          isCompletedRef.current = true;
+          setIsValidating(false);
+          isValidatingRef.current = false;
+          
+          // Lock all slots
+          const allIndices = new Set(Array.from({ length: slotsCount }, (_, i) => i));
+          setLockedSlots(allIndices);
+          
+          // Notify parent of wrong attempt first, then max attempts
+          if (onValidationResult) {
+            onValidationResult({ type: 'wrong', attemptSequence });
+            setTimeout(() => {
+              onValidationResult({ type: 'maxAttemptsReached', finalSequence: attemptSequence });
+            }, 100);
+          }
+          
+        } else {
+          // WRONG BUT CAN TRY AGAIN - return wrong items to pool
+          try {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+          } catch {}
+          
+          const wrongIndices: number[] = [];
+          const wrongItems: ReorderItem[] = [];
+          const correctIndices: number[] = [];
+          
+          // Identify correct and wrong items
+          slots.forEach((slotItem, idx) => {
+            if (!slotItem) return;
+            if (slotItem.id !== correctSequence[idx]) {
+              wrongIndices.push(idx);
+              wrongItems.push(slotItem);
+            } else {
+              correctIndices.push(idx);
+            }
+          });
+          
+          // Lock correct slots
+          if (correctIndices.length > 0) {
+            setLockedSlots((prev) => {
+              const next = new Set(prev);
+              correctIndices.forEach(idx => next.add(idx));
+              return next;
+            });
+          }
+          
+          // Clear wrong slots and return items to pool
+          if (wrongItems.length > 0) {
+            setSlots((prev) => {
+              const next = [...prev];
+              wrongIndices.forEach(idx => {
+                next[idx] = null;
+              });
+              return next;
+            });
+            
+            setPool((prevPool) => {
+              const combinedPool = [...prevPool, ...wrongItems];
+              return restorePoolToOriginalOrder(combinedPool);
+            });
+          }
+          
+          // Notify parent of wrong attempt
+          if (onValidationResult) {
+            onValidationResult({ type: 'wrong', attemptSequence });
+          }
+          
+          // Reset for next attempt
+          setTimeout(() => {
+            setIsValidating(false);
+            isValidatingRef.current = false;
+            lastNotifiedRef.current = '';
+          }, 800);
+        }
+      }
+    }, 300);
+  }, [slots, slotsCount, correctSequence, onChange, onValidationResult, maxAttempts, restorePoolToOriginalOrder]);
 
-  // Place item into slot (FIXED: no nested setState calls)
+  // Place item into slot
   const placeIntoSlot = useCallback((item: ReorderItem, slotIndex: number) => {
-    // Don't allow placing if validating or completed (use refs for immediate check)
+    // Don't allow placing if validating or completed
     if (isValidatingRef.current || isCompletedRef.current || lockedSlots.has(slotIndex)) {
-      console.log('[Reorder] Cannot place - validating, completed, or slot is locked');
       return false;
     }
     
     // Validate slot index
     if (slotIndex < 0 || slotIndex >= slotsCount) {
-      console.log('[Reorder] Invalid slot index:', slotIndex);
       return false;
     }
-    
-    console.log('[Reorder] Placing item', item.id, 'into slot', slotIndex);
     
     // Get previous item before state updates
     const currentSlots = slots;
@@ -677,7 +498,6 @@ const ReorderQuestion = React.memo(({
     
     // Check if item is already in this slot
     if (prevAtSlot && prevAtSlot.id === item.id) {
-      console.log('[Reorder] Item already in this slot - no change needed');
       return true;
     }
     
@@ -690,24 +510,20 @@ const ReorderQuestion = React.memo(({
     setSlots((prev) => {
       const next = [...prev];
       next[slotIndex] = item;
-      console.log('[Reorder] Slot', slotIndex, 'updated with item', item.id);
       return next;
     });
     
-    // Update pool: remove placed item and optionally add swapped item maintaining original order
+    // Update pool: remove placed item and optionally add swapped item
     setPool((p) => {
-      // Remove the item being placed
       let newPool = p.filter((x) => x.id !== item.id);
       
       // Add the previous slot item if it exists and is different
       if (prevAtSlot && prevAtSlot.id !== item.id) {
-        // Check for duplicates before adding
         if (!newPool.some(poolItem => poolItem.id === prevAtSlot.id)) {
           newPool = [...newPool, prevAtSlot];
         }
       }
       
-      // Restore to original order using helper function
       return restorePoolToOriginalOrder(newPool);
     });
     
@@ -717,7 +533,6 @@ const ReorderQuestion = React.memo(({
   // Remove item from slot when dragging starts
   const removeFromSlotForDrag = useCallback((slotIndex: number) => {
     if (lockedSlots.has(slotIndex)) {
-      console.log('[Reorder] Cannot drag - slot is locked');
       return false;
     }
     setSlots((prev) => {
@@ -1209,10 +1024,8 @@ const ReorderQuestion = React.memo(({
     isValidatingRef.current = false;
     isCompletedRef.current = false;
     isDraggingRef.current = false;
-    isClearingWrongItemsRef.current = false;
     draggedItemRef.current = null;
     lastNotifiedRef.current = '';
-    hasCalledOnCompleteRef.current = false;
     
     console.log('[Reorder] Reset complete - all items returned to original position');
   }, [items, slotsCount]);
@@ -3606,9 +3419,10 @@ export default function StudentExerciseAnswering() {
     }
     
     // CRITICAL FIX: Update answers array using helper that updates both state and ref
+    // PRESERVE isCorrect flag if it exists - don't overwrite it
     updateAnswers(prev => prev.map(a => 
       a.questionId === exercise?.questions[currentQuestionIndex].id 
-        ? { ...a, answer }
+        ? { ...a, answer, isCorrect: a.isCorrect !== undefined ? a.isCorrect : undefined }
         : a
     ));
   };
@@ -4349,49 +4163,23 @@ export default function StudentExerciseAnswering() {
       }
 
       // CRITICAL FIX: Ensure all questions have attempts logged before final submission
-      // This handles cases where students complete quickly or auto-advance skips logging
+      // Log any missing attempts for quick submissions
       if (exercise) {
-        console.log('[Submission] Pre-submission attempt logging starting...');
-        console.log('[Submission] Current attemptLogsRef:', Object.keys(attemptLogsRef.current).map(qId => ({
-          qId,
-          attemptCount: attemptLogsRef.current[qId]?.length || 0
-        })));
-        
-        // CRITICAL FIX: Use answersRef.current instead of answers state for synchronous access
-        // Log any missing attempts using synchronous ref access
         exercise.questions.forEach((q) => {
           const questionAttempts = attemptLogsRef.current[q.id] || [];
-          const answerData = answersRef.current.find(a => a.questionId === q.id); // FIX: Use ref instead of state
+          const answerData = answersRef.current.find(a => a.questionId === q.id);
           
           // If no attempts logged but there's an answer, log it now as a final attempt
           if (questionAttempts.length === 0 && answerData?.answer) {
-            console.log(`[Submission] Logging missing final attempt for question ${q.id}`, {
-              answer: answerData.answer,
-              isCorrect: answerData.isCorrect
-            });
             logAttempt(q, answerData.answer, 'final');
           }
         });
         
-        // CRITICAL: Wait longer to ensure ALL attempt logs are written to refs
-        // This is essential for fast submissions where state might not have settled
+        // Wait for attempt logs to write
         await new Promise(resolve => setTimeout(resolve, 200));
-        
-        console.log('[Submission] After logging, attemptLogsRef:', Object.keys(attemptLogsRef.current).map(qId => ({
-          qId,
-          attemptCount: attemptLogsRef.current[qId]?.length || 0,
-          lastAnswer: attemptLogsRef.current[qId]?.[attemptLogsRef.current[qId].length - 1]?.answer,
-          allAttempts: attemptLogsRef.current[qId]?.map((attempt, idx) => ({
-            attemptNumber: idx + 1,
-            type: attempt.attemptType,
-            answer: attempt.answer,
-            timestamp: attempt.timestamp
-          }))
-        })));
       }
 
-      // CRITICAL FIX: Use answersRef.current for most up-to-date data, add current question time
-      console.log('[Submission] Reading answers from ref (most up-to-date)...');
+      // Use answersRef.current for most up-to-date data
       let finalAnswers = answersRef.current;
       
       if (exercise) {
@@ -4406,16 +4194,6 @@ export default function StudentExerciseAnswering() {
         
         // Update ref with final time data
         answersRef.current = finalAnswers;
-        
-        // Debug logging to see what answers we have
-        console.log('[Submission] Final answers being saved (from ref):', finalAnswers.map(a => ({
-          questionId: a.questionId,
-          hasAnswer: !!a.answer,
-          answerType: typeof a.answer,
-          answerValue: a.answer,
-          isCorrect: a.isCorrect,
-          timeSpent: Math.floor((a.timeSpent || 0) / 1000)
-        })));
       }
 
       // Calculate results
@@ -4423,74 +4201,41 @@ export default function StudentExerciseAnswering() {
       const incorrectAnswers = finalAnswers.filter(answer => answer.isCorrect === false).length;
       const totalQuestions = exercise?.questions.length || 0;
       const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
-      // CRITICAL FIX: Calculate total attempts from attemptHistory (source of truth)
-      // Sum up the actual logged attempts, not the counter values which can drift
+      
+      // Calculate total attempts from attemptHistory (source of truth)
       const totalAttempts = exercise?.questions.reduce((sum, q) => {
         const questionAttempts = attemptLogsRef.current[q.id]?.length || 0;
         return sum + questionAttempts;
       }, 0) || 0;
       
-      console.log('[Submission] Total Attempts Calculation:', {
-        totalAttempts,
-        breakdown: exercise?.questions.map(q => ({
-          questionId: q.id,
-          attemptHistoryLength: attemptLogsRef.current[q.id]?.length || 0,
-          attemptCountsValue: attemptCounts[q.id] || 0
-        }))
-      });
-      
-      // CRITICAL FIX: Calculate total time from individual question times for accuracy
+      // Calculate total time from individual question times
       const totalTimeSpentSeconds = finalAnswers.reduce((total, answer) => {
         const questionTime = Math.floor((answer.timeSpent || 0) / 1000);
         return total + questionTime;
       }, 0);
       
-      console.log('[Submission] Time Calculation:', {
-        elapsedTimeFromSession: Math.floor(elapsedTime / 1000),
-        totalTimeFromQuestions: totalTimeSpentSeconds,
-        individualQuestionTimes: finalAnswers.map(a => ({
-          questionId: a.questionId,
-          timeSpentMs: a.timeSpent || 0,
-          timeSpentSeconds: Math.floor((a.timeSpent || 0) / 1000)
-        }))
-      });
-      
-      console.log('[Submission] Score Calculation:', {
-        correctAnswers,
-        incorrectAnswers,
-        totalQuestions,
-        scorePercentage,
-        answersWithCorrectFlag: finalAnswers.filter(a => a.isCorrect === true).map(a => a.questionId),
-        answersWithWrongFlag: finalAnswers.filter(a => a.isCorrect === false).map(a => a.questionId),
-        answersWithUndefinedFlag: finalAnswers.filter(a => a.isCorrect === undefined).map(a => a.questionId)
-      });
-      
       // Get current timestamp for submission
       const completedAt = new Date().toISOString();
       const timestampSubmitted = Date.now();
       
-      // CRITICAL FIX: Generate hierarchical result ID linked to exercise
-      // Format: E-GTK-0004-R-ABC-0001 (shows which exercise this result belongs to)
+      // Generate hierarchical result ID linked to exercise
       const currentExerciseId = exercise?.id || exerciseId as string;
-      console.log('[Submission] Generating result ID for exercise:', currentExerciseId);
-      console.log('[Submission] Exercise ID type:', typeof currentExerciseId);
-      console.log('[Submission] Exercise ID length:', currentExerciseId?.length);
-      console.log('[Submission] Exercise ID format check:', currentExerciseId?.match(/^E-[A-Z]{3}-\d{4}$/));
       
       let exerciseResultId: string;
       try {
         exerciseResultId = await generateResultId(currentExerciseId, '/ExerciseResults');
-        console.log('[Submission] Successfully generated hierarchical result ID:', exerciseResultId);
       } catch (error) {
-        console.error('[Submission] Failed to generate hierarchical result ID:', error);
-        // Fallback to simple ID generation if hierarchical fails
-        const fallbackId = `${currentExerciseId}-R-${Date.now()}`;
-        console.warn('[Submission] Using fallback ID:', fallbackId);
-        exerciseResultId = fallbackId;
+        console.error('[Submission] Failed to generate result ID:', error);
+        exerciseResultId = `${currentExerciseId}-R-${Date.now()}`;
       }
       
-      console.log('[Submission] Final result ID:', exerciseResultId);
-      console.log('[Submission] Result linked to exercise:', currentExerciseId);
+      console.log('[Submission] Submitting:', {
+        resultId: exerciseResultId,
+        exerciseId: currentExerciseId,
+        questions: totalQuestions,
+        correct: correctAnswers,
+        score: scorePercentage + '%'
+      });
       
       // CRITICAL FIX: Check for existing result to prevent duplicates
       if (assignedExerciseId && studentId) {
@@ -5029,135 +4774,54 @@ export default function StudentExerciseAnswering() {
         questionResults
       };
       
-      // CRITICAL: Comprehensive pre-submission logging to verify all data
-      console.log('[Submission] ========== FINAL RESULT DATA VERIFICATION ==========');
-      console.log('[Submission] Recording exercise result with:', {
-        exerciseResultId,
-        loginCode: parentId,
-        actualParentId,
-        studentId,
-        exerciseId: exercise?.id || exerciseId,
-        assignedExerciseId,
-        studentName: studentInfoData.name,
-        correctAnswers,
-        totalQuestions,
-        scorePercentage
-      });
-      
-      // CRITICAL: Verify we have data for ALL questions
-      console.log('[Submission] VERIFICATION - Total questions:', totalQuestions);
-      console.log('[Submission] VERIFICATION - Question results count:', questionResults.length);
+      // Validate data completeness
       if (questionResults.length !== totalQuestions) {
-        console.error('[Submission] ERROR: Mismatch between total questions and results!', {
+        console.error('[Submission] Question count mismatch:', {
           expected: totalQuestions,
           actual: questionResults.length
         });
       }
       
-      console.log('[Submission] Question Results Summary:');
-      questionResults.forEach((qr, idx) => {
-        const hasAnswer = qr.studentAnswer && qr.studentAnswer.trim() !== '';
-        const hasAttempts = qr.attemptHistory && qr.attemptHistory.length > 0;
-        
-        console.log(`  Q${idx + 1}:`, {
-          questionId: qr.questionId,
-          studentAnswer: qr.studentAnswer,
-          hasAnswer,
-          isCorrect: qr.isCorrect,
-          attempts: qr.attempts,
-          timeSpent: qr.timeSpentSeconds,
-          attemptHistoryCount: qr.attemptHistory.length,
-          hasAttempts,
-          attemptHistory: qr.attemptHistory.map(ah => ({
-            attemptNum: ah.attemptNumber,
-            answer: ah.selectedAnswer,
-            correct: ah.isCorrect
-          }))
-        });
-        
-        // CRITICAL: Warn if question is missing critical data
-        if (!hasAnswer && qr.isCorrect) {
-          console.warn(`  [WARNING] Q${idx + 1} marked correct but has no answer!`);
-        }
-        if (!hasAttempts) {
-          console.warn(`  [WARNING] Q${idx + 1} has no attempt history!`);
-        }
-      });
-      
-      console.log('[Submission] Results Summary:', {
-        totalItems: resultsSummary.totalItems,
-        totalCorrect: resultsSummary.totalCorrect,
-        totalIncorrect: resultsSummary.totalIncorrect,
-        score: resultsSummary.score,
-        meanPercentageScore: resultsSummary.meanPercentageScore,
-        remarks: resultsSummary.remarks
-      });
-      console.log('[Submission] ===================================================');
-      
       if (!studentId) {
-        console.error('[Submission] CRITICAL: No studentId - result will have unknown student!');
-      }
-      if (!actualParentId && !parentId) {
-        console.warn('[Submission] WARNING: No parentId - exercise result may not be properly tracked');
+        console.error('[Submission] CRITICAL: No studentId available!');
       }
       
-      // CRITICAL: Final validation before saving to database
-      // Ensure all questions have at least minimal data
-      console.log('[Submission] ========== FINAL VALIDATION ==========');
-      
+      // Validate questions have data
       const invalidQuestions = questionResults.filter((qr, idx) => {
         const hasNoAnswer = !qr.studentAnswer || qr.studentAnswer.trim() === '';
         const hasNoAttempts = !qr.attemptHistory || qr.attemptHistory.length === 0;
         
         if (hasNoAnswer || hasNoAttempts) {
-          console.warn(`[Submission] VALIDATION WARNING - Q${idx + 1} missing data:`, {
-            questionId: qr.questionId,
-            studentAnswer: qr.studentAnswer,
-            hasNoAnswer,
-            hasNoAttempts,
-            isCorrect: qr.isCorrect,
-            attempts: qr.attempts
-          });
+          console.warn(`[Submission] Q${idx + 1} missing data: hasAnswer=${!hasNoAnswer}, hasAttempts=${!hasNoAttempts}`);
         }
         
         return hasNoAnswer && hasNoAttempts;
       });
       
       if (invalidQuestions.length > 0) {
-        console.error('[Submission] CRITICAL: Some questions have no data!', {
-          invalidCount: invalidQuestions.length,
-          totalQuestions: questionResults.length,
-          invalidQuestionIds: invalidQuestions.map(q => q.questionId)
-        });
+        console.error('[Submission] Invalid questions:', invalidQuestions.length);
       }
       
-      // Additional validation: Check for questions marked correct without answers
+      // Check for questions marked correct without answers
       const suspiciousQuestions = questionResults.filter(qr => {
         const hasNoAnswer = !qr.studentAnswer || qr.studentAnswer.trim() === '';
         return qr.isCorrect && hasNoAnswer;
       });
       
       if (suspiciousQuestions.length > 0) {
-        console.error('[Submission] CRITICAL ERROR: Questions marked CORRECT but have NO ANSWER!', {
-          count: suspiciousQuestions.length,
-          questionIds: suspiciousQuestions.map(q => ({ id: q.questionId, isCorrect: q.isCorrect, studentAnswer: q.studentAnswer }))
-        });
+        console.error('[Submission] Questions marked correct with no answer:', suspiciousQuestions.length);
         
         // FIX: Force these questions to be marked incorrect
         suspiciousQuestions.forEach(qr => {
           qr.isCorrect = false;
-          console.log(`[Submission] Fixed Q${qr.questionNumber}: Changed isCorrect to false (no answer provided)`);
+          console.log(`[Submission] Fixed Q${qr.questionNumber}: set isCorrect=false (no answer)`);
         });
       }
-      
-      console.log('[Submission] ========================================');
       
       // CRITICAL FIX: Recalculate ALL summary fields from finalized questionResults
       const finalCorrectCount = questionResults.filter(qr => qr.isCorrect === true).length;
       const finalIncorrectCount = questionResults.filter(qr => qr.isCorrect === false).length;
       const finalScorePercentage = totalQuestions > 0 ? Math.round((finalCorrectCount / totalQuestions) * 100) : 0;
-      
-      // CRITICAL FIX: Recalculate total attempts from attemptHistory (source of truth)
       const finalTotalAttempts = questionResults.reduce((sum, qr) => sum + qr.attemptHistory.length, 0);
       
       // Update resultsSummary with final validated counts
@@ -5166,182 +4830,75 @@ export default function StudentExerciseAnswering() {
       resultsSummary.meanPercentageScore = finalScorePercentage;
       resultsSummary.score = finalCorrectCount;
       resultsSummary.remarks = getRemarks(finalScorePercentage);
-      resultsSummary.totalAttempts = finalTotalAttempts; // CRITICAL FIX: Use recalculated value
+      resultsSummary.totalAttempts = finalTotalAttempts;
       resultsSummary.meanAttemptsPerItem = totalQuestions > 0 ? finalTotalAttempts / totalQuestions : 0;
       
-      console.log('[Submission] Final Validated Summary:', {
-        totalCorrect: finalCorrectCount,
-        totalIncorrect: finalIncorrectCount,
-        scorePercentage: finalScorePercentage,
-        totalAttempts: finalTotalAttempts,
-        meanAttemptsPerItem: resultsSummary.meanAttemptsPerItem,
-        remarks: resultsSummary.remarks
-      });
-      
-      // MOVED: State update will happen AFTER validation to ensure UI shows validated data
-      
-      // CRITICAL FIX: Verify totals match across all data sources
-      console.log('[Submission] ========== VERIFICATION CHECK ==========');
-      console.log('[Submission] Verifying data consistency:');
-      console.log('  Total Questions:', totalQuestions);
-      console.log('  Question Results Count:', questionResults.length);
-      console.log('  Summary Total Items:', resultsSummary.totalItems);
-      console.log('  Match:', totalQuestions === questionResults.length && questionResults.length === resultsSummary.totalItems ? '✓' : '✗');
-      console.log('');
-      console.log('  Correct Count from questionResults:', finalCorrectCount);
-      console.log('  Correct Count in Summary:', resultsSummary.totalCorrect);
-      console.log('  Match:', finalCorrectCount === resultsSummary.totalCorrect ? '✓' : '✗');
-      console.log('');
-      console.log('  Total Attempts from History:', finalTotalAttempts);
-      console.log('  Total Attempts in Summary:', resultsSummary.totalAttempts);
-      console.log('  Match:', finalTotalAttempts === resultsSummary.totalAttempts ? '✓' : '✗');
-      console.log('');
-      console.log('  Individual Question Breakdown:');
-      questionResults.forEach((qr, i) => {
-        console.log(`    Q${i + 1}: attempts=${qr.attempts}, history=${qr.attemptHistory.length}, correct=${qr.isCorrect}, lastAttempt=${qr.attemptHistory[qr.attemptHistory.length - 1]?.isCorrect}`);
-      });
-      console.log('[Submission] =======================================');
-      
       // Save to ExerciseResults table
-      console.log('[Submission] ========== DATABASE WRITE ==========');
-      console.log('[Submission] Path: /ExerciseResults/' + exerciseResultId);
-      console.log('[Submission] Total Questions:', questionResults.length);
-      console.log('[Submission] Correct Answers:', finalCorrectCount);
-      console.log('[Submission] Incorrect Answers:', finalIncorrectCount);
-      console.log('[Submission] Score:', finalScorePercentage + '%');
-      console.log('[Submission] Total Attempts (Summary):', resultsSummary.totalAttempts);
-      console.log('[Submission] Question Details Being Saved:');
+      console.log('[Submission] Saving result:', exerciseResultId);
       
-      // CRITICAL VALIDATION: Verify attempts match history
+      // CRITICAL VALIDATION: Verify attempts match history (only log mismatches)
       let calculatedTotalAttempts = 0;
+      let hasMismatches = false;
       questionResults.forEach((qr, idx) => {
         calculatedTotalAttempts += qr.attemptHistory.length;
         
         // Warn if attempts field doesn't match history length
         if (qr.attempts !== qr.attemptHistory.length) {
-          console.warn(`  [MISMATCH] Q${idx + 1}: attempts=${qr.attempts} but history length=${qr.attemptHistory.length}`);
+          console.warn(`[Submission] Q${idx + 1} attempt mismatch: attempts=${qr.attempts} but history=${qr.attemptHistory.length}`);
+          hasMismatches = true;
         }
-        
-        console.log(`  Q${idx + 1}:`, {
-          id: qr.questionId,
-          studentAnswer: qr.studentAnswer,
-          correctAnswer: qr.correctAnswer,
-          isCorrect: qr.isCorrect,
-          attempts: qr.attempts,
-          attemptHistoryLength: qr.attemptHistory.length,
-          match: qr.attempts === qr.attemptHistory.length ? '✓' : '✗ MISMATCH'
-        });
       });
       
-      console.log('[Submission] Calculated Total Attempts from History:', calculatedTotalAttempts);
-      console.log('[Submission] Summary Total Attempts:', resultsSummary.totalAttempts);
-      console.log('[Submission] Match:', calculatedTotalAttempts === resultsSummary.totalAttempts ? '✓ CORRECT' : '✗ MISMATCH');
-      console.log('[Submission] =====================================');
-      console.log('[Submission] About to save with result ID:', exerciseResultId);
-      console.log('[Submission] Full database path:', `/ExerciseResults/${exerciseResultId}`);
+      if (calculatedTotalAttempts !== resultsSummary.totalAttempts) {
+        console.warn(`[Submission] Total attempts mismatch: calculated=${calculatedTotalAttempts}, summary=${resultsSummary.totalAttempts}`);
+        hasMismatches = true;
+      }
       
       // CRITICAL FIX: Apply unified validation and repair before saving
-      console.log('[Submission] ========== APPLYING UNIFIED VALIDATION ==========');
       const { result: validatedResultData, validation: validationReport } = validateAndRepairExerciseResult(
         resultData as any,
-        { verbose: true }
+        { verbose: false } // Reduce verbosity
       );
       
+      // Only log validation details if there are corrections or errors
       if (validationReport.correctedFields.length > 0) {
-        console.log('[Submission] Validation applied corrections:', {
-          correctedFieldsCount: validationReport.correctedFields.length,
-          fields: validationReport.correctedFields
-        });
+        console.warn('[Submission] Auto-corrected', validationReport.correctedFields.length, 'field(s)');
       }
       
-      // Downgrade summary-only validation errors to warnings since they are auto-corrected
+      // Only log errors if they're not summary-only (which are auto-corrected)
       if (validationReport.errors.length > 0) {
         const summaryOnly = validationReport.errors.every(e => String(e).startsWith('Summary:'));
-        if (summaryOnly) {
-          console.warn('[Submission] Validation summary mismatches (auto-corrected):', validationReport.errors);
-        } else {
-          console.error('[Submission] Validation found errors:', validationReport.errors);
+        if (!summaryOnly) {
+          console.error('[Submission] Validation errors:', validationReport.errors);
         }
       }
       
-      if (validationReport.warnings.length > 0) {
-        console.warn('[Submission] Validation warnings:', validationReport.warnings);
+      // Only log warnings if there are actual issues
+      if (validationReport.warnings.length > 0 && !validationReport.warnings.every(w => String(w).includes('mismatch: was false, should be true'))) {
+        console.warn('[Submission] Validation warnings:', validationReport.warnings.length);
       }
-      
-      console.log('[Submission] Validation complete:', {
-        isValid: validationReport.isValid,
-        errorsCount: validationReport.errors.length,
-        warningsCount: validationReport.warnings.length,
-        correctionsApplied: validationReport.correctedFields.length
-      });
-      console.log('[Submission] ====================================================');
       
       // Use the validated data for saving
       const finalResultData = validatedResultData;
       
-      // CRITICAL FIX: Store VALIDATED questionResults and summary in state for accurate UI display
-      // This ensures UI reads from the same data that was saved to database
+      // Store VALIDATED questionResults and summary in state for accurate UI display
       setSavedQuestionResults(validatedResultData.questionResults);
       setSavedResultsSummary(validatedResultData.resultsSummary);
-      console.log('[Submission] Stored VALIDATED questionResults and resultsSummary in state for UI display');
-      console.log('[Submission] UI will now show:', {
-        totalCorrect: validatedResultData.resultsSummary.totalCorrect,
-        meanPercentageScore: validatedResultData.resultsSummary.meanPercentageScore,
-        remarks: validatedResultData.resultsSummary.remarks
-      });
       
       const exerciseResult = await writeData(`/ExerciseResults/${exerciseResultId}`, finalResultData);
       if (!exerciseResult.success) {
         throw new Error(`Failed to save exercise result: ${exerciseResult.error}`);
       }
       
-      console.log('[Submission] ========== SAVE SUCCESSFUL ==========');
-      console.log('[Submission] Result ID:', exerciseResultId);
-      console.log('[Submission] Database path used:', `/ExerciseResults/${exerciseResultId}`);
-      console.log('[Submission] Saved Data Summary (VALIDATED):');
-      console.log('  - Student:', studentInfoData.name);
-      console.log('  - Exercise:', exerciseInfo.title);
-      console.log('  - Total Questions:', validatedResultData.resultsSummary.totalItems);
-      console.log('  - Correct:', validatedResultData.resultsSummary.totalCorrect);
-      console.log('  - Incorrect:', validatedResultData.resultsSummary.totalIncorrect);
-      console.log('  - Total Attempts:', validatedResultData.resultsSummary.totalAttempts);
-      console.log('  - Mean Attempts/Item:', validatedResultData.resultsSummary.meanAttemptsPerItem.toFixed(2));
-      console.log('  - Score:', validatedResultData.resultsSummary.meanPercentageScore + '%');
-      console.log('  - Remarks:', validatedResultData.resultsSummary.remarks);
-      console.log('[Submission] All question results saved with:');
-      validatedResultData.questionResults.forEach((qr, idx) => {
-        const status = qr.isCorrect ? '✓ CORRECT' : '✗ WRONG';
-        const answerPreview = qr.studentAnswer.substring(0, 30) + (qr.studentAnswer.length > 30 ? '...' : '');
-        console.log(`  Q${idx + 1} ${status}: "${answerPreview}" (${qr.attempts} attempts, ${qr.attemptHistory.length} in history)`);
+      // Success summary - keep it concise
+      console.log('[Submission] ✅ Success:', {
+        resultId: exerciseResultId,
+        student: studentInfoData.name,
+        exercise: exerciseInfo.title,
+        score: `${validatedResultData.resultsSummary.totalCorrect}/${validatedResultData.resultsSummary.totalItems} (${validatedResultData.resultsSummary.meanPercentageScore}%)`,
+        attempts: validatedResultData.resultsSummary.totalAttempts,
+        remarks: validatedResultData.resultsSummary.remarks
       });
-      console.log('[Submission] FINAL VERIFICATION (VALIDATED DATA):');
-      console.log('  Total Attempts (Summary):', validatedResultData.resultsSummary.totalAttempts);
-      console.log('  Total Attempts (Calculated):', validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attempts, 0));
-      console.log('  Total Attempts (History):', validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attemptHistory.length, 0));
-      console.log('  All Match:', validatedResultData.resultsSummary.totalAttempts === validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attempts, 0) && validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attempts, 0) === validatedResultData.questionResults.reduce((sum, qr) => sum + qr.attemptHistory.length, 0) ? '✓ YES' : '✗ NO');
-      console.log('');
-      console.log('  Detailed Question-by-Question Validation:');
-      validatedResultData.questionResults.forEach((qr, i) => {
-        const allAttemptsCorrect = qr.attemptHistory.every(a => a.isCorrect);
-        const anyAttemptCorrect = qr.attemptHistory.some(a => a.isCorrect);
-        const lastAttempt = qr.attemptHistory[qr.attemptHistory.length - 1];
-        
-        console.log(`    Q${i + 1} (${qr.questionId}):`);
-        console.log(`      Final isCorrect: ${qr.isCorrect}`);
-        console.log(`      Total Attempts: ${qr.attempts}`);
-        console.log(`      History Length: ${qr.attemptHistory.length}`);
-        console.log(`      Match: ${qr.attempts === qr.attemptHistory.length ? '✓' : '✗'}`);
-        console.log(`      Student Answer: "${qr.studentAnswer}"`);
-        console.log(`      Correct Answer: "${qr.correctAnswer}"`);
-        console.log(`      Last Attempt isCorrect: ${lastAttempt?.isCorrect}`);
-        console.log(`      All Attempts Correct: ${allAttemptsCorrect}`);
-        console.log(`      Any Attempt Correct: ${anyAttemptCorrect}`);
-        console.log(`      Attempt History:`);
-        qr.attemptHistory.forEach((ah, ahIdx) => {
-          console.log(`        ${ahIdx + 1}. ${ah.isCorrect ? '✓' : '✗'} "${ah.selectedAnswer}"`);
-        });
-      });
-      console.log('[Submission] =====================================');
       
       // Show results panel instead of navigating back
       setShowResults(true);
@@ -6679,7 +6236,7 @@ export default function StudentExerciseAnswering() {
           {renderTTSButton(question.ttsAudioUrl)}
         </View>
         <ReorderQuestion
-          key={question.id} // CRITICAL FIX: Force remount when question changes to ensure clean state
+          key={question.id}
           question={question}
           initialAnswer={initial || []}
           currentAttempts={attemptCounts[question.id] || 0}
@@ -6688,67 +6245,43 @@ export default function StudentExerciseAnswering() {
             setReorderAnswers((prev) => ({ ...prev, [question.id]: ordered }));
             handleAnswerChange(ordered.map((o) => o.id));
           }}
-          onAttempt={(attemptSequence) => {
-            // Single point of attempt recording - avoid duplicates
-            incrementAttemptCount(question.id);
-            logAttempt(question, attemptSequence, 'change');
-            console.log('[Reorder] Attempt recorded for', question.id, 'sequence:', attemptSequence);
-            // Show single wrong feedback per attempt (guarded internally)
-            triggerWrongFeedback();
-          }}
-          onComplete={(isCorrect, finalAnswer) => {
-            console.log('[Reorder] Complete callback received, isCorrect:', isCorrect, 'finalAnswer:', finalAnswer);
-            
-            if (isCorrect) {
-              // Mark question as correct
+          onValidationResult={(result) => {
+            if (result.type === 'wrong') {
+              // Wrong attempt: Record it and show feedback
+              incrementAttemptCount(question.id);
+              logAttempt(question, result.attemptSequence, 'change');
+              triggerWrongFeedback();
+            } else if (result.type === 'correct') {
+              // Correct: Mark complete and advance
               setQuestionCorrect(question.id, true);
-              
-              // Resolve final answer IDs
-              const finalIds = Array.isArray(finalAnswer)
-                ? finalAnswer.map((x: any) => (typeof x === 'string' ? x : x?.id)).filter(Boolean)
-                : (reorderAnswers[question.id]?.map((o: any) => o.id) || []);
-              
-              // Update answer with correct status and final sequence
+              const finalIds = result.finalSequence;
               updateAnswers(prev => prev.map(a => 
                 a.questionId === question.id ? { ...a, answer: finalIds, isCorrect: true } : a
               ));
-              
-              // Log the final correct attempt to close the history properly
               logAttempt(question, finalIds, 'final');
               
-              // Show correct feedback animation
               triggerCorrectFeedback(() => {
                 advanceToNextOrFinish();
               });
-          } else {
-            // Max attempts reached without completing correctly
-            console.log('[Reorder] Max attempts reached, marking as incorrect');
-            
-            // Ensure the last logged attempt is marked as 'final' (no duplicate log)
-            const attempts = attemptLogsRef.current[question.id] || [];
-            if (attempts.length > 0) {
-              const lastAttempt = attempts[attempts.length - 1];
-              if (lastAttempt.attemptType === 'change') {
-                lastAttempt.attemptType = 'final';
-                console.log('[Reorder] Marked last attempt as final before advancing');
+            } else if (result.type === 'maxAttemptsReached') {
+              // Max attempts: Mark incorrect and advance after delay
+              const attempts = attemptLogsRef.current[question.id] || [];
+              if (attempts.length > 0) {
+                const lastAttempt = attempts[attempts.length - 1];
+                if (lastAttempt.attemptType === 'change') {
+                  lastAttempt.attemptType = 'final';
+                }
               }
+              
+              setQuestionCorrect(question.id, false);
+              updateAnswers(prev => prev.map(a => 
+                a.questionId === question.id ? { ...a, isCorrect: false } : a
+              ));
+              
+              setTimeout(() => {
+                advanceToNextOrFinish();
+              }, 1500);
             }
-            
-            // Wrong feedback already shown in onAttempt - skip duplicate
-            console.log('[Reorder] Wrong feedback already shown in onAttempt - skipping duplicate feedback');
-            
-            setQuestionCorrect(question.id, false);
-            
-            // Update answer with incorrect status
-            updateAnswers(prev => prev.map(a => 
-              a.questionId === question.id ? { ...a, isCorrect: false } : a
-            ));
-            
-            // Auto-advance to next question after showing locked state
-            setTimeout(() => {
-              advanceToNextOrFinish();
-            }, 1500); // Slightly longer delay to show feedback
-          }
           }}
         />
       </View>
