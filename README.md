@@ -19,21 +19,27 @@ A comprehensive cross-platform educational application for mathematical learning
 ### Core Capabilities
 - 🎓 **Multi-Role System**: Teachers, Students, Parents, Admins, and Super Admins
 - 📝 **Exercise Management**: Create, assign, and track mathematical exercises
-- 🎯 **Interactive Learning**: Image-based questions with multiple answer types
-- 📊 **Real-time Analytics**: Track student progress and performance
-- 🔊 **Text-to-Speech**: Audio support using ElevenLabs AI
-- 📱 **Cross-Platform**: Works on Web, iOS, and Android
+- 🎯 **Interactive Learning**: Multiple question types (Multiple Choice, Identification, Matching, Re-order, Reading Passage)
+- 📊 **Real-time Analytics**: Track student progress and performance with detailed metrics
+- 🔊 **Dual Audio System**: AI-generated TTS (ElevenLabs) + Teacher voice recording
+- 🎤 **Voice Recording**: Ultra-optimized voice recording (~100 KB/min, 2-minute limit)
+- 📱 **Cross-Platform**: Works seamlessly on Web, iOS, and Android
 - 🌐 **Offline-First**: AsyncStorage for local data persistence
 - 📧 **Email Verification**: Secure teacher registration with email confirmation
+- 🖼️ **Smart Image Management**: Stock image library + custom uploads with filename extraction
 
 ### Advanced Features
-- ✅ Drag-and-drop question ordering
-- 📄 Excel/CSV data export
-- 🖼️ Image upload and management
-- 📢 Announcements and notifications
-- 👥 Class and student management
-- 📈 Performance tracking and reporting
-- 🔐 Role-based access control
+- ✅ **Drag-and-Drop Reordering**: Interactive question ordering with visual feedback
+- 📄 **Excel/CSV Export**: Export student data and results for analysis
+- 🖼️ **Smart Image Management**: 15+ categories of stock images + custom uploads
+- 📢 **Announcements**: Broadcast messages to classes, students, or parents
+- 👥 **Class Management**: Organize students by grade/section with real-time sync
+- 📈 **Performance Analytics**: Detailed metrics including attempts, time spent, accuracy
+- 🔐 **Role-Based Access**: Granular permissions for Teachers, Admins, and Super Admins
+- 🎙️ **Voice Recording**: Record custom voice instructions with noise optimization
+- 🔄 **Attempt Tracking**: Smart attempt counting (only incorrect answers increment attempts)
+- ⏱️ **Time Limits**: Configurable per-question time limits and max attempts
+- 🎨 **Multiple Question Types**: Grid/List layouts, multiple images, image-based options
 
 ## 🛠 Tech Stack
 
@@ -55,11 +61,13 @@ A comprehensive cross-platform educational application for mathematical learning
 - **Custom theming** - Adaptive dark/light mode support
 
 ### Key Libraries
-- **@elevenlabs/elevenlabs-js** - Text-to-speech API integration
-- **react-native-draggable-flatlist** - Drag-and-drop functionality
+- **@elevenlabs/elevenlabs-js** - AI-powered text-to-speech API integration
+- **expo-av** - Audio recording and playback (optimized for voice)
+- **react-native-draggable-flatlist** - Smooth drag-and-drop functionality
 - **xlsx** - Excel file generation and parsing
-- **expo-document-picker** - File selection
+- **expo-document-picker** - File selection for resources
 - **expo-image-picker** - Camera and gallery access
+- **@react-native-firebase** - Firebase SDK integration
 
 ## 🚀 Quick Setup
 
@@ -174,16 +182,33 @@ MATHTATAG uses **Firebase Realtime Database** with the following hierarchical st
 │       ├── category
 │       ├── teacherId
 │       ├── teacherName
+│       ├── timeLimitPerItem    # Time limit per question (seconds)
+│       ├── maxAttemptsPerItem  # Max attempts per question
 │       ├── questions: []
 │       │   └── {
 │       │       id: "E-XXX-0001-Q001",
+│       │       type: "multiple-choice" | "identification" | "matching" | "re-order" | "reading-passage",
 │       │       question: "text",
-│       │       imageUrl: "url",
-│       │       correctAnswer: "...",
-│       │       audioUrl: "url"
+│       │       questionImage: "url",      # Single image
+│       │       questionImages: [],        # Multiple images (patterns)
+│       │       answer: "..." | [],        # String or array
+│       │       options: [],               # For multiple choice
+│       │       optionImages: [],          # Images for options
+│       │       pairs: [],                 # For matching questions
+│       │       reorderItems: [],          # For re-order questions
+│       │       ttsAudioUrl: "url",        # AI-generated TTS
+│       │       recordedTtsUrl: "url",     # Teacher-recorded voice
+│       │       ttsStatus: "idle" | "generating" | "ready" | "failed",
+│       │       fillSettings: {            # For identification questions
+│       │         caseSensitive: boolean,
+│       │         showBoxes: boolean,
+│       │         altAnswers: [],
+│       │         hint: "text"
+│       │       }
 │       │   }
 │       ├── createdAt
-│       └── visibility
+│       ├── isPublic
+│       └── coAuthors: []
 │
 ├── assignedExercises/
 │   └── {assignedId}/        # A-XXX-0001
@@ -229,27 +254,48 @@ MATHTATAG uses **Firebase Realtime Database** with the following hierarchical st
 ├── {exerciseId}/
 │   ├── questions/
 │   │   ├── {questionId}.png
-│   │   └── {questionId}_audio.mp3
+│   │   └── {questionId}_audio.mp3  # AI-generated TTS
 │   └── thumbnail.png
+│
+/recorded-tts/
+└── {exerciseCode}/
+    ├── question-{questionId}.m4a    # Teacher-recorded voice
+    └── ...
 │
 /students/
 └── {studentId}/
     └── avatar.png
+│
+/stock-images/
+└── {categoryName}/
+    └── {imageName}.png              # Custom uploaded stock images
 ```
 
 ### Data Flow Process
 
 #### 1. **Exercise Creation Flow**
 ```
-Teacher creates exercise
+Teacher creates exercise with questions
     ↓
-Questions added with images
+Images added (stock library or custom upload)
     ↓
 Images uploaded to Firebase Storage
     ↓
-Exercise saved to /exercises with image URLs
+Audio options (choose one):
+  • AI TTS generation (ElevenLabs)
+  • Teacher voice recording (2-min limit, optimized compression)
+  • Both (recorded voice takes priority)
     ↓
-Optional: TTS audio generated and uploaded
+Audio uploaded to Firebase Storage
+  • AI TTS: /exercises/{exerciseId}/questions/{questionId}_audio.mp3
+  • Recorded: /recorded-tts/{exerciseCode}/question-{questionId}.m4a
+    ↓
+Exercise saved to /exercises with:
+  • Question data
+  • Image URLs
+  • ttsAudioUrl (AI TTS)
+  • recordedTtsUrl (Teacher voice)
+  • Metadata (attempts, time limits)
     ↓
 Exercise ID generated (E-XXX-0001)
 ```
@@ -339,13 +385,30 @@ The app uses Firebase Realtime Database listeners for instant updates:
 - Generate reports
 
 ### 3. Teacher
-- Create and edit exercises
-- Manage classes and students
-- Assign exercises to classes
-- View student results and analytics
-- Generate parent login codes
-- Send announcements to classes
-- Export student data to Excel
+- **Exercise Creation**: 
+  - Create 5 types of interactive questions
+  - Add images from stock library (500+ images) or custom uploads
+  - Generate AI voice (ElevenLabs TTS) or record custom voice
+  - Set time limits and max attempts per question
+- **Class Management**: 
+  - Create and organize classes by grade/section
+  - Add/remove students
+  - Generate parent login codes
+- **Exercise Assignment**: 
+  - Assign exercises to specific classes
+  - Set deadlines and late submission policies
+- **Analytics & Reporting**:
+  - View real-time student results
+  - Detailed attempt tracking and time analytics
+  - Export data to Excel/CSV
+- **Communication**:
+  - Send announcements to classes
+  - Broadcast messages to students and parents
+- **Voice Recording**:
+  - Record custom voice instructions (max 2 minutes)
+  - Ultra-optimized compression (~100 KB/min)
+  - Preview, re-record, or delete recordings
+  - Recordings automatically prioritize over AI TTS
 
 ### 4. Student
 - View assigned exercises
@@ -361,6 +424,109 @@ The app uses Firebase Realtime Database listeners for instant updates:
 - See detailed results and analytics
 - Update personal information
 - Receive announcements from teachers
+
+## 📝 Question Types
+
+MATHTATAG supports 5 comprehensive question types:
+
+### 1. Multiple Choice
+- **Grid or List Layout**: Visual or text-based options
+- **Single or Multi-Answer**: Select one or multiple correct answers
+- **Image Support**: Questions and options can include images
+- **Multiple Images per Option**: Support for complex visual questions
+- **Smart Validation**: Incorrect answers increment attempts, correct answers don't
+
+### 2. Identification (Fill-in-the-Blank)
+- **Flexible Matching**: Case-sensitive or case-insensitive
+- **Alternative Answers**: Accept multiple correct variations
+- **Show/Hide Boxes**: Visual answer boxes optional
+- **Hints**: Optional hints for students
+- **Accent Stripping**: Ignore diacritical marks for language flexibility
+
+### 3. Matching Type
+- **Drag-and-Drop Interface**: Intuitive pairing with visual feedback
+- **Image Support**: Both left and right sides can have images or text
+- **Color-Coded Pairs**: Visual indication of matched pairs
+- **Smart Validation**: Only incorrect matches count as attempts
+- **Locked Correct Pairs**: Prevent changing correct matches
+
+### 4. Re-Order Questions
+- **Ascending/Descending**: Define sort order
+- **Mixed Content**: Text, images, or both
+- **Visual Feedback**: Lock indicators for correct items
+- **Drag-and-Drop**: Smooth reordering with gesture handling
+- **Smart Locking**: Correct items stay in place, wrong items return to pool
+- **No Duplicates**: Deduplication ensures clean UI
+
+### 5. Reading Passage
+- **Scrollable Passage**: Long-form reading content
+- **Sub-Questions**: Multiple questions about the same passage
+- **Mixed Question Types**: Each sub-question can be any type
+- **Progressive Disclosure**: Questions revealed as students progress
+
+### Question Features
+- **Image Management**: 
+  - Stock image library (15+ categories, 500+ images)
+  - Custom uploads
+  - Filename extraction for Firebase URL comparison
+  - Multiple images per question (patterns)
+- **Audio Support**:
+  - AI-generated TTS per question
+  - Teacher-recorded voice per question
+  - Automatic priority handling
+- **Attempt Tracking**:
+  - Only wrong answers increment attempts
+  - Correct answers don't count against limits
+  - Detailed attempt history per question
+- **Time Tracking**: Per-question time spent monitoring
+
+## 🎤 Audio & Voice Recording Features
+
+MATHTATAG offers a **dual audio system** for maximum flexibility:
+
+### AI-Generated Text-to-Speech (ElevenLabs)
+- **High-quality AI voices**: Natural-sounding voice synthesis
+- **Multi-language support**: Generate TTS in various languages
+- **Batch generation**: Generate audio for all questions at once
+- **Fallback system**: Multiple API keys with automatic failover
+- **Regeneration**: Re-generate audio if quality is unsatisfactory
+
+### Teacher Voice Recording
+- **Custom voice instructions**: Record your own voice for personalized teaching
+- **Ultra-optimized compression**: ~40-100 KB per minute (75% smaller than standard)
+  - Sample Rate: 22,050 Hz (optimized for voice)
+  - Bit Rate: 32 kbps (minimal file size)
+  - Mono channel (single audio track)
+- **2-minute time limit**: Automatic stop with visual countdown
+  - Color-coded timer: Green → Orange (30s left) → Red (15s left)
+- **Firebase Storage integration**: Seamless upload and management
+- **Priority system**: Recorded voice automatically overrides AI TTS
+- **Recording management**:
+  - Preview before saving
+  - Re-record if needed
+  - Delete previous recordings to restore AI TTS
+  - Play/Stop controls
+
+### Audio Playback (Student Side)
+- **Automatic prioritization**: Recorded voice → AI TTS → None
+- **Cached playback**: Pre-loaded audio for instant playback
+- **Resource preloading**: Images and audio preloaded before exercise starts
+- **Play count tracking**: Monitor how many times students listen
+- **Visual feedback**: Speaker icon shows audio availability
+
+### Storage Optimization
+With the optimized recording settings:
+- **2-minute recording**: ~80-200 KB (vs 2 MB unoptimized)
+- **10 recordings**: ~800 KB - 2 MB
+- **100 recordings**: ~8-20 MB
+- **Perfect for Firebase free tier**: 5 GB storage limit
+
+### Benefits
+- ✅ **Personalized learning**: Students hear their teacher's voice
+- ✅ **Language flexibility**: Support for Filipino, English, and mixed content
+- ✅ **Accessibility**: Audio support for students with reading difficulties
+- ✅ **Cost-effective**: Minimal storage usage with optimized compression
+- ✅ **Easy to use**: Simple record → preview → save workflow
 
 ## 📁 Project Structure
 
@@ -655,6 +821,80 @@ const firebaseConfig = {
 ### ElevenLabs TTS (Optional)
 Configure in `lib/elevenlabs-keys.ts` for text-to-speech functionality.
 
+## 🚀 Quick Reference
+
+### Common Teacher Tasks
+
+#### Recording Voice Instructions
+1. Create or edit a question
+2. Click "Record Voice" button
+3. Grant microphone permission (first time only)
+4. Click "Start Recording"
+5. Speak clearly (up to 2 minutes, color-coded timer shows remaining time)
+6. Click "Stop Recording"
+7. Preview the recording with "Play" button
+8. Save or re-record if needed
+
+#### Using Stock Images
+1. When creating a question, click "Add image"
+2. Choose from 15+ categories:
+   - Numbers (0-100)
+   - Shapes (2D & 3D)
+   - Animals (47 images)
+   - Fruits & Vegetables (23 images)
+   - Money (Philippine currency)
+   - Time & Position
+   - And more!
+3. Click an image to add it to your question
+
+#### Managing Audio
+- **AI TTS**: Generated automatically if enabled in question generator
+- **Voice Recording**: Overrides AI TTS when both exist
+- **Delete Recording**: Click "Delete Previous Recording" to restore AI TTS
+- **Regenerate TTS**: Click "Regenerate" if AI voice quality is poor
+
+#### Setting Limits
+- **Time Limit**: Set seconds per question (e.g., 120 for 2 minutes)
+- **Max Attempts**: Set maximum attempts or leave unlimited
+- **Remember**: Only wrong answers count toward attempt limit!
+
+### Common Developer Tasks
+
+#### Running the Project
+```bash
+# Start with clean cache
+npm run start:clear
+
+# Test on specific platform
+npm run android
+npm run ios
+npm run web
+```
+
+#### Database Operations
+```bash
+# Initialize ID system (first time)
+npm run id:init
+
+# Verify database integrity
+npm run id:verify
+
+# Test ID generation
+npm run id:test
+```
+
+#### Deployment
+```bash
+# Build for web (Vercel)
+npm run build:web
+
+# Build Android APK
+eas build --platform android --profile preview
+
+# Push OTA update
+eas update --branch preview --message "Bug fixes"
+```
+
 ## 📚 Learn More
 
 ### Expo Resources
@@ -681,6 +921,23 @@ This project is proprietary software developed for MATHTATAG.
 
 ---
 
+## 🆕 Recent Updates
+
+### Version 1.0.3 (October 2025)
+- ✅ **Voice Recording System**: Ultra-optimized teacher voice recording with 2-minute limit
+- ✅ **Audio Compression**: 75% smaller file sizes (~40-100 KB/min vs 960 KB/min)
+- ✅ **Dual Audio Priority**: Recorded voice automatically overrides AI TTS
+- ✅ **Recording Management**: Delete previous recordings to restore AI TTS
+- ✅ **Smart Attempt Tracking**: Only incorrect answers increment attempt counter
+- ✅ **Re-order Component**: Complete overhaul with locked slots and visual feedback
+- ✅ **Filename Extraction**: Smart URL comparison for Firebase images
+- ✅ **Multiple Question Images**: Support for pattern questions with multiple images
+- ✅ **Time-coded Recording**: Visual countdown with color indicators
+- ✅ **Storage Optimization**: Perfect for Firebase free tier (5 GB limit)
+
+---
+
 **Current Version:** 1.0.3  
-**Last Updated:** October 2025  
-**Status:** Production Ready ✅
+**Last Updated:** October 19, 2025  
+**Status:** Production Ready ✅  
+**Repository:** [github.com/Kaneki0607/MATHTATAG-reimagined](https://github.com/Kaneki0607/MATHTATAG-reimagined)

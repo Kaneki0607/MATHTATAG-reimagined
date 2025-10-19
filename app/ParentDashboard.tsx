@@ -12,6 +12,116 @@ import { logError, logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 
+// Utility functions for answer formatting (from StudentExerciseAnswering.tsx)
+const extractFileName = (value: any): string => {
+  if (!value) return '';
+  const str = String(value).trim();
+  
+  // Check if this is a URL
+  if (str.startsWith('http://') || str.startsWith('https://')) {
+    try {
+      const url = new URL(str);
+      const pathname = url.pathname;
+      const filename = pathname.split('/').pop() || '';
+      // Remove file extension for cleaner display
+      return filename.replace(/\.[^/.]+$/, '');
+    } catch (e) {
+      // If URL parsing fails, return the original string
+      return str;
+    }
+  }
+  
+  return str;
+};
+
+const serializeAnswer = (question: any, ans: any): string => {
+  try {
+    if (question.type === 'multiple-choice') {
+      if (Array.isArray(ans)) {
+        const arr = ans.map(v => String(v));
+        const labeled = arr.map(v => {
+          // Extract filename if this is a URL
+          const displayText = extractFileName(v);
+          return displayText;
+        });
+        return labeled.join(', ');
+      }
+      const displayText = extractFileName(String(ans ?? ''));
+      return displayText;
+    }
+    if (question.type === 'identification') {
+      if (Array.isArray(ans)) {
+        if (ans.length > 1) {
+          return ans.map((x, idx) => `[${idx + 1}] ${extractFileName(String(x))}`).join('  ');
+        }
+        return ans.map((x) => extractFileName(String(x))).join(', ');
+      }
+      return extractFileName(String(ans ?? ''));
+    }
+    if (question.type === 're-order') {
+      const ids = Array.isArray(ans) ? ans as string[] : [];
+      const map = new Map((question.reorderItems || []).map((it: any) => [it.id, it] as const));
+      const labels = ids.map(id => {
+        const item = map.get(id);
+        if (!item) return '';
+        const label = (item as any).text || (item as any).image || `Item ${id}`;
+        return extractFileName(label);
+      });
+      return labels.join(' , ');
+    }
+    if (question.type === 'matching') {
+      const pairs = question.pairs || [];
+      const pairedItems: string[] = [];
+      
+      for (let i = 0; i < pairs.length; i++) {
+        const rightIndex = ans && ans[i] !== undefined ? ans[i] : null;
+        
+        if (rightIndex !== undefined && rightIndex !== null && pairs[rightIndex]) {
+          const leftText = pairs[i].left || `Item ${i + 1}`;
+          const rightText = pairs[rightIndex].right || `Item ${rightIndex + 1}`;
+          const leftDisplay = extractFileName(leftText);
+          const rightDisplay = extractFileName(rightText);
+          pairedItems.push(`${leftDisplay} → ${rightDisplay}`);
+        }
+      }
+      
+      return pairedItems.length > 0 ? pairedItems.join('; ') : 'No pairs matched';
+    }
+    return String(ans ?? '');
+  } catch (e) {
+    return String(ans ?? '');
+  }
+};
+
+// New function specifically for displaying re-order answers in pattern format
+const serializeReorderAnswerPattern = (question: any, ans: any): string => {
+  try {
+    if (question.type !== 're-order') {
+      return serializeAnswer(question, ans);
+    }
+    
+    const ids = Array.isArray(ans) ? ans as string[] : [];
+    const reorderItems = question.reorderItems || [];
+    
+    // Create a map of item ID to original position (1-based)
+    const originalPositions = new Map();
+    reorderItems.forEach((item: any, index: number) => {
+      originalPositions.set(item.id, index + 1);
+    });
+    
+    // Map the answer IDs to their original positions
+    const pattern = ids.map(id => {
+      const position = originalPositions.get(id);
+      return position ? position.toString() : '?';
+    });
+    
+    return pattern.join('-');
+  } catch (error) {
+    console.error('Error serializing re-order pattern:', error);
+    return serializeAnswer(question, ans);
+  }
+};
+
 interface ParentData {
   firstName: string;
   lastName: string;
@@ -426,7 +536,17 @@ export default function ParentDashboard() {
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
   const [classAverages, setClassAverages] = useState<any>(null);
   const [performanceRanking, setPerformanceRanking] = useState<any>(null);
+  
+  // Detailed History Modal state
   const [dailyQuote, setDailyQuote] = useState<{quote: string, author: string} | null>(null);
+  
+  // Question navigation state for swipe functionality
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  
+  // Animation values for smooth transitions
+  const questionFadeAnim = useRef(new Animated.Value(1)).current;
+  const slideAnim = useRef(new Animated.Value(0)).current;
   
   // Profile modal state
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -1983,6 +2103,132 @@ Focus on:
     setGeminiAnalysis(null);
     setClassAverages(null);
   };
+
+
+  // Question navigation functions
+  const handleNextQuestion = () => {
+    if (selectedResult?.questionResults && currentQuestionIndex < selectedResult.questionResults.length - 1) {
+      animateQuestionTransition(() => {
+        setCurrentQuestionIndex(currentQuestionIndex + 1);
+      });
+    }
+  };
+
+  const handlePreviousQuestion = () => {
+    if (currentQuestionIndex > 0) {
+      animateQuestionTransition(() => {
+        setCurrentQuestionIndex(currentQuestionIndex - 1);
+      });
+    }
+  };
+
+  const handleQuestionIndexChange = (index: number) => {
+    if (index !== currentQuestionIndex) {
+      animateQuestionTransition(() => {
+        setCurrentQuestionIndex(index);
+      });
+    }
+  };
+
+  // Animation function for smooth transitions
+  const animateQuestionTransition = (callback: () => void) => {
+    setIsTransitioning(true);
+    
+    Animated.parallel([
+      Animated.timing(questionFadeAnim, {
+        toValue: 0.3,
+        duration: 150,
+        useNativeDriver: true,
+      }),
+      Animated.timing(slideAnim, {
+        toValue: 1,
+        duration: 150,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      callback();
+      
+      Animated.parallel([
+        Animated.timing(questionFadeAnim, {
+          toValue: 1,
+          duration: 150,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 150,
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        setIsTransitioning(false);
+      });
+    });
+  };
+
+  // Reset question index when result changes
+  useEffect(() => {
+    if (selectedResult) {
+      setCurrentQuestionIndex(0);
+    }
+  }, [selectedResult]);
+
+  // Swipe gesture handling for question navigation
+  const questionPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: (evt, gestureState) => {
+        // Don't capture initially - let ScrollView handle vertical gestures
+        return false;
+      },
+      onStartShouldSetPanResponderCapture: (evt, gestureState) => {
+        // Don't capture initially
+        return false;
+      },
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        // Only respond to horizontal swipes with sufficient movement
+        // Allow vertical scrolling by not capturing vertical gestures
+        const isHorizontal = Math.abs(gestureState.dx) > Math.abs(gestureState.dy) && Math.abs(gestureState.dx) > 20;
+        const hasMultipleQuestions = selectedResult?.questionResults && selectedResult.questionResults.length > 1;
+        console.log('onMoveShouldSetPanResponder:', isHorizontal, 'dx:', gestureState.dx, 'dy:', gestureState.dy, 'hasMultiple:', hasMultipleQuestions);
+        return isHorizontal && hasMultipleQuestions;
+      },
+      onMoveShouldSetPanResponderCapture: (evt, gestureState) => {
+        // Only capture clear horizontal movements
+        const isHorizontal = Math.abs(gestureState.dx) > Math.abs(gestureState.dy) && Math.abs(gestureState.dx) > 20;
+        const hasMultipleQuestions = selectedResult?.questionResults && selectedResult.questionResults.length > 1;
+        console.log('onMoveShouldSetPanResponderCapture:', isHorizontal, 'hasMultiple:', hasMultipleQuestions);
+        return isHorizontal && hasMultipleQuestions;
+      },
+      onPanResponderGrant: () => {
+        console.log('Pan responder granted');
+      },
+      onPanResponderMove: (evt, gestureState) => {
+        // Optional: Add visual feedback during swipe
+        console.log('Pan responder move:', gestureState.dx);
+      },
+      onPanResponderRelease: (evt, gestureState) => {
+        const { dx } = gestureState;
+        const threshold = 30; // Reduced threshold for better sensitivity
+        
+        console.log('Pan responder release:', dx, 'threshold:', threshold);
+        
+        // Only navigate if we have multiple questions
+        if (selectedResult?.questionResults && selectedResult.questionResults.length > 1) {
+          if (dx > threshold) {
+            // Swipe right - go to previous question
+            console.log('Swipe right - previous question');
+            handlePreviousQuestion();
+          } else if (dx < -threshold) {
+            // Swipe left - go to next question
+            console.log('Swipe left - next question');
+            handleNextQuestion();
+          }
+        }
+      },
+      onPanResponderTerminate: () => {
+        console.log('Pan responder terminated');
+      },
+    })
+  ).current;
 
   // Helper function to get student class ID
   const getStudentClassId = async (): Promise<string | null> => {
@@ -3901,191 +4147,631 @@ Focus on:
         {/* Question Result View */}
         {activeSection === 'history' && showQuestionResult && selectedResult && (
           <View style={styles.questionResultSection}>
-            {/* Header */}
-            <View style={styles.questionResultHeader}>
-              <TouchableOpacity 
-                style={styles.backButton}
-                onPress={handleBackToHistory}
-              >
-                <MaterialIcons name="arrow-back" size={24} color="#3b82f6" />
-              </TouchableOpacity>
-              <Text style={styles.questionResultTitle}>{selectedResult.title}</Text>
-            </View>
-
             {loadingAnalysis ? (
               <View style={styles.loadingContainer}>
                 <MaterialCommunityIcons name="loading" size={32} color="#3b82f6" />
                 <Text style={styles.loadingText}>Analyzing performance...</Text>
               </View>
             ) : (
-              <ScrollView style={styles.questionResultContent} showsVerticalScrollIndicator={false}>
-                {/* Student & Exercise Info */}
-                <View style={styles.infoCard}>
-                  <Text style={styles.cardTitle}>Activity Information</Text>
-                  <View style={styles.infoRow}>
-                    <MaterialIcons name="person" size={20} color="#3b82f6" />
-                    <Text style={styles.infoLabel}>Student:</Text>
-                    <Text style={styles.infoValue}>{selectedResult.studentInfo?.name || 'Student'}</Text>
+              <View style={styles.questionResultContent}>
+                {/* Exercise Result Header */}
+                <View style={styles.exerciseResultHeader}>
+                  <TouchableOpacity 
+                    style={styles.backButton}
+                    onPress={handleBackToHistory}
+                  >
+                    <MaterialIcons name="arrow-back" size={24} color="#3b82f6" />
+                  </TouchableOpacity>
+                  <View style={styles.exerciseResultHeaderContent}>
+                    <MaterialCommunityIcons name="chart-bar" size={24} color="#8b5cf6" />
+                    <Text style={styles.exerciseResultTitle}>Exercise Result</Text>
                   </View>
-                  <View style={styles.infoRow}>
-                    <MaterialIcons name="book" size={20} color="#3b82f6" />
-                    <Text style={styles.infoLabel}>Exercise:</Text>
-                    <Text style={styles.infoValue}>{selectedResult.exerciseInfo?.title || selectedResult.title}</Text>
+                </View>
+
+                {/* Item Analysis Title */}
+                <Text style={styles.itemAnalysisTitle}>Item Analysis</Text>
+
+                {/* Exercise ID Badge */}
+                <View style={styles.exerciseIdBadge}>
+                  <MaterialIcons name="settings" size={12} color="#3b82f6" />
+                  <Text style={styles.exerciseIdText}>{selectedResult.exerciseInfo?.exerciseId || 'E-PZW-0012-R-FKV-0321'}</Text>
+                </View>
+
+                {/* Student Information Card */}
+                <View style={styles.studentInfoCard}>
+                  <View style={styles.studentInfoRow}>
+                    <Text style={styles.studentInfoLabel}>Student Name:</Text>
+                    <Text style={styles.studentInfoValue}>{selectedResult.studentInfo?.name || 'Adrian Reyes'}</Text>
                   </View>
-                  <View style={styles.infoRow}>
-                    <MaterialIcons name="category" size={20} color="#3b82f6" />
-                    <Text style={styles.infoLabel}>Category:</Text>
-                    <Text style={styles.infoValue}>{selectedResult.exerciseInfo?.category || 'Mathematics'}</Text>
+                  <View style={styles.studentInfoRow}>
+                    <Text style={styles.studentInfoLabel}>Exercise:</Text>
+                    <Text style={styles.studentInfoValue}>{selectedResult.exerciseInfo?.title || selectedResult.title || 'Peso Adventure!'}</Text>
                   </View>
-                  <View style={styles.infoRow}>
-                    <MaterialIcons name="schedule" size={20} color="#3b82f6" />
-                    <Text style={styles.infoLabel}>Completed:</Text>
-                    <Text style={styles.infoValue}>
+                  <View style={styles.studentInfoRow}>
+                    <Text style={styles.studentInfoLabel}>Date:</Text>
+                    <Text style={styles.studentInfoValue}>
                       {selectedResult.exerciseSession?.completedAt ? 
                         new Date(selectedResult.exerciseSession.completedAt).toLocaleDateString('en-US', {
-                          weekday: 'long',
-                          year: 'numeric',
-                          month: 'long',
+                          month: 'short',
                           day: 'numeric',
+                          year: 'numeric'
+                        }) + ' - ' + new Date(selectedResult.exerciseSession.completedAt).toLocaleTimeString('en-US', {
                           hour: 'numeric',
-                          minute: '2-digit'
+                          minute: '2-digit',
+                          hour12: true
                         }) : 
-                        'Unknown'
+                        'Oct 19, 2025 - 9:02PM'
                       }
+                    </Text>
+                    <View style={styles.onTimeBadge}>
+                      <Text style={styles.onTimeText}>On-Time</Text>
+                    </View>
+                  </View>
+                  <View style={styles.studentStatusRow}>
+                    <View style={[
+                      styles.statusGradientBar,
+                      { 
+                        backgroundColor: (() => {
+                          const score = performanceRanking?.currentStudent ? 
+                            performanceRanking.currentStudent.overallScore : 
+                            (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0);
+                          if (score >= 90) return '#10b981';
+                          if (score >= 80) return '#3b82f6';
+                          if (score >= 70) return '#f59e0b';
+                          return '#ef4444';
+                        })()
+                      }
+                    ]} />
+                    <Text style={[
+                      styles.studentStatusText,
+                      { 
+                        color: (() => {
+                          const score = performanceRanking?.currentStudent ? 
+                            performanceRanking.currentStudent.overallScore : 
+                            (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0);
+                          if (score >= 90) return '#10b981';
+                          if (score >= 80) return '#3b82f6';
+                          if (score >= 70) return '#f59e0b';
+                          return '#ef4444';
+                        })()
+                      }
+                    ]}>
+                      {(() => {
+                        const score = performanceRanking?.currentStudent ? 
+                          performanceRanking.currentStudent.overallScore : 
+                          (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0);
+                        if (score >= 90) return 'Excellent Performance';
+                        if (score >= 80) return 'Good Performance';
+                        if (score >= 70) return 'Needs Improvement';
+                        return 'For Intervention';
+                      })()}
                     </Text>
                   </View>
                 </View>
 
-                {/* Performance Overview */}
-                <View style={styles.performanceCard}>
-                  <Text style={styles.cardTitle}>Performance Overview</Text>
-                  <View style={styles.scoreContainer}>
-                    <Text style={styles.scoreText}>
-                      {performanceRanking?.currentStudent ? 
-                        (() => {
-                          return Math.round(performanceRanking.currentStudent.overallScore);
-                        })() : 
-                        (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0)
+                {/* Performance Overview Card */}
+                <View style={styles.performanceOverviewCard}>
+                  <View style={styles.performanceOverviewHeader}>
+                    <Text style={styles.performanceOverviewTitle}>Performance Overview</Text>
+                    <View style={[
+                      styles.performanceRatingBadge,
+                      { 
+                        backgroundColor: (() => {
+                          const score = performanceRanking?.currentStudent ? 
+                            performanceRanking.currentStudent.overallScore : 
+                            (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0);
+                          if (score >= 90) return '#10b981';
+                          if (score >= 80) return '#3b82f6';
+                          if (score >= 70) return '#f59e0b';
+                          return '#ef4444';
+                        })()
                       }
-                    </Text>
-                    <Text style={styles.scoreLabel}>
-                      {performanceRanking?.currentStudent ? 'Performance Score' : 'Overall Score'}
-                    </Text>
-                    {performanceRanking?.currentStudent && (
-                      <Text style={styles.scoreNote}>
-                        Based on efficiency, consistency & mastery
+                    ]}>
+                      <Text style={styles.performanceRatingText}>
+                        {(() => {
+                          const score = performanceRanking?.currentStudent ? 
+                            performanceRanking.currentStudent.overallScore : 
+                            (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0);
+                          if (score >= 90) return 'EXCELLENT';
+                          if (score >= 80) return 'GOOD';
+                          if (score >= 70) return 'FAIR';
+                          return 'POOR';
+                        })()}
                       </Text>
-                    )}
-                  </View>
-                  <View style={styles.statsRow}>
-                    <View style={styles.statItem}>
-                      <Text style={styles.statValue}>{selectedResult.totalQuestions || selectedResult.resultsSummary?.totalItems || 0}</Text>
-                      <Text style={styles.statLabel}>Questions</Text>
-                    </View>
-                    <View style={styles.statItem}>
-                      <Text style={styles.statValue}>
-                        {Math.round((selectedResult.totalTimeSpent || selectedResult.resultsSummary?.totalTimeSpentSeconds * 1000 || 0) / 1000)}s
-                      </Text>
-                      <Text style={styles.statLabel}>Time Spent</Text>
-                    </View>
-                    <View style={styles.statItem}>
-                      <Text style={styles.statValue}>
-                        {selectedResult.resultsSummary?.totalAttempts || 
-                         (selectedResult.questionResults ? 
-                           selectedResult.questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0) : 0)
-                        }
-                      </Text>
-                      <Text style={styles.statLabel}>Total Attempts</Text>
                     </View>
                   </View>
                   
-                  {/* Additional Performance Metrics */}
-                  {selectedResult.resultsSummary && (
-                    <View style={styles.additionalMetrics}>
-                      <View style={styles.metricRow}>
-                        <Text style={styles.additionalMetricLabel}>Correct Answers:</Text>
-                        <Text style={styles.additionalMetricValue}>{selectedResult.resultsSummary.totalCorrect}</Text>
-                      </View>
-                      <View style={styles.metricRow}>
-                        <Text style={styles.additionalMetricLabel}>Incorrect Answers:</Text>
-                        <Text style={styles.additionalMetricValue}>{selectedResult.resultsSummary.totalIncorrect}</Text>
-                      </View>
-                      <View style={styles.metricRow}>
-                        <Text style={styles.additionalMetricLabel}>Avg Attempts per Question:</Text>
-                        <Text style={styles.additionalMetricValue}>{selectedResult.resultsSummary.meanAttemptsPerItem.toFixed(1)}</Text>
-                      </View>
-                      <View style={styles.metricRow}>
-                        <Text style={styles.additionalMetricLabel}>Avg Time per Question:</Text>
-                        <Text style={styles.additionalMetricValue}>{selectedResult.resultsSummary.meanTimePerItemSeconds.toFixed(1)}s</Text>
-                      </View>
-                      <View style={styles.metricRow}>
-                        <Text style={styles.additionalMetricLabel}>Performance Remarks:</Text>
-                        <Text style={[styles.additionalMetricValue, { 
-                          color: selectedResult.resultsSummary.remarks === 'Excellent' ? '#10b981' :
-                                 selectedResult.resultsSummary.remarks === 'Good' ? '#3b82f6' :
-                                 selectedResult.resultsSummary.remarks === 'Needs Improvement' ? '#f59e0b' : '#ef4444'
-                        }]}>
-                          {selectedResult.resultsSummary.remarks}
-                        </Text>
-                      </View>
-                    </View>
-                  )}
-                </View>
+                  <View style={styles.performanceScoreContainer}>
+                    <Text style={styles.performanceScoreNumber}>
+                      {performanceRanking?.currentStudent ? 
+                        Math.round(performanceRanking.currentStudent.overallScore) : 
+                        (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0)
+                      }
+                    </Text>
+                    <Text style={styles.performanceScoreLabel}>PERFORMANCE SCORE</Text>
+                  </View>
 
-                {/* Performance Ranking */}
-                {performanceRanking?.currentStudent && (
-                  <View style={styles.rankingCard}>
-                    <Text style={styles.cardTitle}>Performance Ranking</Text>
-                   
-                    <View style={styles.performanceMetrics}>
-                      <View style={styles.metricItem}>
-                        <Text style={styles.metricLabel}>Efficiency</Text>
-                        <Text style={styles.metricValue}>
-                          {(() => {
-                            return Math.round(performanceRanking.currentStudent.efficiencyScore);
-                          })()}/100
-                        </Text>
-                        <Text style={styles.metricComparison}>
-                          vs {Math.round(performanceRanking.classStats.averageEfficiency)} class avg
-                        </Text>
-                      </View>
-                      <View style={styles.metricItem}>
-                        <Text style={styles.metricLabel}>Consistency</Text>
-                        <Text style={styles.metricValue}>
-                          {(() => {
-                            return Math.round(performanceRanking.currentStudent.consistencyScore);
-                          })()}/100
-                        </Text>
-                        <Text style={styles.metricComparison}>
-                          vs {Math.round(performanceRanking.classStats.averageConsistency)} class avg
-                        </Text>
-                      </View>
-                      <View style={styles.metricItem}>
-                        <Text style={styles.metricLabel}>Mastery</Text>
-                        <Text style={styles.metricValue}>
-                          {(() => {
-                            return Math.round(performanceRanking.currentStudent.masteryScore);
-                          })()}/100
-                        </Text>
-                        <Text style={styles.metricComparison}>
-                          vs {Math.round(performanceRanking.classStats.averageMastery)} class avg
-                        </Text>
-                      </View>
+                  {/* Performance Metrics Grid */}
+                  <View style={styles.performanceMetricsGrid}>
+                    <View style={styles.performanceMetricItem}>
+                      <Text style={styles.performanceMetricValue}>
+                        {performanceRanking?.currentStudent ? 
+                          `${Math.round(performanceRanking.currentStudent.efficiencyScore)}/100` :
+                          (() => {
+                            const questionResults = selectedResult.questionResults || [];
+                            const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                            const totalQuestions = questionResults.length || 1;
+                            const avgAttemptsPerQuestion = totalQuestions > 0 ? totalAttempts / totalQuestions : 0;
+                            let efficiencyScore;
+                            if (avgAttemptsPerQuestion <= 1) efficiencyScore = 100;
+                            else if (avgAttemptsPerQuestion <= 1.5) efficiencyScore = 90;
+                            else if (avgAttemptsPerQuestion <= 2) efficiencyScore = 80;
+                            else if (avgAttemptsPerQuestion <= 2.5) efficiencyScore = 70;
+                            else if (avgAttemptsPerQuestion <= 3) efficiencyScore = 60;
+                            else efficiencyScore = 50;
+                            return `${efficiencyScore}/100`;
+                          })()
+                        }
+                      </Text>
+                      <Text style={styles.performanceMetricLabel}>EFFICIENCY</Text>
                     </View>
-                    <View style={styles.overallScore}>
-                      <Text style={styles.overallScoreLabel}>Overall Performance</Text>
-                      <Text style={styles.overallScoreValue}>{Math.round(performanceRanking.currentStudent.overallScore)}/100</Text>
-                      <Text style={[styles.performanceLevelText, { 
-                        color: performanceRanking.performanceLevel === 'excellent' ? '#10b981' :
-                               performanceRanking.performanceLevel === 'good' ? '#3b82f6' :
-                               performanceRanking.performanceLevel === 'needs_improvement' ? '#f59e0b' : '#ef4444'
-                      }]}>
-                        {performanceRanking.performanceLevel.charAt(0).toUpperCase() + performanceRanking.performanceLevel.slice(1).replace('_', ' ')}
+                    <View style={styles.performanceMetricItem}>
+                      <Text style={styles.performanceMetricValue}>
+                        {performanceRanking?.currentStudent ? 
+                          `${Math.round(performanceRanking.currentStudent.consistencyScore)}/100` :
+                          (() => {
+                            const questionResults = selectedResult.questionResults || [];
+                            const totalQuestions = questionResults.length || 1;
+                            const correctAnswers = questionResults.filter((q: any) => q.isCorrect).length;
+                            const consistencyScore = Math.round((correctAnswers / totalQuestions) * 100);
+                            return `${consistencyScore}/100`;
+                          })()
+                        }
+                      </Text>
+                      <Text style={styles.performanceMetricLabel}>CONSISTENCY</Text>
+                    </View>
+                    <View style={styles.performanceMetricItem}>
+                      <Text style={styles.performanceMetricValue}>
+                        {performanceRanking?.currentStudent ? 
+                          `${Math.round(performanceRanking.currentStudent.masteryScore)}/100` :
+                          (() => {
+                            const questionResults = selectedResult.questionResults || [];
+                            const totalQuestions = questionResults.length || 1;
+                            const correctAnswers = questionResults.filter((q: any) => q.isCorrect).length;
+                            const masteryScore = Math.round((correctAnswers / totalQuestions) * 100);
+                            return `${masteryScore}/100`;
+                          })()
+                        }
+                      </Text>
+                      <Text style={styles.performanceMetricLabel}>MASTERY</Text>
+                    </View>
+                    <View style={styles.performanceMetricItem}>
+                      <Text style={styles.performanceMetricValue}>{selectedResult.totalQuestions || selectedResult.resultsSummary?.totalItems || 3}</Text>
+                      <Text style={styles.performanceMetricLabel}>QUESTIONS</Text>
+                    </View>
+                    <View style={styles.performanceMetricItem}>
+                      <Text style={styles.performanceMetricValue}>
+                        {Math.round((selectedResult.totalTimeSpent || selectedResult.resultsSummary?.totalTimeSpentSeconds * 1000 || 78000) / 1000)}s
+                      </Text>
+                      <Text style={styles.performanceMetricLabel}>DURATION</Text>
+                    </View>
+                    <View style={styles.performanceMetricItem}>
+                      <Text style={styles.performanceMetricValue}>
+                        {selectedResult.resultsSummary?.totalAttempts || 
+                         (selectedResult.questionResults ? 
+                           selectedResult.questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0) : 9)
+                        }
+                      </Text>
+                      <Text style={styles.performanceMetricLabel}>ATTEMPTS</Text>
+                    </View>
+                  </View>
+
+                  {/* Summary Statistics */}
+                  <View style={styles.summaryStatsContainer}>
+                    <View style={styles.summaryStatRow}>
+                      <Text style={styles.summaryStatLabel}>Average Attempts per Question:</Text>
+                      <Text style={styles.summaryStatValue}>
+                        {(() => {
+                          const questionResults = selectedResult.questionResults || [];
+                          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                          const totalQuestions = questionResults.length || 1;
+                          return (totalQuestions > 0 ? totalAttempts / totalQuestions : 0).toFixed(1);
+                        })()}
+                      </Text>
+                    </View>
+                    <View style={styles.summaryStatRow}>
+                      <Text style={styles.summaryStatLabel}>Average Time per Question:</Text>
+                      <Text style={styles.summaryStatValue}>
+                        {(() => {
+                          const questionResults = selectedResult.questionResults || [];
+                          const totalTime = questionResults.reduce((sum: number, q: any) => sum + (q.timeSpent || 0), 0);
+                          const totalQuestions = questionResults.length || 1;
+                          return `${(totalQuestions > 0 ? totalTime / totalQuestions / 1000 : 0).toFixed(0)}s`;
+                        })()}
+                      </Text>
+                    </View>
+                    <View style={styles.summaryStatRow}>
+                      <Text style={styles.summaryStatLabel}>Correct / Incorrect Count:</Text>
+                      <Text style={styles.summaryStatValue}>
+                        {(() => {
+                          const questionResults = selectedResult.questionResults || [];
+                          const correctAnswers = questionResults.filter((q: any) => q.isCorrect).length;
+                          const incorrectAnswers = questionResults.length - correctAnswers;
+                          return `${correctAnswers}/${incorrectAnswers}`;
+                        })()}
                       </Text>
                     </View>
                   </View>
-                )}
+                </View>
 
+                {/* Enhanced History Card with Swipe Navigation */}
+                <View style={styles.historyCard}>
+                  <Text style={styles.historyCardTitle}>Question History</Text>
+                  
+                  {/* Question Navigation Header */}
+                  {selectedResult.questionResults && selectedResult.questionResults.length > 1 && (
+                    <View style={styles.questionNavigationHeader}>
+                      <Text style={styles.questionNavigationTitle}>
+                        Question {currentQuestionIndex + 1} of {selectedResult.questionResults.length}
+                      </Text>
+                      <View style={styles.questionNavigationDots}>
+                        {selectedResult.questionResults.map((_: any, index: number) => (
+                          <TouchableOpacity
+                            key={index}
+                            style={[
+                              styles.questionNavigationDot,
+                              index === currentQuestionIndex && styles.questionNavigationDotActive
+                            ]}
+                            onPress={() => handleQuestionIndexChange(index)}
+                          />
+                        ))}
+                      </View>
+                    </View>
+                  )}
+
+
+
+                  {/* Current Question Display */}
+                  {selectedResult.questionResults && selectedResult.questionResults[currentQuestionIndex] && (
+                    <Animated.View 
+                      style={[
+                        styles.currentQuestionCard,
+                        {
+                          opacity: questionFadeAnim,
+                          transform: [{
+                            translateX: slideAnim.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: [0, 20],
+                            }),
+                          }],
+                        }
+                      ]}
+                      {...questionPanResponder.panHandlers}
+                    >
+                      <ScrollView 
+                        style={styles.questionCardScrollView}
+                        contentContainerStyle={styles.questionCardScrollContent}
+                        showsVerticalScrollIndicator={true}
+                        nestedScrollEnabled={true}
+                        keyboardShouldPersistTaps="handled"
+                        scrollEventThrottle={16}
+                      >
+                      {/* Question Header */}
+                      <View style={styles.questionCardHeader}>
+                        <View style={styles.questionHeaderTopRow}>
+                          <View style={styles.questionNumberBadge}>
+                            <Text style={styles.questionNumberText}>{currentQuestionIndex + 1}</Text>
+                          </View>
+                          <View style={styles.questionTypeBadge}>
+                            <Text style={styles.questionTypeText}>
+                              {selectedResult.questionResults[currentQuestionIndex].originalQuestion?.type || 'Question'}
+                            </Text>
+                          </View>
+                          <View style={styles.questionDifficultyBadge}>
+                            <MaterialCommunityIcons name="diamond" size={12} color="#8b5cf6" />
+                            <Text style={styles.questionDifficultyText}>2.2</Text>
+                          </View>
+                          <View style={styles.questionTimeBadge}>
+                            <MaterialCommunityIcons name="clock" size={12} color="#8b5cf6" />
+                            <Text style={styles.questionTimeText}>20s</Text>
+                          </View>
+                        </View>
+                        <View style={styles.questionStatusContainer}>
+                          <MaterialIcons 
+                            name={selectedResult.questionResults[currentQuestionIndex].isCorrect ? "check-circle" : "close"} 
+                            size={20} 
+                            color={selectedResult.questionResults[currentQuestionIndex].isCorrect ? "#10b981" : "#ef4444"} 
+                          />
+                          <Text style={[
+                            styles.questionStatusText,
+                            { color: selectedResult.questionResults[currentQuestionIndex].isCorrect ? "#10b981" : "#ef4444" }
+                          ]}>
+                            {selectedResult.questionResults[currentQuestionIndex].isCorrect ? "Correct" : "Incorrect"}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Question Stats */}
+                      <View style={styles.questionStatsRow}>
+                        <View style={styles.questionStatItem}>
+                          <MaterialIcons name="schedule" size={16} color="#64748b" />
+                          <Text style={styles.questionStatText}>
+                            {selectedResult.questionResults[currentQuestionIndex].attempts || 1} attempts
+                          </Text>
+                        </View>
+                        <View style={styles.questionStatItem}>
+                          <MaterialIcons name="timer" size={16} color="#64748b" />
+                          <Text style={styles.questionStatText}>
+                            {Math.round((selectedResult.questionResults[currentQuestionIndex].timeSpent || 0) / 1000)}s
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Question Instruction */}
+                      <Text style={styles.questionInstructionText}>
+                        {selectedResult.questionResults[currentQuestionIndex].questionText || 
+                         selectedResult.questionResults[currentQuestionIndex].originalQuestion?.question || 
+                         "Question not available"}
+                      </Text>
+
+                      {/* Question Prompt */}
+                      <Text style={styles.questionPromptText}>
+                        {selectedResult.questionResults[currentQuestionIndex].questionText || 
+                         selectedResult.questionResults[currentQuestionIndex].originalQuestion?.question || 
+                         "Question not available"}
+                      </Text>
+
+                      {/* Question Image if available */}
+                      {selectedResult.questionResults[currentQuestionIndex].questionImage && (
+                        <View style={styles.questionImageContainer}>
+                          <Image 
+                            source={{ uri: selectedResult.questionResults[currentQuestionIndex].questionImage }} 
+                            style={styles.questionImage}
+                            resizeMode="contain"
+                          />
+                        </View>
+                      )}
+
+                      {/* Enhanced Attempt History */}
+                      <View style={styles.attemptHistoryContainer}>
+                        <Text style={styles.attemptHistoryTitle}>Attempt History:</Text>
+                        {selectedResult.questionResults[currentQuestionIndex].attemptHistory && 
+                         Array.isArray(selectedResult.questionResults[currentQuestionIndex].attemptHistory) ? 
+                          selectedResult.questionResults[currentQuestionIndex].attemptHistory.map((attempt: any, attemptIndex: number) => (
+                            <View key={attemptIndex} style={styles.enhancedAttemptHistoryItem}>
+                            <View style={styles.attemptHeader}>
+                              <View style={styles.attemptStatusContainer}>
+                                <MaterialIcons 
+                                  name={attempt.isCorrect ? "check-circle" : "close"} 
+                                  size={18} 
+                                  color={attempt.isCorrect ? "#10b981" : "#ef4444"} 
+                                />
+                                <Text style={[
+                                  styles.attemptNumber,
+                                  { color: attempt.isCorrect ? "#10b981" : "#ef4444" }
+                                ]}>
+                                  Attempt {attemptIndex + 1}
+                                </Text>
+                                {attempt.attemptType && (
+                                  <View style={[
+                                    styles.attemptTypeBadge,
+                                    { backgroundColor: attempt.attemptType === 'final' ? '#dcfce7' : '#fef3c7' }
+                                  ]}>
+                                    <Text style={[
+                                      styles.attemptTypeText,
+                                      { color: attempt.attemptType === 'final' ? '#10b981' : '#f59e0b' }
+                                    ]}>
+                                      {attempt.attemptType}
+                                    </Text>
+                                  </View>
+                                )}
+                              </View>
+                              <View style={styles.attemptTimeContainer}>
+                                <MaterialIcons name="schedule" size={14} color="#64748b" />
+                                <Text style={styles.attemptTimeText}>
+                                  {Math.round((attempt.timeSpent || 0) / 1000)}s
+                                </Text>
+                              </View>
+                            </View>
+                            
+                            <View style={styles.attemptDetails}>
+                              <View style={styles.answerLabelContainer}>
+                                <MaterialIcons name="quiz" size={14} color="#3b82f6" />
+                                <Text style={styles.answerLabel}>Student Answer:</Text>
+                              </View>
+                              <Text style={styles.attemptAnswerText}>
+                                {(() => {
+                                  const question = selectedResult.questionResults[currentQuestionIndex];
+                                  
+                                  // Try the correct field name from AttemptHistory interface
+                                  const answerData = attempt.selectedAnswer || attempt.answer || attempt.answerValue || attempt.studentAnswer || attempt.finalAnswer;
+                                  
+                                  if (answerData) {
+                                    const serializedAnswer = serializeReorderAnswerPattern(question, answerData);
+                                    return serializedAnswer;
+                                  }
+                                  
+                                  // If no answer data, check if this is a timeout or skipped attempt
+                                  if (attempt.attemptType === 'final' && !answerData) {
+                                    return 'Attempt timed out or skipped';
+                                  }
+                                  
+                                  // Check for other possible answer fields
+                                  if (attempt.userAnswer) {
+                                    const serializedUserAnswer = serializeReorderAnswerPattern(question, attempt.userAnswer);
+                                    return serializedUserAnswer;
+                                  }
+                                  
+                                  if (attempt.response) {
+                                    const serializedResponse = serializeReorderAnswerPattern(question, attempt.response);
+                                    return serializedResponse;
+                                  }
+                                  
+                                  return attempt.description || 'No answer provided';
+                                })()}
+                              </Text>
+                              
+                              {attempt.confidence && (
+                                <View style={styles.confidenceContainer}>
+                                  <MaterialIcons name="psychology" size={14} color="#64748b" />
+                                  <Text style={styles.confidenceText}>
+                                    Confidence: {attempt.confidence}%
+                                  </Text>
+                                </View>
+                              )}
+                              
+                              {attempt.questionPhase && (
+                                <View style={styles.phaseContainer}>
+                                  <MaterialIcons name="timeline" size={14} color="#64748b" />
+                                  <Text style={styles.phaseText}>
+                                    Phase: {attempt.questionPhase}
+                                  </Text>
+                                </View>
+                              )}
+                              
+                              {attempt.timestamp && (
+                                <View style={styles.timestampContainer}>
+                                  <MaterialIcons name="access-time" size={14} color="#64748b" />
+                                  <Text style={styles.timestampText}>
+                                    {new Date(attempt.timestamp).toLocaleTimeString()}
+                                  </Text>
+                                </View>
+                              )}
+                            </View>
+                          </View>
+                        )) || (
+                          <View style={styles.enhancedAttemptHistoryItem}>
+                            <View style={styles.attemptHeader}>
+                              <View style={styles.attemptStatusContainer}>
+                                <MaterialIcons 
+                                  name={selectedResult.questionResults[currentQuestionIndex].isCorrect ? "check-circle" : "close"} 
+                                  size={18} 
+                                  color={selectedResult.questionResults[currentQuestionIndex].isCorrect ? "#10b981" : "#ef4444"} 
+                                />
+                                <Text style={[
+                                  styles.attemptNumber,
+                                  { color: selectedResult.questionResults[currentQuestionIndex].isCorrect ? "#10b981" : "#ef4444" }
+                                ]}>
+                                  Final Result
+                                </Text>
+                              </View>
+                              <View style={styles.attemptTimeContainer}>
+                                <MaterialIcons name="schedule" size={14} color="#64748b" />
+                                <Text style={styles.attemptTimeText}>
+                                  {Math.round((selectedResult.questionResults[currentQuestionIndex].timeSpent || 0) / 1000)}s
+                                </Text>
+                              </View>
+                            </View>
+                            
+                            <View style={styles.attemptDetails}>
+                              <View style={styles.answerLabelContainer}>
+                                <MaterialIcons name="check-circle" size={14} color="#10b981" />
+                                <Text style={styles.answerLabel}>Final Answer:</Text>
+                              </View>
+                              <Text style={styles.attemptAnswerText}>
+                                {(() => {
+                                  const question = selectedResult.questionResults[currentQuestionIndex];
+                                  const questionResult = selectedResult.questionResults[currentQuestionIndex];
+                                  
+                                  // Try the correct field name from QuestionResult interface
+                                  const finalAnswer = questionResult.studentAnswer || 
+                                                    questionResult.finalAnswer || 
+                                                    questionResult.answer || 
+                                                    questionResult.answerValue ||
+                                                    questionResult.userAnswer ||
+                                                    questionResult.response;
+                                  
+                                  if (finalAnswer) {
+                                    const serializedAnswer = serializeReorderAnswerPattern(question, finalAnswer);
+                                    return serializedAnswer;
+                                  }
+                                  
+                                  // If no final answer, check if the question was answered correctly
+                                  if (questionResult.isCorrect) {
+                                    return 'Question answered correctly (answer data not available)';
+                                  }
+                                  
+                                  return 'No final answer recorded';
+                                })()}
+                              </Text>
+                              
+                              <View style={styles.attemptStatsContainer}>
+                                <View style={styles.attemptStatItem}>
+                                  <MaterialIcons name="quiz" size={14} color="#64748b" />
+                                  <Text style={styles.attemptStatText}>
+                                    Attempts: {selectedResult.questionResults[currentQuestionIndex].attempts || 1}
+                                  </Text>
+                                </View>
+                                
+                                <View style={styles.attemptStatItem}>
+                                  <MaterialIcons name="timer" size={14} color="#64748b" />
+                                  <Text style={styles.attemptStatText}>
+                                    Total Time: {Math.round((selectedResult.questionResults[currentQuestionIndex].timeSpent || 0) / 1000)}s
+                                  </Text>
+                                </View>
+                              </View>
+                            </View>
+                          </View>
+                        ) : (
+                          <View style={styles.enhancedAttemptHistoryItem}>
+                            <Text style={styles.attemptAnswerText}>No attempt history available</Text>
+                          </View>
+                        )}
+                      </View>
+
+                      {/* Options if available */}
+                      {selectedResult.questionResults[currentQuestionIndex].options && 
+                       selectedResult.questionResults[currentQuestionIndex].options.length > 0 && (
+                        <View style={styles.optionsContainer}>
+                          <Text style={styles.optionsTitle}>Options:</Text>
+                          {selectedResult.questionResults[currentQuestionIndex].options.map((option: any, optionIndex: number) => (
+                            <View key={optionIndex} style={styles.optionItem}>
+                              <Text style={styles.optionText}>
+                                {optionIndex + 1}. {option.text || option}
+                              </Text>
+                              {option.isCorrect && (
+                                <MaterialIcons name="check" size={16} color="#10b981" />
+                              )}
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                      
+                      </ScrollView>
+                    </Animated.View>
+                  )}
+
+                  {/* Arrow Navigation Buttons */}
+                  {selectedResult.questionResults && selectedResult.questionResults.length > 1 && (
+                    <View style={styles.arrowNavigationButtons}>
+                      <TouchableOpacity
+                        style={[
+                          styles.arrowButton,
+                          currentQuestionIndex === 0 && styles.arrowButtonDisabled
+                        ]}
+                        onPress={handlePreviousQuestion}
+                        disabled={currentQuestionIndex === 0}
+                      >
+                        <MaterialIcons name="chevron-left" size={24} color={currentQuestionIndex === 0 ? "#9ca3af" : "#3b82f6"} />
+                      </TouchableOpacity>
+                      
+                      <TouchableOpacity
+                        style={[
+                          styles.arrowButton,
+                          currentQuestionIndex === selectedResult.questionResults.length - 1 && styles.arrowButtonDisabled
+                        ]}
+                        onPress={handleNextQuestion}
+                        disabled={currentQuestionIndex === selectedResult.questionResults.length - 1}
+                      >
+                        <MaterialIcons name="chevron-right" size={24} color={currentQuestionIndex === selectedResult.questionResults.length - 1 ? "#9ca3af" : "#3b82f6"} />
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                </View>
+
+
+                {/* Existing Analysis Sections - Keep all existing functionality */}
                 {/* Class Comparison */}
                 {classAverages && (
                   <View style={styles.comparisonCard}>
@@ -4177,30 +4863,6 @@ Focus on:
                       </View>
                     </View>
 
-                    {/* Simple Performance Summary */}
-                    <View style={styles.analysisCard}>
-                      <Text style={styles.cardTitle}>Performance Summary</Text>
-                      <View style={styles.simpleSummary}>
-                        <View style={styles.simpleSummaryItem}>
-                          <MaterialIcons name="check-circle" size={20} color="#10b981" />
-                          <Text style={styles.summaryText}>
-                            {selectedResult.resultsSummary?.totalCorrect || 0} out of {selectedResult.resultsSummary?.totalItems || 0} questions correct
-                          </Text>
-                        </View>
-                        <View style={styles.simpleSummaryItem}>
-                          <MaterialIcons name="schedule" size={20} color="#3b82f6" />
-                          <Text style={styles.summaryText}>
-                            Completed in {Math.round((selectedResult.resultsSummary?.totalTimeSpentSeconds || 0))} seconds
-                          </Text>
-                        </View>
-                        <View style={styles.simpleSummaryItem}>
-                          <MaterialIcons name="repeat" size={20} color="#f59e0b" />
-                          <Text style={styles.summaryText}>
-                            Average {Math.round((selectedResult.resultsSummary?.meanAttemptsPerItem || 0) * 10) / 10} attempts per question
-                          </Text>
-                        </View>
-                      </View>
-                    </View>
 
                     {/* Strengths */}
                     <View style={styles.analysisCard}>
@@ -4284,7 +4946,7 @@ Focus on:
                   </>
                 )}
 
-              </ScrollView>
+              </View>
             )}
           </View>
         )}
@@ -4784,6 +5446,7 @@ Focus on:
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
 
       {/* Custom Alert */}
       <CustomAlert
@@ -6386,18 +7049,6 @@ const styles = StyleSheet.create({
   historyScrollView: {
     flex: 1,
   },
-  historyCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 4,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-  },
   historyItem: {
     backgroundColor: '#ffffff',
     borderRadius: 12,
@@ -7010,21 +7661,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
-  },
-  questionNumber: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1e293b',
-  },
-  questionStatus: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
-  },
-  questionStatusText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#ffffff',
   },
   questionDetailStats: {
     flexDirection: 'row',
@@ -8596,6 +9232,972 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     color: '#3b82f6',
+  },
+
+  // New Exercise Result UI Styles
+  exerciseResultHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  exerciseResultTitle: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#374151',
+  },
+  exerciseResultHeaderContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  itemAnalysisTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#374151',
+    marginBottom: 16,
+    marginTop: 8,
+  },
+  exerciseResultCloseButton: {
+    padding: 8,
+  },
+  exerciseIdBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+    marginBottom: 16,
+    gap: 4,
+  },
+  exerciseIdText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3b82f6',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  studentInfoCard: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  studentInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    flexWrap: 'wrap',
+  },
+  studentInfoLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginRight: 8,
+  },
+  studentInfoValue: {
+    fontSize: 14,
+    color: '#374151',
+    flex: 1,
+  },
+  onTimeBadge: {
+    backgroundColor: '#10b981',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  onTimeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  studentStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  statusGradientBar: {
+    width: 40,
+    height: 4,
+    backgroundColor: '#ec4899',
+    borderRadius: 2,
+    marginRight: 8,
+  },
+  studentStatusText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ec4899',
+  },
+  performanceOverviewCard: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  performanceOverviewHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  performanceOverviewTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#374151',
+  },
+  performanceRatingBadge: {
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  performanceRatingText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  performanceScoreContainer: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  performanceScoreNumber: {
+    fontSize: 48,
+    fontWeight: '700',
+    color: '#1e40af',
+    marginBottom: 4,
+  },
+  performanceScoreLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#374151',
+    letterSpacing: 1,
+  },
+  performanceMetricsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  performanceMetricItem: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 12,
+    alignItems: 'center',
+    width: '30%',
+    marginBottom: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  performanceMetricValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#374151',
+    marginBottom: 4,
+  },
+  performanceMetricLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#374151',
+    textAlign: 'center',
+  },
+  summaryStatsContainer: {
+    marginTop: 8,
+  },
+  summaryStatRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  summaryStatLabel: {
+    fontSize: 12,
+    color: '#374151',
+  },
+  summaryStatValue: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  historyCard: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  historyCardTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#374151',
+    marginBottom: 16,
+  },
+  questionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f9ff',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  questionNumber: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#374151',
+    marginRight: 8,
+  },
+  questionType: {
+    fontSize: 14,
+    color: '#374151',
+    marginRight: 8,
+  },
+  questionAttempts: {
+    fontSize: 12,
+    color: '#374151',
+    marginLeft: 4,
+  },
+  questionTime: {
+    fontSize: 12,
+    color: '#374151',
+    marginLeft: 4,
+  },
+  questionStatus: {
+    fontSize: 12,
+    color: '#10b981',
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  questionPrompt: {
+    fontSize: 14,
+    color: '#374151',
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  attemptDetailsContainer: {
+    marginBottom: 16,
+  },
+  attemptItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  attemptText: {
+    fontSize: 12,
+    color: '#374151',
+    marginLeft: 8,
+  },
+
+  // Detailed History Modal Styles
+  detailedHistoryModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+    zIndex: 9999,
+  },
+  detailedHistoryModal: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '90%',
+    minHeight: '60%',
+    zIndex: 10000,
+  },
+  detailedHistoryModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e7eb',
+  },
+  detailedHistoryModalTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  detailedHistoryModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  detailedHistoryCloseButton: {
+    padding: 8,
+  },
+  detailedHistoryModalContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  detailedQuestionCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    marginVertical: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  detailedQuestionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  detailedQuestionNumber: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginRight: 8,
+  },
+  detailedQuestionType: {
+    fontSize: 12,
+    color: '#64748b',
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  detailedQuestionAttempts: {
+    fontSize: 12,
+    color: '#374151',
+    marginLeft: 4,
+  },
+  detailedQuestionTime: {
+    fontSize: 12,
+    color: '#374151',
+    marginLeft: 4,
+  },
+  detailedQuestionStatus: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  detailedQuestionPrompt: {
+    fontSize: 14,
+    color: '#374151',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  detailedQuestionImageContainer: {
+    marginBottom: 12,
+    alignItems: 'center',
+  },
+  detailedQuestionImage: {
+    width: 200,
+    height: 150,
+    borderRadius: 8,
+  },
+  detailedAttemptHistory: {
+    marginBottom: 12,
+  },
+  detailedAttemptHistoryTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 8,
+  },
+  detailedAttemptItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingLeft: 8,
+  },
+  detailedAttemptText: {
+    fontSize: 12,
+    color: '#374151',
+    flex: 1,
+    marginLeft: 8,
+  },
+  detailedAttemptTime: {
+    fontSize: 10,
+    color: '#64748b',
+    marginLeft: 8,
+  },
+  detailedOptionsContainer: {
+    marginTop: 8,
+  },
+  detailedOptionsTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 6,
+  },
+  detailedOptionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+    paddingLeft: 8,
+  },
+  detailedOptionText: {
+    fontSize: 12,
+    color: '#374151',
+    flex: 1,
+  },
+  noHistoryContainer: {
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  noHistoryText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#64748b',
+    marginTop: 12,
+  },
+  noHistorySubtext: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  detailedHistoryModalFooter: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  detailedHistoryCloseFooterButton: {
+    backgroundColor: '#3b82f6',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  detailedHistoryCloseFooterButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  // Expanded History Styles
+  expandedHistoryCard: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  expandedHistoryHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  expandedHistoryTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  expandedHistoryCloseButton: {
+    padding: 8,
+  },
+  expandedHistoryContent: {
+    maxHeight: 400,
+  },
+  expandedQuestionCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  expandedQuestionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  expandedQuestionNumber: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginRight: 6,
+  },
+  expandedQuestionType: {
+    fontSize: 11,
+    color: '#64748b',
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  expandedQuestionAttempts: {
+    fontSize: 11,
+    color: '#374151',
+    marginLeft: 2,
+  },
+  expandedQuestionTime: {
+    fontSize: 11,
+    color: '#374151',
+    marginLeft: 2,
+  },
+  expandedQuestionStatus: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginLeft: 2,
+  },
+  expandedQuestionPrompt: {
+    fontSize: 13,
+    color: '#374151',
+    lineHeight: 18,
+    marginBottom: 8,
+  },
+  expandedQuestionImageContainer: {
+    marginBottom: 8,
+    alignItems: 'center',
+  },
+  expandedQuestionImage: {
+    width: 150,
+    height: 100,
+    borderRadius: 6,
+  },
+  expandedAttemptHistory: {
+    marginBottom: 8,
+  },
+  expandedAttemptHistoryTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 6,
+  },
+  expandedAttemptItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+    paddingLeft: 6,
+  },
+  expandedAttemptText: {
+    fontSize: 11,
+    color: '#374151',
+    flex: 1,
+    marginLeft: 6,
+  },
+  expandedAttemptTime: {
+    fontSize: 10,
+    color: '#64748b',
+    marginLeft: 6,
+  },
+  expandedOptionsContainer: {
+    marginTop: 6,
+  },
+  expandedOptionsTitle: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  expandedOptionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 2,
+    paddingLeft: 6,
+  },
+  expandedOptionText: {
+    fontSize: 11,
+    color: '#374151',
+    flex: 1,
+  },
+  expandedNoHistoryContainer: {
+    alignItems: 'center',
+    paddingVertical: 20,
+  },
+  expandedNoHistoryText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748b',
+    marginTop: 8,
+  },
+  expandedNoHistorySubtext: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+
+  // Enhanced History Navigation Styles
+  questionNavigationHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 4,
+  },
+  questionNavigationTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  questionNavigationDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  questionNavigationDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#d1d5db',
+    marginHorizontal: 4,
+  },
+  questionNavigationDotActive: {
+    backgroundColor: '#3b82f6',
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  currentQuestionCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    height: 400, // Fixed height for the white card
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  questionCardScrollView: {
+    flex: 1,
+    maxHeight: 350, // Ensure scrollable area within the 400px card
+    minHeight: 200, // Ensure minimum scrollable area
+  },
+  questionCardScrollContent: {
+    paddingBottom: 20,
+    paddingTop: 5,
+    flexGrow: 1,
+    minHeight: 350, // Force content to be scrollable
+  },
+  questionCardHeader: {
+    marginBottom: 16,
+  },
+  questionHeaderTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+  },
+  questionNumberBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    minWidth: 24,
+    alignItems: 'center',
+  },
+  questionNumberText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  questionTypeBadge: {
+    backgroundColor: '#e0e7ff',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  questionTypeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+    textTransform: 'lowercase',
+  },
+  questionDifficultyBadge: {
+    backgroundColor: '#e0e7ff',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  questionDifficultyText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#8b5cf6',
+  },
+  questionTimeBadge: {
+    backgroundColor: '#e0e7ff',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  questionTimeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#8b5cf6',
+  },
+  questionStatusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+  },
+  questionStatusText: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 6,
+  },
+  questionInstructionText: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '600',
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  questionStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  questionStatItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  questionStatText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginLeft: 4,
+  },
+  questionPromptText: {
+    fontSize: 14,
+    color: '#374151',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  questionImageContainer: {
+    alignItems: 'center',
+    marginBottom: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 8,
+  },
+  questionImage: {
+    width: 200,
+    height: 150,
+    borderRadius: 6,
+  },
+  attemptHistoryContainer: {
+    marginBottom: 12,
+    marginTop: 8,
+  },
+  attemptHistoryTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  attemptHistoryItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingVertical: 4,
+  },
+  attemptHistoryText: {
+    fontSize: 13,
+    color: '#4b5563',
+    marginLeft: 8,
+    flex: 1,
+  },
+  attemptHistoryTime: {
+    fontSize: 11,
+    color: '#9ca3af',
+    marginLeft: 8,
+  },
+  enhancedAttemptHistoryItem: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  attemptHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  attemptStatusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  attemptNumber: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  attemptTypeBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  attemptTypeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  },
+  attemptTimeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  attemptTimeText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginLeft: 4,
+    fontWeight: '500',
+  },
+  attemptDetails: {
+    marginTop: 4,
+  },
+  attemptAnswerText: {
+    fontSize: 13,
+    color: '#374151',
+    marginBottom: 8,
+    lineHeight: 18,
+  },
+  answerLabelContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  answerLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3b82f6',
+    marginLeft: 4,
+  },
+  confidenceContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  confidenceText: {
+    fontSize: 11,
+    color: '#64748b',
+    marginLeft: 4,
+  },
+  phaseContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  phaseText: {
+    fontSize: 11,
+    color: '#64748b',
+    marginLeft: 4,
+  },
+  timestampContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  timestampText: {
+    fontSize: 11,
+    color: '#64748b',
+    marginLeft: 4,
+  },
+  attemptStatsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  attemptStatItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  attemptStatText: {
+    fontSize: 11,
+    color: '#64748b',
+    marginLeft: 4,
+  },
+  optionsContainer: {
+    marginTop: 8,
+  },
+  optionsTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  optionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+    paddingVertical: 2,
+  },
+  optionText: {
+    fontSize: 13,
+    color: '#4b5563',
+    flex: 1,
+  },
+  arrowNavigationButtons: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: 16,
+    paddingHorizontal: 20,
+    gap: 20, // Add gap between arrows instead of space-between
+  },
+  arrowButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  arrowButtonDisabled: {
+    backgroundColor: '#f1f5f9',
+    borderColor: '#e2e8f0',
+    shadowOpacity: 0.05,
+  },
+  swipeHintContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  swipeHintText: {
+    fontSize: 13,
+    color: '#3b82f6',
+    marginLeft: 8,
+    fontWeight: '500',
+  },
+  transitionIndicator: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
   },
 
 });

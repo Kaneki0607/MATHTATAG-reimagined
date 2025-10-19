@@ -11,6 +11,7 @@ export interface Exercise {
   teacherName: string;
   questionCount: number;
   timesUsed: number;
+  timesCopied?: number; // Track how many times this exercise has been copied
   isPublic: boolean;
   createdAt: string;
   questions: any[];
@@ -353,8 +354,24 @@ export const useExercises = (currentUserId: string | null) => {
         });
       }
 
-      // Reload my exercises
-      await loadMyExercises();
+      // Increment the timesCopied counter for the original exercise
+      try {
+        const { data: originalExerciseData } = await readData(`/exercises/${exercise.id}`);
+        if (originalExerciseData) {
+          const currentTimesCopied = originalExerciseData.timesCopied || 0;
+          await writeData(`/exercises/${exercise.id}/timesCopied`, currentTimesCopied + 1);
+          console.log(`[CopyExercise] Incremented timesCopied for exercise ${exercise.id}: ${currentTimesCopied} -> ${currentTimesCopied + 1}`);
+        }
+      } catch (incrementErr) {
+        console.error('[CopyExercise] Failed to increment timesCopied:', incrementErr);
+        // Don't fail the entire operation if we can't increment the counter
+      }
+
+      // Reload all exercises to reflect both the new copy and updated counters
+      await Promise.all([
+        loadMyExercises(),
+        loadPublicExercises()
+      ]);
       return { success: true, id: result.exerciseId };
     } catch (err) {
       console.error('[CopyExercise] Failed to copy exercise:', err);
@@ -409,22 +426,47 @@ export const useExercises = (currentUserId: string | null) => {
 
       // Increment the timesUsed counter for the exercise
       try {
-        const { data: exerciseData } = await readData(`/exercises/${exerciseId}`);
-        if (exerciseData) {
-          const currentTimesUsed = exerciseData.timesUsed || 0;
-          await writeData(`/exercises/${exerciseId}/timesUsed`, currentTimesUsed + classIds.length);
-          console.log(`[AssignExercise] Incremented timesUsed for exercise ${exerciseId}: ${currentTimesUsed} -> ${currentTimesUsed + classIds.length}`);
+        console.log(`[AssignExercise] Reading exercise data for: ${exerciseId}`);
+        const { data: exerciseData, error: readError } = await readData(`/exercises/${exerciseId}`);
+        
+        if (readError) {
+          console.error(`[AssignExercise] Error reading exercise data:`, readError);
+          throw new Error(`Failed to read exercise: ${readError}`);
         }
+        
+        if (!exerciseData) {
+          console.error(`[AssignExercise] Exercise data not found for: ${exerciseId}`);
+          throw new Error(`Exercise not found: ${exerciseId}`);
+        }
+        
+        const currentTimesUsed = exerciseData.timesUsed || 0;
+        const newTimesUsed = currentTimesUsed + classIds.length;
+        
+        console.log(`[AssignExercise] Updating timesUsed for exercise ${exerciseId}: ${currentTimesUsed} -> ${newTimesUsed}`);
+        const { success: writeSuccess, error: writeError } = await writeData(`/exercises/${exerciseId}/timesUsed`, newTimesUsed);
+        
+        if (!writeSuccess || writeError) {
+          console.error(`[AssignExercise] Error writing timesUsed:`, writeError);
+          throw new Error(`Failed to update timesUsed: ${writeError}`);
+        }
+        
+        console.log(`[AssignExercise] Successfully incremented timesUsed for exercise ${exerciseId}`);
       } catch (incrementErr) {
         console.error('[AssignExercise] Failed to increment timesUsed:', incrementErr);
         // Don't fail the entire operation if we can't increment the counter
+        // But log the error for debugging
+        if (incrementErr instanceof Error) {
+          console.error('[AssignExercise] Error details:', incrementErr.message, incrementErr.stack);
+        }
       }
 
       // Reload both assigned exercises and all exercises to reflect the updated counter
+      console.log('[AssignExercise] Reloading exercises data...');
       await Promise.all([
         loadAssignedExercises(),
         loadAllExercises()
       ]);
+      console.log('[AssignExercise] Exercises data reloaded successfully');
       return { success: true };
     } catch (err) {
       setError('Failed to assign exercise');

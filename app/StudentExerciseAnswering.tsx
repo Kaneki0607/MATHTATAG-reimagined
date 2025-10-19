@@ -1095,6 +1095,7 @@ interface Question {
   };
   // Optional saved TTS audio URL for this question
   ttsAudioUrl?: string;
+  recordedTtsUrl?: string; // Teacher-recorded audio (preferred over ttsAudioUrl)
 }
 interface Exercise {
   id: string;
@@ -1214,6 +1215,7 @@ interface ExerciseResultData {
   exerciseSession: ExerciseSession;
   resultsSummary: ResultsSummary;
   questionResults: QuestionResult[];
+  submittedAt: string;
 }
 
 // Resource preloading interfaces
@@ -1937,6 +1939,25 @@ export default function StudentExerciseAnswering() {
     // Note: Resource preloading is now handled comprehensively in loadExercise()
   }, [currentQuestionIndex, exercise]);
 
+  // Helper function to accumulate current question time
+  const accumulateCurrentQuestionTime = () => {
+    if (exercise && currentQuestionIndex >= 0 && currentQuestionIndex < exercise.questions.length) {
+      const currentQid = exercise.questions[currentQuestionIndex].id;
+      const delta = questionElapsedRef.current;
+      
+      if (delta > 0) {
+        // CRITICAL FIX: Accumulate time and reset the timer
+        updateAnswers(prev => prev.map(a => a.questionId === currentQid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+        
+        // Reset the question timer for next attempt/interaction
+        setQuestionStartTime(Date.now());
+        setQuestionElapsed(0);
+        
+        console.log(`[TimeTracking] Accumulated ${delta}ms for question ${currentQid}`);
+      }
+    }
+  };
+
   // Reset question timer when index changes
   useEffect(() => {
     // CRITICAL: Stop TTS when question index changes
@@ -2130,8 +2151,9 @@ export default function StudentExerciseAnswering() {
       }
       
       // Collect TTS audio files for preloading
-      if (question.ttsAudioUrl) {
-        resources.push({ url: question.ttsAudioUrl, type: 'audio', priority, questionId: question.id });
+      const audioUrl = getPreferredAudioUrl(question);
+      if (audioUrl) {
+        resources.push({ url: audioUrl, type: 'audio', priority, questionId: question.id });
         console.log(`[CollectResources] Q${questionIndex + 1}: Added TTS audio resource`);
       }
       
@@ -2383,6 +2405,16 @@ export default function StudentExerciseAnswering() {
     return item.content;
   };
 
+  // Helper to get preferred audio URL (recorded voice > AI TTS)
+  const getPreferredAudioUrl = (question: Question | Omit<Question, 'subQuestions'>): string | null => {
+    // Prefer recorded voice if available
+    if (question.recordedTtsUrl) {
+      return question.recordedTtsUrl;
+    }
+    // Fallback to AI-generated TTS
+    return question.ttsAudioUrl || null;
+  };
+
   // TTS helpers - OPTIMIZED for instant playback with cached players
   const playTTS = async (audioUrl?: string | null) => {
     try {
@@ -2564,15 +2596,16 @@ export default function StudentExerciseAnswering() {
     // Always set the last played question ID regardless of whether TTS exists
     lastAutoPlayedQuestionIdRef.current = q.id;
     
-    if (q.ttsAudioUrl) {
+    const audioUrl = getPreferredAudioUrl(q);
+    if (audioUrl) {
       // OPTIMIZATION: Check if audio is cached - if so, play instantly!
-      const isCached = audioPlayerCacheRef.current.has(q.ttsAudioUrl);
+      const isCached = audioPlayerCacheRef.current.has(audioUrl);
       const delay = isCached ? 200 : 600; // Much shorter delay for cached audio
       
       console.log(`[TTS-AutoPlay] Audio ${isCached ? 'CACHED' : 'NOT cached'} - delay: ${delay}ms`);
       
       setTimeout(() => {
-        playTTS(q.ttsAudioUrl!);
+        playTTS(audioUrl);
       }, delay);
     }
   }, [exercise, currentQuestionIndex, isFocused, loading, isPreloadingResources, exerciseStarted]);
@@ -3675,6 +3708,9 @@ export default function StudentExerciseAnswering() {
     // CRITICAL: Stop TTS immediately when answer is correct
     stopCurrentTTS();
     
+    // CRITICAL FIX: Accumulate time for this final attempt before showing feedback
+    accumulateCurrentQuestionTime();
+    
     // Trigger haptic feedback for correct answer
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     
@@ -3699,6 +3735,10 @@ export default function StudentExerciseAnswering() {
       return;
     }
     wrongFeedbackActiveRef.current = true;
+    
+    // CRITICAL FIX: Accumulate time for this attempt before showing feedback
+    accumulateCurrentQuestionTime();
+    
     // Trigger haptic feedback for wrong answer
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     
@@ -4464,7 +4504,8 @@ export default function StudentExerciseAnswering() {
         // CRITICAL FIX: Use attemptHistory.length as source of truth, not attemptCounts
         // attemptHistory is the actual record of what happened
         let attempts = 0; // Will be set from attemptHistory after it's created
-        let timeSpentSeconds = Math.floor(getTimeMsForQuestion(q) / 1000);
+        // IMPROVED: Use Math.ceil for more accurate time (rounds up to nearest second)
+        let timeSpentSeconds = Math.ceil(getTimeMsForQuestion(q) / 1000);
         const ttsPlayed = helpUsage[q.id]?.ttsCount > 0;
         const ttsPlayCount = helpUsage[q.id]?.ttsCount || 0;
         
@@ -4477,7 +4518,8 @@ export default function StudentExerciseAnswering() {
           hasAttemptLogs: questionAttempts.length > 0,
           attemptCountFromRef: attemptCountsRef.current[q.id],
           attemptCountUsed: attempts,
-          timeSpent: timeSpentSeconds
+          timeSpentMs: getTimeMsForQuestion(q),
+          timeSpentSeconds: timeSpentSeconds
         });
         
         // Get interaction types
@@ -4771,7 +4813,8 @@ export default function StudentExerciseAnswering() {
         deviceInfo: deviceInfoData,
         exerciseSession,
         resultsSummary,
-        questionResults
+        questionResults,
+        submittedAt: completedAt
       };
       
       // Validate data completeness
@@ -5229,7 +5272,7 @@ export default function StudentExerciseAnswering() {
         {typeof question.question === 'string' && question.question.trim().length > 0 && (
           <View style={styles.questionTextContainer}>
             <Text style={styles.questionText}>{question.question}</Text>
-            {renderTTSButton(question.ttsAudioUrl)}
+            {renderTTSButton(getPreferredAudioUrl(question))}
           </View>
         )}
         
@@ -5637,7 +5680,7 @@ export default function StudentExerciseAnswering() {
           
           <View style={styles.questionTextContainer}>
             <Text style={[styles.fillBlankQuestionText, { fontSize: dynamicFontSize }]}>{question.question}</Text>
-          {renderTTSButton(question.ttsAudioUrl)}
+          {renderTTSButton(getPreferredAudioUrl(question))}
           </View>
           <View style={styles.adaptiveBoxesRow}>
             {Array.isArray(question.answer) ? question.answer.map((expected, index) => {
@@ -5742,7 +5785,7 @@ export default function StudentExerciseAnswering() {
           
           <View style={styles.questionTextContainer}>
             <Text style={[styles.fillBlankQuestionText, { fontSize: dynamicFontSize }]}>{question.question}</Text>
-            {renderTTSButton(question.ttsAudioUrl)}
+            {renderTTSButton(getPreferredAudioUrl(question))}
           </View>
           <TextInput
             style={styles.identificationInput}
@@ -5867,7 +5910,7 @@ export default function StudentExerciseAnswering() {
         
         <View style={styles.questionTextContainer}>
           <Text style={styles.questionText}>{question.question}</Text>
-          {renderTTSButton(question.ttsAudioUrl)}
+          {renderTTSButton(getPreferredAudioUrl(question))}
         </View>
         
         {/* Instructions */}
@@ -6233,7 +6276,7 @@ export default function StudentExerciseAnswering() {
         
         <View style={styles.questionTextContainer}>
           <Text style={styles.questionText}>{question.question}</Text>
-          {renderTTSButton(question.ttsAudioUrl)}
+          {renderTTSButton(getPreferredAudioUrl(question))}
         </View>
         <ReorderQuestion
           key={question.id}
@@ -6379,7 +6422,7 @@ export default function StudentExerciseAnswering() {
               {/* Sub-question Text container */}
               <View style={index === 0 ? styles.subQuestionTextContainer : styles.questionTextContainer}>
                 <Text style={styles.questionText}>{subQuestion.question}</Text>
-                {renderTTSButton((subQuestion as any).ttsAudioUrl)}
+                {renderTTSButton(getPreferredAudioUrl(subQuestion))}
               </View>
 
               {subQuestion.type === 'multiple-choice' && (() => {
@@ -7063,7 +7106,8 @@ export default function StudentExerciseAnswering() {
       });
     }
     // TTS readiness is required when present: require cached audio for instant playback
-    const ttsOk = !q.ttsAudioUrl || audioPlayerCacheRef.current.has(q.ttsAudioUrl);
+    const audioUrl = getPreferredAudioUrl(q);
+    const ttsOk = !audioUrl || audioPlayerCacheRef.current.has(audioUrl);
     // Images considered ready if each URL either loaded or already attempted (loadedResources or failedResources)
     const allImagesKnown = urls.every(u => loadedResources.has(u) || failedResources.has(u));
     return allImagesKnown && ttsOk;

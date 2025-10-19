@@ -57,9 +57,7 @@ import { AssignedExercise, useExercises } from '../hooks/useExercises';
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
 
 import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
-import { recalculateResultsSummary, validateAndRepairExerciseResult } from '../lib/result-validation-utils';
 
-import { Colors, Typography } from '../constants/theme';
 import { collectAppMetadata } from '../lib/app-metadata';
 import { createAnnouncement, createClass, createParent, createStudent } from '../lib/entity-helpers';
 import { logError, logErrorWithStack } from '../lib/error-logger';
@@ -2252,6 +2250,133 @@ export default function TeacherDashboard() {
   // Class statistics expansion state
   const [expandedStats, setExpandedStats] = useState<Record<string, boolean>>({});
 
+  // Detailed Statistics Modal state
+  const [showDetailedStatsModal, setShowDetailedStatsModal] = useState(false);
+  const [selectedExerciseForStats, setSelectedExerciseForStats] = useState<{
+    exerciseTitle: string;
+    exerciseId: string;
+    classId: string;
+    exerciseResults: any[];
+  } | null>(null);
+
+  // Helper function to format answers for display based on exercise type
+  const formatAnswerForDisplay = (answer: string, questionType: string): string => {
+    if (!answer || answer === 'No answer') return 'No answer';
+    
+    // Helper function to clean filename
+    const cleanFilename = (filename: string): string => {
+      return filename
+        .replace(/\.(png|jpg|jpeg)$/i, '')
+        .replace(/reorder-/g, '')
+        .replace(/question-/g, '')
+        .replace(/item-/gi, '')
+        .replace(/item/gi, '')
+        .replace(/^[0-9]+-/, '') // Remove leading numbers with dash
+        .replace(/^[0-9]+/, '') // Remove leading numbers
+        .replace(/^[A-Za-z]+-/, '') // Remove leading letters with dash
+        .replace(/^[A-Za-z]+/, '') // Remove leading letters
+        .trim();
+    };
+    
+    // Helper function to make text more readable
+    const makeReadable = (text: string): string => {
+      return text
+        .replace(/_/g, ' ') // Replace underscores with spaces
+        .replace(/-/g, ' ') // Replace dashes with spaces
+        .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+        .trim()
+        .split(' ')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()) // Capitalize first letter
+        .join(' ');
+    };
+    
+    // Handle URL-encoded answers
+    if (answer.includes('%2F') || answer.includes('exercises%2F')) {
+      try {
+        const decodedAnswer = decodeURIComponent(answer);
+        
+        // For re-order questions, show as numbered sequence
+        if (questionType.toLowerCase().includes('re-order')) {
+          const items = decodedAnswer.split(',').map((item: string, index: number) => {
+            const cleanItem = item.trim();
+            const parts = cleanItem.split('/');
+            const filename = parts[parts.length - 1];
+            const cleanNumber = cleanFilename(filename);
+            return cleanNumber;
+          });
+          return items.map((item, index) => `${index + 1}. ${item}`).join(', ');
+        }
+        
+        // For matching questions, show as pairs
+        if (questionType.toLowerCase().includes('matching')) {
+          const items = decodedAnswer.split(',');
+          const pairs = [];
+          for (let i = 0; i < items.length; i += 2) {
+            if (i + 1 < items.length) {
+              const left = makeReadable(cleanFilename(items[i].trim().split('/').pop() || ''));
+              const right = makeReadable(cleanFilename(items[i + 1].trim().split('/').pop() || ''));
+              pairs.push(`${left} → ${right}`);
+            }
+          }
+          return pairs.join(', ');
+        }
+        
+        // For identification questions, show as clean list
+        if (questionType.toLowerCase().includes('identification')) {
+          const items = decodedAnswer.split(',');
+          return items.map((item: string) => {
+            const filename = makeReadable(cleanFilename(item.trim().split('/').pop() || ''));
+            return filename;
+          }).filter(item => item.length > 0).join(', ');
+        }
+        
+        // For multiple choice questions, show as selected options
+        if (questionType.toLowerCase().includes('multiple-choice')) {
+          const items = decodedAnswer.split(',');
+          return items.map((item: string, index: number) => {
+            const filename = makeReadable(cleanFilename(item.trim().split('/').pop() || ''));
+            return `Option ${String.fromCharCode(65 + index)}: ${filename}`;
+          }).join(', ');
+        }
+        
+        // Default: extract and clean filenames
+        const items = decodedAnswer.split(',');
+        return items.map((item: string) => {
+          const filename = makeReadable(cleanFilename(item.trim().split('/').pop() || ''));
+          return filename;
+        }).filter(item => item.length > 0).join(', ');
+      } catch (error) {
+        console.error('Error decoding answer:', error);
+        return answer;
+      }
+    }
+    
+    // Handle JSON arrays (for re-order questions)
+    if (answer.startsWith('[') && answer.endsWith(']')) {
+      try {
+        const parsedAnswer = JSON.parse(answer);
+        if (Array.isArray(parsedAnswer)) {
+          if (questionType.toLowerCase().includes('re-order')) {
+            return parsedAnswer.map((item: any, index: number) => `${index + 1}. ${item}`).join(', ');
+          }
+          return parsedAnswer.join(', ');
+        }
+      } catch (error) {
+        console.error('Error parsing JSON answer:', error);
+      }
+    }
+    
+    // Handle comma-separated values
+    if (answer.includes(',')) {
+      const items = answer.split(',').map((item: string, index: number) => {
+        const cleanItem = makeReadable(item.trim());
+        return `${index + 1}. ${cleanItem}`;
+      });
+      return items.join(', ');
+    }
+    
+    return makeReadable(answer);
+  };
 
   // Technical Report Modal state
 
@@ -3432,32 +3557,27 @@ export default function TeacherDashboard() {
 
             
 
+            // More accurate class analytics calculation
             classResults.forEach((result: any) => {
-
               if (result.questionResults) {
-
                 result.questionResults.forEach((q: any) => {
-
-                  totalAttempts += q.attempts || 1;
-
-                  totalTime += q.timeSpent || 0;
-
+                  // Use actual attempts if available, otherwise default to 1
+                  const attempts = q.attempts || 1;
+                  totalAttempts += attempts;
+                  
+                  // Use actual time spent if available
+                  const timeSpent = q.timeSpent || 0;
+                  totalTime += timeSpent;
+                  
                   totalQuestions++;
-
                 });
-
               }
-
             });
 
-            
-
             if (totalQuestions > 0) {
-
-              classAnalytics.averageAttempts = totalAttempts / totalQuestions;
-
-              classAnalytics.averageTime = totalTime / classResults.length; // Average time per exercise
-
+              // More accurate average calculations
+              classAnalytics.averageAttempts = Math.round((totalAttempts / totalQuestions) * 10) / 10;
+              classAnalytics.averageTime = Math.round(totalTime / classResults.length); // Average time per exercise
             }
 
           }
@@ -4932,10 +5052,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         const totalQuestions = results[0]?.questionResults?.length || 0;
 
+        // More accurate total correct calculation
         const totalCorrect = results.reduce((sum, result) => {
-
-          return sum + (result.resultsSummary?.totalCorrect || 0);
-
+          if (result.resultsSummary?.totalCorrect !== undefined) {
+            return sum + result.resultsSummary.totalCorrect;
+          } else {
+            // Count actual correct answers from question results
+            const questionResults = result.questionResults || [];
+            const correctCount = questionResults.filter((q: any) => q.isCorrect === true).length;
+            return sum + correctCount;
+          }
         }, 0);
 
         const totalPossible = totalStudents * totalQuestions;
@@ -4957,13 +5083,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         }, 0) / totalStudents;
 
         const avgAttemptsPerItem = results.reduce((sum, result) => {
-
           const questionResults = result.questionResults || [];
-
-          const totalAttempts = questionResults.reduce((attemptSum: number, q: any) => attemptSum + (q.attempts || 1), 0);
-
+          const totalAttempts = questionResults.reduce((attemptSum: number, q: any) => {
+            // Use actual attempts if available, otherwise default to 1
+            const attempts = q.attempts || 1;
+            return attemptSum + attempts;
+          }, 0);
           return sum + (totalAttempts / Math.max(questionResults.length, 1));
-
         }, 0) / totalStudents;
 
         // CENTRAL TENDENCY CALCULATIONS
@@ -4971,7 +5097,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         const times = results.map(result => Math.round((result.totalTimeSpent || 0) / 1000));
         const attempts = results.map(result => {
           const questionResults = result.questionResults || [];
-          return questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+          return questionResults.reduce((sum: number, q: any) => {
+            // Use actual attempts if available, otherwise default to 1
+            const attempts = q.attempts || 1;
+            return sum + attempts;
+          }, 0);
         });
 
         // Sort arrays for median calculation
@@ -5230,11 +5360,65 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         questionResults.forEach((question: any, questionIndex: number) => {
 
-          const questionNumber = questionIndex + 1;
+          // More accurate question number calculation
+          const questionNumber = question.questionNumber || questionIndex + 1;
 
           const correctAnswer = question.correctAnswer || 'N/A';
 
           const questionText = question.questionText || `Question ${questionNumber}`;
+
+          // More accurate question type calculation
+          let questionType = question.questionType || 'Unknown';
+          if (questionType.includes('multiple-choice')) {
+            questionType = 'Multiple Choice';
+          } else if (questionType.includes('identification')) {
+            questionType = 'Identification';
+          } else if (questionType.includes('re-order')) {
+            questionType = 'Re-order';
+          } else if (questionType.includes('matching')) {
+            questionType = 'Matching';
+          }
+
+          // Calculate metrics based on actual student results
+          const questionResults = results.map((result: any) => {
+            return result.questionResults?.find((q: any) => q.questionNumber === questionNumber);
+          }).filter(Boolean);
+          
+          // Calculate difficulty based on student performance
+          const correctCountForDifficulty = questionResults.filter((q: any) => q.isCorrect === true).length;
+          const accuracy = questionResults.length > 0 ? correctCountForDifficulty / questionResults.length : 0;
+          
+          let difficulty = '2.0'; // Default medium difficulty
+          if (accuracy >= 0.9) difficulty = '1.0';      // Very Easy (90%+ correct)
+          else if (accuracy >= 0.8) difficulty = '1.2'; // Easy (80-89% correct)
+          else if (accuracy >= 0.7) difficulty = '1.5'; // Easy-Medium (70-79% correct)
+          else if (accuracy >= 0.6) difficulty = '2.0';  // Medium (60-69% correct)
+          else if (accuracy >= 0.5) difficulty = '2.5';  // Medium-Hard (50-59% correct)
+          else if (accuracy >= 0.4) difficulty = '3.0';  // Hard (40-49% correct)
+          else if (accuracy >= 0.3) difficulty = '3.5';  // Very Hard (30-39% correct)
+          else difficulty = '4.0';                      // Extremely Hard (<30% correct)
+          
+          // Calculate average time spent by students
+          const timeSpentArray = questionResults.map((q: any) => q.timeSpent || 0).filter(time => time > 0);
+          const avgTimeSpent = timeSpentArray.length > 0 
+            ? timeSpentArray.reduce((sum, time) => sum + time, 0) / timeSpentArray.length 
+            : 0;
+          
+          // Calculate time allowed based on student performance
+          let timeAllowed = 25; // Default
+          if (avgTimeSpent > 0) {
+            // Set time allowed to 1.5x the average time spent (giving students reasonable buffer)
+            timeAllowed = Math.max(15, Math.min(60, Math.round(avgTimeSpent * 1.5 / 1000)));
+          } else {
+            // Fallback based on question type if no time data
+            if (questionType.toLowerCase().includes('re-order')) {
+              timeAllowed = 20;
+            } else if (questionType.toLowerCase().includes('matching')) {
+              timeAllowed = 30;
+            } else if (questionType.toLowerCase().includes('identification')) {
+              timeAllowed = 15;
+            }
+          }
 
           
 
@@ -7558,6 +7742,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                              <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
 
+                             {exercise.isPublic && (
+                               <>
+                                 <Text style={styles.exerciseStatSeparator}>•</Text>
+                                 <Text style={styles.exerciseStat}>{exercise.timesCopied || 0} copies</Text>
+                               </>
+                             )}
+
                            </View>
 
                            <View style={styles.exerciseMeta}>
@@ -7837,6 +8028,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                  <Text style={styles.exerciseStatSeparator}>•</Text>
 
                                  <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
+
+                                 <Text style={styles.exerciseStatSeparator}>•</Text>
+
+                                 <Text style={styles.exerciseStat}>{exercise.timesCopied || 0} copies</Text>
 
                                </View>
 
@@ -9397,25 +9592,51 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        
 
-                                       // Calculate average attempts and total time
-
+                                       // Calculate average attempts and total time - IMPROVED ACCURACY
                                        const questionResults = result.questionResults || [];
 
-                                       const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                                       // More accurate attempts calculation
+                                       const totalAttempts = questionResults.reduce((sum: number, q: any) => {
+                                         // Use actual attempts if available, otherwise default to 1
+                                         const attempts = q.attempts || 1;
+                                         return sum + attempts;
+                                       }, 0);
 
                                        const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
 
-                                       const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
-
-                                       const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
-
-                                       const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
+                                       // More accurate time calculation
+                                       const totalTimeMs = result.totalTimeSpent || 0;
+                                       const totalTimeMinutes = Math.floor(totalTimeMs / 60000);
+                                       const totalTimeSeconds = Math.floor((totalTimeMs % 60000) / 1000);
+                                       
+                                       // Format time display more accurately
+                                       let timeDisplay = '';
+                                       if (totalTimeMinutes > 0) {
+                                         timeDisplay = `${totalTimeMinutes}m ${totalTimeSeconds}s`;
+                                       } else {
+                                         timeDisplay = `${totalTimeSeconds}s`;
+                                       }
 
                                        
-                                       // Calculate total correct and score
+                                       // Calculate total correct and score - IMPROVED ACCURACY
                                        const totalQuestions = questionResults.length;
-                                       const totalCorrect = result.resultsSummary?.totalCorrect || questionResults.filter((q: any) => q.isCorrect).length;
-                                       const scorePercentage = result.scorePercentage || 0;
+                                       
+                                       // More accurate total correct calculation
+                                       let totalCorrect = 0;
+                                       if (result.resultsSummary?.totalCorrect !== undefined) {
+                                         totalCorrect = result.resultsSummary.totalCorrect;
+                                       } else {
+                                         // Count actual correct answers from question results
+                                         totalCorrect = questionResults.filter((q: any) => q.isCorrect === true).length;
+                                       }
+                                       
+                                       // More accurate score percentage calculation
+                                       let scorePercentage = 0;
+                                       if (result.scorePercentage !== undefined && result.scorePercentage !== null) {
+                                         scorePercentage = result.scorePercentage;
+                                       } else if (totalQuestions > 0) {
+                                         scorePercentage = Math.round((totalCorrect / totalQuestions) * 100);
+                                       }
 
                                        // Get remarks based on score
                                        const getRemarks = (score: number) => {
@@ -9432,24 +9653,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        
 
-                                       // Calculate performance level for this student
-
+                                       // Calculate performance level for this student - IMPROVED ACCURACY
                                        const studentPerformanceLevel = (() => {
-
                                          const avgAttemptsNum = parseFloat(avgAttempts);
-
-                                         const timeInSeconds = (result.totalTimeSpent || 0) / 1000;
-
+                                         const timeInSeconds = totalTimeMs / 1000;
                                          
-
-                                         if (avgAttemptsNum <= 1.2 && timeInSeconds <= 60) return 'excellent';
-
-                                         if (avgAttemptsNum <= 2.0 && timeInSeconds <= 120) return 'good';
-
-                                         if (avgAttemptsNum <= 3.0 && timeInSeconds <= 180) return 'fair';
-
+                                         // More accurate performance level calculation based on actual data
+                                         if (avgAttemptsNum <= 1.2 && timeInSeconds <= 60 && scorePercentage >= 90) return 'excellent';
+                                         if (avgAttemptsNum <= 2.0 && timeInSeconds <= 120 && scorePercentage >= 75) return 'good';
+                                         if (avgAttemptsNum <= 3.0 && timeInSeconds <= 180 && scorePercentage >= 60) return 'fair';
                                          return 'needs_improvement';
-
                                        })();
 
                                        
@@ -9608,162 +9821,25 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                       {/* Toggle Button */}
                                       <TouchableOpacity 
                                         style={styles.statsToggleButton}
-                                        onPress={() => setExpandedStats(prev => ({ ...prev, [statsKey]: !isExpanded }))}
+                                        onPress={() => {
+                                          setSelectedExerciseForStats({
+                                            exerciseTitle,
+                                            exerciseId: exerciseResults[0]?.exerciseId || '',
+                                            classId: cls.id,
+                                            exerciseResults
+                                          });
+                                          setShowDetailedStatsModal(true);
+                                        }}
                                       >
                                         <Text style={styles.statsToggleText}>
-                                          {isExpanded ? 'Hide Detailed Statistics' : 'Show Detailed Statistics'}
+                                          Show Detailed Statistics
                                         </Text>
                                         <MaterialCommunityIcons 
-                                          name={isExpanded ? 'chevron-up' : 'chevron-down'} 
+                                          name="chevron-right" 
                                           size={18} 
                                           color="#3b82f6" 
                                         />
                                       </TouchableOpacity>
-                                      
-                                      {isExpanded && (
-                                        <>
-                                      {/* Central Tendency Measures */}
-                                      <View style={styles.resultsStatsSubsection}>
-                                         <Text style={styles.resultsStatsSubtitle}>Central Tendency</Text>
-                                         <View style={styles.resultsStatsGrid}>
-                                           <View style={styles.resultsStatCard}>
-                                             <MaterialCommunityIcons name="calculator" size={12} color="#64748b" />
-                                             <Text style={styles.resultsStatLabel}>Mean</Text>
-                                             <Text style={styles.resultsStatValue}>{mps.toFixed(1)}%</Text>
-                                           </View>
-                                           
-                                           <View style={styles.resultsStatCard}>
-                                             <MaterialCommunityIcons name="chart-bell-curve" size={12} color="#64748b" />
-                                             <Text style={styles.resultsStatLabel}>Median</Text>
-                                             <Text style={styles.resultsStatValue}>{median.toFixed(1)}%</Text>
-                                           </View>
-                                           
-                                           <View style={styles.resultsStatCard}>
-                                             <MaterialCommunityIcons name="trending-up" size={12} color="#64748b" />
-                                             <Text style={styles.resultsStatLabel}>Mode</Text>
-                                             <Text style={styles.resultsStatValue}>{mode.toFixed(0)}%</Text>
-                                           </View>
-                                         </View>
-                                       </View>
-                                       
-                                       {/* Dispersion Measures */}
-                                       <View style={styles.resultsStatsSubsection}>
-                                         <Text style={styles.resultsStatsSubtitle}>Dispersion</Text>
-                                         <View style={styles.resultsStatsGrid}>
-                                           <View style={styles.resultsStatCard}>
-                                             <MaterialCommunityIcons name="sigma" size={12} color="#64748b" />
-                                             <Text style={styles.resultsStatLabel}>Std Dev</Text>
-                                             <Text style={styles.resultsStatValue}>{stdDev.toFixed(1)}</Text>
-                                             <Text style={styles.resultsStatSubtext}>
-                                               {stdDev < 10 ? 'Low' : stdDev < 20 ? 'Moderate' : 'High'}
-                                             </Text>
-                                           </View>
-                                           
-                                           <View style={styles.resultsStatCard}>
-                                             <MaterialCommunityIcons name="arrow-expand-horizontal" size={12} color="#64748b" />
-                                             <Text style={styles.resultsStatLabel}>Range</Text>
-                                             <Text style={styles.resultsStatValue}>{range.toFixed(1)}%</Text>
-                                             <Text style={styles.resultsStatSubtext}>{lowestScore.toFixed(0)}-{highestScore.toFixed(0)}%</Text>
-                                           </View>
-                                         </View>
-                                       </View>
-                                       
-                                       {/* Performance Extremes */}
-                                       <View style={styles.resultsStatsSubsection}>
-                                         <Text style={styles.resultsStatsSubtitle}>Top & Bottom</Text>
-                                         <View style={styles.resultsStatsGrid}>
-                                           <View style={[styles.resultsStatCard, { backgroundColor: '#f0fdf4' }]}>
-                                             <MaterialCommunityIcons name="trophy" size={12} color="#10b981" />
-                                             <Text style={[styles.resultsStatLabel, { color: '#10b981' }]}>Highest</Text>
-                                             <Text style={[styles.resultsStatValue, { color: '#10b981' }]}>{highestScore.toFixed(1)}%</Text>
-                                             <Text style={[styles.resultsStatSubtext, { fontSize: 9 }]} numberOfLines={1}>{topStudent ? getStudentName(topStudent) : '—'}</Text>
-                                           </View>
-                                           
-                                           <View style={[styles.resultsStatCard, { backgroundColor: '#fef2f2' }]}>
-                                             <MaterialCommunityIcons name="alert-circle" size={12} color="#ef4444" />
-                                             <Text style={[styles.resultsStatLabel, { color: '#ef4444' }]}>Lowest</Text>
-                                             <Text style={[styles.resultsStatValue, { color: '#ef4444' }]}>{lowestScore.toFixed(1)}%</Text>
-                                             <Text style={[styles.resultsStatSubtext, { fontSize: 9 }]} numberOfLines={1}>{bottomStudent ? getStudentName(bottomStudent) : '—'}</Text>
-                                           </View>
-                                         </View>
-                                       </View>
-                                       
-                                       {/* Efficiency Metrics */}
-                                       <View style={styles.resultsStatsSubsection}>
-                                         <Text style={styles.resultsStatsSubtitle}>Efficiency</Text>
-                                         <View style={styles.resultsStatsGrid}>
-                                           <View style={styles.resultsStatCard}>
-                                             <MaterialCommunityIcons name="repeat" size={12} color="#64748b" />
-                                             <Text style={styles.resultsStatLabel}>Avg Attempts</Text>
-                                             <Text style={styles.resultsStatValue}>{avgAttemptsPerItem.toFixed(1)}</Text>
-                                             <Text style={styles.resultsStatSubtext}>
-                                               {avgAttemptsPerItem < 1.5 ? 'Excellent' : avgAttemptsPerItem < 2.5 ? 'Good' : 'Fair'}
-                                             </Text>
-                                           </View>
-                                           
-                                           <View style={styles.resultsStatCard}>
-                                             <MaterialCommunityIcons name="clock-outline" size={12} color="#64748b" />
-                                             <Text style={styles.resultsStatLabel}>Avg Time</Text>
-                                             <Text style={styles.resultsStatValue}>
-                                               {avgTimePerItem > 60000 
-                                                 ? `${Math.floor(avgTimePerItem / 60000)}m ${Math.floor((avgTimePerItem % 60000) / 1000)}s`
-                                                 : `${Math.floor(avgTimePerItem / 1000)}s`}
-                                             </Text>
-                                           </View>
-                                         </View>
-                                       </View>
-                                       
-                                       {/* Item Analysis - Performance Distribution */}
-                                       <View style={styles.resultsStatsSubsection}>
-                                         <Text style={styles.resultsStatsSubtitle}>Performance Distribution</Text>
-                                         <View style={styles.resultsDistribution}>
-                                           <View style={styles.resultsDistItem}>
-                                             <View style={[styles.resultsDistBar, { width: scores.length > 0 ? `${(excellentCount / scores.length) * 100}%` : '0%', backgroundColor: '#10b981' }]} />
-                                             <View style={styles.resultsDistLabel}>
-                                               <View style={styles.resultsDistLabelRow}>
-                                                 <View style={[styles.resultsDistDot, { backgroundColor: '#10b981' }]} />
-                                                 <Text style={styles.resultsDistText}>Excellent (90-100%)</Text>
-                                               </View>
-                                               <Text style={styles.resultsDistCount}>{excellentCount} ({scores.length > 0 ? ((excellentCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
-                                             </View>
-                                           </View>
-                                           
-                                           <View style={styles.resultsDistItem}>
-                                             <View style={[styles.resultsDistBar, { width: scores.length > 0 ? `${(goodCount / scores.length) * 100}%` : '0%', backgroundColor: '#3b82f6' }]} />
-                                             <View style={styles.resultsDistLabel}>
-                                               <View style={styles.resultsDistLabelRow}>
-                                                 <View style={[styles.resultsDistDot, { backgroundColor: '#3b82f6' }]} />
-                                                 <Text style={styles.resultsDistText}>Good (75-89%)</Text>
-                                               </View>
-                                               <Text style={styles.resultsDistCount}>{goodCount} ({scores.length > 0 ? ((goodCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
-                                             </View>
-                                           </View>
-                                           
-                                           <View style={styles.resultsDistItem}>
-                                             <View style={[styles.resultsDistBar, { width: scores.length > 0 ? `${(fairCount / scores.length) * 100}%` : '0%', backgroundColor: '#f59e0b' }]} />
-                                             <View style={styles.resultsDistLabel}>
-                                               <View style={styles.resultsDistLabelRow}>
-                                                 <View style={[styles.resultsDistDot, { backgroundColor: '#f59e0b' }]} />
-                                                 <Text style={styles.resultsDistText}>Fair (60-74%)</Text>
-                                               </View>
-                                               <Text style={styles.resultsDistCount}>{fairCount} ({scores.length > 0 ? ((fairCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
-                                             </View>
-                                           </View>
-                                           
-                                           <View style={styles.resultsDistItem}>
-                                             <View style={[styles.resultsDistBar, { width: scores.length > 0 ? `${(needsImprovementCount / scores.length) * 100}%` : '0%', backgroundColor: '#ef4444' }]} />
-                                             <View style={styles.resultsDistLabel}>
-                                               <View style={styles.resultsDistLabelRow}>
-                                                 <View style={[styles.resultsDistDot, { backgroundColor: '#ef4444' }]} />
-                                                 <Text style={styles.resultsDistText}>Needs Improvement (&lt;60%)</Text>
-                                               </View>
-                                               <Text style={styles.resultsDistCount}>{needsImprovementCount} ({scores.length > 0 ? ((needsImprovementCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
-                                             </View>
-                                          </View>
-                                        </View>
-                                      </View>
-                                      </>
-                                      )}
                                     </View>
                                   );
                                 })()}
@@ -13039,36 +13115,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         <View style={styles.studentPerformanceFullScreenContainer}>
 
-          <View style={styles.studentPerformanceFullScreenHeader}>
-
-            <View style={styles.studentPerformanceHeaderContent}>
-
-              <Text style={styles.studentPerformanceFullScreenTitle}>Exercise Result</Text>
-
+          <View style={styles.exerciseResultHeader}>
+            <View style={styles.exerciseResultHeaderContent}>
+              <Text style={styles.exerciseResultTitle}>Exercise Result</Text>
               {selectedExerciseResultId && (
-
-                <Text style={styles.studentPerformanceStudentName}>
-
-                  {selectedExerciseResultId}
-
-                </Text>
-
+                <View style={styles.exerciseResultIdBadge}>
+                  <MaterialCommunityIcons name="tag" size={12} color="#3b82f6" />
+                  <Text style={styles.exerciseResultIdText}>{selectedExerciseResultId}</Text>
+                </View>
               )}
-
             </View>
-
             <TouchableOpacity
-
               onPress={() => setShowExerciseResultModal(false)}
-
-              style={styles.studentPerformanceCloseButton}
-
+              style={styles.exerciseResultCloseButton}
             >
-
               <MaterialIcons name="close" size={24} color="#1e293b" />
-
             </TouchableOpacity>
-
           </View>
 
           {loadingExerciseResult ? (
@@ -13082,147 +13144,102 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               nestedScrollEnabled={true}
               keyboardShouldPersistTaps="handled"
             >
-              {/* Header info */}
-              <View style={styles.studentPerformanceSection}>
-                <Text style={styles.studentPerformanceSectionTitle}>Exercise Result Info</Text>
-                <View style={styles.studentPerformanceInfo}>
-                  <Text style={styles.studentPerformanceName}>
+              {/* Student and Exercise Details */}
+              <View style={styles.exerciseResultInfoCard}>
+                <View style={styles.exerciseResultInfoRow}>
+                  <Text style={styles.exerciseResultInfoLabel}>Student Name:</Text>
+                  <Text style={styles.exerciseResultInfoValue}>
                     {selectedExerciseResultData?.studentInfo?.name || 'Unknown Student'}
                   </Text>
-                  <Text style={styles.studentPerformanceExercise}>
+                </View>
+                <View style={styles.exerciseResultInfoRow}>
+                  <Text style={styles.exerciseResultInfoLabel}>Exercise:</Text>
+                  <Text style={styles.exerciseResultInfoValue}>
                     {selectedExerciseResultData?.exerciseInfo?.title || selectedExerciseResultData?.exerciseTitle || 'Unknown Exercise'}
                   </Text>
                 </View>
-              </View>
-
-              {/* Summary card (expanded) */}
-              <View style={styles.studentPerformanceCard}>
-                <Text style={[styles.studentPerformanceCardTitle, { ...Typography.h2, color: Colors.light.text }]}>Results Summary</Text>
-                <View style={[styles.studentPerformanceStatsRow, { flexWrap: 'wrap' }]}>
-                  <View style={styles.studentPerformanceStatItem}>
-                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalItems ?? 0}</Text>
-                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Items</Text>
-                  </View>
-                  <View style={styles.studentPerformanceStatItem}>
-                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalCorrect ?? 0}</Text>
-                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Correct</Text>
-                  </View>
-                  <View style={styles.studentPerformanceStatItem}>
-                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalIncorrect ?? 0}</Text>
-                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Incorrect</Text>
-                  </View>
-                  <View style={styles.studentPerformanceStatItem}>
-                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalAttempts ?? 0}</Text>
-                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Total Attempts</Text>
-                  </View>
-                  <View style={styles.studentPerformanceStatItem}>
-                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.meanAttemptsPerItem ?? 0}</Text>
-                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Attempts/Item</Text>
-                  </View>
-                  <View style={styles.studentPerformanceStatItem}>
-                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalTimeSpentSeconds ?? 0}</Text>
-                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Total Time (s)</Text>
-                  </View>
-                </View>
-                <View style={[styles.studentPerformanceOverallScore, { marginTop: 8 }]}>
-                  <Text style={[styles.studentPerformanceOverallScoreLabel, Typography.h3]}>Score</Text>
-                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8 }}>
-                      <Text style={[styles.studentPerformanceOverallScoreValue, Typography.h1]}>{editableSummary?.meanPercentageScore ?? 0}%</Text>
-                      <View style={{ paddingVertical: 2, paddingHorizontal: 8, borderRadius: 9999, backgroundColor: (editableSummary?.meanPercentageScore ?? 0) >= 75 ? '#dcfce7' : '#fee2e2' }}>
-                        <Text style={{ color: (editableSummary?.meanPercentageScore ?? 0) >= 75 ? '#16a34a' : '#dc2626', fontWeight: '700' }}>
-                          {(editableSummary?.meanPercentageScore ?? 0) >= 75 ? 'Passing' : 'Needs Work'}
-                        </Text>
-                      </View>
-                    </View>
-                </View>
-
-                {/* Quick performance highlights + trend */}
-                <View style={{ marginTop: 8, flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                  <View style={{ backgroundColor: '#dcfce7', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 9999 }}>
-                    <Text style={{ color: '#16a34a', fontWeight: '700' }}>🟢 {editableSummary?.meanPercentageScore >= 85 ? 'High' : 'Stable'}</Text>
-                  </View>
-                  <View style={{ backgroundColor: '#fef9c3', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 9999 }}>
-                    <Text style={{ color: '#a16207', fontWeight: '700' }}>🟡 Attempts: {editableSummary?.meanAttemptsPerItem ?? 0}</Text>
-                  </View>
-                  <View style={{ backgroundColor: '#fee2e2', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 9999 }}>
-                    <Text style={{ color: '#dc2626', fontWeight: '700' }}>🔴 Time/item: {editableSummary?.meanTimePerItemSeconds ?? 0}s</Text>
-                  </View>
-                </View>
-
-                {relatedStats && (
-                  <View style={{ marginTop: 10, backgroundColor: '#f8fafc', borderRadius: 8, padding: 10 }}>
-                    <Text style={{ color: '#0f172a', fontWeight: '700' }}>Trend</Text>
-                    <Text style={{ color: '#475569', marginTop: 2 }}>Previous attempts: {relatedStats.previousCount}</Text>
-                    <Text style={{ color: '#475569', marginTop: 2 }}>Prev avg score: {relatedStats.previousAvgScore}%</Text>
-                    {relatedStats.lastScores.length > 0 && (
-                      <Text style={{ color: '#475569', marginTop: 2 }}>Last scores: {relatedStats.lastScores.join(', ')}</Text>
-                    )}
-                  </View>
-                )}
-
-                {/* Device Info toggle */}
-                {selectedExerciseResultData?.deviceInfo && (
-                  <View style={{ marginTop: 10 }}>
-                    <TouchableOpacity onPress={() => setShowDeviceInfo(v => !v)} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      <MaterialIcons name={showDeviceInfo ? 'expand-less' : 'expand-more'} size={18} color="#334155" />
-                      <Text style={{ color: '#334155', fontWeight: '700' }}>Device Info</Text>
-                    </TouchableOpacity>
-                    {showDeviceInfo && (
-                      <View style={{ backgroundColor: '#f8fafc', borderRadius: 8, padding: 10, marginTop: 6 }}>
-                        <Text style={{ color: '#475569' }}>Device: {toFriendlyText(selectedExerciseResultData?.deviceInfo?.deviceModel)}</Text>
-                        <Text style={{ color: '#475569' }}>OS: {toFriendlyText(selectedExerciseResultData?.deviceInfo?.osVersion)}</Text>
-                      </View>
-                    )}
-                  </View>
-                )}
-
-                {/* Filter/Sort + Print/Export + Remarks */}
-                <View style={{ marginTop: 12, flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                  <View style={{ flexDirection: 'row', backgroundColor: '#e2e8f0', borderRadius: 8, padding: 2 }}>
-                    {(['all','correct','wrong'] as const).map(mode => (
-                      <TouchableOpacity key={mode} onPress={() => setFilterMode(mode)} style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, backgroundColor: filterMode === mode ? '#3b82f6' : 'transparent' }}>
-                        <Text style={{ color: filterMode === mode ? '#ffffff' : '#0f172a', fontWeight: '700', textTransform: 'capitalize' }}>{mode}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                  <View style={{ flexDirection: 'row', backgroundColor: '#e2e8f0', borderRadius: 8, padding: 2 }}>
-                    {(['default','attempts','time','type'] as const).map(mode => (
-                      <TouchableOpacity key={mode} onPress={() => setSortMode(mode)} style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, backgroundColor: sortMode === mode ? '#3b82f6' : 'transparent' }}>
-                        <Text style={{ color: sortMode === mode ? '#ffffff' : '#0f172a', fontWeight: '700', textTransform: 'capitalize' }}>{mode}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                  <TouchableOpacity
-                    onPress={async () => {
-                      try {
-                        const html = `<!DOCTYPE html><html><body><h1>${selectedExerciseResultData?.studentInfo?.name || 'Student'}</h1><p>Score: ${editableSummary?.meanPercentageScore ?? 0}%</p></body></html>`;
-                        await Print.printAsync({ html });
-                      } catch (e: any) {
-                        showAlert('Print Failed', e?.message || 'Unable to print', undefined, 'error');
+                <View style={styles.exerciseResultInfoRow}>
+                  <Text style={styles.exerciseResultInfoLabel}>Submitted:</Text>
+                  <View style={styles.exerciseResultSubmittedContainer}>
+                    <Text style={styles.exerciseResultInfoValue}>
+                      {selectedExerciseResultData?.submittedAt ? 
+                        new Date(selectedExerciseResultData.submittedAt).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                          hour: 'numeric',
+                          minute: '2-digit',
+                          hour12: true
+                        }) : 
+                        selectedExerciseResultData?.exerciseSession?.completedAt ?
+                        new Date(selectedExerciseResultData.exerciseSession.completedAt).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                          hour: 'numeric',
+                          minute: '2-digit',
+                          hour12: true
+                        }) : 'Not submitted'
                       }
-                    }}
-                    style={{ backgroundColor: '#10b981', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8 }}
-                  >
-                    <Text style={{ color: '#ffffff', fontWeight: '700' }}>Print</Text>
-                  </TouchableOpacity>
+                    </Text>
+                    {(selectedExerciseResultData?.submittedAt || selectedExerciseResultData?.exerciseSession?.completedAt) && (
+                      <View style={styles.exerciseResultOnTimeTag}>
+                        <Text style={styles.exerciseResultOnTimeText}>On-Time</Text>
+                      </View>
+                    )}
+                  </View>
                 </View>
-
-                <View style={{ marginTop: 8 }}>
-                  <Text style={{ color: '#334155', marginBottom: 6, fontWeight: '700' }}>Teacher Remarks</Text>
-                  <TextInput
-                    placeholder="Add feedback for the student"
-                    placeholderTextColor="#94a3b8"
-                    value={teacherRemarks}
-                    onChangeText={setTeacherRemarks}
-                    style={{ borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, padding: 10, color: '#0f172a', backgroundColor: '#ffffff' }}
-                    multiline
-                  />
+                <View style={styles.exerciseResultInfoRow}>
+                  <Text style={styles.exerciseResultInfoLabel}>Student Status:</Text>
+                  <View style={[
+                    styles.exerciseResultStatusTag,
+                    { backgroundColor: (editableSummary?.meanPercentageScore ?? 0) >= 75 ? '#dcfce7' : '#fee2e2' }
+                  ]}>
+                    <Text style={[
+                      styles.exerciseResultStatusText,
+                      { color: (editableSummary?.meanPercentageScore ?? 0) >= 75 ? '#16a34a' : '#dc2626' }
+                    ]}>
+                      {(editableSummary?.meanPercentageScore ?? 0) >= 75 ? 'Passing' : 'For Intervention'}
+                    </Text>
+                  </View>
                 </View>
               </View>
 
-              {/* Questions list with tools */}
-              <View style={styles.studentPerformanceCard}>
-                <Text style={styles.studentPerformanceCardTitle}>Questions</Text>
+              {/* Summary Statistics Cards */}
+              <View style={styles.exerciseResultSummaryCards}>
+                <View style={styles.exerciseResultSummaryCard}>
+                  <Text style={styles.exerciseResultSummaryValue}>
+                    {editableSummary?.totalTimeSpentSeconds ? 
+                      `${Math.floor(editableSummary.totalTimeSpentSeconds / 60)}:${String(Math.floor(editableSummary.totalTimeSpentSeconds % 60)).padStart(2, '0')}` : 
+                      '0:00'
+                    }
+                  </Text>
+                  <Text style={styles.exerciseResultSummaryLabel}>TIME</Text>
+                  <Text style={styles.exerciseResultSummarySubtext}>
+                    {editableSummary?.meanTimePerItemSeconds ? `${Math.round(editableSummary.meanTimePerItemSeconds)}s per item` : '0s per item'}
+                  </Text>
+                </View>
+                
+                <View style={styles.exerciseResultSummaryCard}>
+                  <Text style={styles.exerciseResultSummaryValue}>{editableSummary?.meanPercentageScore ?? 0}</Text>
+                  <Text style={styles.exerciseResultSummaryLabel}>SCORE</Text>
+                  <Text style={styles.exerciseResultSummarySubtext}>
+                    {editableSummary?.totalCorrect ?? 0}/{editableSummary?.totalItems ?? 0}
+                  </Text>
+                </View>
+                
+                <View style={styles.exerciseResultSummaryCard}>
+                  <Text style={styles.exerciseResultSummaryValue}>{editableSummary?.totalAttempts ?? 0}</Text>
+                  <Text style={styles.exerciseResultSummaryLabel}>ATTEMPTS</Text>
+                  <Text style={styles.exerciseResultSummarySubtext}>
+                    {editableSummary?.meanAttemptsPerItem ? `${editableSummary.meanAttemptsPerItem.toFixed(1)} per item` : '0 per item'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* History Section */}
+              <View style={styles.exerciseResultHistorySection}>
+                <Text style={styles.exerciseResultHistoryTitle}>History</Text>
                 {editableQuestionResults
                   .filter((qr: any) => filterMode === 'all' ? true : filterMode === 'correct' ? qr.isCorrect : !qr.isCorrect)
                   .sort((a: any, b: any) => {
@@ -13232,192 +13249,67 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                     return 0;
                   })
                   .map((qr: any, index: number) => (
-                  <View key={qr.questionId || index} style={{ marginBottom: 16, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, padding: 12, backgroundColor: '#ffffff' }}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Text style={{ fontWeight: '700', color: '#0f172a', flex: 1 }}>Q{qr.questionNumber}: {qr.questionText}</Text>
-                      <View style={{ paddingVertical: 4, paddingHorizontal: 8, borderRadius: 9999, backgroundColor: qr.isCorrect ? '#dcfce7' : '#fee2e2' }}>
-                        <Text style={{ color: qr.isCorrect ? '#16a34a' : '#dc2626', fontWeight: '700' }}>{qr.isCorrect ? 'Correct' : 'Wrong'}</Text>
+                  <View key={qr.questionId || index} style={styles.exerciseResultQuestionCard}>
+                    <View style={styles.exerciseResultQuestionHeader}>
+                      <View style={styles.exerciseResultQuestionNumber}>
+                        <Text style={styles.exerciseResultQuestionNumberText}>{index + 1}</Text>
+                      </View>
+                      <Text style={styles.exerciseResultQuestionType}>
+                        {qr.questionType ? qr.questionType.charAt(0).toUpperCase() + qr.questionType.slice(1).replace('-', ' ') + ' Type' : 'Unknown Type'}
+                      </Text>
+                      <View style={styles.exerciseResultQuestionStats}>
+                        <View style={styles.exerciseResultQuestionStat}>
+                          <MaterialCommunityIcons name="eye" size={14} color="#64748b" />
+                          <Text style={styles.exerciseResultQuestionStatText}>{qr.attempts || 0}</Text>
+                        </View>
+                        <View style={styles.exerciseResultQuestionStat}>
+                          <MaterialCommunityIcons name="clock" size={14} color="#64748b" />
+                          <Text style={styles.exerciseResultQuestionStatText}>{qr.timeSpentSeconds || 0}s</Text>
+                        </View>
+                        <View style={styles.exerciseResultQuestionStat}>
+                          {qr.isCorrect ? (
+                            <MaterialCommunityIcons name="check" size={14} color="#16a34a" />
+                          ) : (
+                            <MaterialCommunityIcons name="close" size={14} color="#dc2626" />
+                          )}
+                          <Text style={[
+                            styles.exerciseResultQuestionStatText,
+                            { color: qr.isCorrect ? '#16a34a' : '#dc2626' }
+                          ]}>
+                            {qr.isCorrect ? 'Correct' : 'Wrong'}
+                          </Text>
+                        </View>
                       </View>
                     </View>
-                    <View style={{ flexDirection: 'row', marginTop: 6, alignItems: 'center', gap: 8 }}>
-                      <Text style={{ color: '#64748b' }}>Type:</Text>
-                      <Text style={{ color: '#0f172a', fontWeight: '700', textTransform: 'capitalize' }}>{toFriendlyText(qr.questionType)}</Text>
-                      <Text style={{ color: '#64748b', marginLeft: 12 }}>Time:</Text>
-                      <Text style={{ color: '#0f172a', fontWeight: '700' }}>{qr.timeSpentSeconds ?? 0}s</Text>
-                    </View>
-                    {Array.isArray(qr.choices) && qr.choices.length > 0 && (
-                      <View style={{ marginTop: 6, marginBottom: 10, backgroundColor: '#f8fafc', borderRadius: 8, padding: 8 }}>
-                        {qr.choices.map((choice: string, i: number) => (
-                          <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
-                            {isImageUrl(choice) ? (
-                              <View style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: '#e2e8f0', alignItems: 'center', justifyContent: 'center', marginRight: 8 }}>
-                                <MaterialIcons name="image" size={16} color="#475569" />
-                              </View>
-                            ) : null}
-                            <Text style={{ color: '#334155' }}>• {toFriendlyText(choice)}</Text>
-                          </View>
-                        ))}
+                    
+                    <Text style={styles.exerciseResultQuestionText}>
+                      {qr.questionText || 'No question text available'}
+                    </Text>
+                    
+                    {/* Attempt History */}
+                    {(qr.attemptHistory || []).map((attempt: any, attemptIndex: number) => (
+                      <View key={attemptIndex} style={styles.exerciseResultAttemptRow}>
+                        <View style={styles.exerciseResultAttemptIcon}>
+                          {attempt.isCorrect ? (
+                            <MaterialCommunityIcons name="check" size={16} color="#16a34a" />
+                          ) : (
+                            <MaterialCommunityIcons name="close" size={16} color="#dc2626" />
+                          )}
+                        </View>
+                        <Text style={styles.exerciseResultAttemptText}>
+                          {attemptIndex + 1}: {toFriendlyText(attempt.selectedAnswer, 50)}
+                        </Text>
                       </View>
-                    )}
-                    {/* Read-only refs for teacher context */}
-                    <View style={{ backgroundColor: '#f8fafc', borderRadius: 8, padding: 8 }}>
-                      <Text style={{ color: '#475569' }}>Correct Answer: <Text style={{ fontWeight: '700', color: '#0f172a' }}>{toFriendlyText(qr.correctAnswer)}</Text></Text>
-                      {qr.attemptHistory && qr.attemptHistory.length > 0 && (
-                        <Text style={{ color: '#475569', marginTop: 4 }}>Last Attempt: <Text style={{ fontWeight: '700', color: '#0f172a' }}>{toFriendlyText(qr.attemptHistory[qr.attemptHistory.length - 1].selectedAnswer)}</Text></Text>
-                      )}
-                    </View>
-                    {/* Expand for attempt history */}
-                    <TouchableOpacity onPress={() => toggleQuestionExpanded(qr.questionId)} style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      <MaterialIcons name={expandedQuestions[qr.questionId] ? 'expand-less' : 'expand-more'} size={18} color="#334155" />
-                      <Text style={{ color: '#334155', fontWeight: '700' }}>Attempt History</Text>
-                    </TouchableOpacity>
-                    {expandedQuestions[qr.questionId] && (
-                      <View style={{ backgroundColor: '#f8fafc', borderRadius: 8, padding: 8, marginTop: 6 }}>
-                        {(qr.attemptHistory || []).map((a: any, i: number) => (
-                          <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                            <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: a.isCorrect ? '#10b981' : '#ef4444', marginRight: 8 }} />
-                            <Text style={{ color: '#0f172a', fontWeight: '700' }}>#{a.attemptNumber}</Text>
-                            <Text style={{ color: '#475569', marginLeft: 8 }}>{toFriendlyText(a.selectedAnswer)}</Text>
-                            <Text style={{ color: '#64748b', marginLeft: 8 }}>{toFriendlyText(a.timeStamp, 24)}</Text>
-                          </View>
-                        ))}
-                      </View>
-                    )}
-                    {/* Score toggle */}
-                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
-                      <Text style={{ width: 120, color: '#334155' }}>Score</Text>
-                      <View style={{ flexDirection: 'row', backgroundColor: '#e2e8f0', borderRadius: 8, padding: 2 }}>
-                        <TouchableOpacity
-                          style={{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 6, backgroundColor: qr.isCorrect ? '#10b981' : 'transparent' }}
-                          onPress={() => {
-                            const next = editableQuestionResults.map((q2, idx) => {
-                              if (idx !== index) return q2;
-                              const newAttempts = Math.max(1, q2.attempts || 0);
-                              const baseHistory = (q2.attemptHistory && q2.attemptHistory.length > 0) ? q2.attemptHistory.slice(0, newAttempts - 1) : [];
-                              const lastAttempt = { attemptNumber: newAttempts, selectedAnswer: q2.correctAnswer || q2.studentAnswer || '', isCorrect: true, timeStamp: new Date().toISOString() };
-                              const newHistory = [...baseHistory, lastAttempt];
-                              return { ...q2, isCorrect: true, attempts: newAttempts, attemptHistory: newHistory };
-                            });
-                            setEditableQuestionResults(next);
-                            setEditableSummary(recalculateResultsSummary(next, editableSummary));
-                          }}
-                        >
-                          <Text style={{ color: qr.isCorrect ? '#ffffff' : '#0f172a', fontWeight: '700' }}>Correct</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={{ marginLeft: 6, paddingVertical: 6, paddingHorizontal: 12, borderRadius: 6, backgroundColor: !qr.isCorrect ? '#ef4444' : 'transparent' }}
-                          onPress={() => {
-                            const next = editableQuestionResults.map((q2, idx) => {
-                              if (idx !== index) return q2;
-                              const newAttempts = Math.max(1, q2.attempts || 0);
-                              const baseHistory = (q2.attemptHistory && q2.attemptHistory.length > 0) ? q2.attemptHistory.slice(0, newAttempts - 1) : [];
-                              const lastAttempt = { attemptNumber: newAttempts, selectedAnswer: q2.studentAnswer || '', isCorrect: false, timeStamp: new Date().toISOString() };
-                              const newHistory = [...baseHistory, lastAttempt];
-                              return { ...q2, isCorrect: false, attempts: newAttempts, attemptHistory: newHistory };
-                            });
-                            setEditableQuestionResults(next);
-                            setEditableSummary(recalculateResultsSummary(next, editableSummary));
-                          }}
-                        >
-                          <Text style={{ color: !qr.isCorrect ? '#ffffff' : '#0f172a', fontWeight: '700' }}>Wrong</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                    {/* Attempts stepper */}
-                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
-                      <Text style={{ width: 120, color: '#334155' }}>Attempts</Text>
-                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                        <TouchableOpacity
-                          onPress={() => {
-                            const next = editableQuestionResults.map((q2, idx) => {
-                              if (idx !== index) return q2;
-                              const newVal = Math.max(0, (q2.attempts || 0) - 1);
-                              const newHistory = (q2.attemptHistory || []).slice(0, Math.max(0, newVal));
-                              return { ...q2, attempts: newVal, attemptHistory: newHistory };
-                            });
-                            setEditableQuestionResults(next);
-                            setEditableSummary(recalculateResultsSummary(next, editableSummary));
-                          }}
-                          style={{ backgroundColor: '#e2e8f0', padding: 6, borderRadius: 6 }}
-                        >
-                          <MaterialIcons name="remove" size={18} color="#0f172a" />
-                        </TouchableOpacity>
-                        <Text style={{ marginHorizontal: 12, minWidth: 24, textAlign: 'center', color: '#0f172a', fontWeight: '700' }}>{qr.attempts ?? 0}</Text>
-                        <TouchableOpacity
-                          onPress={() => {
-                            const next = editableQuestionResults.map((q2, idx) => {
-                              if (idx !== index) return q2;
-                              const newVal = (q2.attempts || 0) + 1;
-                              const lastTemplate = (q2.attemptHistory && q2.attemptHistory.length > 0) ? q2.attemptHistory[q2.attemptHistory.length - 1] : { attemptNumber: 0, selectedAnswer: q2.studentAnswer || '', isCorrect: q2.isCorrect || false, timeStamp: new Date().toISOString() };
-                              const newHistory = [...(q2.attemptHistory || []), { ...lastTemplate, attemptNumber: newVal, timeStamp: new Date().toISOString() }];
-                              return { ...q2, attempts: newVal, attemptHistory: newHistory };
-                            });
-                            setEditableQuestionResults(next);
-                            setEditableSummary(recalculateResultsSummary(next, editableSummary));
-                          }}
-                          style={{ backgroundColor: '#e2e8f0', padding: 6, borderRadius: 6 }}
-                        >
-                          <MaterialIcons name="add" size={18} color="#0f172a" />
-                        </TouchableOpacity>
-                      </View>
-                    </View>
+                    ))}
                   </View>
                 ))}
 
-                {/* Save / Delete buttons */}
-                <View style={{ flexDirection: 'row', gap: 12, marginTop: 4 }}>
+                {/* Delete button */}
+                <View style={styles.exerciseResultBottomActions}>
                   <TouchableOpacity
-                    style={{ backgroundColor: '#3b82f6', paddingVertical: 10, paddingHorizontal: 14, borderRadius: 8 }}
-                    onPress={async () => {
-                      if (!selectedExerciseResultId) return;
-                      // Build updated payload and run validate/repair
-                      const updated = {
-                        ...(selectedExerciseResultData || {}),
-                        questionResults: editableQuestionResults,
-                        resultsSummary: recalculateResultsSummary(editableQuestionResults, editableSummary),
-                        teacherRemarks
-                      } as any;
-                      const { result } = validateAndRepairExerciseResult(updated, { verbose: true });
-                      const { success, error } = await writeData(`/ExerciseResults/${selectedExerciseResultId}`, result);
-                      if (!success) {
-                        showAlert('Update Failed', error || 'Unable to update result', undefined, 'error');
-                        return;
-                      }
-                      setSelectedExerciseResultData(result);
-                      showAlert('Saved', 'Exercise result updated.', undefined, 'success');
-                      try {
-                        if (activeClasses.length > 0) {
-                          await loadAssignments(activeClasses.map(c => c.id));
-                        }
-                      } catch {}
-                    }}
-                  >
-                    <Text style={{ color: 'white', fontWeight: '700' }}>Save</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={{ backgroundColor: '#ef4444', paddingVertical: 10, paddingHorizontal: 14, borderRadius: 8 }}
+                    style={styles.exerciseResultDeleteButton}
                     onPress={() => {
                       if (!selectedExerciseResultId) return;
-                      setAlertButtons([
-                        { text: 'Cancel', style: 'cancel', onPress: () => {} },
-                        { text: 'Delete', style: 'destructive', onPress: async () => {
-                          const { success, error } = await deleteData(`/ExerciseResults/${selectedExerciseResultId}`);
-                          if (!success) {
-                            showAlert('Delete Failed', error || 'Unable to delete result', undefined, 'error');
-                            return;
-                          }
-                          showAlert('Deleted', 'Exercise result removed.', undefined, 'success');
-                          setShowExerciseResultModal(false);
-                          setSelectedExerciseResultId(null);
-                          setSelectedExerciseResultData(null);
-                          try {
-                            if (activeClasses.length > 0) {
-                              await loadAssignments(activeClasses.map(c => c.id));
-                            }
-                          } catch {}
-                        } }
-                      ]);
                       showAlert('Delete Result?', 'This cannot be undone.', [
                         { text: 'Cancel', style: 'cancel', onPress: () => {} },
                         { text: 'Delete', style: 'destructive', onPress: async () => {
@@ -13439,7 +13331,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                       ], 'warning');
                     }}
                   >
-                    <Text style={{ color: 'white', fontWeight: '700' }}>Delete</Text>
+                    <Text style={styles.exerciseResultDeleteButtonText}>Delete</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -13742,7 +13634,534 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       </Modal>
 
+      {/* Detailed Statistics Modal */}
+      <Modal visible={showDetailedStatsModal} animationType="slide" transparent={false}>
+        <View style={styles.detailedStatsModalContainer}>
+          {/* Header */}
+          <View style={styles.detailedStatsModalHeader}>
+            <View style={styles.detailedStatsModalTitleContainer}>
+              <MaterialCommunityIcons name="chart-box" size={24} color="#8b5cf6" />
+              <Text style={styles.detailedStatsModalTitle}>Class Statistics</Text>
+            </View>
+            <TouchableOpacity 
+              onPress={() => setShowDetailedStatsModal(false)} 
+              style={styles.detailedStatsCloseButton}
+            >
+              <AntDesign name="close" size={24} color="#64748b" />
+            </TouchableOpacity>
+          </View>
 
+          {/* Exercise ID Badge */}
+          {selectedExerciseForStats && (
+            <View style={styles.detailedStatsExerciseIdContainer}>
+              <Text style={styles.detailedStatsExerciseIdText}>
+                {selectedExerciseForStats.exerciseId}
+              </Text>
+            </View>
+          )}
+
+          <ScrollView style={styles.detailedStatsModalContent} showsVerticalScrollIndicator={false}>
+            {/* Class Statistics Section */}
+            {selectedExerciseForStats && (() => {
+              const { exerciseResults } = selectedExerciseForStats;
+              const scores = exerciseResults.map((r: any) => r.scorePercentage || 0);
+              
+              if (scores.length === 0) return null;
+              
+              // Calculate statistics
+              const mps = scores.reduce((sum: number, score: number) => sum + score, 0) / scores.length;
+              const sortedScores = [...scores].sort((a: number, b: number) => a - b);
+              const median = sortedScores.length % 2 === 0 
+                ? (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2
+                : sortedScores[Math.floor(sortedScores.length / 2)];
+              
+              // Calculate mode (most frequent score)
+              const scoreCounts: { [key: number]: number } = {};
+              scores.forEach((score: number) => {
+                const roundedScore = Math.round(score);
+                scoreCounts[roundedScore] = (scoreCounts[roundedScore] || 0) + 1;
+              });
+              const mode = Object.keys(scoreCounts).reduce((a, b) => 
+                scoreCounts[parseInt(a)] > scoreCounts[parseInt(b)] ? a : b
+              );
+              
+              // Calculate standard deviation
+              const variance = scores.reduce((sum: number, score: number) => sum + Math.pow(score - mps, 2), 0) / scores.length;
+              const stdDev = Math.sqrt(variance);
+              
+              const highestScore = Math.max(...scores);
+              const lowestScore = Math.min(...scores);
+              const range = highestScore - lowestScore;
+              
+              // Find top and bottom students
+              const topStudent = exerciseResults.find((r: any) => r.scorePercentage === highestScore);
+              const bottomStudent = exerciseResults.find((r: any) => r.scorePercentage === lowestScore);
+              
+              // Calculate efficiency metrics
+              const totalAttempts = exerciseResults.reduce((sum: number, result: any) => {
+                return sum + (result.questionResults?.reduce((qSum: number, q: any) => qSum + (q.attempts || 1), 0) || 0);
+              }, 0);
+              const avgAttemptsPerItem = totalAttempts / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
+              
+              const totalTime = exerciseResults.reduce((sum: number, result: any) => sum + (result.totalTimeSpent || 0), 0);
+              const avgTimePerItem = totalTime / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
+              
+              // Performance distribution
+              const excellentCount = scores.filter((s: number) => s >= 90).length;
+              const goodCount = scores.filter((s: number) => s >= 75 && s < 90).length;
+              const fairCount = scores.filter((s: number) => s >= 60 && s < 75).length;
+              const needsImprovementCount = scores.filter((s: number) => s < 60).length;
+              
+              // Calculate pass rate (students with score >= 60%)
+              const passCount = scores.filter((s: number) => s >= 60).length;
+              const passRate = scores.length > 0 ? (passCount / scores.length) * 100 : 0;
+
+              return (
+                <View style={styles.detailedStatsClassStatsSection}>
+                  {/* Top Row - MPS and Pass Rate */}
+                  <View style={styles.detailedStatsTopRow}>
+                    <View style={styles.detailedStatsTopCard}>
+                      <MaterialCommunityIcons name="percent" size={16} color="#64748b" />
+                      <Text style={styles.detailedStatsTopLabel}>MPS</Text>
+                      <Text style={styles.detailedStatsTopValue}>{mps.toFixed(1)}%</Text>
+                    </View>
+                    
+                    <View style={styles.detailedStatsTopCard}>
+                      <MaterialCommunityIcons name="chart-line" size={16} color="#64748b" />
+                      <Text style={styles.detailedStatsTopLabel}>Pass Rate</Text>
+                      <Text style={[styles.detailedStatsTopValue, { color: '#ef4444' }]}>{passRate.toFixed(1)}%</Text>
+                      <Text style={styles.detailedStatsTopSubtext}>{passCount}/{scores.length}</Text>
+                    </View>
+                  </View>
+
+                  {/* Central Tendency */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Central Tendency</Text>
+                    <View style={styles.detailedStatsGrid}>
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="chart-line-variant" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Mean</Text>
+                        <Text style={styles.detailedStatsValue}>{mps.toFixed(1)}%</Text>
+                      </View>
+                      
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="chart-line-variant" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Median</Text>
+                        <Text style={styles.detailedStatsValue}>{median.toFixed(1)}%</Text>
+                      </View>
+                    </View>
+                    
+                    <View style={styles.detailedStatsModeCard}>
+                        <MaterialCommunityIcons name="chart-line" size={16} color="#64748b" />
+                      <Text style={styles.detailedStatsLabel}>Mode</Text>
+                      <Text style={styles.detailedStatsValue}>{mode}%</Text>
+                    </View>
+                  </View>
+                  
+                  {/* Dispersion */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Dispersion</Text>
+                    <View style={styles.detailedStatsGrid}>
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="sigma" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Std Dev</Text>
+                        <Text style={styles.detailedStatsValue}>{stdDev.toFixed(1)}</Text>
+                        <Text style={styles.detailedStatsSubtext}>
+                          {stdDev < 10 ? 'Low' : stdDev < 20 ? 'Moderate' : 'High'}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="arrow-expand-horizontal" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Range</Text>
+                        <Text style={styles.detailedStatsValue}>{range.toFixed(1)}%</Text>
+                        <Text style={styles.detailedStatsSubtext}>{lowestScore.toFixed(0)}-{highestScore.toFixed(0)}%</Text>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  {/* Top & Bottom */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Top & Bottom</Text>
+                    <View style={styles.detailedStatsGrid}>
+                      <View style={[styles.detailedStatsCard, { backgroundColor: '#f0fdf4' }]}>
+                        <MaterialCommunityIcons name="trophy" size={16} color="#10b981" />
+                        <Text style={[styles.detailedStatsLabel, { color: '#10b981' }]}>Highest</Text>
+                        <Text style={[styles.detailedStatsValue, { color: '#10b981' }]}>{highestScore.toFixed(1)}%</Text>
+                        <Text style={[styles.detailedStatsSubtext, { fontSize: 10, color: '#10b981' }]} numberOfLines={1}>
+                          {topStudent ? (topStudent.studentInfo?.name || 'Unknown') : '—'}
+                        </Text>
+                      </View>
+                      
+                      <View style={[styles.detailedStatsCard, { backgroundColor: '#fef2f2' }]}>
+                        <MaterialCommunityIcons name="trophy" size={16} color="#ef4444" />
+                        <Text style={[styles.detailedStatsLabel, { color: '#ef4444' }]}>Lowest</Text>
+                        <Text style={[styles.detailedStatsValue, { color: '#ef4444' }]}>{lowestScore.toFixed(1)}%</Text>
+                        <Text style={[styles.detailedStatsSubtext, { fontSize: 10, color: '#ef4444' }]} numberOfLines={1}>
+                          {bottomStudent ? (bottomStudent.studentInfo?.name || 'Unknown') : '—'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  {/* Efficiency */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Efficiency</Text>
+                    <View style={styles.detailedStatsGrid}>
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="format-list-checks" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Avg Attempts</Text>
+                        <Text style={styles.detailedStatsValue}>{avgAttemptsPerItem.toFixed(1)}</Text>
+                        <Text style={styles.detailedStatsSubtext}>
+                          {avgAttemptsPerItem < 1.5 ? 'Excellent' : avgAttemptsPerItem < 2.5 ? 'Good' : 'Fair'}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Avg Time</Text>
+                        <Text style={styles.detailedStatsValue}>
+                          {avgTimePerItem > 60000 
+                            ? `${Math.floor(avgTimePerItem / 60000)}m ${Math.floor((avgTimePerItem % 60000) / 1000)}s`
+                            : `${Math.floor(avgTimePerItem / 1000)}s`}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  {/* Performance Distribution */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Performance Distribution</Text>
+                    <View style={styles.detailedStatsDistribution}>
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(excellentCount / scores.length) * 100}%` : '0%', backgroundColor: '#10b981' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#10b981' }]} />
+                            <Text style={styles.detailedStatsDistText}>Excellent (90-100%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{excellentCount} ({scores.length > 0 ? ((excellentCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(goodCount / scores.length) * 100}%` : '0%', backgroundColor: '#3b82f6' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#3b82f6' }]} />
+                            <Text style={styles.detailedStatsDistText}>Good (75-89%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{goodCount} ({scores.length > 0 ? ((goodCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(fairCount / scores.length) * 100}%` : '0%', backgroundColor: '#f59e0b' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#f59e0b' }]} />
+                            <Text style={styles.detailedStatsDistText}>Fair (60-74%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{fairCount} ({scores.length > 0 ? ((fairCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(needsImprovementCount / scores.length) * 100}%` : '0%', backgroundColor: '#ef4444' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#ef4444' }]} />
+                            <Text style={styles.detailedStatsDistText}>Needs Improvement (&lt;60%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{needsImprovementCount} ({scores.length > 0 ? ((needsImprovementCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                    </View>
+                  </View>
+                </View>
+              );
+            })()}
+
+            {/* Item Analysis Section */}
+            <View style={styles.detailedStatsItemAnalysisSection}>
+              <Text style={styles.detailedStatsSectionTitle}>Item Analysis</Text>
+              
+              {selectedExerciseForStats && (() => {
+                const { exerciseResults } = selectedExerciseForStats;
+                const firstResult = exerciseResults[0];
+                
+                if (!firstResult?.questionResults?.length) {
+                  return (
+                    <View style={styles.noDataContainer}>
+                      <Text style={styles.noDataText}>No question data available</Text>
+                    </View>
+                  );
+                }
+
+                // Filter to only show questions that have been answered by students
+                const answeredQuestions = firstResult.questionResults.filter((question: any) => {
+                  const hasAnswers = exerciseResults.some((result: any) => {
+                    const qResult = result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                    return qResult && (qResult.studentAnswer || qResult.answer);
+                  });
+                  return hasAnswers;
+                });
+
+                return answeredQuestions.map((question: any, questionIndex: number) => {
+                  // More accurate question number calculation
+                  const questionNumber = question.questionNumber || questionIndex + 1;
+                  const questionText = question.questionText || `Question ${questionNumber}`;
+                  
+                  // More accurate question type calculation
+                  let questionType = question.questionType || 'Unknown';
+                  if (questionType.includes('multiple-choice')) {
+                    questionType = 'Multiple Choice';
+                  } else if (questionType.includes('identification')) {
+                    questionType = 'Identification';
+                  } else if (questionType.includes('re-order')) {
+                    questionType = 'Re-order';
+                  } else if (questionType.includes('matching')) {
+                    questionType = 'Matching';
+                  }
+                  
+                  // Calculate metrics based on actual student results for this specific question
+                  const questionResults = exerciseResults.map((result: any) => {
+                    return result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                  }).filter(Boolean);
+                  
+                  // Only proceed if we have actual responses for this question
+                  if (questionResults.length === 0) return null;
+                  
+                  // Calculate accurate time metrics based on actual student performance
+                  const timeSpentArray = questionResults
+                    .map((q: any) => q.timeSpent || 0)
+                    .filter(time => time > 0);
+                  
+                  const avgTimeSpent = timeSpentArray.length > 0 
+                    ? timeSpentArray.reduce((sum, time) => sum + time, 0) / timeSpentArray.length 
+                    : 0;
+                  
+                  // Calculate actual time spent in seconds (more accurate)
+                  const avgTimeInSeconds = avgTimeSpent > 0 ? Math.round(avgTimeSpent / 1000) : 0;
+                  
+                  // Calculate average attempts by students
+                  const attemptsArray = questionResults.map((q: any) => q.attempts || 1);
+                  const avgAttempts = attemptsArray.length > 0 
+                    ? attemptsArray.reduce((sum, attempts) => sum + attempts, 0) / attemptsArray.length 
+                    : 1;
+                  
+                  // Get the correct answer from the question data
+                  const correctAnswer = question.correctAnswer || question.answer;
+                  
+                  // Analyze answer distribution for this question
+                  const answerDistribution: { [key: string]: { count: number, isCorrect: boolean } } = {};
+                  let totalStudentsAnswered = 0;
+                  let correctResponses = 0;
+                  
+                  let noAnswerCount = 0;
+                  
+                  exerciseResults.forEach((result: any) => {
+                    const qResult = result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                    if (qResult && (qResult.studentAnswer || qResult.answer)) {
+                      totalStudentsAnswered++;
+                      const rawAnswer = qResult.studentAnswer || qResult.answer;
+                      const formattedAnswer = formatAnswerForDisplay(rawAnswer, questionType);
+                      
+                      // Determine if this answer is correct
+                      let isCorrect = false;
+                      if (correctAnswer) {
+                        const formattedCorrectAnswer = formatAnswerForDisplay(correctAnswer, questionType);
+                        isCorrect = formattedAnswer === formattedCorrectAnswer;
+                      } else {
+                        // Fallback to the isCorrect flag from the result
+                        isCorrect = qResult.isCorrect || false;
+                      }
+                      
+                      if (isCorrect) {
+                        correctResponses++;
+                      }
+                      
+                      if (!answerDistribution[formattedAnswer]) {
+                        answerDistribution[formattedAnswer] = { count: 0, isCorrect };
+                      }
+                      answerDistribution[formattedAnswer].count++;
+                    } else {
+                      // Student didn't answer this question
+                      noAnswerCount++;
+                    }
+                  });
+                  
+                  // Add "No Answer" entry if there are students who didn't respond
+                  if (noAnswerCount > 0) {
+                    answerDistribution['No Answer'] = { count: noAnswerCount, isCorrect: false };
+                  }
+
+                  // Sort answers by frequency (most common first)
+                  const sortedAnswers = Object.entries(answerDistribution)
+                    .sort(([,a], [,b]) => b.count - a.count);
+
+                  // Calculate difficulty index (percentage who got it correct out of those who answered)
+                  const difficultyIndex = totalStudentsAnswered > 0 ? (correctResponses / totalStudentsAnswered) * 100 : 0;
+                  
+                  // Calculate discrimination index (difference between top and bottom performers)
+                  const topPerformers = exerciseResults
+                    .sort((a: any, b: any) => (b.scorePercentage || 0) - (a.scorePercentage || 0))
+                    .slice(0, Math.ceil(exerciseResults.length * 0.27));
+                  const bottomPerformers = exerciseResults
+                    .sort((a: any, b: any) => (a.scorePercentage || 0) - (b.scorePercentage || 0))
+                    .slice(0, Math.ceil(exerciseResults.length * 0.27));
+                  
+                  const topCorrect = topPerformers.filter((result: any) => {
+                    const qResult = result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                    return qResult?.isCorrect || false;
+                  }).length;
+                  
+                  const bottomCorrect = bottomPerformers.filter((result: any) => {
+                    const qResult = result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                    return qResult?.isCorrect || false;
+                  }).length;
+                  
+                  const discriminationIndex = topPerformers.length > 0 && bottomPerformers.length > 0 
+                    ? ((topCorrect / topPerformers.length) - (bottomCorrect / bottomPerformers.length)) * 100
+                    : 0;
+
+                  return (
+                    <View key={question.questionId || questionIndex} style={styles.itemAnalysisCard}>
+                      <View style={styles.itemAnalysisHeader}>
+                        <View style={styles.itemAnalysisTitleRow}>
+                          <View style={styles.itemAnalysisNumberBadge}>
+                            <Text style={styles.itemAnalysisNumberText}>{questionNumber}</Text>
+                          </View>
+                          <View style={styles.itemAnalysisTypeBadge}>
+                            <Text style={styles.itemAnalysisTypeText}>{questionType}</Text>
+                          </View>
+                          <View style={styles.itemAnalysisDifficultyBadge}>
+                            <MaterialCommunityIcons name="speedometer" size={12} color="#64748b" />
+                            <Text style={styles.itemAnalysisDifficultyText}>{difficultyIndex.toFixed(1)}</Text>
+                          </View>
+                          <View style={styles.itemAnalysisTimeBadge}>
+                            <MaterialCommunityIcons name="clock" size={12} color="#64748b" />
+                            <Text style={styles.itemAnalysisTimeText}>{avgTimeInSeconds}s</Text>
+                          </View>
+                        </View>
+                        <Text style={styles.itemAnalysisQuestionText}>
+                          {questionText}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.itemAnalysisTable}>
+                        <View style={styles.itemAnalysisTableHeader}>
+                          <View style={styles.itemAnalysisAnswerCell}>
+                            <Text style={styles.itemAnalysisTableHeaderText}>Answer</Text>
+                          </View>
+                          <View style={{
+                            flex: 1,
+                            alignItems: 'center',
+                          }}>
+                            <Text style={styles.itemAnalysisTableHeaderText}>Frequency</Text>
+                          </View>
+                          <View style={{
+                            flex: 1,
+                            alignItems: 'center',
+                          }}>
+                            <Text style={styles.itemAnalysisTableHeaderText}>% of Students</Text>
+                          </View>
+                        </View>
+                        
+                        {sortedAnswers.map(([answer, data], answerIndex) => (
+                          <View 
+                            key={answerIndex} 
+                            style={[
+                              styles.itemAnalysisTableRow,
+                              data.isCorrect && styles.itemAnalysisCorrectRow
+                            ]}
+                          >
+                            <View style={styles.itemAnalysisAnswerCell}>
+                              <View style={styles.itemAnalysisAnswerContent}>
+                                {data.isCorrect && (
+                                  <MaterialCommunityIcons name="check" size={16} color="#10b981" style={styles.itemAnalysisCheckIcon} />
+                                )}
+                                <Text 
+                                  style={[
+                                    styles.itemAnalysisAnswerText,
+                                    data.isCorrect && styles.itemAnalysisCorrectText
+                                  ]}
+                                  numberOfLines={3}
+                                  ellipsizeMode="tail"
+                                >
+                                  {answer}
+                                </Text>
+                              </View>
+                            </View>
+                            <View style={{
+                              flex: 1,
+                              alignItems: 'center',
+                            }}>
+                              <Text style={styles.itemAnalysisFrequencyText}>{data.count}</Text>
+                            </View>
+                            <View style={{
+                              flex: 1,
+                              alignItems: 'center',
+                            }}>
+                              <Text style={styles.itemAnalysisPercentageText}>
+                                {exerciseResults.length > 0 ? Math.round((data.count / exerciseResults.length) * 100) : 0}%
+                              </Text>
+                            </View>
+                          </View>
+                        ))}
+                        
+                        {/* Total Row */}
+                        <View style={{
+                          flexDirection: 'row',
+                          paddingVertical: 12,
+                          paddingHorizontal: 12,
+                          backgroundColor: '#f1f5f9',
+                          borderTopWidth: 2,
+                          borderTopColor: '#e2e8f0',
+                          alignItems: 'center',
+                        }}>
+                          <View style={styles.itemAnalysisAnswerCell}>
+                            <Text style={{
+                              fontSize: 13,
+                              color: '#1e293b',
+                              fontWeight: '700',
+                              textAlign: 'center',
+                            }}>Total</Text>
+                          </View>
+                          <View style={{
+                            flex: 1,
+                            alignItems: 'center',
+                          }}>
+                            <Text style={{
+                              fontSize: 13,
+                              color: '#1e293b',
+                              fontWeight: '700',
+                              textAlign: 'center',
+                            }}>
+                              {exerciseResults.length}
+                            </Text>
+                          </View>
+                          <View style={{
+                            flex: 1,
+                            alignItems: 'center',
+                          }}>
+                            <Text style={{
+                              fontSize: 13,
+                              color: '#1e293b',
+                              fontWeight: '700',
+                              textAlign: 'center',
+                            }}>100%</Text>
+                          </View>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                });
+              })()}
+            </View>
+          </ScrollView>
+        </View>
+      </Modal>
 
       {/* Custom Alert */}
 
@@ -22590,6 +23009,1146 @@ const styles = StyleSheet.create({
   },
 
   resultsDistCount: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  // Exercise Result Modal Styles
+  exerciseResultIdContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#dbeafe',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 4,
+  },
+
+  exerciseResultIdText: {
+    fontSize: 12,
+    color: '#3b82f6',
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+
+  exerciseResultCloseButton: {
+    position: 'absolute',
+    right: 16,
+    top: 16,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  exerciseResultInfoCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+
+  exerciseResultInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+
+  exerciseResultInfoLabel: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+    width: 100,
+  },
+
+  exerciseResultInfoValue: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '600',
+    flex: 1,
+  },
+
+  exerciseResultSubmittedContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+
+  exerciseResultOnTimeTag: {
+    backgroundColor: '#dcfce7',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+
+  exerciseResultOnTimeText: {
+    fontSize: 12,
+    color: '#16a34a',
+    fontWeight: '600',
+  },
+
+  exerciseResultStatusTag: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+
+  exerciseResultStatusText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
+  exerciseResultSummaryCards: {
+    flexDirection: 'row',
+    marginBottom: 16,
+    gap: 12,
+  },
+
+  exerciseResultSummaryCard: {
+    flex: 1,
+    backgroundColor: '#dbeafe',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+  },
+
+  exerciseResultSummaryValue: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#3b82f6',
+    marginBottom: 4,
+  },
+
+  exerciseResultSummaryLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+
+  exerciseResultSummarySubtext: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+
+  exerciseResultHistorySection: {
+    marginBottom: 16,
+  },
+
+  exerciseResultHistoryTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+
+  exerciseResultQuestionCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+
+  exerciseResultQuestionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+
+  exerciseResultQuestionNumber: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+
+  exerciseResultQuestionNumberText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  exerciseResultQuestionType: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+    flex: 1,
+  },
+
+  exerciseResultQuestionStats: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+
+  exerciseResultQuestionStat: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  exerciseResultQuestionStatText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+
+  exerciseResultQuestionText: {
+    fontSize: 14,
+    color: '#1e293b',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+
+  exerciseResultAttemptRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+
+  exerciseResultAttemptIcon: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+
+  exerciseResultAttemptText: {
+    fontSize: 13,
+    color: '#475569',
+    flex: 1,
+  },
+
+  exerciseResultHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+
+  exerciseResultHeaderContent: {
+    flex: 1,
+  },
+
+  exerciseResultTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+
+  exerciseResultIdBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#dbeafe',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+  },
+
+  exerciseResultBottomActions: {
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    backgroundColor: '#ffffff',
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  exerciseResultDeleteButton: {
+    backgroundColor: '#dc2626',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    minWidth: 120,
+    alignItems: 'center',
+  },
+
+  exerciseResultDeleteButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+
+  // Item Analysis Styles
+  noDataContainer: {
+    padding: 20,
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    marginVertical: 8,
+  },
+
+  noDataText: {
+    fontSize: 14,
+    color: '#64748b',
+    fontStyle: 'italic',
+  },
+
+  itemAnalysisCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  itemAnalysisHeader: {
+    marginBottom: 12,
+  },
+
+  itemAnalysisTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+
+  // New styles for the updated Item Analysis UI
+  itemAnalysisNumberBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    minWidth: 24,
+    alignItems: 'center',
+  },
+
+  itemAnalysisNumberText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  itemAnalysisTypeBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    alignItems: 'center',
+  },
+
+  itemAnalysisTypeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  itemAnalysisDifficultyBadge: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  itemAnalysisDifficultyText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+
+  itemAnalysisTimeBadge: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  itemAnalysisTimeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+
+  itemAnalysisQuestionText: {
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '500',
+    marginBottom: 12,
+    lineHeight: 20,
+  },
+
+  itemAnalysisAnswerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+
+  itemAnalysisCheckIcon: {
+    marginRight: 4,
+  },
+
+  itemAnalysisNumber: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginRight: 8,
+  },
+
+
+  itemAnalysisTable: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+
+  itemAnalysisTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#e2e8f0',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+
+  itemAnalysisTableHeaderText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    flex: 1,
+  },
+
+  itemAnalysisTableRow: {
+    flexDirection: 'row',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  itemAnalysisCorrectRow: {
+    backgroundColor: '#f0fdf4',
+  },
+
+  itemAnalysisAnswerCell: {
+    flex: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  itemAnalysisAnswerText: {
+    fontSize: 13,
+    color: '#1e293b',
+    flex: 1,
+  },
+
+  itemAnalysisCorrectText: {
+    color: '#059669',
+    fontWeight: '600',
+  },
+
+  itemAnalysisCorrectIcon: {
+    marginLeft: 4,
+  },
+
+  itemAnalysisFrequencyText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    flex: 1,
+    textAlign: 'center',
+  },
+
+  itemAnalysisPercentageText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    flex: 1,
+    textAlign: 'center',
+  },
+
+
+  itemAnalysisInstruction: {
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '500',
+    marginBottom: 12,
+    lineHeight: 20,
+  },
+
+  itemAnalysisMetrics: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+    flexWrap: 'wrap',
+  },
+
+  itemAnalysisMetricCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 8,
+    alignItems: 'center',
+    minWidth: 80,
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  itemAnalysisMetricLabel: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '600',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+
+  itemAnalysisMetricValue: {
+    fontSize: 12,
+    color: '#1e293b',
+    fontWeight: '700',
+    marginTop: 2,
+  },
+
+  itemAnalysisPercentageHeaderCell: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  itemAnalysisPercentageCell: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  itemAnalysisFrequencyCell: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  itemAnalysisTotalRow: {
+    flexDirection: 'row',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: '#f1f5f9',
+    borderTopWidth: 2,
+    borderTopColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  itemAnalysisTotalText: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+
+  // Detailed Statistics Modal Styles
+  detailedStatsModalContainer: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+  },
+
+  detailedStatsModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+
+  detailedStatsModalTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+
+  detailedStatsModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: 8,
+  },
+
+  detailedStatsCloseButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  detailedStatsExerciseIdContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#dbeafe',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginHorizontal: 16,
+    marginTop: 8,
+    alignSelf: 'flex-start',
+  },
+
+  detailedStatsExerciseIdText: {
+    fontSize: 12,
+    color: '#3b82f6',
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+
+  detailedStatsModalContent: {
+    flex: 1,
+    paddingHorizontal: 16,
+  },
+
+  detailedStatsItemAnalysisSection: {
+    marginTop: 16,
+  },
+
+  detailedStatsSectionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 16,
+  },
+
+  detailedStatsItemCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  detailedStatsItemHeader: {
+    marginBottom: 12,
+  },
+
+  detailedStatsItemTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+
+  detailedStatsItemNumber: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginRight: 8,
+  },
+
+  detailedStatsItemTypeBadge: {
+    backgroundColor: '#e0e7ff',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+  },
+
+  detailedStatsItemTypeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  detailedStatsItemTimeRow: {
+    marginTop: 4,
+  },
+
+  detailedStatsItemTimeText: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+
+  detailedStatsItemQuestionText: {
+    fontSize: 14,
+    color: '#1e293b',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+
+  detailedStatsItemTable: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+
+  detailedStatsItemTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#e2e8f0',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+
+  detailedStatsItemTableHeaderText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    textAlign: 'center',
+  },
+
+  detailedStatsItemTableRow: {
+    flexDirection: 'row',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    alignItems: 'flex-start',
+    minHeight: 44,
+  },
+
+  detailedStatsItemCorrectRow: {
+    backgroundColor: '#f0fdf4',
+  },
+
+  detailedStatsItemAnswerCell: {
+    flex: 2,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingRight: 8,
+  },
+
+  detailedStatsItemFrequencyCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  detailedStatsItemPercentageCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  detailedStatsItemAnswerText: {
+    fontSize: 12,
+    color: '#1e293b',
+    flex: 1,
+    lineHeight: 16,
+    fontFamily: 'monospace',
+  },
+
+  detailedStatsItemCorrectText: {
+    color: '#059669',
+    fontWeight: '600',
+  },
+
+  detailedStatsItemCorrectIcon: {
+    marginLeft: 4,
+  },
+
+  detailedStatsItemFrequencyText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+
+  detailedStatsItemPercentageText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+
+  detailedStatsItemTotalRow: {
+    flexDirection: 'row',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: '#f8fafc',
+    borderTopWidth: 2,
+    borderTopColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  detailedStatsItemTotalText: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+
+  // Response Analysis Card Styles (matching the provided design)
+  responseAnalysisCard: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+
+  responseAnalysisHeader: {
+    marginBottom: 16,
+  },
+
+  responseAnalysisTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+  },
+
+  responseAnalysisNumberBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    minWidth: 24,
+    alignItems: 'center',
+  },
+
+  responseAnalysisNumberText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  responseAnalysisTypeBadge: {
+    backgroundColor: '#e0e7ff',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+
+  responseAnalysisTypeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  responseAnalysisDifficultyBadge: {
+    backgroundColor: '#e0e7ff',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  responseAnalysisDifficultyText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  responseAnalysisTimeBadge: {
+    backgroundColor: '#e0e7ff',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  responseAnalysisTimeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  responseAnalysisAttemptsBadge: {
+    backgroundColor: '#e0e7ff',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  responseAnalysisAttemptsText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  responseAnalysisInstruction: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '600',
+    lineHeight: 20,
+  },
+
+  responseAnalysisTable: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+
+  responseAnalysisTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#e2e8f0',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+
+  responseAnalysisTableHeaderText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    textAlign: 'right',
+  },
+
+  responseAnalysisTableRow: {
+    flexDirection: 'row',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+
+  responseAnalysisCorrectRow: {
+    backgroundColor: '#f0fdf4',
+  },
+
+  responseAnalysisAnswerCell: {
+    flex: 2,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+  },
+
+  responseAnalysisFrequencyCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  responseAnalysisPercentageCell: {
+    flex: 1,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+
+  responseAnalysisPercentageHeaderCell: {
+    flex: 1,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+
+  responseAnalysisAnswerText: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '500',
+  },
+
+  responseAnalysisCorrectText: {
+    color: '#059669',
+    fontWeight: '600',
+  },
+
+  responseAnalysisFrequencyText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+  },
+
+  responseAnalysisPercentageText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    textAlign: 'right',
+  },
+
+  responseAnalysisTotalRow: {
+    flexDirection: 'row',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: '#f8fafc',
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+
+  responseAnalysisTotalText: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '700',
+  },
+
+  detailedStatsClassStatsSection: {
+    marginTop: 24,
+    marginBottom: 24,
+  },
+
+  // Top row styles for MPS and Pass Rate
+  detailedStatsTopRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 24,
+  },
+
+  detailedStatsTopCard: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  detailedStatsTopLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+
+  detailedStatsTopValue: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+
+  detailedStatsTopSubtext: {
+    fontSize: 10,
+    color: '#64748b',
+    marginTop: 2,
+  },
+
+  detailedStatsSubsection: {
+    marginBottom: 16,
+  },
+
+  detailedStatsSubtitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 8,
+  },
+
+  detailedStatsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+
+  // Mode card that spans full width
+  detailedStatsModeCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    marginTop: 8,
+    width: '100%',
+  },
+
+  detailedStatsCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 12,
+    alignItems: 'center',
+    minWidth: '30%',
+    flex: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  detailedStatsLabel: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+
+  detailedStatsValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+
+  detailedStatsSubtext: {
+    fontSize: 9,
+    color: '#94a3b8',
+    textAlign: 'center',
+    marginTop: 2,
+  },
+
+  detailedStatsDistribution: {
+    gap: 8,
+  },
+
+  detailedStatsDistItem: {
+    marginBottom: 6,
+  },
+
+  detailedStatsDistBar: {
+    height: 6,
+    borderRadius: 3,
+    marginBottom: 4,
+    minWidth: 2,
+  },
+
+  detailedStatsDistLabel: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  detailedStatsDistLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  detailedStatsDistDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+
+  detailedStatsDistText: {
+    fontSize: 11,
+    color: '#475569',
+    fontWeight: '500',
+  },
+
+  detailedStatsDistCount: {
     fontSize: 11,
     color: '#64748b',
     fontWeight: '600',

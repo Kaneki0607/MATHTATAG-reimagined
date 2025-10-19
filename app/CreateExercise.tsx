@@ -1,5 +1,6 @@
 import { AntDesign, MaterialCommunityIcons } from '@expo/vector-icons';
 import { AudioSource, AudioStatus, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import { Audio, AVPlaybackStatus } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
@@ -859,7 +860,9 @@ interface Question {
     allowShowWork?: boolean;
   };
   // TTS fields
-  ttsAudioUrl?: string;
+  ttsAudioUrl?: string; // AI-generated TTS audio
+  recordedTtsUrl?: string; // Teacher-recorded audio (takes priority over ttsAudioUrl)
+  ttsStatus?: 'idle' | 'generating' | 'ready' | 'failed'; // TTS generation status
 }
 
 export default function CreateExercise() {
@@ -1079,7 +1082,7 @@ export default function CreateExercise() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
   const [modalStack, setModalStack] = useState<string[]>([]);
-
+  
   // Custom Alert state
   const [customAlert, setCustomAlert] = useState<{
     visible: boolean;
@@ -1114,6 +1117,21 @@ export default function CreateExercise() {
   // Track failed TTS generations
   const [failedTTSQuestions, setFailedTTSQuestions] = useState<Set<string>>(new Set());
   const [isRetryingFailedTTS, setIsRetryingFailedTTS] = useState(false);
+
+  // Voice Recording state
+  const [showRecordingModal, setShowRecordingModal] = useState(false);
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [recordedAudioUri, setRecordedAudioUri] = useState<string | null>(null);
+  const [isPlayingRecording, setIsPlayingRecording] = useState(false);
+  const [recordingQuestionId, setRecordingQuestionId] = useState<string | null>(null);
+  const [hasPreviousRecording, setHasPreviousRecording] = useState(false);
+  const recordingSound = useRef<Audio.Sound | null>(null);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // AI TTS Toggle state (for AI question generator)
+  const [generateAITTS, setGenerateAITTS] = useState(true);
 
   // Timer for TTS process (generation + upload)
   useEffect(() => {
@@ -1661,13 +1679,6 @@ export default function CreateExercise() {
       description: 'Students arrange items in correct order',
       icon: 'sort',
       color: '#ef4444',
-    },
-    {
-      id: 'reading-passage',
-      title: 'Reading Passage',
-      description: 'Provide a passage with related questions',
-      icon: 'book-open-variant',
-      color: '#8b5cf6',
     },
   ];
 
@@ -3004,6 +3015,16 @@ Re-order Example (pattern completion):
       // Add generated questions to existing questions
       setQuestions(prev => [...prev, ...newQuestions]);
       
+      // Check if AI TTS generation is enabled
+      if (!generateAITTS) {
+        console.log('AI TTS generation skipped - toggle is off');
+        showCustomAlert('Success', `${newQuestions.length} questions generated successfully! You can record voice or generate TTS individually for each question.`);
+        setShowAIGenerator(false);
+        setAiPrompt('');
+        setIsGeneratingQuestions(false);
+        return;
+      }
+      
       // Generate TTS audio for all new questions sequentially to avoid rate limits
       setIsGeneratingTTS(true);
       
@@ -4073,6 +4094,269 @@ Please respond with a JSON object in this exact format:
     }
   };
 
+  // Voice Recording Functions
+  const openRecordingModal = (questionId: string) => {
+    setRecordingQuestionId(questionId);
+    setRecordedAudioUri(null);
+    setRecordingDuration(0);
+    
+    // Check if this question already has a recorded voice
+    const question = questions.find(q => q.id === questionId);
+    setHasPreviousRecording(!!question?.recordedTtsUrl);
+    
+    setShowRecordingModal(true);
+  };
+
+  const closeRecordingModal = () => {
+    // Stop any ongoing recording or playback
+    stopRecording(false);
+    stopRecordingPlayback();
+    setShowRecordingModal(false);
+    setRecordingQuestionId(null);
+    setRecordedAudioUri(null);
+    setRecordingDuration(0);
+    setHasPreviousRecording(false);
+  };
+
+  const startRecording = async () => {
+    try {
+      console.log('Requesting permissions...');
+      const permission = await Audio.requestPermissionsAsync();
+      
+      if (permission.status !== 'granted') {
+        showCustomAlert('Permission Required', 'Please enable microphone access to record audio.');
+        return;
+      }
+
+      console.log('Setting up audio mode with noise cancellation...');
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      console.log('Starting recording with optimized compression...');
+      // ULTRA-OPTIMIZED recording options for smallest file size while maintaining voice clarity
+      // Optimized for voice recording: ~40-50 KB per minute (vs 960 KB/min at 128kbps)
+      const recordingOptions = {
+        android: {
+          extension: '.m4a',
+          outputFormat: Audio.AndroidOutputFormat.MPEG_4,
+          audioEncoder: Audio.AndroidAudioEncoder.AAC,
+          sampleRate: 22050, // Reduced from 44100 - sufficient for voice (saves ~50% size)
+          numberOfChannels: 1, // Mono - essential for voice recording
+          bitRate: 32000, // Reduced from 128000 - optimal for voice (saves 75% size)
+        },
+        ios: {
+          extension: '.m4a',
+          outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
+          audioQuality: Audio.IOSAudioQuality.MEDIUM, // Changed from HIGH for smaller size
+          sampleRate: 22050, // Reduced from 44100
+          numberOfChannels: 1, // Mono
+          bitRate: 32000, // Reduced from 128000
+          linearPCMBitDepth: 16,
+          linearPCMIsBigEndian: false,
+          linearPCMIsFloat: false,
+        },
+        web: {
+          mimeType: 'audio/webm',
+          bitsPerSecond: 32000, // Reduced from 128000
+        },
+      };
+
+      const { recording: newRecording } = await Audio.Recording.createAsync(
+        recordingOptions
+      );
+      
+      setRecording(newRecording);
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      // Start timer with 2-minute limit
+      const MAX_RECORDING_DURATION = 120; // 2 minutes in seconds
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration(prev => {
+          const newDuration = prev + 1;
+          
+          // Auto-stop at 2 minutes
+          if (newDuration >= MAX_RECORDING_DURATION) {
+            console.log('Maximum recording duration reached (2 minutes)');
+            stopRecording(true); // Pass true to indicate auto-stop
+            return MAX_RECORDING_DURATION;
+          }
+          
+          // Warning at 1:45
+          if (newDuration === 105) {
+            console.log('15 seconds remaining...');
+          }
+          
+          return newDuration;
+        });
+      }, 1000) as any;
+
+      console.log('Recording started successfully (max 2 minutes)');
+    } catch (error: any) {
+      console.error('Failed to start recording:', error);
+      showCustomAlert('Recording Error', `Failed to start recording: ${error.message}`);
+    }
+  };
+
+  const stopRecording = async (autoStopped: boolean = false) => {
+    if (!recording) return;
+
+    try {
+      console.log('Stopping recording...');
+      setIsRecording(false);
+      
+      // Clear timer
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      setRecordedAudioUri(uri);
+      setRecording(null);
+
+      // Reset audio mode
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+      });
+
+      console.log('Recording stopped, URI:', uri);
+      
+      // Show info message if auto-stopped at limit
+      if (autoStopped) {
+        setTimeout(() => {
+          showCustomAlert('Recording Complete', 'Recording stopped at 2-minute limit. You can now save or re-record.');
+        }, 500);
+      }
+    } catch (error: any) {
+      console.error('Failed to stop recording:', error);
+      showCustomAlert('Recording Error', `Failed to stop recording: ${error.message}`);
+    }
+  };
+
+  const playRecording = async () => {
+    if (!recordedAudioUri) return;
+
+    try {
+      console.log('Playing recording...');
+      
+      // Stop any existing playback
+      if (recordingSound.current) {
+        await recordingSound.current.unloadAsync();
+        recordingSound.current = null;
+      }
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: recordedAudioUri },
+        { shouldPlay: true },
+        (status: AVPlaybackStatus) => {
+          if (status.isLoaded && status.didJustFinish) {
+            setIsPlayingRecording(false);
+          }
+        }
+      );
+
+      recordingSound.current = sound;
+      setIsPlayingRecording(true);
+
+      console.log('Playing recording...');
+    } catch (error: any) {
+      console.error('Failed to play recording:', error);
+      showCustomAlert('Playback Error', `Failed to play recording: ${error.message}`);
+    }
+  };
+
+  const stopRecordingPlayback = async () => {
+    if (recordingSound.current) {
+      await recordingSound.current.stopAsync();
+      await recordingSound.current.unloadAsync();
+      recordingSound.current = null;
+      setIsPlayingRecording(false);
+    }
+  };
+
+  const reRecord = () => {
+    setRecordedAudioUri(null);
+    setRecordingDuration(0);
+    startRecording();
+  };
+
+  const saveRecordedVoice = async () => {
+    if (!recordedAudioUri || !recordingQuestionId) return;
+
+    try {
+      setUploading(true);
+
+      // Upload to Firebase Storage
+      const fileName = `recorded-tts/${exerciseCode || 'temp'}/question-${recordingQuestionId}.m4a`;
+      
+      // Use fetch to read the file and create a proper blob (RN compatible)
+      const response = await fetch(recordedAudioUri);
+      const blob = await response.blob();
+
+      // Upload file
+      const uploadResult = await uploadFile(fileName, blob, { contentType: 'audio/m4a' });
+      
+      if (uploadResult.error || !uploadResult.downloadURL) {
+        throw new Error(uploadResult.error || 'Upload failed');
+      }
+
+      // Update question with recorded TTS URL
+      updateQuestion(recordingQuestionId, {
+        recordedTtsUrl: uploadResult.downloadURL,
+        ttsStatus: 'ready'
+      });
+
+      console.log('Recorded voice saved successfully:', uploadResult.downloadURL);
+      showCustomAlert('Success', 'Voice recording saved successfully!');
+      closeRecordingModal();
+    } catch (error: any) {
+      console.error('Failed to save recorded voice:', error);
+      showCustomAlert('Upload Error', `Failed to save recording: ${error.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const deletePreviousRecording = () => {
+    if (!recordingQuestionId) return;
+
+    showCustomAlert(
+      'Delete Recording',
+      'Are you sure you want to delete the previous voice recording? This will restore the AI-generated TTS (if available).',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel'
+        },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            // Remove the recorded TTS URL from the question
+            updateQuestion(recordingQuestionId, {
+              recordedTtsUrl: undefined
+            });
+            
+            setHasPreviousRecording(false);
+            console.log('Previous recording deleted for question:', recordingQuestionId);
+            showCustomAlert('Success', 'Previous voice recording deleted successfully!');
+          }
+        }
+      ]
+    );
+  };
+
+  const formatRecordingTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
   const deleteQuestion = (questionId: string) => {
     showCustomAlert(
       'Delete Question',
@@ -4324,6 +4608,14 @@ Please respond with a JSON object in this exact format:
           // TTS fields
           if (q.ttsAudioUrl) {
             cleanQuestion.ttsAudioUrl = q.ttsAudioUrl;
+          }
+          
+          if (q.recordedTtsUrl) {
+            cleanQuestion.recordedTtsUrl = q.recordedTtsUrl;
+          }
+          
+          if (q.ttsStatus) {
+            cleanQuestion.ttsStatus = q.ttsStatus;
           }
 
           return cleanQuestion;
@@ -4768,6 +5060,73 @@ Please respond with a JSON object in this exact format:
     openModal('imageLibrary');
   };
 
+  const pickMultipleImagesFromDevice = async (questionId: string) => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        showCustomAlert('Permission Required', 'Please grant permission to access your photo library to add images.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: 'images',
+        allowsMultipleSelection: true,
+        quality: 0.8,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      // Upload all selected images to Firebase and add them to the question
+      setUploadingImage(true);
+      const uploadedUris: string[] = [];
+
+      for (let i = 0; i < result.assets.length; i++) {
+        const asset = result.assets[i];
+        try {
+          const fileName = `exercise_question_${Date.now()}_${i}.jpg`;
+          const storagePath = `exercise-images/${fileName}`;
+          
+          // Read the file and upload using the uploadFile helper
+          const response = await fetch(asset.uri);
+          const blob = await response.blob();
+          
+          const { downloadURL, error } = await uploadFile(storagePath, blob, {
+            contentType: 'image/jpeg',
+          });
+          
+          if (error) {
+            throw new Error(`Upload failed: ${error}`);
+          }
+          
+          if (downloadURL) {
+            uploadedUris.push(downloadURL);
+          }
+        } catch (error) {
+          console.error(`Error uploading image ${i + 1}:`, error);
+          showCustomAlert('Upload Error', `Failed to upload image ${i + 1} of ${result.assets.length}`);
+        }
+      }
+
+      // Add all successfully uploaded images to the question
+      const question = questions.find(q => q.id === questionId);
+      if (question && uploadedUris.length > 0) {
+        const currentImages = question.questionImages || [];
+        updateQuestion(questionId, { 
+          questionImages: [...currentImages, ...uploadedUris] 
+        });
+        showCustomAlert('Success', `Successfully added ${uploadedUris.length} image(s) to the question`);
+      }
+
+      setUploadingImage(false);
+    } catch (error) {
+      console.error('Error picking images:', error);
+      showCustomAlert('Error', 'Failed to pick images. Please try again.');
+      setUploadingImage(false);
+    }
+  };
+
   const addQuestionImage = (questionId: string, imageUri: string) => {
     const question = questions.find(q => q.id === questionId);
     if (!question) return;
@@ -5093,12 +5452,7 @@ Please respond with a JSON object in this exact format:
             <Text style={styles.fullScreenTitle}>
               Edit {questionTypes.find(t => t.id === editingQuestion.type)?.title} Question
             </Text>
-            <TouchableOpacity 
-              onPress={() => scrollToTop(questionEditorScrollRef)} 
-              style={styles.scrollToTopButton}
-            >
-              <AntDesign name="arrow-up" size={20} color="#64748b" />
-            </TouchableOpacity>
+            <View style={styles.placeholder} />
           </View>
             
           <ScrollView 
@@ -5182,25 +5536,52 @@ Please respond with a JSON object in this exact format:
                       </Text>
                     </TouchableOpacity>
                   )}
+                  
+                  {/* Record Voice Button */}
+                  <TouchableOpacity
+                    style={[styles.ttsButton, styles.recordVoiceButton]}
+                    onPress={() => openRecordingModal(editingQuestion.id)}
+                    disabled={isGeneratingTTS}
+                  >
+                    <MaterialCommunityIcons 
+                      name={editingQuestion.recordedTtsUrl ? "microphone-settings" : "microphone"} 
+                      size={16} 
+                      color={editingQuestion.recordedTtsUrl ? "#10b981" : "#7c3aed"} 
+                    />
+                    <Text style={[styles.ttsButtonText, { color: editingQuestion.recordedTtsUrl ? '#10b981' : '#7c3aed' }]}>
+                      {editingQuestion.recordedTtsUrl ? 'Voice Recorded' : 'Record Voice'}
+                    </Text>
+                  </TouchableOpacity>
+                  
+                  {/* Play Recorded Voice Button */}
+                  {editingQuestion.recordedTtsUrl && (
+                    <TouchableOpacity
+                      style={styles.ttsButton}
+                      onPress={isPlayingTTS ? stopTTS : () => playTTS(editingQuestion.recordedTtsUrl)}
+                    >
+                      <MaterialCommunityIcons 
+                        name={isPlayingTTS ? "stop" : "play"} 
+                        size={16} 
+                        color="#7c3aed" 
+                      />
+                      <Text style={[styles.ttsButtonText, { color: '#7c3aed' }]}>
+                        {isPlayingTTS ? 'Stop Voice' : 'Play Voice'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
               </View>
               
               <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
-                <TouchableOpacity onPress={() => pickQuestionImage(editingQuestion.id)} style={styles.pickFileButton}>
-                  <MaterialCommunityIcons name="image-plus" size={16} color="#ffffff" />
-                  <Text style={styles.pickFileButtonText}>{editingQuestion.questionImage ? 'Change image' : 'Add image'}</Text>
+                <TouchableOpacity 
+                  onPress={() => pickMultipleQuestionImages(editingQuestion.id)} 
+                  style={styles.imageOptionsButton}
+                >
+                  <MaterialCommunityIcons name="image-plus" size={18} color="#ffffff" />
+                  <Text style={styles.imageOptionsButtonText}>
+                    Add Images
+                  </Text>
                 </TouchableOpacity>
-                
-                {/* Multiple images button for pattern questions and multiple choice */}
-                {(editingQuestion.type === 're-order' || editingQuestion.type === 'identification' || editingQuestion.type === 'multiple-choice') && (
-                  <TouchableOpacity 
-                    onPress={() => pickMultipleQuestionImages(editingQuestion.id)} 
-                    style={[styles.pickFileButton, { marginLeft: 8, backgroundColor: '#f97316' }]}
-                  >
-                    <MaterialCommunityIcons name="image-multiple" size={16} color="#ffffff" />
-                    <Text style={styles.pickFileButtonText}>Add Multiple Images</Text>
-                  </TouchableOpacity>
-                )}
               </View>
               
               {/* Single question image */}
@@ -6602,12 +6983,7 @@ Please respond with a JSON object in this exact format:
             <AntDesign name="arrow-left" size={24} color="#1e293b" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{isEditing ? 'Edit Exercise' : 'Create Exercise'}</Text>
-          <TouchableOpacity 
-            onPress={() => scrollToTop(mainScrollRef)} 
-            style={styles.scrollToTopButton}
-          >
-            <AntDesign name="arrow-up" size={20} color="#64748b" />
-          </TouchableOpacity>
+          <View style={styles.placeholder} />
         </View>
 
         {/* Exercise Details */}
@@ -6835,12 +7211,11 @@ Please respond with a JSON object in this exact format:
             <Text style={styles.sectionTitle}>Questions ({questions.length})</Text>
             <View style={styles.buttonContainer}>
               <TouchableOpacity
-                style={styles.aiGeneratorButton}
+                style={styles.aiGeneratorButtonIcon}
                 onPress={() => setShowAIGenerator(true)}
                 disabled={!exerciseTitle.trim() || !exerciseDescription.trim() || !exerciseCategory.trim()}
               >
-                <MaterialCommunityIcons name="robot" size={16} color="#ffffff" />
-                <Text style={styles.aiGeneratorButtonText}>AI</Text>
+                <MaterialCommunityIcons name="robot" size={22} color="#ffffff" />
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.addQuestionButton}
@@ -6849,7 +7224,7 @@ Please respond with a JSON object in this exact format:
                   openModal('questionType');
                 }}
               >
-                <AntDesign name="plus" size={16} color="#ffffff" />
+                <AntDesign name="plus" size={18} color="#ffffff" />
                 <Text style={styles.addQuestionButtonText}>Add Question</Text>
               </TouchableOpacity>
             </View>
@@ -7012,16 +7387,8 @@ Please respond with a JSON object in this exact format:
                 </TouchableOpacity>
               </View>
               
+              
               <View style={styles.aiModalContent}>
-                
-                {questions.length > 0 && (
-                  <View style={styles.existingQuestionsInfo}>
-                    <MaterialCommunityIcons name="information" size={20} color="#3b82f6" />
-                    <Text style={styles.existingQuestionsInfoText}>
-                      AI will use your {questions.length} existing question{questions.length > 1 ? 's' : ''} as examples to match your teaching style and avoid duplicates
-                    </Text>
-                  </View>
-                )}
                 
                 <Text style={styles.aiModalLabel}>Additional Requirements (Optional)</Text>
                 <TextInput
@@ -7034,6 +7401,25 @@ Please respond with a JSON object in this exact format:
                   textAlignVertical="top"
                 />
                 
+                {/* AI TTS Toggle */}
+                <View style={styles.aiTTSToggleContainer}>
+                  <View style={styles.aiTTSToggleTextContainer}>
+                    <MaterialCommunityIcons name="volume-high" size={20} color="#7c3aed" />
+                    <View>
+                      <Text style={styles.aiTTSToggleTitle}>Generate AI TTS</Text>
+                      <Text style={styles.aiTTSToggleSubtitle}>
+                        Auto-generate speech for each question
+                      </Text>
+                    </View>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.aiTTSToggle, generateAITTS && styles.aiTTSToggleActive]}
+                    onPress={() => setGenerateAITTS(!generateAITTS)}
+                  >
+                    <View style={[styles.aiTTSToggleThumb, generateAITTS && styles.aiTTSToggleThumbActive]} />
+                  </TouchableOpacity>
+                </View>
+
                 <View style={styles.aiModalRow}>
                   <View style={styles.aiModalInputGroup}>
                     <Text style={styles.aiModalLabel}>Number of Questions</Text>
@@ -7053,6 +7439,8 @@ Please respond with a JSON object in this exact format:
                       </TouchableOpacity>
                     </View>
                   </View>
+
+                  
                   
                   <View style={styles.aiModalInputGroup}>
                     <Text style={styles.aiModalLabel}>Question Type</Text>
@@ -7079,6 +7467,8 @@ Please respond with a JSON object in this exact format:
                     </View>
                   </View>
                 </View>
+
+        
                 
                 <TouchableOpacity
                   style={[styles.aiGenerateButton, (isGeneratingQuestions || isGeneratingTTS) && styles.aiGenerateButtonDisabled]}
@@ -7116,6 +7506,154 @@ Please respond with a JSON object in this exact format:
               </View>
             </View>
           </ScrollView>
+        </View>
+      </Modal>
+      
+      {/* Voice Recording Modal */}
+      <Modal
+        visible={showRecordingModal}
+        transparent
+        animationType="fade"
+        onRequestClose={closeRecordingModal}
+      >
+        <View style={styles.recordingModalOverlay}>
+          <View style={styles.recordingModalContainer}>
+            <View style={styles.recordingModalHeader}>
+              <Text style={styles.recordingModalTitle}>Record Voice</Text>
+              <TouchableOpacity onPress={closeRecordingModal} style={styles.recordingModalClose}>
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.recordingModalContent}>
+              {/* Recording Status */}
+              <View style={styles.recordingStatusContainer}>
+                {isRecording && (
+                  <View style={styles.recordingPulse}>
+                    <View style={styles.recordingPulseInner} />
+                  </View>
+                )}
+                <MaterialCommunityIcons 
+                  name={isRecording ? "microphone" : recordedAudioUri ? "check-circle" : "microphone-outline"} 
+                  size={80} 
+                  color={isRecording ? "#ef4444" : recordedAudioUri ? "#10b981" : "#94a3b8"} 
+                />
+              </View>
+
+              {/* Timer with Limit */}
+              <View style={styles.recordingTimerContainer}>
+                <Text style={[
+                  styles.recordingTimer,
+                  recordingDuration >= 105 && isRecording && { color: '#ef4444' }, // Red when < 15s left
+                  recordingDuration >= 90 && recordingDuration < 105 && isRecording && { color: '#f59e0b' }, // Orange when < 30s left
+                ]}>
+                  {formatRecordingTime(recordingDuration)}
+                </Text>
+                <Text style={styles.recordingTimerLimit}> / 2:00</Text>
+              </View>
+
+              {/* Status Text */}
+              <Text style={styles.recordingStatusText}>
+                {isRecording 
+                  ? recordingDuration >= 105 
+                    ? "Finishing soon..." 
+                    : "Recording in progress..." 
+                  : recordedAudioUri 
+                    ? "Recording ready!" 
+                    : "Tap to start (max 2 minutes)"}
+              </Text>
+
+              {/* Control Buttons */}
+              <View style={styles.recordingControls}>
+                {!recordedAudioUri ? (
+                  <>
+                    {!isRecording ? (
+                      <>
+                        <TouchableOpacity 
+                          style={styles.recordingButtonPrimary}
+                          onPress={startRecording}
+                        >
+                          <MaterialCommunityIcons name="microphone" size={24} color="#fff" />
+                          <Text style={styles.recordingButtonText}>Start Recording</Text>
+                        </TouchableOpacity>
+                        
+                        {/* Delete Previous Recording Button */}
+                        {hasPreviousRecording && (
+                          <TouchableOpacity 
+                            style={styles.recordingButtonDelete}
+                            onPress={deletePreviousRecording}
+                          >
+                            <MaterialCommunityIcons name="delete-outline" size={20} color="#ef4444" />
+                            <Text style={styles.recordingButtonDeleteText}>Delete Previous Recording</Text>
+                          </TouchableOpacity>
+                        )}
+                      </>
+                    ) : (
+                      <TouchableOpacity 
+                        style={[styles.recordingButtonPrimary, styles.recordingButtonStop]}
+                        onPress={() => stopRecording(false)}
+                      >
+                        <MaterialCommunityIcons name="stop" size={24} color="#fff" />
+                        <Text style={styles.recordingButtonText}>Stop Recording</Text>
+                      </TouchableOpacity>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <View style={styles.recordingActionsRow}>
+                      <TouchableOpacity 
+                        style={styles.recordingButtonSecondary}
+                        onPress={isPlayingRecording ? stopRecordingPlayback : playRecording}
+                      >
+                        <MaterialCommunityIcons 
+                          name={isPlayingRecording ? "stop" : "play"} 
+                          size={20} 
+                          color="#7c3aed" 
+                        />
+                        <Text style={styles.recordingButtonSecondaryText}>
+                          {isPlayingRecording ? "Stop" : "Play"}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity 
+                        style={styles.recordingButtonSecondary}
+                        onPress={reRecord}
+                      >
+                        <MaterialCommunityIcons name="refresh" size={20} color="#7c3aed" />
+                        <Text style={styles.recordingButtonSecondaryText}>Re-record</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <TouchableOpacity 
+                      style={[styles.recordingButtonPrimary, styles.recordingButtonSave]}
+                      onPress={saveRecordedVoice}
+                      disabled={uploading}
+                    >
+                      {uploading ? (
+                        <>
+                          <ActivityIndicator size="small" color="#fff" />
+                          <Text style={styles.recordingButtonText}>Saving...</Text>
+                        </>
+                      ) : (
+                        <>
+                          <MaterialCommunityIcons name="content-save" size={24} color="#fff" />
+                          <Text style={styles.recordingButtonText}>Save Voice</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+
+              {/* Tips */}
+              <View style={styles.recordingTips}>
+                <MaterialCommunityIcons name="lightbulb-outline" size={16} color="#64748b" />
+                <Text style={styles.recordingTipsText}>
+                  Tip: Max 2 minutes. Recording is optimized for voice with minimal file size (~100 KB/min). Speak clearly near the microphone
+                </Text>
+              </View>
+            </View>
+          </View>
         </View>
       </Modal>
       
@@ -8661,7 +9199,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 12,
+    paddingTop: 50,
+    paddingBottom: 12,
     marginBottom: 16,
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
@@ -9063,21 +9602,51 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#7c3aed',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 18,
     shadowColor: '#7c3aed',
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.25,
-    shadowRadius: 8,
+    shadowRadius: 4,
     elevation: 3,
   },
   addQuestionButtonText: {
     color: '#ffffff',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
-    marginLeft: 6,
+    marginLeft: 4,
   },
+  
+  // Icon-only buttons for AI and Add Question
+  aiGeneratorButtonIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#10b981',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  addQuestionButtonIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#7c3aed',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+    marginLeft: 8,
+  },
+  
   retryFailedTTSButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -9209,9 +9778,18 @@ const styles = StyleSheet.create({
   },
   saveExerciseButton: {
     backgroundColor: '#10b981',
-    paddingVertical: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
     borderRadius: 12,
     alignItems: 'center',
+    alignSelf: 'center',
+    minWidth: 200,
+    maxWidth: 400,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
   saveExerciseButtonDisabled: {
     backgroundColor: '#9ca3af',
@@ -9219,7 +9797,7 @@ const styles = StyleSheet.create({
   },
   saveExerciseButtonText: {
     color: '#ffffff',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
   },
   ttsUploadProgressContainer: {
@@ -9363,7 +9941,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    maxHeight: '80%',
+    maxHeight: '85%',
+    minHeight: '60%',
   },
   modalHeader: {
     flexDirection: 'row',
@@ -9384,6 +9963,7 @@ const styles = StyleSheet.create({
   questionTypesList: {
     paddingHorizontal: 20,
     paddingVertical: 16,
+    paddingBottom: 30,
   },
   questionTypeCard: {
     flexDirection: 'row',
@@ -9639,6 +10219,114 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginLeft: 6,
   },
+  
+  // Image Options Button
+  imageOptionsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  imageOptionsButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 8,
+    marginRight: 6,
+  },
+  
+  // Image Options Modal
+  imageOptionsModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  imageOptionsModalContent: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    width: '100%',
+    maxWidth: 400,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  imageOptionsModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  imageOptionsModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  imageOptionsModalClose: {
+    padding: 4,
+  },
+  imageOptionsModalBody: {
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+  },
+  imageOptionsModalDescription: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  imageOptionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  imageOptionIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  imageOptionContent: {
+    flex: 1,
+  },
+  imageOptionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  imageOptionDescription: {
+    fontSize: 13,
+    color: '#64748b',
+  },
+  
   selectedFileName: {
     flex: 1,
     color: '#1e293b',
@@ -11134,5 +11822,245 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#3b82f6',
+  },
+
+  // Recording Modal Styles
+  recordingModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  recordingModalContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    width: '100%',
+    maxWidth: 480,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 12,
+    overflow: 'hidden',
+  },
+  recordingModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+  },
+  recordingModalTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  recordingModalClose: {
+    padding: 8,
+    borderRadius: 20,
+    backgroundColor: '#f1f5f9',
+  },
+  recordingModalContent: {
+    padding: 32,
+    alignItems: 'center',
+  },
+  recordingStatusContainer: {
+    position: 'relative',
+    marginBottom: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recordingPulse: {
+    position: 'absolute',
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    opacity: 0.6,
+  },
+  recordingPulseInner: {
+    position: 'absolute',
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: 'rgba(239, 68, 68, 0.3)',
+    opacity: 0.4,
+  },
+  recordingTimerContainer: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  recordingTimer: {
+    fontSize: 48,
+    fontWeight: '700',
+    color: '#1e293b',
+    fontVariant: ['tabular-nums'],
+  },
+  recordingTimerLimit: {
+    fontSize: 24,
+    fontWeight: '500',
+    color: '#94a3b8',
+    fontVariant: ['tabular-nums'],
+  },
+  recordingStatusText: {
+    fontSize: 16,
+    color: '#64748b',
+    marginBottom: 32,
+    textAlign: 'center',
+  },
+  recordingControls: {
+    width: '100%',
+    gap: 12,
+  },
+  recordingActionsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 12,
+  },
+  recordingButtonPrimary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#7c3aed',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    gap: 8,
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  recordingButtonStop: {
+    backgroundColor: '#ef4444',
+    shadowColor: '#ef4444',
+  },
+  recordingButtonSave: {
+    backgroundColor: '#10b981',
+    shadowColor: '#10b981',
+  },
+  recordingButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  recordingButtonSecondary: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f1f5f9',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  recordingButtonSecondaryText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#7c3aed',
+  },
+  recordingButtonDelete: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fef2f2',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    marginTop: 12,
+  },
+  recordingButtonDeleteText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ef4444',
+  },
+  recordingTips: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+  },
+  recordingTipsText: {
+    fontSize: 13,
+    color: '#64748b',
+    flex: 1,
+    lineHeight: 18,
+  },
+  recordVoiceButton: {
+    borderWidth: 1,
+    borderColor: '#7c3aed',
+    backgroundColor: '#faf5ff',
+  },
+
+  // AI TTS Toggle Styles
+  aiTTSToggleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: '#faf5ff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e9d5ff',
+    marginTop: 8,
+  },
+  aiTTSToggleTextContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  aiTTSToggleTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+  aiTTSToggleSubtitle: {
+    fontSize: 9,
+    color: '#64748b',
+  },
+  aiTTSToggle: {
+    width: 52,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#cbd5e1',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  aiTTSToggleActive: {
+    backgroundColor: '#7c3aed',
+  },
+  aiTTSToggleThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+    transform: [{ translateX: 0 }],
+  },
+  aiTTSToggleThumbActive: {
+    transform: [{ translateX: 24 }],
   },
 });

@@ -341,6 +341,7 @@ export async function createExercise(params: CreateExerciseParams): Promise<{
       resourceUrl: params.resourceUrl || null,
       category: params.category || 'Mathematics',
       timesUsed: params.timesUsed || 0,
+      timesCopied: 0, // Track how many times this exercise has been copied
       isPublic: params.isPublic !== undefined ? params.isPublic : false,
       createdAt: new Date().toISOString()
     };
