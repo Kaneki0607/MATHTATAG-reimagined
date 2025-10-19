@@ -15,33 +15,33 @@ import * as Sharing from 'expo-sharing';
 import { useEffect, useRef, useState } from 'react';
 
 import {
-    ActivityIndicator,
+  ActivityIndicator,
 
-    Animated,
-    Dimensions,
+  Animated,
+  Dimensions,
 
-    Image,
+  Image,
 
-    Modal,
+  Modal,
 
-    PanResponder,
-    Platform,
-    RefreshControl,
+  PanResponder,
+  Platform,
+  RefreshControl,
 
-    ScrollView,
+  ScrollView,
 
-    StyleSheet,
+  StyleSheet,
 
-    Text,
+  Text,
 
-    TextInput,
+  TextInput,
 
-    TouchableOpacity,
+  TouchableOpacity,
 
-    TouchableWithoutFeedback,
+  TouchableWithoutFeedback,
 
-    View,
-    useWindowDimensions
+  View,
+  useWindowDimensions
 } from 'react-native';
 
 import { ResponsiveCards } from '../components/ResponsiveGrid';
@@ -57,7 +57,9 @@ import { AssignedExercise, useExercises } from '../hooks/useExercises';
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
 
 import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
+import { recalculateResultsSummary, validateAndRepairExerciseResult } from '../lib/result-validation-utils';
 
+import { Colors, Typography } from '../constants/theme';
 import { collectAppMetadata } from '../lib/app-metadata';
 import { createAnnouncement, createClass, createParent, createStudent } from '../lib/entity-helpers';
 import { logError, logErrorWithStack } from '../lib/error-logger';
@@ -2196,6 +2198,48 @@ export default function TeacherDashboard() {
   const [selectedStudentPerformance, setSelectedStudentPerformance] = useState<any>(null);
 
   const [selectedExerciseForPerformance, setSelectedExerciseForPerformance] = useState<any>(null);
+
+  // Exercise Result modal (view/edit/delete)
+  const [showExerciseResultModal, setShowExerciseResultModal] = useState(false);
+  const [selectedExerciseResultId, setSelectedExerciseResultId] = useState<string | null>(null);
+  const [selectedExerciseResultData, setSelectedExerciseResultData] = useState<any>(null);
+  const [editableQuestionResults, setEditableQuestionResults] = useState<any[]>([]);
+  const [editableSummary, setEditableSummary] = useState<any>(null);
+  const [loadingExerciseResult, setLoadingExerciseResult] = useState<boolean>(false);
+  const [showDeviceInfo, setShowDeviceInfo] = useState<boolean>(false);
+  const [filterMode, setFilterMode] = useState<'all' | 'correct' | 'wrong'>('all');
+  const [sortMode, setSortMode] = useState<'default' | 'attempts' | 'time' | 'type'>('default');
+  const [expandedQuestions, setExpandedQuestions] = useState<Record<string, boolean>>({});
+  const [teacherRemarks, setTeacherRemarks] = useState<string>('');
+  const [relatedStats, setRelatedStats] = useState<{ previousCount: number; previousAvgScore: number; lastScores: number[] } | null>(null);
+
+  // Helper: show friendly text for values that might be URLs (e.g., image choices)
+  const toFriendlyText = (value: any, maxLen: number = 40): string => {
+    if (value === null || value === undefined) return '';
+    const str = String(value).trim();
+    let out = str;
+    if (str.startsWith('http://') || str.startsWith('https://')) {
+      try {
+        const parts = str.split('/');
+        const lastPart = parts[parts.length - 1];
+        out = lastPart.split('?')[0];
+      } catch {
+        out = str;
+      }
+    }
+    if (out.length > maxLen) return out.slice(0, maxLen) + '...';
+    return out;
+  };
+
+  const isImageUrl = (value: any): boolean => {
+    if (!value) return false;
+    const s = String(value).toLowerCase();
+    return s.startsWith('http://') || s.startsWith('https://');
+  };
+
+  const toggleQuestionExpanded = (qid: string) => {
+    setExpandedQuestions(prev => ({ ...prev, [qid]: !prev[qid] }));
+  };
 
   const [studentPerformanceData, setStudentPerformanceData] = useState<any>(null);
 
@@ -4802,7 +4846,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
   // Function to handle student name click
 
-  const handleStudentNameClick = async (studentId: string, exerciseId: string, classId: string, studentNickname: string) => {
+  const handleStudentNameClick = async (studentId: string, exerciseId: string, classId: string, studentNickname: string, resultId?: string) => {
 
     // Find the student data
 
@@ -4811,6 +4855,44 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     if (!student) return;
 
 
+
+    // If a specific exercise result ID is provided, open Exercise Result modal instead
+    if (resultId) {
+      try {
+        setLoadingExerciseResult(true);
+        setSelectedExerciseResultId(resultId);
+        const { data } = await readData(`/ExerciseResults/${resultId}`);
+        setSelectedExerciseResultData(data);
+        setEditableQuestionResults((data?.questionResults || []).map((qr: any) => ({ ...qr })));
+        setEditableSummary(data?.resultsSummary || null);
+        setTeacherRemarks(data?.teacherRemarks || '');
+
+        // Load related results to show trend (same student + exercise)
+        try {
+          const { data: allResults } = await readData('/ExerciseResults');
+          if (allResults && data?.studentId && (data?.exerciseInfo?.exerciseId || data?.exerciseId)) {
+            const studentId = data.studentId;
+            const exerciseId = data?.exerciseInfo?.exerciseId || data?.exerciseId;
+            const list = Object.entries(allResults).filter(([rid, r]: any) => {
+              if (rid === resultId) return false;
+              const eId = r?.exerciseInfo?.exerciseId || r?.exerciseId;
+              return r?.studentId === studentId && eId === exerciseId;
+            }).map(([rid, r]: any) => r);
+            const scores = list.map((r: any) => r?.resultsSummary?.meanPercentageScore).filter((x: any) => typeof x === 'number');
+            const avg = scores.length > 0 ? Math.round(scores.reduce((a: number, b: number) => a + b, 0) / scores.length) : 0;
+            setRelatedStats({ previousCount: list.length, previousAvgScore: avg, lastScores: scores.slice(-3) });
+          } else {
+            setRelatedStats(null);
+          }
+        } catch {
+          setRelatedStats(null);
+        }
+        setShowExerciseResultModal(true);
+      } finally {
+        setLoadingExerciseResult(false);
+      }
+      return;
+    }
 
     setSelectedStudentPerformance(student);
 
@@ -9382,7 +9464,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                              style={{ flex: 2, flexDirection: 'row', alignItems: 'center' }}
 
-                                             onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname)}
+                                          onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname, result.resultId)}
 
                                            >
 
@@ -12950,6 +13032,421 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       </Modal>
 
+
+      {/* Exercise Result Modal */}
+
+      <Modal visible={showExerciseResultModal} animationType="slide" transparent={false}>
+
+        <View style={styles.studentPerformanceFullScreenContainer}>
+
+          <View style={styles.studentPerformanceFullScreenHeader}>
+
+            <View style={styles.studentPerformanceHeaderContent}>
+
+              <Text style={styles.studentPerformanceFullScreenTitle}>Exercise Result</Text>
+
+              {selectedExerciseResultId && (
+
+                <Text style={styles.studentPerformanceStudentName}>
+
+                  {selectedExerciseResultId}
+
+                </Text>
+
+              )}
+
+            </View>
+
+            <TouchableOpacity
+
+              onPress={() => setShowExerciseResultModal(false)}
+
+              style={styles.studentPerformanceCloseButton}
+
+            >
+
+              <MaterialIcons name="close" size={24} color="#1e293b" />
+
+            </TouchableOpacity>
+
+          </View>
+
+          {loadingExerciseResult ? (
+            <View style={styles.studentPerformanceFullScreenLoading}>
+              <Text style={styles.studentPerformanceLoadingText}>Loading result...</Text>
+            </View>
+          ) : (
+            <ScrollView 
+              style={styles.studentPerformanceFullScreenContent} 
+              showsVerticalScrollIndicator={true}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* Header info */}
+              <View style={styles.studentPerformanceSection}>
+                <Text style={styles.studentPerformanceSectionTitle}>Exercise Result Info</Text>
+                <View style={styles.studentPerformanceInfo}>
+                  <Text style={styles.studentPerformanceName}>
+                    {selectedExerciseResultData?.studentInfo?.name || 'Unknown Student'}
+                  </Text>
+                  <Text style={styles.studentPerformanceExercise}>
+                    {selectedExerciseResultData?.exerciseInfo?.title || selectedExerciseResultData?.exerciseTitle || 'Unknown Exercise'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Summary card (expanded) */}
+              <View style={styles.studentPerformanceCard}>
+                <Text style={[styles.studentPerformanceCardTitle, { ...Typography.h2, color: Colors.light.text }]}>Results Summary</Text>
+                <View style={[styles.studentPerformanceStatsRow, { flexWrap: 'wrap' }]}>
+                  <View style={styles.studentPerformanceStatItem}>
+                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalItems ?? 0}</Text>
+                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Items</Text>
+                  </View>
+                  <View style={styles.studentPerformanceStatItem}>
+                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalCorrect ?? 0}</Text>
+                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Correct</Text>
+                  </View>
+                  <View style={styles.studentPerformanceStatItem}>
+                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalIncorrect ?? 0}</Text>
+                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Incorrect</Text>
+                  </View>
+                  <View style={styles.studentPerformanceStatItem}>
+                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalAttempts ?? 0}</Text>
+                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Total Attempts</Text>
+                  </View>
+                  <View style={styles.studentPerformanceStatItem}>
+                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.meanAttemptsPerItem ?? 0}</Text>
+                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Attempts/Item</Text>
+                  </View>
+                  <View style={styles.studentPerformanceStatItem}>
+                    <Text style={[styles.studentPerformanceStatValue, Typography.h2]}>{editableSummary?.totalTimeSpentSeconds ?? 0}</Text>
+                    <Text style={[styles.studentPerformanceStatLabel, Typography.caption]}>Total Time (s)</Text>
+                  </View>
+                </View>
+                <View style={[styles.studentPerformanceOverallScore, { marginTop: 8 }]}>
+                  <Text style={[styles.studentPerformanceOverallScoreLabel, Typography.h3]}>Score</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8 }}>
+                      <Text style={[styles.studentPerformanceOverallScoreValue, Typography.h1]}>{editableSummary?.meanPercentageScore ?? 0}%</Text>
+                      <View style={{ paddingVertical: 2, paddingHorizontal: 8, borderRadius: 9999, backgroundColor: (editableSummary?.meanPercentageScore ?? 0) >= 75 ? '#dcfce7' : '#fee2e2' }}>
+                        <Text style={{ color: (editableSummary?.meanPercentageScore ?? 0) >= 75 ? '#16a34a' : '#dc2626', fontWeight: '700' }}>
+                          {(editableSummary?.meanPercentageScore ?? 0) >= 75 ? 'Passing' : 'Needs Work'}
+                        </Text>
+                      </View>
+                    </View>
+                </View>
+
+                {/* Quick performance highlights + trend */}
+                <View style={{ marginTop: 8, flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                  <View style={{ backgroundColor: '#dcfce7', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 9999 }}>
+                    <Text style={{ color: '#16a34a', fontWeight: '700' }}>🟢 {editableSummary?.meanPercentageScore >= 85 ? 'High' : 'Stable'}</Text>
+                  </View>
+                  <View style={{ backgroundColor: '#fef9c3', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 9999 }}>
+                    <Text style={{ color: '#a16207', fontWeight: '700' }}>🟡 Attempts: {editableSummary?.meanAttemptsPerItem ?? 0}</Text>
+                  </View>
+                  <View style={{ backgroundColor: '#fee2e2', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 9999 }}>
+                    <Text style={{ color: '#dc2626', fontWeight: '700' }}>🔴 Time/item: {editableSummary?.meanTimePerItemSeconds ?? 0}s</Text>
+                  </View>
+                </View>
+
+                {relatedStats && (
+                  <View style={{ marginTop: 10, backgroundColor: '#f8fafc', borderRadius: 8, padding: 10 }}>
+                    <Text style={{ color: '#0f172a', fontWeight: '700' }}>Trend</Text>
+                    <Text style={{ color: '#475569', marginTop: 2 }}>Previous attempts: {relatedStats.previousCount}</Text>
+                    <Text style={{ color: '#475569', marginTop: 2 }}>Prev avg score: {relatedStats.previousAvgScore}%</Text>
+                    {relatedStats.lastScores.length > 0 && (
+                      <Text style={{ color: '#475569', marginTop: 2 }}>Last scores: {relatedStats.lastScores.join(', ')}</Text>
+                    )}
+                  </View>
+                )}
+
+                {/* Device Info toggle */}
+                {selectedExerciseResultData?.deviceInfo && (
+                  <View style={{ marginTop: 10 }}>
+                    <TouchableOpacity onPress={() => setShowDeviceInfo(v => !v)} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <MaterialIcons name={showDeviceInfo ? 'expand-less' : 'expand-more'} size={18} color="#334155" />
+                      <Text style={{ color: '#334155', fontWeight: '700' }}>Device Info</Text>
+                    </TouchableOpacity>
+                    {showDeviceInfo && (
+                      <View style={{ backgroundColor: '#f8fafc', borderRadius: 8, padding: 10, marginTop: 6 }}>
+                        <Text style={{ color: '#475569' }}>Device: {toFriendlyText(selectedExerciseResultData?.deviceInfo?.deviceModel)}</Text>
+                        <Text style={{ color: '#475569' }}>OS: {toFriendlyText(selectedExerciseResultData?.deviceInfo?.osVersion)}</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+
+                {/* Filter/Sort + Print/Export + Remarks */}
+                <View style={{ marginTop: 12, flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                  <View style={{ flexDirection: 'row', backgroundColor: '#e2e8f0', borderRadius: 8, padding: 2 }}>
+                    {(['all','correct','wrong'] as const).map(mode => (
+                      <TouchableOpacity key={mode} onPress={() => setFilterMode(mode)} style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, backgroundColor: filterMode === mode ? '#3b82f6' : 'transparent' }}>
+                        <Text style={{ color: filterMode === mode ? '#ffffff' : '#0f172a', fontWeight: '700', textTransform: 'capitalize' }}>{mode}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <View style={{ flexDirection: 'row', backgroundColor: '#e2e8f0', borderRadius: 8, padding: 2 }}>
+                    {(['default','attempts','time','type'] as const).map(mode => (
+                      <TouchableOpacity key={mode} onPress={() => setSortMode(mode)} style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, backgroundColor: sortMode === mode ? '#3b82f6' : 'transparent' }}>
+                        <Text style={{ color: sortMode === mode ? '#ffffff' : '#0f172a', fontWeight: '700', textTransform: 'capitalize' }}>{mode}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <TouchableOpacity
+                    onPress={async () => {
+                      try {
+                        const html = `<!DOCTYPE html><html><body><h1>${selectedExerciseResultData?.studentInfo?.name || 'Student'}</h1><p>Score: ${editableSummary?.meanPercentageScore ?? 0}%</p></body></html>`;
+                        await Print.printAsync({ html });
+                      } catch (e: any) {
+                        showAlert('Print Failed', e?.message || 'Unable to print', undefined, 'error');
+                      }
+                    }}
+                    style={{ backgroundColor: '#10b981', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8 }}
+                  >
+                    <Text style={{ color: '#ffffff', fontWeight: '700' }}>Print</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={{ marginTop: 8 }}>
+                  <Text style={{ color: '#334155', marginBottom: 6, fontWeight: '700' }}>Teacher Remarks</Text>
+                  <TextInput
+                    placeholder="Add feedback for the student"
+                    placeholderTextColor="#94a3b8"
+                    value={teacherRemarks}
+                    onChangeText={setTeacherRemarks}
+                    style={{ borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, padding: 10, color: '#0f172a', backgroundColor: '#ffffff' }}
+                    multiline
+                  />
+                </View>
+              </View>
+
+              {/* Questions list with tools */}
+              <View style={styles.studentPerformanceCard}>
+                <Text style={styles.studentPerformanceCardTitle}>Questions</Text>
+                {editableQuestionResults
+                  .filter((qr: any) => filterMode === 'all' ? true : filterMode === 'correct' ? qr.isCorrect : !qr.isCorrect)
+                  .sort((a: any, b: any) => {
+                    if (sortMode === 'attempts') return (b.attempts || 0) - (a.attempts || 0);
+                    if (sortMode === 'time') return (b.timeSpentSeconds || 0) - (a.timeSpentSeconds || 0);
+                    if (sortMode === 'type') return String(a.questionType).localeCompare(String(b.questionType));
+                    return 0;
+                  })
+                  .map((qr: any, index: number) => (
+                  <View key={qr.questionId || index} style={{ marginBottom: 16, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, padding: 12, backgroundColor: '#ffffff' }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={{ fontWeight: '700', color: '#0f172a', flex: 1 }}>Q{qr.questionNumber}: {qr.questionText}</Text>
+                      <View style={{ paddingVertical: 4, paddingHorizontal: 8, borderRadius: 9999, backgroundColor: qr.isCorrect ? '#dcfce7' : '#fee2e2' }}>
+                        <Text style={{ color: qr.isCorrect ? '#16a34a' : '#dc2626', fontWeight: '700' }}>{qr.isCorrect ? 'Correct' : 'Wrong'}</Text>
+                      </View>
+                    </View>
+                    <View style={{ flexDirection: 'row', marginTop: 6, alignItems: 'center', gap: 8 }}>
+                      <Text style={{ color: '#64748b' }}>Type:</Text>
+                      <Text style={{ color: '#0f172a', fontWeight: '700', textTransform: 'capitalize' }}>{toFriendlyText(qr.questionType)}</Text>
+                      <Text style={{ color: '#64748b', marginLeft: 12 }}>Time:</Text>
+                      <Text style={{ color: '#0f172a', fontWeight: '700' }}>{qr.timeSpentSeconds ?? 0}s</Text>
+                    </View>
+                    {Array.isArray(qr.choices) && qr.choices.length > 0 && (
+                      <View style={{ marginTop: 6, marginBottom: 10, backgroundColor: '#f8fafc', borderRadius: 8, padding: 8 }}>
+                        {qr.choices.map((choice: string, i: number) => (
+                          <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                            {isImageUrl(choice) ? (
+                              <View style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: '#e2e8f0', alignItems: 'center', justifyContent: 'center', marginRight: 8 }}>
+                                <MaterialIcons name="image" size={16} color="#475569" />
+                              </View>
+                            ) : null}
+                            <Text style={{ color: '#334155' }}>• {toFriendlyText(choice)}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                    {/* Read-only refs for teacher context */}
+                    <View style={{ backgroundColor: '#f8fafc', borderRadius: 8, padding: 8 }}>
+                      <Text style={{ color: '#475569' }}>Correct Answer: <Text style={{ fontWeight: '700', color: '#0f172a' }}>{toFriendlyText(qr.correctAnswer)}</Text></Text>
+                      {qr.attemptHistory && qr.attemptHistory.length > 0 && (
+                        <Text style={{ color: '#475569', marginTop: 4 }}>Last Attempt: <Text style={{ fontWeight: '700', color: '#0f172a' }}>{toFriendlyText(qr.attemptHistory[qr.attemptHistory.length - 1].selectedAnswer)}</Text></Text>
+                      )}
+                    </View>
+                    {/* Expand for attempt history */}
+                    <TouchableOpacity onPress={() => toggleQuestionExpanded(qr.questionId)} style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <MaterialIcons name={expandedQuestions[qr.questionId] ? 'expand-less' : 'expand-more'} size={18} color="#334155" />
+                      <Text style={{ color: '#334155', fontWeight: '700' }}>Attempt History</Text>
+                    </TouchableOpacity>
+                    {expandedQuestions[qr.questionId] && (
+                      <View style={{ backgroundColor: '#f8fafc', borderRadius: 8, padding: 8, marginTop: 6 }}>
+                        {(qr.attemptHistory || []).map((a: any, i: number) => (
+                          <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                            <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: a.isCorrect ? '#10b981' : '#ef4444', marginRight: 8 }} />
+                            <Text style={{ color: '#0f172a', fontWeight: '700' }}>#{a.attemptNumber}</Text>
+                            <Text style={{ color: '#475569', marginLeft: 8 }}>{toFriendlyText(a.selectedAnswer)}</Text>
+                            <Text style={{ color: '#64748b', marginLeft: 8 }}>{toFriendlyText(a.timeStamp, 24)}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                    {/* Score toggle */}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                      <Text style={{ width: 120, color: '#334155' }}>Score</Text>
+                      <View style={{ flexDirection: 'row', backgroundColor: '#e2e8f0', borderRadius: 8, padding: 2 }}>
+                        <TouchableOpacity
+                          style={{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 6, backgroundColor: qr.isCorrect ? '#10b981' : 'transparent' }}
+                          onPress={() => {
+                            const next = editableQuestionResults.map((q2, idx) => {
+                              if (idx !== index) return q2;
+                              const newAttempts = Math.max(1, q2.attempts || 0);
+                              const baseHistory = (q2.attemptHistory && q2.attemptHistory.length > 0) ? q2.attemptHistory.slice(0, newAttempts - 1) : [];
+                              const lastAttempt = { attemptNumber: newAttempts, selectedAnswer: q2.correctAnswer || q2.studentAnswer || '', isCorrect: true, timeStamp: new Date().toISOString() };
+                              const newHistory = [...baseHistory, lastAttempt];
+                              return { ...q2, isCorrect: true, attempts: newAttempts, attemptHistory: newHistory };
+                            });
+                            setEditableQuestionResults(next);
+                            setEditableSummary(recalculateResultsSummary(next, editableSummary));
+                          }}
+                        >
+                          <Text style={{ color: qr.isCorrect ? '#ffffff' : '#0f172a', fontWeight: '700' }}>Correct</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={{ marginLeft: 6, paddingVertical: 6, paddingHorizontal: 12, borderRadius: 6, backgroundColor: !qr.isCorrect ? '#ef4444' : 'transparent' }}
+                          onPress={() => {
+                            const next = editableQuestionResults.map((q2, idx) => {
+                              if (idx !== index) return q2;
+                              const newAttempts = Math.max(1, q2.attempts || 0);
+                              const baseHistory = (q2.attemptHistory && q2.attemptHistory.length > 0) ? q2.attemptHistory.slice(0, newAttempts - 1) : [];
+                              const lastAttempt = { attemptNumber: newAttempts, selectedAnswer: q2.studentAnswer || '', isCorrect: false, timeStamp: new Date().toISOString() };
+                              const newHistory = [...baseHistory, lastAttempt];
+                              return { ...q2, isCorrect: false, attempts: newAttempts, attemptHistory: newHistory };
+                            });
+                            setEditableQuestionResults(next);
+                            setEditableSummary(recalculateResultsSummary(next, editableSummary));
+                          }}
+                        >
+                          <Text style={{ color: !qr.isCorrect ? '#ffffff' : '#0f172a', fontWeight: '700' }}>Wrong</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                    {/* Attempts stepper */}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
+                      <Text style={{ width: 120, color: '#334155' }}>Attempts</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <TouchableOpacity
+                          onPress={() => {
+                            const next = editableQuestionResults.map((q2, idx) => {
+                              if (idx !== index) return q2;
+                              const newVal = Math.max(0, (q2.attempts || 0) - 1);
+                              const newHistory = (q2.attemptHistory || []).slice(0, Math.max(0, newVal));
+                              return { ...q2, attempts: newVal, attemptHistory: newHistory };
+                            });
+                            setEditableQuestionResults(next);
+                            setEditableSummary(recalculateResultsSummary(next, editableSummary));
+                          }}
+                          style={{ backgroundColor: '#e2e8f0', padding: 6, borderRadius: 6 }}
+                        >
+                          <MaterialIcons name="remove" size={18} color="#0f172a" />
+                        </TouchableOpacity>
+                        <Text style={{ marginHorizontal: 12, minWidth: 24, textAlign: 'center', color: '#0f172a', fontWeight: '700' }}>{qr.attempts ?? 0}</Text>
+                        <TouchableOpacity
+                          onPress={() => {
+                            const next = editableQuestionResults.map((q2, idx) => {
+                              if (idx !== index) return q2;
+                              const newVal = (q2.attempts || 0) + 1;
+                              const lastTemplate = (q2.attemptHistory && q2.attemptHistory.length > 0) ? q2.attemptHistory[q2.attemptHistory.length - 1] : { attemptNumber: 0, selectedAnswer: q2.studentAnswer || '', isCorrect: q2.isCorrect || false, timeStamp: new Date().toISOString() };
+                              const newHistory = [...(q2.attemptHistory || []), { ...lastTemplate, attemptNumber: newVal, timeStamp: new Date().toISOString() }];
+                              return { ...q2, attempts: newVal, attemptHistory: newHistory };
+                            });
+                            setEditableQuestionResults(next);
+                            setEditableSummary(recalculateResultsSummary(next, editableSummary));
+                          }}
+                          style={{ backgroundColor: '#e2e8f0', padding: 6, borderRadius: 6 }}
+                        >
+                          <MaterialIcons name="add" size={18} color="#0f172a" />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+                ))}
+
+                {/* Save / Delete buttons */}
+                <View style={{ flexDirection: 'row', gap: 12, marginTop: 4 }}>
+                  <TouchableOpacity
+                    style={{ backgroundColor: '#3b82f6', paddingVertical: 10, paddingHorizontal: 14, borderRadius: 8 }}
+                    onPress={async () => {
+                      if (!selectedExerciseResultId) return;
+                      // Build updated payload and run validate/repair
+                      const updated = {
+                        ...(selectedExerciseResultData || {}),
+                        questionResults: editableQuestionResults,
+                        resultsSummary: recalculateResultsSummary(editableQuestionResults, editableSummary),
+                        teacherRemarks
+                      } as any;
+                      const { result } = validateAndRepairExerciseResult(updated, { verbose: true });
+                      const { success, error } = await writeData(`/ExerciseResults/${selectedExerciseResultId}`, result);
+                      if (!success) {
+                        showAlert('Update Failed', error || 'Unable to update result', undefined, 'error');
+                        return;
+                      }
+                      setSelectedExerciseResultData(result);
+                      showAlert('Saved', 'Exercise result updated.', undefined, 'success');
+                      try {
+                        if (activeClasses.length > 0) {
+                          await loadAssignments(activeClasses.map(c => c.id));
+                        }
+                      } catch {}
+                    }}
+                  >
+                    <Text style={{ color: 'white', fontWeight: '700' }}>Save</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={{ backgroundColor: '#ef4444', paddingVertical: 10, paddingHorizontal: 14, borderRadius: 8 }}
+                    onPress={() => {
+                      if (!selectedExerciseResultId) return;
+                      setAlertButtons([
+                        { text: 'Cancel', style: 'cancel', onPress: () => {} },
+                        { text: 'Delete', style: 'destructive', onPress: async () => {
+                          const { success, error } = await deleteData(`/ExerciseResults/${selectedExerciseResultId}`);
+                          if (!success) {
+                            showAlert('Delete Failed', error || 'Unable to delete result', undefined, 'error');
+                            return;
+                          }
+                          showAlert('Deleted', 'Exercise result removed.', undefined, 'success');
+                          setShowExerciseResultModal(false);
+                          setSelectedExerciseResultId(null);
+                          setSelectedExerciseResultData(null);
+                          try {
+                            if (activeClasses.length > 0) {
+                              await loadAssignments(activeClasses.map(c => c.id));
+                            }
+                          } catch {}
+                        } }
+                      ]);
+                      showAlert('Delete Result?', 'This cannot be undone.', [
+                        { text: 'Cancel', style: 'cancel', onPress: () => {} },
+                        { text: 'Delete', style: 'destructive', onPress: async () => {
+                          const { success, error } = await deleteData(`/ExerciseResults/${selectedExerciseResultId}`);
+                          if (!success) {
+                            showAlert('Delete Failed', error || 'Unable to delete result', undefined, 'error');
+                            return;
+                          }
+                          showAlert('Deleted', 'Exercise result removed.', undefined, 'success');
+                          setShowExerciseResultModal(false);
+                          setSelectedExerciseResultId(null);
+                          setSelectedExerciseResultData(null);
+                          try {
+                            if (activeClasses.length > 0) {
+                              await loadAssignments(activeClasses.map(c => c.id));
+                            }
+                          } catch {}
+                        } }
+                      ], 'warning');
+                    }}
+                  >
+                    <Text style={{ color: 'white', fontWeight: '700' }}>Delete</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </ScrollView>
+          )}
+        </View>
+      </Modal>
 
 
       {/* Floating Customer Service Button */}

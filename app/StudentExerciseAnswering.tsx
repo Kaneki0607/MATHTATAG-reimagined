@@ -11,27 +11,140 @@ import * as Speech from 'expo-speech';
 // import * as Network from 'expo-network';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated,
-  Dimensions,
-  Easing,
-  Image,
-  ImageBackground,
-  LayoutAnimation,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    Animated,
+    Dimensions,
+    Easing,
+    Image,
+    ImageBackground,
+    LayoutAnimation,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import { collectAppMetadata } from '../lib/app-metadata';
 import { logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { generateResultId } from '../lib/id-generator';
 import {
-  validateAndRepairExerciseResult
+    validateAndRepairExerciseResult
 } from '../lib/result-validation-utils';
+
+// Structured logging helpers (toggleable)
+const LOG = {
+  media: true,
+  preload: true,
+  tts: true,
+  reorder: true,
+};
+const log = {
+  media: (...args: any[]) => LOG.media && console.log('[Media]', ...args),
+  mediaWarn: (...args: any[]) => LOG.media && console.warn('[Media]', ...args),
+  preload: (...args: any[]) => LOG.preload && console.log('[Preload]', ...args),
+  preloadWarn: (...args: any[]) => LOG.preload && console.warn('[Preload]', ...args),
+  tts: (...args: any[]) => LOG.tts && console.log('[TTS]', ...args),
+  ttsWarn: (...args: any[]) => LOG.tts && console.warn('[TTS]', ...args),
+  reorder: (...args: any[]) => LOG.reorder && console.log('[Reorder]', ...args),
+};
+
+// Lightweight log gating to reduce noise while keeping useful diagnostics
+// Levels: none < error < warn < info < debug
+const LOG_LEVEL: 'none' | 'error' | 'warn' | 'info' | 'debug' = __DEV__ ? 'info' : 'warn';
+const LEVEL_ORDER: Record<'none' | 'error' | 'warn' | 'info' | 'debug', number> = {
+  none: 0,
+  error: 1,
+  warn: 2,
+  info: 3,
+  debug: 4,
+};
+
+// Tag switches - enable only what we need by default
+const ENABLED_TAGS: Record<string, boolean> = {
+  Submission: true, // keep succinct submission milestones
+  Reorder: false,
+  AttemptHistory: false,
+  ResultCreation: false,
+  ResultsUI: false,
+  LoadExercise: false,
+  Matching: false,
+  Media: false,
+  Preload: false,
+  TTS: false,
+  HandleNext: false,
+  UpdateAnswers: false,
+};
+
+const originalConsole = {
+  log: console.log,
+  warn: console.warn,
+  error: console.error,
+};
+
+function allowedByLevel(level: 'error' | 'warn' | 'info' | 'debug') {
+  return LEVEL_ORDER[LOG_LEVEL] >= LEVEL_ORDER[level];
+}
+
+function shouldAllow(tag: string, level: 'error' | 'warn' | 'info' | 'debug', firstArg: string): boolean {
+  if (!allowedByLevel(level)) return false;
+  // Errors always pass through
+  if (level === 'error') return true;
+  const enabled = ENABLED_TAGS[tag];
+  if (enabled) return true;
+  // Special minimal allowlist for Submission info logs to avoid spam
+  if (tag === 'Submission' && level === 'info') {
+    const keepSnippets = [
+      'SAVE SUCCESSFUL',
+      'Saved Data Summary',
+      'FINAL VERIFICATION (VALIDATED DATA)',
+      'Result ID:',
+      'Database path used:',
+    ];
+    return keepSnippets.some(s => firstArg.includes(s));
+  }
+  return false;
+}
+
+// Intercept console calls and filter bracket-tagged logs like "[Submission] ..."
+console.log = (...args: any[]) => {
+  if (args.length > 0 && typeof args[0] === 'string') {
+    const first = String(args[0]);
+    const m = first.match(/^\[([^\]]+)\]/);
+    if (m) {
+      const tag = m[1];
+      if (!shouldAllow(tag, 'info', first)) return;
+    } else if (!allowedByLevel('info')) {
+      return;
+    }
+  } else if (!allowedByLevel('info')) {
+    return;
+  }
+  originalConsole.log(...args);
+};
+
+console.warn = (...args: any[]) => {
+  if (args.length > 0 && typeof args[0] === 'string') {
+    const first = String(args[0]);
+    const m = first.match(/^\[([^\]]+)\]/);
+    if (m) {
+      const tag = m[1];
+      if (!shouldAllow(tag, 'warn', first)) return;
+    } else if (!allowedByLevel('warn')) {
+      return;
+    }
+  } else if (!allowedByLevel('warn')) {
+    return;
+  }
+  originalConsole.warn(...args);
+};
+
+console.error = (...args: any[]) => {
+  // Always allow errors, but still respect minimal level 'error'
+  if (!allowedByLevel('error')) return;
+  originalConsole.error(...args);
+};
 
 // Standalone component for Re-order interaction to keep hooks valid
 const ReorderQuestion = React.memo(({
@@ -159,7 +272,13 @@ const ReorderQuestion = React.memo(({
   const draggedItemRef = useRef<{item: ReorderItem, fromPool: boolean, fromSlot?: number} | null>(null);
   const hasCalledOnCompleteRef = useRef(false);
   const isClearingWrongItemsRef = useRef(false);
-  const hasCalledOnAttemptRef = useRef(false); // Prevent duplicate onAttempt calls
+  // Validation cycle identifier to ensure exactly-once attempt handling per validation
+  const validationIdRef = useRef(0);
+  // Single-submit guard to avoid overlapping validations/popups/increments
+  const isSubmittingRef = useRef(false);
+  // Per-validation once-only gates
+  const attemptGateRef = useRef<number | null>(null);
+  const completeGateRef = useRef<number | null>(null);
 
   // Keep currentAttemptsRef in sync with prop
   useEffect(() => {
@@ -187,7 +306,6 @@ const ReorderQuestion = React.memo(({
     isCompletedRef.current = false;
     isClearingWrongItemsRef.current = false;
     hasCalledOnCompleteRef.current = false;
-    hasCalledOnAttemptRef.current = false; // Reset attempt callback flag
     
     // Clear dragged item
     draggedItemRef.current = null;
@@ -216,7 +334,8 @@ const ReorderQuestion = React.memo(({
     lastNotifiedRef.current = '';
     currentAttemptsRef.current = currentAttempts;
     hasCalledOnCompleteRef.current = false;
-    hasCalledOnAttemptRef.current = false; // Reset attempt callback flag
+    // Reset validation cycle id
+    validationIdRef.current = 0;
     
     // Reset locked slots
     setLockedSlots(new Set());
@@ -271,30 +390,53 @@ const ReorderQuestion = React.memo(({
       onChange(ordered);
       
       // Auto-validate when all slots are filled and not already validating or completed
-      if (ordered.length === slotsCount && !isValidatingRef.current && !isCompletedRef.current) {
+      const allFilled = slots.every(s => s !== null);
+      if (allFilled && !isValidatingRef.current && !isCompletedRef.current) {
+        // Prevent overlapping validations within a short window
+        if (isSubmittingRef.current) {
+          console.log('[Reorder] Validation suppressed: submit in progress');
+          return;
+        }
         console.log('[Reorder] ✓ All slots filled (', ordered.length, '/', slotsCount, '), starting validation...');
         console.log('[Reorder] Current attempt count before validation:', currentAttemptsRef.current);
         console.log('[Reorder] Validation will fire in 300ms...');
         setIsValidating(true);
         isValidatingRef.current = true;
+        isSubmittingRef.current = true;
+        // Start a new validation cycle
+        const thisValidationId = ++validationIdRef.current;
+        // Reset per-validation gates
+        attemptGateRef.current = thisValidationId;
+        completeGateRef.current = thisValidationId;
+        console.log('[Reorder] Set isSubmittingRef=true, validationId=', thisValidationId);
         
         setTimeout(() => {
           // CRITICAL: Double-check completion AND validation status before validating
-          if (isCompletedRef.current || !isValidatingRef.current) {
+          if (isCompletedRef.current || !isValidatingRef.current || validationIdRef.current !== thisValidationId) {
             console.log('[Reorder] Aborting validation - completed:', isCompletedRef.current, 'validating:', isValidatingRef.current);
             setIsValidating(false);
             isValidatingRef.current = false;
+            isSubmittingRef.current = false;
+            console.log('[Reorder] Cleared isSubmittingRef due to abort for validationId=', thisValidationId);
+            return;
+          }
+          // Prevent duplicate validation cycles
+          if (attemptGateRef.current === null || isSubmittingRef.current === false) {
+            console.log('[Reorder] Duplicate or stale validation prevented.');
+            setIsValidating(false);
             return;
           }
           
-          const isCorrect = ordered.every((item, idx) => item.id === correctSequence[idx]);
+          // Validate against exact slot positions to avoid index compression issues
+          const isCorrect = slots.every((slotItem, idx) => slotItem && slotItem.id === correctSequence[idx]);
           
           console.log('[Reorder] ========== VALIDATION START ==========');
           console.log('[Reorder] Validation result:', isCorrect ? 'CORRECT' : 'WRONG');
           console.log('[Reorder] Current attempts BEFORE processing:', currentAttemptsRef.current);
-          console.log('[Reorder] Current slots state:', ordered.map(item => item.id));
+          console.log('[Reorder] Current slots state:', slots.map(item => item ? item.id : null));
           console.log('[Reorder] Expected sequence:', correctSequence);
           console.log('[Reorder] Timestamp:', new Date().toISOString());
+          console.log('[Reorder] validationId=', thisValidationId, 'attemptGateRef=', attemptGateRef.current, 'completeGateRef=', completeGateRef.current, 'isSubmittingRef=', isSubmittingRef.current);
           
           // CRITICAL FIX: Only increment attempt counter when answer is WRONG
           // Correct answers should NOT increment attempts
@@ -302,16 +444,17 @@ const ReorderQuestion = React.memo(({
           let hasReachedLimit = false;
           
           if (!isCorrect) {
-            // WRONG ANSWER - Call onAttempt callback ONCE
-            // The parent will increment the counter and update both state AND ref immediately
-            if (onAttempt && !hasCalledOnAttemptRef.current) {
-              console.log('[Reorder] Wrong answer - calling onAttempt callback (will increment by 1)');
-              console.log('[Reorder] Calling onAttempt at:', new Date().toISOString());
-              hasCalledOnAttemptRef.current = true; // Mark as called to prevent duplicates
+            // WRONG ANSWER - Always record this validation as a single attempt
+            if (onAttempt && attemptGateRef.current === thisValidationId) {
+              console.log('[Reorder] Wrong answer - calling onAttempt (once), validationId=', thisValidationId);
               onAttempt(ordered.map(item => item.id));
-              console.log('[Reorder] onAttempt callback completed - parent should have incremented ref');
-            } else if (hasCalledOnAttemptRef.current) {
-              console.log('[Reorder] Skipping duplicate onAttempt call - already called for this validation');
+              console.log('[Reorder] onAttempt triggered once for validationId:', thisValidationId);
+              // Close the gate to prevent duplicate attempt logging
+              attemptGateRef.current = null;
+              // Optional: delayed ensure-close in case of batched renders
+              setTimeout(() => { attemptGateRef.current = null; }, 500);
+            } else {
+              console.log('[Reorder] Skipping onAttempt - gate closed or validationId mismatch');
             }
             
             // CRITICAL FIX: Use ref value for stable count during validation cycle
@@ -352,15 +495,19 @@ const ReorderQuestion = React.memo(({
             const allIndices = new Set(Array.from({ length: slotsCount }, (_, i) => i));
             setLockedSlots(allIndices);
             
-            // REMOVED: Haptic feedback here to prevent duplicate - parent's triggerCorrectFeedback() handles it
+            // Do not trigger correct feedback here; parent handles it once
             
             // Notify parent that the answer is correct and complete (only once)
-            if (onComplete && !hasCalledOnCompleteRef.current) {
+            if (onComplete && completeGateRef.current === thisValidationId && !hasCalledOnCompleteRef.current) {
               hasCalledOnCompleteRef.current = true;
+              // Close the completion gate for this validation
+              completeGateRef.current = null;
               setTimeout(() => {
-                console.log('[Reorder] Calling onComplete(true) - all correct');
+                console.log('[Reorder] Calling onComplete(true) - all correct, validationId=', thisValidationId);
                 onComplete(true, ordered.map(item => item.id));
               }, 500);
+            } else {
+              console.log('[Reorder] Skipping onComplete(true) - gate closed or already called');
             }
           } else if (hasReachedLimit) {
             console.log('[Reorder] ========== MAX ATTEMPTS REACHED ==========');
@@ -382,7 +529,7 @@ const ReorderQuestion = React.memo(({
             setLockedSlots(allIndices);
             console.log('[Reorder] All slots locked - no more changes allowed');
             
-            // REMOVED: Haptic feedback here to prevent duplicate - parent's triggerWrongFeedback() handles it
+            // Do not trigger wrong feedback here; it was already shown in onAttempt
             
             // DON'T call onChange here - it will trigger a re-render and validation loop
             // The parent already has the answer from previous onChange calls
@@ -390,23 +537,26 @@ const ReorderQuestion = React.memo(({
             
             // CRITICAL FIX: Call onComplete(false) with a delay so user sees the locked state (only once)
             // This will mark the question as incorrect and trigger advancement
-            if (onComplete && !hasCalledOnCompleteRef.current) {
+            if (onComplete && completeGateRef.current === thisValidationId && !hasCalledOnCompleteRef.current) {
               hasCalledOnCompleteRef.current = true;
-              console.log('[Reorder] Scheduling onComplete(false) call after 2s delay');
+              completeGateRef.current = null;
+              console.log('[Reorder] Scheduling onComplete(false) call after 2s delay, validationId=', thisValidationId);
               console.log('[Reorder] This will mark question as WRONG and auto-advance');
               setTimeout(() => {
-                console.log('[Reorder] Calling onComplete(false) after max attempts');
+                console.log('[Reorder] Calling onComplete(false) after max attempts, validationId=', thisValidationId);
                 onComplete(false, ordered.map(item => item.id));
-              }, 2000); // 2 second delay to show the state
+              }, 2000);
             } else if (hasCalledOnCompleteRef.current) {
               console.log('[Reorder] Already called onComplete, preventing duplicate call');
+            } else {
+              console.log('[Reorder] Skipping onComplete(false) - gate closed or validationId mismatch');
             }
           } else {
             // Some items wrong, return them to pool and let student try again
             const attemptsLeft = maxAttempts !== null ? (maxAttempts - newAttemptCount) : 'unlimited';
             console.log('[Reorder] ❌ Some items wrong. Keeping correct ones, returning wrong ones to pool.');
             console.log('[Reorder] Attempts remaining:', attemptsLeft);
-            // REMOVED: Haptic feedback here to prevent duplicate - parent handles all feedback
+            // Haptic handled once in triggerWrongFeedback
             
             // CRITICAL: Set clearing flag IMMEDIATELY to block effect from running during state updates
             isClearingWrongItemsRef.current = true;
@@ -421,16 +571,16 @@ const ReorderQuestion = React.memo(({
               const wrongItems: ReorderItem[] = [];
               const correctIndices: number[] = [];
               
-              ordered.forEach((item, idx) => {
-                if (item.id !== correctSequence[idx]) {
-                  // This item is in the wrong position
+              // Compare by actual slot index; do not compress nulls
+              slots.forEach((slotItem, idx) => {
+                if (!slotItem) return;
+                if (slotItem.id !== correctSequence[idx]) {
                   wrongIndices.push(idx);
-                  wrongItems.push(item);
-                  console.log('[Reorder] Item', item.id, 'at slot', idx, 'is WRONG - will return to pool');
+                  wrongItems.push(slotItem);
+                  console.log('[Reorder] Item', slotItem.id, 'at slot', idx, 'is WRONG - will return to pool');
                 } else {
-                  // This item is in the correct position - LOCK IT
                   correctIndices.push(idx);
-                  console.log('[Reorder] Item', item.id, 'at slot', idx, 'is CORRECT - locking it');
+                  console.log('[Reorder] Item', slotItem.id, 'at slot', idx, 'is CORRECT - locking it');
                 }
               });
               
@@ -489,7 +639,6 @@ const ReorderQuestion = React.memo(({
               setIsValidating(false);
               isValidatingRef.current = false;
               isClearingWrongItemsRef.current = false;
-              hasCalledOnAttemptRef.current = false; // Reset for next validation cycle
               
               // CRITICAL FIX: Reset lastNotifiedRef to allow fresh validation on next fill
               // This ensures the effect will trigger onChange when slots are refilled
@@ -498,6 +647,9 @@ const ReorderQuestion = React.memo(({
               console.log('[Reorder] ========== READY FOR NEXT ATTEMPT ==========');
             }, 800);
           }
+          // Reset submission guard at the end of the validation timeout
+          isSubmittingRef.current = false;
+          console.log('[Reorder] Cleared isSubmittingRef at end of validation timeout, validationId=', thisValidationId);
         }, 300);
       }
     }
@@ -1061,7 +1213,6 @@ const ReorderQuestion = React.memo(({
     draggedItemRef.current = null;
     lastNotifiedRef.current = '';
     hasCalledOnCompleteRef.current = false;
-    hasCalledOnAttemptRef.current = false; // Reset attempt callback flag
     
     console.log('[Reorder] Reset complete - all items returned to original position');
   }, [items, slotsCount]);
@@ -1495,6 +1646,9 @@ export default function StudentExerciseAnswering() {
   const correctAnim = useRef(new Animated.Value(0)).current;
   const [showWrong, setShowWrong] = useState(false);
   const wrongAnim = useRef(new Animated.Value(0)).current;
+  // Guards to prevent duplicate popups/overlays
+  const correctFeedbackActiveRef = useRef(false);
+  const wrongFeedbackActiveRef = useRef(false);
   const [showAlertModal, setShowAlertModal] = useState(false);
   const [alertConfig, setAlertConfig] = useState({title: '', message: '', type: 'warning', onConfirm: () => {}});
   const alertAnim = useRef(new Animated.Value(0)).current;
@@ -2177,7 +2331,7 @@ export default function StudentExerciseAnswering() {
       }
     });
     
-    console.log(`[CollectResources] Collection complete: ${resources.length} total resources`, {
+    log.preload(`Collection complete: ${resources.length} total resources`, {
       byType: {
         images: resources.filter(r => r.type === 'image').length,
         audio: resources.filter(r => r.type === 'audio').length
@@ -2200,7 +2354,7 @@ export default function StudentExerciseAnswering() {
         // Asset paths and require() references will be handled by ExpoImage on-demand
         if (!resource.url.startsWith('http://') && !resource.url.startsWith('https://')) {
           const loadTime = Date.now() - startTime;
-          console.log(`[Preload] ⏭ Skipping non-HTTP image (will load on-demand): ${resource.url.substring(0, 50)}`);
+          log.preload(`Skipping non-HTTP image (on-demand): ${resource.url.substring(0, 50)}`);
           return { 
             success: true, // Mark as success since ExpoImage will handle it
             url: resource.url, 
@@ -2213,15 +2367,24 @@ export default function StudentExerciseAnswering() {
           setTimeout(() => reject(new Error('Timeout after 15s')), 15000)
         );
         
-        // Prefetch using React Native Image component for HTTP(S) URLs only
-        await Promise.race([
-          Image.prefetch(resource.url),
-          timeoutPromise
-        ]);
+        // Prefetch using Expo Image cache (aligns with ExpoImage renderer) with retry
+        const prefetchOnce = async () => {
+          await Promise.race([
+            (ExpoImage as any).prefetch ? (ExpoImage as any).prefetch(resource.url) : Image.prefetch(resource.url),
+            timeoutPromise
+          ]);
+        };
+        try {
+          await prefetchOnce();
+        } catch (e1) {
+          log.preloadWarn('First prefetch attempt failed, retrying once…', resource.url);
+          await new Promise(r => setTimeout(r, 250));
+          await prefetchOnce();
+        }
         
         const loadTime = Date.now() - startTime;
         const filename = resource.url.substring(resource.url.lastIndexOf('/') + 1, resource.url.indexOf('?') > 0 ? resource.url.indexOf('?') : resource.url.length);
-        console.log(`[Preload] ✓ Image loaded (${loadTime}ms): ${filename}`);
+        log.preload(`Image loaded (${loadTime}ms): ${filename}`);
         return { success: true, url: resource.url, loadTime };
       } else if (resource.type === 'audio') {
         // CRITICAL: Preload TTS audio files with proper caching for instant playback
@@ -2239,7 +2402,7 @@ export default function StudentExerciseAnswering() {
           player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
             if ('isLoaded' in status && status.isLoaded && !isReady) {
               isReady = true;
-              console.log(`[TTS-Preload] ✓ Audio player ready for: ${resource.url.substring(0, 50)}`);
+              log.tts(`Audio player ready: ${resource.url.substring(0, 50)}`);
               resolve();
             }
           });
@@ -2247,7 +2410,7 @@ export default function StudentExerciseAnswering() {
           // Fallback: resolve after short delay if listener doesn't fire
           setTimeout(() => {
             if (!isReady) {
-              console.log(`[TTS-Preload] ⚠ Audio player timeout fallback: ${resource.url.substring(0, 50)}`);
+              log.tts(`Audio player timeout fallback: ${resource.url.substring(0, 50)}`);
               resolve();
             }
           }, 2000);
@@ -2260,7 +2423,7 @@ export default function StudentExerciseAnswering() {
         
         const loadTime = Date.now() - startTime;
         const filename = resource.url.substring(resource.url.lastIndexOf('/') + 1, resource.url.indexOf('?') > 0 ? resource.url.indexOf('?') : resource.url.length);
-        console.log(`[TTS-Preload] ✓ Audio cached for instant playback (${loadTime}ms): ${filename}`);
+        log.tts(`Audio cached for instant playback (${loadTime}ms): ${filename}`);
         return { success: true, url: resource.url, loadTime };
       }
       
@@ -2269,10 +2432,7 @@ export default function StudentExerciseAnswering() {
     } catch (error) {
       const loadTime = Date.now() - startTime;
       // Log but don't fail - images will load on-demand via ExpoImage
-      console.warn(`[Preload] ⚠ Failed to preload (will load on-demand): ${resource.url.substring(0, 60)}`, {
-        error: error instanceof Error ? error.message : 'Unknown error',
-        loadTime
-      });
+      log.preloadWarn(`Failed to preload (on-demand): ${resource.url.substring(0, 60)} err=${error instanceof Error ? error.message : 'Unknown'}`, loadTime);
       return { 
         success: false, 
         url: resource.url, 
@@ -2298,7 +2458,7 @@ export default function StudentExerciseAnswering() {
       batches.push(sortedResources.slice(i, i + batchSize));
     }
     
-    console.log(`[Preload] Processing ${totalResources} resources in ${batches.length} batches (max ${batchSize} per batch)`);
+    log.preload(`Processing ${totalResources} resources in ${batches.length} batches (max ${batchSize}/batch)`);
     
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
@@ -2306,7 +2466,7 @@ export default function StudentExerciseAnswering() {
       const batchEnd = Math.min(results.length + batch.length, totalResources);
       
       setPreloadStatus(`Loading resources ${batchStart}-${batchEnd} of ${totalResources}...`);
-      console.log(`[Preload] Batch ${batchIndex + 1}/${batches.length}: Loading ${batch.length} resources`);
+      log.preload(`Batch ${batchIndex + 1}/${batches.length}: Loading ${batch.length} resources`);
       
       // CRITICAL FIX: Process resources sequentially for smooth progress animation
       // Sequential processing ensures progress updates are visible and smooth
@@ -2328,15 +2488,16 @@ export default function StudentExerciseAnswering() {
         const currentProgress = Math.round((completedResources / totalResources) * 100);
         setPreloadProgress(currentProgress);
         
-        // CRITICAL FIX: Longer delay for smooth progress animation (150ms per resource)
+        // CRITICAL FIX: Longer delay for smooth progress animation (100-180ms jitter per resource)
         // This ensures the progress bar animates smoothly and is visible to users
         // Even skipped resources get this delay for consistent animation
-        await new Promise(resolve => setTimeout(resolve, 150));
+        const jitter = 100 + Math.floor(Math.random() * 80);
+        await new Promise(resolve => setTimeout(resolve, jitter));
       }
       
       results.push(...batchResults);
       
-      console.log(`[Preload] Batch ${batchIndex + 1} completed: ${results.length}/${totalResources} resources loaded`);
+      log.preload(`Batch ${batchIndex + 1} completed: ${results.length}/${totalResources} resources loaded`);
       
       // No delay between batches since we already have 150ms delay per resource
     }
@@ -2662,10 +2823,12 @@ export default function StudentExerciseAnswering() {
       }).join('; ');
     }
     if (question.type === 're-order') {
-      const ids: string[] = (question.order && question.order.length)
+      const baseIds: string[] = (question.order && question.order.length)
         ? (question.order as string[])
         : (question.reorderItems || []).map(it => it.id);
-      if (!ids.length) return '';
+      if (!baseIds.length) return '';
+      // Apply direction if specified
+      const ids = question.reorderDirection === 'desc' ? [...baseIds].reverse() : baseIds;
       const map = new Map((question.reorderItems || []).map(it => [it.id, it] as const));
       const labels = ids.map(id => {
         const label = getReorderItemLabel(map.get(id) || null);
@@ -3004,6 +3167,12 @@ export default function StudentExerciseAnswering() {
       ...prev,
       [question.id]: [...(prev[question.id] || []), newAttempt],
     }));
+  };
+
+  // Keep attemptCounts in sync with attemptLogsRef length (authoritative)
+  const syncAttemptCount = (questionId: string) => {
+    const len = (attemptLogsRef.current[questionId] || []).length;
+    updateAttemptCount(questionId, len);
   };
   const loadExercise = async () => {
     try {
@@ -3684,6 +3853,11 @@ export default function StudentExerciseAnswering() {
   };
 
   const triggerCorrectFeedback = (onComplete?: () => void) => {
+    if (correctFeedbackActiveRef.current) {
+      console.log('[Feedback] Correct feedback already active, skipping');
+      return;
+    }
+    correctFeedbackActiveRef.current = true;
     // CRITICAL: Stop TTS immediately when answer is correct
     stopCurrentTTS();
     
@@ -3698,6 +3872,7 @@ export default function StudentExerciseAnswering() {
       setTimeout(() => {
         Animated.timing(correctAnim, { toValue: 0, duration: 180, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => {
           setShowCorrect(false);
+          correctFeedbackActiveRef.current = false;
           onComplete && onComplete();
         });
       }, 500);
@@ -3705,6 +3880,11 @@ export default function StudentExerciseAnswering() {
   };
   
   const triggerWrongFeedback = () => {
+    if (wrongFeedbackActiveRef.current) {
+      console.log('[Feedback] Wrong feedback already active, skipping');
+      return;
+    }
+    wrongFeedbackActiveRef.current = true;
     // Trigger haptic feedback for wrong answer
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     
@@ -3714,6 +3894,7 @@ export default function StudentExerciseAnswering() {
       setTimeout(() => {
         Animated.timing(wrongAnim, { toValue: 0, duration: 180, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => {
           setShowWrong(false);
+          wrongFeedbackActiveRef.current = false;
         });
       }, 500);
     });
@@ -5028,7 +5209,7 @@ export default function StudentExerciseAnswering() {
       console.log('[Submission] Correct Answers:', finalCorrectCount);
       console.log('[Submission] Incorrect Answers:', finalIncorrectCount);
       console.log('[Submission] Score:', finalScorePercentage + '%');
-      console.log('[Submission] Total Attempts (Summary):', totalAttempts);
+      console.log('[Submission] Total Attempts (Summary):', resultsSummary.totalAttempts);
       console.log('[Submission] Question Details Being Saved:');
       
       // CRITICAL VALIDATION: Verify attempts match history
@@ -5073,8 +5254,14 @@ export default function StudentExerciseAnswering() {
         });
       }
       
+      // Downgrade summary-only validation errors to warnings since they are auto-corrected
       if (validationReport.errors.length > 0) {
-        console.error('[Submission] Validation found errors:', validationReport.errors);
+        const summaryOnly = validationReport.errors.every(e => String(e).startsWith('Summary:'));
+        if (summaryOnly) {
+          console.warn('[Submission] Validation summary mismatches (auto-corrected):', validationReport.errors);
+        } else {
+          console.error('[Submission] Validation found errors:', validationReport.errors);
+        }
       }
       
       if (validationReport.warnings.length > 0) {
@@ -5225,11 +5412,10 @@ export default function StudentExerciseAnswering() {
           });
           
           // Increment attempt counter for wrong answer
-          updateAttemptCount(q.id, newAttemptCount);
-          
           // Check if attempt limit is reached
           if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
             logAttempt(q, currentAns, 'final'); // Log as final attempt
+            syncAttemptCount(q.id);
             
             // Mark question as completed (with wrong answer)
             setQuestionCorrect(q.id, false);
@@ -5249,6 +5435,7 @@ export default function StudentExerciseAnswering() {
           }
           
           logAttempt(q, currentAns, 'change');
+          syncAttemptCount(q.id);
           
           // Show remaining attempts if limit is set
           const remainingAttempts = maxAttempts !== null && maxAttempts !== undefined ? maxAttempts - newAttemptCount : null;
@@ -5278,6 +5465,9 @@ export default function StudentExerciseAnswering() {
             a.questionId === q.id ? { ...a, answer: currentAns || a.answer, isCorrect: true } : a
           ));
           // FIXED: Don't increment attempts on correct answer
+          // Log a final correct attempt for history consistency
+          logAttempt(q, currentAns, 'final');
+          syncAttemptCount(q.id);
         }
         setQuestionCorrect(q.id, true);
       }
@@ -5396,7 +5586,7 @@ export default function StudentExerciseAnswering() {
                   question.questionImage.length === 1 ? styles.imageRowCenter : styles.imageRowLeft,
                 ]}> 
                   {question.questionImage.map((img, idx) => (
-                    <ExpoImage 
+                  <ExpoImage 
                       key={`qi-${idx}`} 
                       source={{ uri: img }} 
                       style={styles.questionImageAuto} 
@@ -5404,6 +5594,7 @@ export default function StudentExerciseAnswering() {
                       transition={150} 
                       cachePolicy="memory-disk" 
                       priority="high"
+                    onError={(e) => log.mediaWarn('questionImage array item failed', { url: img, error: String(e) })}
                       recyclingKey={`qi-${question.id}-${idx}`}
                     />
                   ))}
@@ -5432,6 +5623,7 @@ export default function StudentExerciseAnswering() {
                 transition={150} 
                 cachePolicy="memory-disk" 
                 priority="high"
+                onError={(e) => log.mediaWarn('questionImage single failed', { url: question.questionImage, error: String(e) })}
                 recyclingKey={`qi-${question.id}`}
               />
             ) : null}
@@ -5443,14 +5635,15 @@ export default function StudentExerciseAnswering() {
                   { marginTop: 8 },
                 ]}> 
                   {question.questionImages.map((img, idx) => (
-                    <ExpoImage 
+                  <ExpoImage 
                       key={`qis-${idx}`} 
                       source={{ uri: img }} 
                       style={styles.questionImageAuto} 
                       contentFit="cover" 
                       transition={120} 
                       cachePolicy="memory-disk"
-                      priority="high"
+                    priority="high"
+                    onError={(e) => log.mediaWarn('questionImages small failed', { url: img, error: String(e) })}
                       recyclingKey={`qis-${question.id}-${idx}`}
                     />
                   ))}
@@ -5466,6 +5659,7 @@ export default function StudentExerciseAnswering() {
                       transition={120} 
                       cachePolicy="memory-disk"
                       priority="high"
+                      onError={(e) => log.mediaWarn('questionImages thumb failed', { url: img, error: String(e) })}
                       recyclingKey={`qis-${question.id}-${idx}`}
                     />
                   ))}
@@ -5560,8 +5754,8 @@ export default function StudentExerciseAnswering() {
                         }
                         
                         setLastShakeKey(optionKey);
-                        updateAttemptCount(question.id, newAttemptCount);
                         logAttempt(question, optionValue, 'change');
+                        syncAttemptCount(question.id);
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
                           Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
@@ -5593,6 +5787,9 @@ export default function StudentExerciseAnswering() {
                       
                       // Use helper functions to update both state and ref
                       setQuestionCorrect(question.id, true);
+                      // Log a final correct attempt for history consistency
+                      logAttempt(question, optionValue, 'final');
+                      syncAttemptCount(question.id);
                       // FIXED: Don't increment attempts on correct answer
                       console.log('[MC-Grid-Correct] Answer correct on first try - no attempt logged');
                       logAttempt(question, optionValue, 'final');
@@ -5842,6 +6039,8 @@ export default function StudentExerciseAnswering() {
                     transition={150} 
                     cachePolicy="memory-disk" 
                     priority="high"
+                    onLoad={() => console.log('[ImageLoad] ident questionImage array item loaded:', img)}
+                    onError={(e) => log.mediaWarn('ident questionImage array item failed', { url: img, error: String(e) })}
                     recyclingKey={`qi-ident-${question.id}-${idx}`}
                   />
                 ))
@@ -5853,6 +6052,8 @@ export default function StudentExerciseAnswering() {
                   transition={150} 
                   cachePolicy="memory-disk" 
                   priority="high"
+                  onLoad={() => console.log('[ImageLoad] ident questionImage single loaded:', question.questionImage)}
+                  onError={(e) => log.mediaWarn('ident questionImage single failed', { url: question.questionImage, error: String(e) })}
                   recyclingKey={`qi-ident-${question.id}`}
                 />
               ) : null}
@@ -5867,6 +6068,8 @@ export default function StudentExerciseAnswering() {
                     transition={120} 
                     cachePolicy="memory-disk"
                     priority="high"
+                    onLoad={() => console.log('[ImageLoad] ident questionImages thumb loaded:', img)}
+                    onError={(e) => log.mediaWarn('ident questionImages thumb failed', { url: img, error: String(e) })}
                     recyclingKey={`qis-ident-${question.id}-${idx}`}
                   />
                 ))}
@@ -6317,7 +6520,7 @@ export default function StudentExerciseAnswering() {
                         
                         // CRITICAL FIX: Increment attempt count AFTER feedback
                         const newAttemptCount = currentAttemptCount + 1;
-                        updateAttemptCount(question.id, newAttemptCount);
+                        // CRITICAL: We do not trust local counter; sync after logging from attemptLogsRef
                         
                         // CRITICAL FIX: Log attempt with current correct pairs (before wrong pair is added)
                         // This ensures we track the attempt without polluting the answer with wrong data
@@ -6330,6 +6533,7 @@ export default function StudentExerciseAnswering() {
                         
                         // Log the attempt with just current pairs (excluding the wrong one)
                         logAttempt(question, currentPairs, 'change');
+                        syncAttemptCount(question.id);
                         
                         // Check if attempt limit is reached
                         if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
@@ -6344,6 +6548,7 @@ export default function StudentExerciseAnswering() {
                           });
                           
                           logAttempt(question, currentPairs, 'final');
+                          syncAttemptCount(question.id);
                           setQuestionCorrect(question.id, false);
                           
                           // Show attempt limit reached message briefly
@@ -6484,61 +6689,66 @@ export default function StudentExerciseAnswering() {
             handleAnswerChange(ordered.map((o) => o.id));
           }}
           onAttempt={(attemptSequence) => {
-            // Increment attempt counter for this question
+            // Single point of attempt recording - avoid duplicates
             incrementAttemptCount(question.id);
-            // Log the attempt history with the sequence tried
             logAttempt(question, attemptSequence, 'change');
-            console.log('[Reorder] Attempt incremented for', question.id, 'with sequence:', attemptSequence);
-            
-            // Show wrong feedback animation for each wrong attempt
+            console.log('[Reorder] Attempt recorded for', question.id, 'sequence:', attemptSequence);
+            // Show single wrong feedback per attempt (guarded internally)
             triggerWrongFeedback();
           }}
           onComplete={(isCorrect, finalAnswer) => {
             console.log('[Reorder] Complete callback received, isCorrect:', isCorrect, 'finalAnswer:', finalAnswer);
             
             if (isCorrect) {
-              // CRITICAL FIX: Log the final CORRECT attempt
-              // The onAttempt callback is only called for WRONG attempts
-              // We need to log the final correct attempt here
-              console.log('[Reorder] Logging final CORRECT attempt:', finalAnswer);
-              logAttempt(question, finalAnswer, 'final');
-              
               // Mark question as correct
               setQuestionCorrect(question.id, true);
               
-              // Update answer with correct status
+              // Resolve final answer IDs
+              const finalIds = Array.isArray(finalAnswer)
+                ? finalAnswer.map((x: any) => (typeof x === 'string' ? x : x?.id)).filter(Boolean)
+                : (reorderAnswers[question.id]?.map((o: any) => o.id) || []);
+              
+              // Update answer with correct status and final sequence
               updateAnswers(prev => prev.map(a => 
-                a.questionId === question.id ? { ...a, isCorrect: true } : a
+                a.questionId === question.id ? { ...a, answer: finalIds, isCorrect: true } : a
               ));
+              
+              // Log the final correct attempt to close the history properly
+              logAttempt(question, finalIds, 'final');
               
               // Show correct feedback animation
               triggerCorrectFeedback(() => {
                 advanceToNextOrFinish();
               });
-            } else {
-              // Max attempts reached without completing correctly
-              console.log('[Reorder] Max attempts reached, marking as incorrect');
-              
-              // CRITICAL FIX: DON'T log again here - already logged in onAttempt callback
-              // The final wrong attempt was already logged when onAttempt was called
-              // Logging here would create a duplicate entry in attemptHistory
-              console.log('[Reorder] Final attempt already logged in onAttempt - skipping duplicate log');
-              
-              setQuestionCorrect(question.id, false);
-              
-              // Update answer with incorrect status
-              updateAnswers(prev => prev.map(a => 
-                a.questionId === question.id ? { ...a, isCorrect: false } : a
-              ));
-              
-              // Show wrong feedback animation
-              triggerWrongFeedback();
-              
-              // Auto-advance to next question after showing locked state
-              setTimeout(() => {
-                advanceToNextOrFinish();
-              }, 1500); // Slightly longer delay to show feedback
+          } else {
+            // Max attempts reached without completing correctly
+            console.log('[Reorder] Max attempts reached, marking as incorrect');
+            
+            // Ensure the last logged attempt is marked as 'final' (no duplicate log)
+            const attempts = attemptLogsRef.current[question.id] || [];
+            if (attempts.length > 0) {
+              const lastAttempt = attempts[attempts.length - 1];
+              if (lastAttempt.attemptType === 'change') {
+                lastAttempt.attemptType = 'final';
+                console.log('[Reorder] Marked last attempt as final before advancing');
+              }
             }
+            
+            // Wrong feedback already shown in onAttempt - skip duplicate
+            console.log('[Reorder] Wrong feedback already shown in onAttempt - skipping duplicate feedback');
+            
+            setQuestionCorrect(question.id, false);
+            
+            // Update answer with incorrect status
+            updateAnswers(prev => prev.map(a => 
+              a.questionId === question.id ? { ...a, isCorrect: false } : a
+            ));
+            
+            // Auto-advance to next question after showing locked state
+            setTimeout(() => {
+              advanceToNextOrFinish();
+            }, 1500); // Slightly longer delay to show feedback
+          }
           }}
         />
       </View>
@@ -7304,11 +7514,34 @@ export default function StudentExerciseAnswering() {
       </View>
     );
   };
+  // Media readiness gate: require current question's primary images and TTS (if present) to be ready
+  const isQuestionMediaReady = (q: Question): boolean => {
+    const urls: string[] = [];
+    if (q.questionImage) {
+      if (Array.isArray(q.questionImage)) urls.push(...q.questionImage.filter(Boolean));
+      else urls.push(q.questionImage);
+    }
+    if (q.questionImages && q.questionImages.length) urls.push(...q.questionImages.filter(Boolean));
+    if (q.type === 'multiple-choice' && q.optionImages && q.optionImages.length) urls.push(...q.optionImages.filter(Boolean) as string[]);
+    if (q.type === 'matching' && q.pairs && q.pairs.length) {
+      q.pairs.forEach(p => {
+        if (p.leftImage) urls.push(p.leftImage);
+        if (p.rightImage) urls.push(p.rightImage);
+      });
+    }
+    // TTS readiness is required when present: require cached audio for instant playback
+    const ttsOk = !q.ttsAudioUrl || audioPlayerCacheRef.current.has(q.ttsAudioUrl);
+    // Images considered ready if each URL either loaded or already attempted (loadedResources or failedResources)
+    const allImagesKnown = urls.every(u => loadedResources.has(u) || failedResources.has(u));
+    return allImagesKnown && ttsOk;
+  };
+
   const renderQuestion = () => {
     if (!exercise) return null;
     
     const question = exercise.questions[currentQuestionIndex];
     const isLastQuestion = currentQuestionIndex === exercise.questions.length - 1;
+    const mediaReady = isQuestionMediaReady(question);
     
     return (
       <Animated.View 
@@ -7332,11 +7565,19 @@ export default function StudentExerciseAnswering() {
         </View>
         
         {/* Question Type Specific Rendering */}
-        {question.type === 'multiple-choice' && renderMultipleChoice(question)}
-        {question.type === 'identification' && renderIdentification(question)}
-        {question.type === 'matching' && renderMatching(question)}
-        {question.type === 're-order' && renderReorder(question)}
-        {question.type === 'reading-passage' && renderReadingPassage(question)}
+        {!mediaReady ? (
+          <View style={{ padding: 16, alignItems: 'center' }}>
+            <Text style={{ color: '#64748b' }}>Preparing media…</Text>
+          </View>
+        ) : (
+          <>
+            {question.type === 'multiple-choice' && renderMultipleChoice(question)}
+            {question.type === 'identification' && renderIdentification(question)}
+            {question.type === 'matching' && renderMatching(question)}
+            {question.type === 're-order' && renderReorder(question)}
+            {question.type === 'reading-passage' && renderReadingPassage(question)}
+          </>
+        )}
         
         {/* Check Answer Button for non-auto-advancing question types */}
         {question.type !== 'multiple-choice' && question.type !== 'matching' && question.type !== 're-order' && (
