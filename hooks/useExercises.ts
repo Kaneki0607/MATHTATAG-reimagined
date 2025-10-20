@@ -35,6 +35,7 @@ export interface AssignedExercise {
   exercise?: Exercise;
   className?: string;
   quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4';
+  targetStudentIds?: string[];
 }
 
 export const useExercises = (currentUserId: string | null) => {
@@ -393,7 +394,7 @@ export const useExercises = (currentUserId: string | null) => {
     }
   };
 
-  const assignExercise = async (exerciseId: string, classIds: string[], deadline: string, assignedBy: string, acceptLateSubmissions: boolean = true, acceptingStatus: 'open' | 'closed' = 'open', quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => {
+  const assignExercise = async (exerciseId: string, classIds: string[], deadline: string, assignedBy: string, acceptLateSubmissions: boolean = true, acceptingStatus: 'open' | 'closed' = 'open', quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4', targetStudentIds?: string[]) => {
     try {
       // Create assigned exercises with readable IDs (ASSIGNED-0001, ASSIGNED-0002, etc.)
       console.log('[AssignExercise] Creating assignments with readable IDs...');
@@ -406,7 +407,8 @@ export const useExercises = (currentUserId: string | null) => {
           deadline,
           acceptLateSubmissions,
           acceptingStatus,
-          quarter
+          quarter,
+          targetStudentIds
         });
         
         if (result.success && result.assignedId) {
@@ -479,7 +481,32 @@ export const useExercises = (currentUserId: string | null) => {
       // Get the assignment data before deleting to know which exercise to decrement
       const { data: assignmentData } = await readData(`/assignedExercises/${assignmentId}`);
       const exerciseId = assignmentData?.exerciseId;
+      const classId = assignmentData?.classId;
       
+      // Delete associated exercise results
+      try {
+        const { data: allResults } = await readData('/ExerciseResults');
+        if (allResults) {
+          const resultEntries = Object.entries(allResults as Record<string, any>);
+          const toDelete = resultEntries.filter(([id, res]: any) => {
+            const assignedId = res.assignedExerciseId || res.assignmentId || res.assignmentID || res.assignment?.id || res.assignmentMetadata?.assignmentId || res.assignmentMetadata?.assignedExerciseId;
+            const resExerciseId = res.exerciseId || res.exerciseInfo?.exerciseId;
+            const resClassId = res.classId || res.assignmentMetadata?.classId;
+            if (assignedId && assignedId === assignmentId) return true;
+            if (resExerciseId && resClassId && resExerciseId === exerciseId && resClassId === classId) return true;
+            return false;
+          });
+          for (const [resultId] of toDelete) {
+            await deleteData(`/ExerciseResults/${resultId}`);
+          }
+          if (toDelete.length > 0) {
+            console.log(`[DeleteAssignment] Removed ${toDelete.length} related exercise result(s)`);
+          }
+        }
+      } catch (resErr) {
+        console.error('[DeleteAssignment] Failed to delete related results:', resErr);
+      }
+
       await deleteData(`/assignedExercises/${assignmentId}`);
       
       // Decrement the timesUsed counter for the exercise

@@ -2422,10 +2422,16 @@ Focus on:
           id: key
         })) as AssignedExercise[];
         
-        // Filter assigned exercises by student's class and update status
+        // Filter assigned exercises by student's class and target list (if present), then update status
+        const currentStudentId = await getStudentId();
         const filteredAssignedExercises = studentClassId 
           ? assignedExercisesList
               .filter(assignedExercise => assignedExercise.classId === studentClassId)
+              .filter(assignedExercise => {
+                const targets = assignedExercise.targetStudentIds as string[] | undefined;
+                if (!targets || targets.length === 0) return true; // Whole class assignment
+                return !!currentStudentId && targets.includes(currentStudentId);
+              })
               .map(assignedExercise => {
                 // Update status based on deadline and acceptLateSubmissions
                 const now = new Date();
@@ -5127,7 +5133,7 @@ Focus on:
                 
                 <TextInput
                   style={styles.registrationInput}
-                  placeholder="Email Address *"
+                  placeholder="Email Address (optional)"
                   placeholderTextColor="#1e293b"
                   value={registrationData.email}
                   onChangeText={(value) => handleRegistrationInputChange('email', value)}
@@ -5276,7 +5282,7 @@ Focus on:
                 
                 <TextInput
                   style={styles.profileInput}
-                  placeholder="Email Address *"
+                  placeholder="Email Address (optional)"
                   placeholderTextColor="#1e293b"
                   value={profileEditData.email}
                   onChangeText={(value) => handleProfileEditInputChange('email', value)}

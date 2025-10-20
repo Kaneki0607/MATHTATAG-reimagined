@@ -1,14 +1,14 @@
 import { AntDesign, MaterialCommunityIcons } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
 import {
-    Alert,
-    Modal,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Alert,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { readData } from '../lib/firebase-database';
 
@@ -25,7 +25,7 @@ interface Class {
 interface AssignExerciseFormProps {
   visible: boolean;
   onClose: () => void;
-  onAssign: (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => void;
+  onAssign: (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4', targetStudentIds?: string[]) => void;
   exerciseTitle: string;
   currentUserId: string | null;
 }
@@ -39,6 +39,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
 }) => {
   const [classes, setClasses] = useState<Class[]>([]);
   const [selectedClasses, setSelectedClasses] = useState<string[]>([]);
+  const [targetStudentIdsByClass, setTargetStudentIdsByClass] = useState<Record<string, string[]>>({});
+  const [studentsByClass, setStudentsByClass] = useState<Record<string, Array<{ studentId: string; firstName?: string; surname?: string; fullName?: string; gender?: string }>>>({});
   const [deadline, setDeadline] = useState(new Date());
   const [deadlineDate, setDeadlineDate] = useState('');
   const [deadlineTime, setDeadlineTime] = useState('');
@@ -63,15 +65,41 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
   const loadClasses = async () => {
     try {
       setLoading(true);
-      const { data } = await readData('/classes');
-      const classList = Object.entries(data || {})
-        .map(([id, section]: any) => ({
-          id,
-          ...section,
-        }))
-        .filter((section: any) => section.teacherId === currentUserId);
+      const [{ data: classesData }, { data: sectionsData }, { data: studentsData }] = await Promise.all([
+        readData('/classes'),
+        readData('/sections'),
+        readData('/students')
+      ]);
+
+      const classList = Object.entries(classesData || {})
+        .map(([id, cls]: any) => {
+          const extras = (sectionsData || {})[id] || {};
+          return {
+            id,
+            ...cls,
+            // merge in status/school info from sections if present
+            status: cls.status ?? extras.status ?? 'active',
+            schoolName: cls.schoolName ?? extras.schoolName,
+            schoolYear: cls.schoolYear ?? extras.schoolYear,
+          };
+        })
+        .filter((section: any) => section.teacherId === currentUserId)
+        .filter((section: any) => {
+          const status = String(section.status || '').toLowerCase();
+          return status !== 'closed' && status !== 'inactive';
+        });
       
       setClasses(classList);
+
+      // Group students by class for selection UI
+      const grouped: Record<string, any[]> = {};
+      Object.values(studentsData || {}).forEach((s: any) => {
+        const cid = String(s.classId || '');
+        if (!cid) return;
+        if (!grouped[cid]) grouped[cid] = [];
+        grouped[cid].push(s);
+      });
+      setStudentsByClass(grouped);
     } catch (error) {
       console.error('Error loading classes:', error);
       Alert.alert('Error', 'Failed to load classes');
@@ -81,11 +109,34 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
   };
 
   const toggleClassSelection = (classId: string) => {
-    setSelectedClasses(prev =>
-      prev.includes(classId)
-        ? prev.filter(id => id !== classId)
-        : [...prev, classId]
-    );
+    setSelectedClasses(prev => {
+      const isSelected = prev.includes(classId);
+      const next = isSelected ? prev.filter(id => id !== classId) : [...prev, classId];
+      // When selecting a class, auto-select all its students by default
+      if (!isSelected) {
+        const allStudents = (studentsByClass[classId] || []).map((s: any) => s.studentId || s.id);
+        setTargetStudentIdsByClass(curr => ({ ...curr, [classId]: allStudents }));
+      }
+      return next;
+    });
+  };
+
+  const toggleStudentSelection = (classId: string, studentId: string) => {
+    setTargetStudentIdsByClass(prev => {
+      const current = prev[classId] || [];
+      const next = current.includes(studentId)
+        ? current.filter(id => id !== studentId)
+        : [...current, studentId];
+      return { ...prev, [classId]: next };
+    });
+  };
+
+  const formatStudentName = (s: any) => {
+    const last = (s.surname || '').trim();
+    const first = (s.firstName || '').trim();
+    if (last && first) return `${last}, ${first}`;
+    if (s.fullName) return String(s.fullName);
+    return 'Unknown';
   };
 
   const handleDateChange = (text: string) => {
@@ -137,7 +188,12 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
       return;
     }
 
-    onAssign(selectedClasses, deadline.toISOString(), acceptLateSubmissions, selectedQuarter);
+    // If any class has student selections, pass the union of selected students for that class.
+    // The assign handler applies same target set to all selected classes (UI is simple first pass).
+    const allSelectedTargets = selectedClasses.flatMap(cid => (targetStudentIdsByClass[cid] || []).filter(Boolean));
+    const uniqueTargets = Array.from(new Set(allSelectedTargets)).filter(id => typeof id === 'string' && id.length > 0);
+    
+    onAssign(selectedClasses, deadline.toISOString(), acceptLateSubmissions, selectedQuarter, uniqueTargets.length > 0 ? uniqueTargets : undefined);
     onClose();
   };
 
@@ -192,33 +248,82 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               ) : (
                 <View style={styles.classesList}>
                   {classes.map((classItem) => (
-                  <TouchableOpacity
-                    key={classItem.id}
-                    style={[
-                      styles.classItem,
-                      selectedClasses.includes(classItem.id) && styles.classItemSelected,
-                    ]}
-                    onPress={() => toggleClassSelection(classItem.id)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={styles.classInfo}>
-                      <Text style={styles.className}>{classItem.name}</Text>
-                      <Text style={styles.classDetails}>
-                        {classItem.schoolName} • {classItem.schoolYear}
-                      </Text>
-                    </View>
-                    <View style={[
-                      styles.checkbox,
-                      selectedClasses.includes(classItem.id) && {
-                        backgroundColor: '#0ea5e9',
-                        borderColor: '#0ea5e9',
-                      }
-                    ]}>
+                    <View key={classItem.id} style={{ marginBottom: 10 }}>
+                      <TouchableOpacity
+                        style={[
+                          styles.classItem,
+                          selectedClasses.includes(classItem.id) && styles.classItemSelected,
+                        ]}
+                        onPress={() => toggleClassSelection(classItem.id)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.classInfo}>
+                          <Text style={styles.className}>{classItem.name}</Text>
+                          <Text style={styles.classDetails}>
+                            {classItem.schoolName} • {classItem.schoolYear}
+                          </Text>
+                        </View>
+                        <View style={[
+                          styles.checkbox,
+                          selectedClasses.includes(classItem.id) && {
+                            backgroundColor: '#0ea5e9',
+                            borderColor: '#0ea5e9',
+                          }
+                        ]}>
+                          {selectedClasses.includes(classItem.id) && (
+                            <AntDesign name="check" size={14} color="#ffffff" />
+                          )}
+                        </View>
+                      </TouchableOpacity>
+
                       {selectedClasses.includes(classItem.id) && (
-                        <AntDesign name="check" size={14} color="#ffffff" />
+                        <View style={{ marginTop: 8, backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10 }}>
+                          <View style={{ paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#e2e8f0', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#0f172a' }}>Select Students (optional)</Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                              <TouchableOpacity onPress={() => {
+                                const allIds = (studentsByClass[classItem.id] || []).map((s: any) => s.studentId || s.id);
+                                const selected = targetStudentIdsByClass[classItem.id] || [];
+                                const next = selected.length === 0 ? allIds : [];
+                                setTargetStudentIdsByClass(prev => ({ ...prev, [classItem.id]: next }));
+                              }}>
+                                <Text style={{ fontSize: 12, color: '#0ea5e9', fontWeight: '700' }}>
+                                  {(targetStudentIdsByClass[classItem.id] || []).length === 0 ? 'Select All' : 'Unselect All'}
+                                </Text>
+                              </TouchableOpacity>
+                              <Text style={{ fontSize: 12, color: '#64748b' }}>{(targetStudentIdsByClass[classItem.id] || []).length} selected</Text>
+                            </View>
+                          </View>
+                          <View style={{ paddingHorizontal: 8, paddingVertical: 8 }}>
+                            {[...(studentsByClass[classItem.id] || [])]
+                              .sort((a: any, b: any) => {
+                                const ga = String(a.gender || '').toLowerCase() === 'female' ? 1 : 0;
+                                const gb = String(b.gender || '').toLowerCase() === 'female' ? 1 : 0;
+                                if (ga !== gb) return ga - gb; // male(0) first
+                                const na = `${(a.surname || '').toLowerCase()} ${(a.firstName || '').toLowerCase()}`;
+                                const nb = `${(b.surname || '').toLowerCase()} ${(b.firstName || '').toLowerCase()}`;
+                                return na.localeCompare(nb);
+                              })
+                              .map((s: any) => {
+                                const id = s.studentId || s.id;
+                                const selected = (targetStudentIdsByClass[classItem.id] || []).includes(id);
+                                return (
+                                  <TouchableOpacity key={id} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 6, paddingHorizontal: 6, borderRadius: 8, backgroundColor: selected ? '#eff6ff' : 'transparent' }} onPress={() => toggleStudentSelection(classItem.id, id)}>
+                                    <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: selected ? '#0ea5e9' : '#d1d5db', backgroundColor: selected ? '#0ea5e9' : '#ffffff', alignItems: 'center', justifyContent: 'center', marginRight: 8 }}>
+                                      {selected && <AntDesign name="check" size={12} color="#ffffff" />}
+                                    </View>
+                                    <Text style={{ flex: 1, color: '#0f172a' }}>{formatStudentName(s)}</Text>
+                                    <Text style={{ color: '#64748b', fontSize: 12, width: 60, textAlign: 'right' }}>{String(s.gender || '').toLowerCase() === 'female' ? 'Female' : 'Male'}</Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            {(studentsByClass[classItem.id] || []).length === 0 && (
+                              <Text style={{ color: '#9ca3af', paddingHorizontal: 8, paddingVertical: 6 }}>No students in this class.</Text>
+                            )}
+                          </View>
+                        </View>
                       )}
                     </View>
-                  </TouchableOpacity>
                   ))}
                 </View>
               )}

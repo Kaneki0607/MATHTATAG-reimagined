@@ -2058,6 +2058,7 @@ export default function TeacherDashboard() {
   }, [isShakeEnabled]);
   
   const [closingClassId, setClosingClassId] = useState<string | null>(null);
+  const [deletingClassId, setDeletingClassId] = useState<string | null>(null);
 
   // Add Student state
 
@@ -2068,7 +2069,9 @@ export default function TeacherDashboard() {
   // When set, modal operates in edit mode instead of create
   const [selectedStudentForEdit, setSelectedStudentForEdit] = useState<any | null>(null);
 
-  const [studentFullName, setStudentFullName] = useState('');
+  const [studentLastName, setStudentLastName] = useState('');
+  const [studentFirstName, setStudentFirstName] = useState('');
+  const [studentMiddleInitial, setStudentMiddleInitial] = useState('');
 
   const [studentGender, setStudentGender] = useState<'male' | 'female'>('male');
 
@@ -2110,6 +2113,10 @@ export default function TeacherDashboard() {
   // Parent info modal state
 
   const [selectedParentForInfo, setSelectedParentForInfo] = useState<any>(null);
+
+  // List tab sorting state
+  const [listSortBy, setListSortBy] = useState<'name' | 'gender'>('gender');
+  const [listSortOrder, setListSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [studentsByClass, setStudentsByClass] = useState<Record<string, any[]>>({});
 
@@ -3785,26 +3792,58 @@ export default function TeacherDashboard() {
 
 
 
-  const handleAssignExercise = async (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => {
+  const handleAssignExercise = async (
+    classIds: string[],
+    deadline: string,
+    acceptLateSubmissions: boolean,
+    quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4',
+    targetStudentIds?: string[]
+  ) => {
 
     try {
 
+      // Detect possible duplicate assignment for same exercise/class/targets
+      if (selectedExerciseForAssign?.id) {
+        const duplicates: Array<{ classId: string; className: string }> = [];
+        const currentTargets = Array.isArray(targetStudentIds) && targetStudentIds.length > 0 ? new Set(targetStudentIds) : null;
+        classIds.forEach((cid) => {
+          const existing = assignedExercises.filter((a: any) => a.classId === cid && a.exerciseId === selectedExerciseForAssign.id);
+          const classInfo = teacherClasses.find((c) => c.id === cid);
+          const className = classInfo?.name || 'Class';
+          const hasOverlap = existing.some((a: any) => {
+            const existingTargets: string[] | null = Array.isArray(a.targetStudentIds) && a.targetStudentIds.length > 0 ? a.targetStudentIds : null;
+            if (!existingTargets || !currentTargets) return true; // whole class in either
+            return existingTargets.some((sid: string) => currentTargets.has(sid));
+          });
+          if (hasOverlap) duplicates.push({ classId: cid, className });
+        });
+
+        if (duplicates.length > 0) {
+          let proceed = false;
+          await new Promise<void>((resolve) => {
+            showAlert(
+              'Possible Duplicate Assignment',
+              `This exercise already has an assignment for:\n${duplicates.map(d => `• ${d.className}`).join('\n')}\nProceed anyway?`,
+              [
+                { text: 'Cancel', style: 'cancel', onPress: () => { proceed = false; resolve(); } },
+                { text: 'Proceed', style: 'destructive', onPress: () => { proceed = true; resolve(); } },
+              ],
+              'warning'
+            );
+          });
+          if (!proceed) { return; }
+        }
+      }
+
       await assignExercise(
-
-        selectedExerciseForAssign.id, 
-
-        classIds, 
-
-        deadline, 
-
-        currentUserId!, 
-
-        acceptLateSubmissions, 
-
-        'open', // Default to open status
-
-        quarter
-
+        selectedExerciseForAssign.id,
+        classIds,
+        deadline,
+        currentUserId!,
+        acceptLateSubmissions,
+        'open',
+        quarter,
+        targetStudentIds
       );
 
       showAlert('Success', 'Exercise assigned successfully', undefined, 'success');
@@ -6247,6 +6286,83 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
   };
 
+
+  const handleDeleteClass = (cls: { id: string; name: string }) => {
+
+    showAlert(
+
+      'Delete Class',
+
+      `This will permanently delete "${cls.name}", all students in it, and their parent records. This cannot be undone. Continue?`,
+
+      [
+
+        { text: 'Cancel', style: 'cancel' },
+
+        {
+
+          text: 'Delete Class',
+
+          style: 'destructive',
+
+          onPress: async () => {
+
+            try {
+
+              setDeletingClassId(cls.id);
+
+              // Load all students to ensure we have the latest list
+              const { data: studentsData } = await readData('/students');
+              const studentsInClass = Object.values(studentsData || {}).filter((s: any) => String(s.classId) === String(cls.id));
+
+              // Delete students and their parents (including login code mapping)
+              for (const s of studentsInClass as any[]) {
+                try {
+                  if (s.parentId) {
+                    const { data: parentData } = await readData(`/parents/${s.parentId}`);
+                    if (parentData && parentData.loginCode) {
+                      await deleteData(`/parentLoginCodes/${parentData.loginCode}`);
+                    }
+                    await deleteData(`/parents/${s.parentId}`);
+                  }
+                  if (s.studentId) {
+                    await deleteData(`/students/${s.studentId}`);
+                  }
+                } catch {}
+              }
+
+              // Delete the class itself
+              await deleteData(`/classes/${cls.id}`);
+
+              showAlert('Deleted', 'Class and related records were removed.', undefined, 'success');
+
+              // Refresh classes
+              if (currentUserId) {
+                await loadTeacherClasses(currentUserId);
+              }
+
+            } catch (e) {
+
+              showAlert('Error', 'Failed to delete class.', undefined, 'error');
+
+            } finally {
+
+              setDeletingClassId(null);
+
+            }
+
+          },
+
+        },
+
+      ],
+
+      'warning'
+
+    );
+
+  };
+
   const handleShowParentsList = (classId: string) => {
 
     setSelectedClassForParentsList(classId);
@@ -6293,22 +6409,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   const parseFullName = (fullName: string): { firstName: string; middleInitial: string; surname: string } => {
     const trimmed = fullName.trim();
     if (!trimmed) return { firstName: '', middleInitial: '', surname: '' };
-
-    const parts = trimmed.split(/\s+/); // Split by whitespace
-    
+    const parts = trimmed.split(/\s+/);
     if (parts.length === 1) {
-      // Only one word - treat as first name
       return { firstName: parts[0], middleInitial: '', surname: '' };
     } else if (parts.length === 2) {
-      // Two words - First Name and Surname
       return { firstName: parts[0], middleInitial: '', surname: parts[1] };
     } else {
-      // Three or more words - First Name, Middle Initial (from middle name), and Surname
       const firstName = parts[0];
       const surname = parts[parts.length - 1];
-      // Extract middle initial from the second word
-      const middleInitial = parts[1].charAt(0).toUpperCase() + '.';
-      
+      const middleInitial = parts[1] ? (parts[1].charAt(0).toUpperCase() + '.') : '';
       return { firstName, middleInitial, surname };
     }
   };
@@ -6316,25 +6425,23 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   // Format student name for display
   const formatStudentName = (student: any): string => {
     if (!student) return 'Unknown Student';
-    
-    // If fullName exists, use it
+    const last = (student.surname || '').trim();
+    const first = (student.firstName || '').trim();
+    const mi = (student.middleInitial || '').trim();
+    if (last && first) {
+      const miPart = mi ? ` ${mi}` : '';
+      return `${last}, ${first}${miPart}`;
+    }
     if (student.fullName && student.fullName.trim()) {
+      // Try to reformat legacy fullName into Last, First MI
+      const { firstName, middleInitial, surname } = parseFullName(student.fullName);
+      const miPart = middleInitial ? ` ${middleInitial}` : '';
+      if (surname && firstName) return `${surname}, ${firstName}${miPart}`;
       return student.fullName.trim();
     }
-    
-    // If firstName and surname exist, format them
-    if (student.firstName && student.surname) {
-      const firstName = student.firstName.trim();
-      const surname = student.surname.trim();
-      const mi = student.middleInitial && student.middleInitial.trim() ? ` ${student.middleInitial.trim()}` : '';
-      return `${firstName}${mi} ${surname}`;
-    }
-    
-    // Fallback to nickname if it exists (for backwards compatibility)
     if (student.nickname && student.nickname.trim()) {
       return student.nickname.trim();
     }
-    
     return 'Unknown Student';
   };
 
@@ -6386,7 +6493,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     setSelectedStudentForEdit(null);
 
-    setStudentFullName('');
+    setStudentLastName('');
+    setStudentFirstName('');
+    setStudentMiddleInitial('');
 
     setStudentGender('male');
 
@@ -6400,7 +6509,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     if (!selectedClassForStudent) return;
 
-    if (!studentFullName.trim()) { showAlert('Error', 'Please enter student full name.', undefined, 'error'); return; }
+    if (!studentLastName.trim() || !studentFirstName.trim()) { showAlert('Error', 'Enter Lastname and Firstname (Middle Initial optional).', undefined, 'error'); return; }
 
     try {
 
@@ -6409,8 +6518,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       // Generate login code
       const loginCode = await generateLoginCode();
 
-      // Parse full name
-      const { firstName, middleInitial, surname } = parseFullName(studentFullName);
+      const firstName = studentFirstName.trim();
+      const surname = studentLastName.trim();
+      const middleInitial = studentMiddleInitial.trim() ? (studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.') : '';
 
       if (!firstName || !surname) {
         showAlert('Error', 'Please enter at least a first name and surname (e.g., "Juan Dela Cruz").', undefined, 'error');
@@ -6440,7 +6550,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         firstName,
         middleInitial: middleInitial || '',
         surname,
-        fullName: studentFullName.trim(),
+        fullName: `${surname}, ${firstName}${middleInitial ? ` ${middleInitial}` : ''}`,
         gender: studentGender,
         gradeSection: selectedClassForStudent.name || 'DEFAULT'
       });
@@ -6456,7 +6566,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       // Refresh lists
 
-      await loadStudentsAndParents(activeClasses.map((c) => c.id));
+      await loadStudentsAndParents(teacherClasses.map((c) => c.id));
 
       
 
@@ -6486,7 +6596,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
               onPress: () => {
 
-                setStudentFullName('');
+                setStudentLastName('');
+                setStudentFirstName('');
+                setStudentMiddleInitial('');
 
                 setShowAddStudentModal(true);
 
@@ -6525,14 +6637,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     if (!selectedClassForStudent || !selectedStudentForEdit) return;
 
-    if (!studentFullName.trim()) { showAlert('Error', 'Please enter student full name.', undefined, 'error'); return; }
+    if (!studentLastName.trim() || !studentFirstName.trim()) { showAlert('Error', 'Enter Lastname and Firstname (Middle Initial optional).', undefined, 'error'); return; }
 
     try {
 
       setSavingStudent(true);
 
-      // Parse full name
-      const { firstName, middleInitial, surname } = parseFullName(studentFullName);
+      const firstName = studentFirstName.trim();
+      const surname = studentLastName.trim();
+      const middleInitial = studentMiddleInitial.trim() ? (studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.') : '';
 
       if (!firstName || !surname) {
         showAlert('Error', 'Please enter at least a first name and surname (e.g., "Juan Dela Cruz").', undefined, 'error');
@@ -6545,7 +6658,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         firstName,
         middleInitial: middleInitial || '',
         surname,
-        fullName: studentFullName.trim(),
+        fullName: `${surname}, ${firstName}${middleInitial ? ` ${middleInitial}` : ''}`,
         gender: studentGender,
       });
 
@@ -6577,10 +6690,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     setSelectedClassForStudent(classInfo);
 
     // Reconstruct full name from stored components, or use fullName if available
-    const fullName = student.fullName || 
-      `${student.firstName || ''} ${student.middleInitial || ''} ${student.surname || ''}`.trim();
-
-    setStudentFullName(fullName);
+    setStudentLastName(String(student.surname || ''));
+    setStudentFirstName(String(student.firstName || ''));
+    setStudentMiddleInitial(String((student.middleInitial || '').replace(/\./g, '')));
 
     setStudentGender(String(student.gender || 'male') === 'female' ? 'female' : 'male');
 
@@ -6904,9 +7016,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             // Refresh student lists
 
-            if (activeClasses.length > 0) {
+            if (teacherClasses.length > 0) {
 
-              await loadStudentsAndParents(activeClasses.map(c => c.id));
+              await loadStudentsAndParents(teacherClasses.map(c => c.id));
 
             }
 
@@ -6918,9 +7030,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             await loadTeacherClasses(currentUserId);
 
-            if (activeClasses.length > 0) {
+            if (teacherClasses.length > 0) {
 
-              await loadStudentsAndParents(activeClasses.map(c => c.id));
+              await loadStudentsAndParents(teacherClasses.map(c => c.id));
 
             }
 
@@ -7670,6 +7782,18 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                             <MaterialCommunityIcons name="lock" size={16} color="#ef4444" />
                             <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{closingClassId === cls.id ? 'Closing…' : 'Close Class'}</Text>
                           </TouchableOpacity>
+
+                              <TouchableOpacity
+                                style={styles.moreMenuItem}
+                                onPress={() => {
+                                  setOpenMenuClassId(null);
+                                  handleDeleteClass(cls);
+                                }}
+                                disabled={deletingClassId === cls.id}
+                              >
+                                <MaterialCommunityIcons name="delete-forever" size={16} color="#ef4444" />
+                                <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{deletingClassId === cls.id ? 'Deleting…' : 'Delete Class'}</Text>
+                              </TouchableOpacity>
                         </View>
                       )}
                     </View>
@@ -8870,105 +8994,104 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     <View>
 
-                      <View style={styles.studentHeaderRow}>
+                      {/* Header row is rendered below with sortable columns */}
 
-                        <Text style={[styles.studentIndex, { width: 28 }]}>#</Text>
+                      {(() => {
+                        const rows = (studentsByClass[cls.id] || []).map((s: any) => {
+                          const p = s.parentId ? parentsById[s.parentId] : undefined;
+                          const name = formatStudentName(s);
+                          const gender = String(s.gender || '').toLowerCase() === 'female' ? 'Female' : 'Male';
+                          const parentCode = p?.loginCode || '—';
+                          const enrolled = p?.infoStatus === 'completed';
+                          const sortKeyName = `${(s.surname || '').toLowerCase()} ${(s.firstName || '').toLowerCase()} ${(s.middleInitial || '').toLowerCase()}`.trim();
+                          return { s, p, name, gender, parentCode, enrolled, sortKeyName };
+                        });
 
-                        <Text style={[styles.studentName, { fontWeight: '700', color: '#374151' }]}>Student Name</Text>
+                        const compare = (a: any, b: any) => {
+                          if (listSortBy === 'name') {
+                            const nameCmp = a.sortKeyName.localeCompare(b.sortKeyName);
+                            return listSortOrder === 'asc' ? nameCmp : -nameCmp;
+                          }
+                          // listSortBy === 'gender'
+                          const genderCmpRaw = a.gender.localeCompare(b.gender);
+                          if (genderCmpRaw === 0) {
+                            // Always A->Z within the same gender
+                            return a.sortKeyName.localeCompare(b.sortKeyName);
+                          }
+                          // Flip only the gender grouping when desc (Male on top), keep within-group unaffected
+                          return listSortOrder === 'desc' ? -genderCmpRaw : genderCmpRaw;
+                        };
 
-                        <Text style={[styles.studentCode, { color: '#374151' }]}>Parent Access Code</Text>
+                        const sorted = rows.sort(compare);
 
-                      </View>
+                        const toggleSort = (key: 'name' | 'gender') => {
+                          if (listSortBy === key) {
+                            setListSortOrder(listSortOrder === 'asc' ? 'desc' : 'asc');
+                          } else {
+                            setListSortBy(key);
+                            setListSortOrder('asc');
+                          }
+                        };
 
-                      {(studentsByClass[cls.id] || []).map((s: any, idx: number) => {
+                        return (
+                          <>
+                            <View style={[styles.studentRow, { backgroundColor: '#f8fafc', alignItems: 'center' }]}>
+                              <Text style={[styles.studentIndex, { fontWeight: '700', color: '#334155', width: 28, textAlign: 'left' }]}>#</Text>
+                              <TouchableOpacity onPress={() => toggleSort('name')} style={{ flex: 1 }}>
+                                <Text style={[styles.studentName, { fontWeight: '700', color: '#334155' }]} numberOfLines={1} ellipsizeMode="tail">Name</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity onPress={() => toggleSort('gender')} style={{ width: 80 }}>
+                                <Text style={{ color: '#334155', fontWeight: '700', width: 80, textAlign: 'left' }} numberOfLines={1}>Gender</Text>
+                              </TouchableOpacity>
+                              <Text style={[styles.studentCode, { fontWeight: '700', color: '#334155', width: 90, textAlign: 'left' }]} numberOfLines={1}>Parent Code</Text>
+                              <View style={[styles.studentActionsWrap, { width: 28 }]} />
+                            </View>
 
-                      const p = s.parentId ? parentsById[s.parentId] : undefined;
-
-                      const loginCode = p?.loginCode || 'N/A';
-
-                      return (
-
-                        <View key={s.studentId} style={styles.studentRow}>
-
-                          <Text style={styles.studentIndex}>{idx + 1}.</Text>
-
-                          <Text style={styles.studentName}>{formatStudentName(s)}</Text>
-
-                          <Text style={styles.studentCode}>{loginCode}</Text>
-
-                          <View style={styles.studentActionsWrap}>
-
-                            <TouchableOpacity
-
-                              accessibilityLabel="Student options"
-
-                              onPress={() => setStudentMenuVisible(studentMenuVisible === s.studentId ? null : s.studentId)}
-
-                              style={styles.iconBtn}
-
-                            >
-
-                              <MaterialIcons name="more-vert" size={20} color="#64748b" />
-
-                            </TouchableOpacity>
-
-                            {studentMenuVisible === s.studentId && (
-
-                              <View style={styles.studentMenuDropdown}>
-
-                                <TouchableOpacity
-
-                                  style={styles.studentMenuItem}
-
-                                  onPress={() => handleEditStudent(s, { id: cls.id, name: cls.name })}
-
-                                >
-
-                                  <MaterialIcons name="edit" size={16} color="#64748b" />
-
-                                  <Text style={styles.studentMenuText}>Edit Student</Text>
-
-                                </TouchableOpacity>
-
-                                <TouchableOpacity
-
-                                  style={styles.studentMenuItem}
-
-                                  onPress={() => handleViewParentInfo(s)}
-
-                                >
-
-                                  <MaterialIcons name="person" size={16} color="#3b82f6" />
-
-                                  <Text style={styles.studentMenuText}>View Parent Info</Text>
-
-                                </TouchableOpacity>
-
-                                <TouchableOpacity
-
-                                  style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
-
-                                  onPress={() => handleDeleteStudent(s, cls.id)}
-
-                                >
-
-                                  <MaterialIcons name="delete" size={16} color="#ef4444" />
-
-                                  <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
-
-                                </TouchableOpacity>
-
+                            {sorted.map((row: any, idx: number) => (
+                              <View key={row.s.studentId} style={[styles.studentRow, { alignItems: 'center' }]}>
+                                <Text style={[styles.studentIndex, { width: 28 }]}>{idx + 1}.</Text>
+                                <Text style={[styles.studentName, { flex: 1, minWidth: 120 }]} numberOfLines={1} ellipsizeMode="tail">{row.name}</Text>
+                                <Text style={{ width: 80, color: '#111827', textAlign: 'left' }} numberOfLines={1}>{row.gender}</Text>
+                                <Text style={[styles.studentCode, { width: 90, textAlign: 'left', color: row.enrolled ? '#111827' : '#ef4444', fontWeight: row.enrolled ? '500' : '700' }]} numberOfLines={1}>{row.parentCode}</Text>
+                                <View style={styles.studentActionsWrap}>
+                                  <TouchableOpacity
+                                    accessibilityLabel="Student options"
+                                    onPress={() => setStudentMenuVisible(studentMenuVisible === row.s.studentId ? null : row.s.studentId)}
+                                    style={styles.iconBtn}
+                                  >
+                                    <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                                  </TouchableOpacity>
+                                  {studentMenuVisible === row.s.studentId && (
+                                    <View style={styles.studentMenuDropdown}>
+                                      <TouchableOpacity
+                                        style={styles.studentMenuItem}
+                                        onPress={() => handleEditStudent(row.s, { id: cls.id, name: cls.name })}
+                                      >
+                                        <MaterialIcons name="edit" size={16} color="#64748b" />
+                                        <Text style={styles.studentMenuText}>Edit Student</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={styles.studentMenuItem}
+                                        onPress={() => handleViewParentInfo(row.s)}
+                                      >
+                                        <MaterialIcons name="person" size={16} color="#3b82f6" />
+                                        <Text style={styles.studentMenuText}>View Parent Info</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
+                                        onPress={() => handleDeleteStudent(row.s, cls.id)}
+                                      >
+                                        <MaterialIcons name="delete" size={16} color="#ef4444" />
+                                        <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
+                                      </TouchableOpacity>
+                                    </View>
+                                  )}
+                                </View>
                               </View>
-
-                            )}
-
-                          </View>
-
-                        </View>
-
-                      );
-
-                    })}
+                            ))}
+                          </>
+                        );
+                      })()}
 
                     </View>
 
@@ -11418,51 +11541,57 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               <View style={styles.infoSection}>
 
                 <View style={styles.field}>
-
-                  <Text style={styles.fieldLabel}>Full Name</Text>
-
+                  <Text style={styles.fieldLabel}>Last Name</Text>
                   <TextInput
-
                     style={styles.fieldInput}
-
-                    value={studentFullName}
-
-                    onChangeText={setStudentFullName}
-
-                    placeholder="e.g., Juan Santos, Maria Garcia, Pedro Rizal"
-
+                    value={studentLastName}
+                    onChangeText={setStudentLastName}
+                    placeholder="e.g., Dela Cruz"
                     placeholderTextColor="#6b7280"
-
                   />
-
                 </View>
 
-                {studentFullName.trim() && (() => {
-                  const parsed = parseFullName(studentFullName);
-                  return (
-                    <View style={{ 
-                      backgroundColor: '#f1f5f9', 
-                      padding: 12, 
-                      borderRadius: 8, 
-                      marginBottom: 16,
-                      borderWidth: 1,
-                      borderColor: '#e2e8f0'
-                    }}>
-                      <Text style={{ fontSize: 12, fontWeight: '600', color: '#475569', marginBottom: 6 }}>
-                        Preview:
-                      </Text>
-                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
-                        First Name: <Text style={{ fontWeight: '600' }}>{parsed.firstName || '—'}</Text>
-                      </Text>
-                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
-                        M.I.: <Text style={{ fontWeight: '600' }}>{parsed.middleInitial || '—'}</Text>
-                      </Text>
-                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
-                        Surname: <Text style={{ fontWeight: '600' }}>{parsed.surname || '—'}</Text>
-                      </Text>
-                    </View>
-                  );
-                })()}
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>First Name</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={studentFirstName}
+                    onChangeText={setStudentFirstName}
+                    placeholder="e.g., Juan"
+                    placeholderTextColor="#6b7280"
+                  />
+                </View>
+
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Middle Initial</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={studentMiddleInitial}
+                    onChangeText={setStudentMiddleInitial}
+                    placeholder="e.g., R"
+                    placeholderTextColor="#6b7280"
+                    maxLength={2}
+                    autoCapitalize="characters"
+                  />
+                </View>
+
+                {(studentLastName.trim() || studentFirstName.trim() || studentMiddleInitial.trim()) && (
+                  <View style={{ 
+                    backgroundColor: '#f1f5f9', 
+                    padding: 12, 
+                    borderRadius: 8, 
+                    marginBottom: 16,
+                    borderWidth: 1,
+                    borderColor: '#e2e8f0'
+                  }}>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: '#475569', marginBottom: 6 }}>
+                      Preview:
+                    </Text>
+                    <Text style={{ fontSize: 14, color: '#1e293b' }}>
+                      {`${studentLastName.trim()}${studentLastName.trim() && studentFirstName.trim() ? ', ' : ''}${studentFirstName.trim()}${studentMiddleInitial.trim() ? ` ${studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.'}` : ''}` || '—'}
+                    </Text>
+                  </View>
+                )}
 
                 <View style={styles.field}>
 
@@ -11499,9 +11628,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 </View>
 
                 <Text style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
-
-                  Note: Enter full name in format "First Name Middle Name Surname" or "First Name Surname". Parent details will be collected securely when they first log in.
-
+                  Note: Name will be saved and shown as "Lastname, Firstname MI". Parent details will be collected when they first log in.
                 </Text>
 
               </View>
@@ -16954,7 +17081,7 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
 
     paddingVertical: 8,
 
@@ -16970,7 +17097,7 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
 
     paddingVertical: 8,
 

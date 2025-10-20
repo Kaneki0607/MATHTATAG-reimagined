@@ -76,6 +76,7 @@ export interface CreateAssignedExerciseParams {
   acceptLateSubmissions?: boolean;
   acceptingStatus?: 'open' | 'closed';
   quarter?: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4';
+  targetStudentIds?: string[]; // Optional: assign to specific students only
 }
 
 export interface CreateAnnouncementParams {
@@ -391,7 +392,7 @@ export async function createAssignedExercise(params: CreateAssignedExerciseParam
     const assignedId = await generateNextId('ASSIGNED', undefined, '/assignedExercises');
     
     // Create assigned exercise data
-    const assignedData = {
+    const assignedData: any = {
       assignedExerciseId: assignedId,
       exerciseId: params.exerciseId,
       classId: params.classId,
@@ -402,6 +403,13 @@ export async function createAssignedExercise(params: CreateAssignedExerciseParam
       quarter: params.quarter,
       createdAt: new Date().toISOString()
     };
+    // Add targetStudentIds only when present and valid (avoid undefined in payload)
+    if (Array.isArray(params.targetStudentIds)) {
+      const cleanedTargets = params.targetStudentIds.filter((id) => typeof id === 'string' && id.trim().length > 0);
+      if (cleanedTargets.length > 0) {
+        assignedData.targetStudentIds = cleanedTargets;
+      }
+    }
     
     // Write to database
     const result = await writeData(`/assignedExercises/${assignedId}`, assignedData);
