@@ -2259,6 +2259,9 @@ export default function TeacherDashboard() {
     exerciseResults: any[];
   } | null>(null);
 
+  // Student results view state
+  const [showAllStudents, setShowAllStudents] = useState(false);
+
   // Helper function to format answers for display based on exercise type
   const formatAnswerForDisplay = (answer: string, questionType: string): string => {
     if (!answer || answer === 'No answer') return 'No answer';
@@ -5627,6 +5630,232 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     }
 
   };
+  
+  
+  
+  // Export Class Statistics to Excel
+  const handleExportClassStatsToExcel = async () => {
+    if (!selectedExerciseForStats) return;
+    
+    try {
+      const { exerciseTitle, exerciseId, exerciseResults, classId } = selectedExerciseForStats;
+      
+      // Create a workbook
+      const wb = XLSX.utils.book_new();
+      
+      // Calculate all statistics
+      const scores = exerciseResults.map((r: any) => r.scorePercentage || 0);
+      const sortedScores = [...scores].sort((a: number, b: number) => a - b);
+      
+      if (scores.length === 0) {
+        showAlert('Error', 'No data available to export.', undefined, 'error');
+        return;
+      }
+      
+      // CENTRAL TENDENCY
+      const mps = scores.reduce((sum: number, score: number) => sum + score, 0) / scores.length;
+      const median = sortedScores.length % 2 === 0 
+        ? (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2
+        : sortedScores[Math.floor(sortedScores.length / 2)];
+      
+      const scoreCounts: { [key: number]: number } = {};
+      scores.forEach((score: number) => {
+        const roundedScore = Math.round(score);
+        scoreCounts[roundedScore] = (scoreCounts[roundedScore] || 0) + 1;
+      });
+      const mode = Object.keys(scoreCounts).reduce((a, b) => 
+        scoreCounts[parseInt(a)] > scoreCounts[parseInt(b)] ? a : b
+      );
+      
+      // DISPERSION
+      const variance = scores.reduce((sum: number, score: number) => sum + Math.pow(score - mps, 2), 0) / scores.length;
+      const stdDev = Math.sqrt(variance);
+      const highestScore = Math.max(...scores);
+      const lowestScore = Math.min(...scores);
+      const range = highestScore - lowestScore;
+      
+      // TOP & BOTTOM PERFORMERS
+      const topStudent = exerciseResults.find((r: any) => r.scorePercentage === highestScore);
+      const bottomStudent = exerciseResults.find((r: any) => r.scorePercentage === lowestScore);
+      
+      // EFFICIENCY METRICS
+      const totalAttempts = exerciseResults.reduce((sum: number, result: any) => {
+        return sum + (result.questionResults?.reduce((qSum: number, q: any) => qSum + (q.attempts || 1), 0) || 0);
+      }, 0);
+      const avgAttemptsPerItem = totalAttempts / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
+      
+      const totalTime = exerciseResults.reduce((sum: number, result: any) => sum + (result.totalTimeSpent || 0), 0);
+      const avgTimePerItem = totalTime / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
+      
+      // PERFORMANCE DISTRIBUTION
+      const highlyProficientCount = scores.filter((s: number) => s >= 85).length;
+      const proficientCount = scores.filter((s: number) => s >= 75 && s < 85).length;
+      const nearlyProficientCount = scores.filter((s: number) => s >= 50 && s < 75).length;
+      const lowProficientCount = scores.filter((s: number) => s >= 25 && s < 50).length;
+      const notProficientCount = scores.filter((s: number) => s < 25).length;
+      
+      // PASS RATE
+      const passCount = scores.filter((s: number) => s >= 75).length;
+      const passRate = scores.length > 0 ? (passCount / scores.length) * 100 : 0;
+      
+      // SHEET 1: OVERVIEW
+      const overviewData = [
+        { 'Metric': 'Exercise Title', 'Value': exerciseTitle },
+        { 'Metric': 'Exercise ID', 'Value': exerciseId },
+        { 'Metric': 'Total Students', 'Value': scores.length },
+        { 'Metric': 'Mean Percentage Score (MPS)', 'Value': `${mps.toFixed(1)}%` },
+        { 'Metric': 'Pass Rate (≥60%)', 'Value': `${passRate.toFixed(1)}%` },
+        { 'Metric': 'Students Passed', 'Value': `${passCount}/${scores.length}` }
+      ];
+      
+      const overviewWs = XLSX.utils.json_to_sheet(overviewData);
+      overviewWs['!cols'] = [{ wch: 35 }, { wch: 25 }];
+      XLSX.utils.book_append_sheet(wb, overviewWs, 'Overview');
+      
+      // SHEET 2: CENTRAL TENDENCY
+      const centralTendencyData = [
+        { 'Statistic': 'Mean', 'Value': `${mps.toFixed(1)}%`, 'Description': 'Average score across all students' },
+        { 'Statistic': 'Median', 'Value': `${median.toFixed(1)}%`, 'Description': 'Middle value when scores are sorted' },
+        { 'Statistic': 'Mode', 'Value': `${mode}%`, 'Description': 'Most frequently occurring score' }
+      ];
+      
+      const centralTendencyWs = XLSX.utils.json_to_sheet(centralTendencyData);
+      centralTendencyWs['!cols'] = [{ wch: 20 }, { wch: 15 }, { wch: 40 }];
+      XLSX.utils.book_append_sheet(wb, centralTendencyWs, 'Central Tendency');
+      
+      // SHEET 3: DISPERSION
+      const dispersionData = [
+        { 'Statistic': 'Standard Deviation', 'Value': stdDev.toFixed(1), 'Interpretation': stdDev < 10 ? 'Low variability' : stdDev < 20 ? 'Moderate variability' : 'High variability' },
+        { 'Statistic': 'Range', 'Value': `${range.toFixed(1)}%`, 'Interpretation': `${lowestScore.toFixed(0)}% to ${highestScore.toFixed(0)}%` },
+        { 'Statistic': 'Highest Score', 'Value': `${highestScore.toFixed(1)}%`, 'Interpretation': topStudent ? (topStudent.studentInfo?.name || 'Unknown') : '—' },
+        { 'Statistic': 'Lowest Score', 'Value': `${lowestScore.toFixed(1)}%`, 'Interpretation': bottomStudent ? (bottomStudent.studentInfo?.name || 'Unknown') : '—' }
+      ];
+      
+      const dispersionWs = XLSX.utils.json_to_sheet(dispersionData);
+      dispersionWs['!cols'] = [{ wch: 25 }, { wch: 20 }, { wch: 40 }];
+      XLSX.utils.book_append_sheet(wb, dispersionWs, 'Dispersion');
+      
+      // SHEET 4: EFFICIENCY
+      const avgTimeDisplay = avgTimePerItem > 60000 
+        ? `${Math.floor(avgTimePerItem / 60000)}m ${Math.floor((avgTimePerItem % 60000) / 1000)}s`
+        : `${Math.floor(avgTimePerItem / 1000)}s`;
+      
+      const efficiencyData = [
+        { 'Metric': 'Avg Attempts per Item', 'Value': avgAttemptsPerItem.toFixed(1), 'Assessment': avgAttemptsPerItem < 1.5 ? 'Excellent' : avgAttemptsPerItem < 2.5 ? 'Good' : 'Fair' },
+        { 'Metric': 'Avg Time per Item', 'Value': avgTimeDisplay, 'Assessment': '—' }
+      ];
+      
+      const efficiencyWs = XLSX.utils.json_to_sheet(efficiencyData);
+      efficiencyWs['!cols'] = [{ wch: 30 }, { wch: 20 }, { wch: 20 }];
+      XLSX.utils.book_append_sheet(wb, efficiencyWs, 'Efficiency');
+      
+      // SHEET 5: PERFORMANCE DISTRIBUTION
+      const performanceDistData = [
+        { 'Category': 'Highly Proficient (85-100%)', 'Count': highlyProficientCount, 'Percentage': `${scores.length > 0 ? ((highlyProficientCount / scores.length) * 100).toFixed(0) : 0}%` },
+        { 'Category': 'Proficient (75-84%)', 'Count': proficientCount, 'Percentage': `${scores.length > 0 ? ((proficientCount / scores.length) * 100).toFixed(0) : 0}%` },
+        { 'Category': 'Nearly Proficient (50-74%)', 'Count': nearlyProficientCount, 'Percentage': `${scores.length > 0 ? ((nearlyProficientCount / scores.length) * 100).toFixed(0) : 0}%` },
+        { 'Category': 'Low Proficient (25-49%)', 'Count': lowProficientCount, 'Percentage': `${scores.length > 0 ? ((lowProficientCount / scores.length) * 100).toFixed(0) : 0}%` },
+        { 'Category': 'Not Proficient (<25%)', 'Count': notProficientCount, 'Percentage': `${scores.length > 0 ? ((notProficientCount / scores.length) * 100).toFixed(0) : 0}%` }
+      ];
+      
+      const performanceDistWs = XLSX.utils.json_to_sheet(performanceDistData);
+      performanceDistWs['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 15 }];
+      XLSX.utils.book_append_sheet(wb, performanceDistWs, 'Performance Distribution');
+      
+      // SHEET 6: ITEM ANALYSIS
+      const firstResult = exerciseResults[0];
+      if (firstResult?.questionResults?.length) {
+        const itemAnalysisData: any[] = [];
+        
+        firstResult.questionResults.forEach((question: any, questionIndex: number) => {
+          const questionNumber = question.questionNumber || questionIndex + 1;
+          const questionText = question.questionText || `Question ${questionNumber}`;
+          
+          let questionType = question.questionType || 'Unknown';
+          if (questionType.includes('multiple-choice')) {
+            questionType = 'Multiple Choice';
+          } else if (questionType.includes('identification')) {
+            questionType = 'Identification';
+          } else if (questionType.includes('re-order')) {
+            questionType = 'Re-order';
+          } else if (questionType.includes('matching')) {
+            questionType = 'Matching';
+          }
+          
+          const questionResults = exerciseResults.map((result: any) => {
+            return result.questionResults?.find((q: any) => q.questionId === question.questionId);
+          }).filter(Boolean);
+          
+          const correctCount = questionResults.filter((q: any) => q.isCorrect).length;
+          const difficultyIndex = questionResults.length > 0 ? (correctCount / questionResults.length) * 100 : 0;
+          
+          const avgTime = questionResults.reduce((sum: any, q: any) => sum + (q.timeSpent || 0), 0) / questionResults.length;
+          const avgTimeSeconds = Math.round(avgTime / 1000);
+          
+          const avgAttempts = questionResults.reduce((sum: any, q: any) => sum + (q.attempts || 1), 0) / questionResults.length;
+          
+          itemAnalysisData.push({
+            'Question #': questionNumber,
+            'Question Text': questionText,
+            'Type': questionType,
+            'Difficulty Index (%)': difficultyIndex.toFixed(1),
+            'Correct Count': correctCount,
+            'Total Responses': questionResults.length,
+            'Avg Time (s)': avgTimeSeconds,
+            'Avg Attempts': avgAttempts.toFixed(1)
+          });
+        });
+        
+        const itemAnalysisWs = XLSX.utils.json_to_sheet(itemAnalysisData);
+        itemAnalysisWs['!cols'] = [
+          { wch: 12 }, // Question #
+          { wch: 40 }, // Question Text
+          { wch: 18 }, // Type
+          { wch: 18 }, // Difficulty Index
+          { wch: 15 }, // Correct Count
+          { wch: 15 }, // Total Responses
+          { wch: 12 }, // Avg Time
+          { wch: 15 }  // Avg Attempts
+        ];
+        XLSX.utils.book_append_sheet(wb, itemAnalysisWs, 'Item Analysis');
+      }
+      
+      // Generate Excel file
+      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_class_statistics.xlsx`;
+      const fileUri = `${FileSystem.cacheDirectory}${filename}`;
+      
+      await FileSystem.writeAsStringAsync(fileUri, wbout, { encoding: 'base64' });
+      
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          dialogTitle: `Export Class Statistics - ${exerciseTitle}`,
+          UTI: 'com.microsoft.excel.xlsx'
+        });
+        showAlert('Success', 'Class statistics exported to Excel successfully!', undefined, 'success');
+      } else {
+        showAlert('Success', `Exported to ${filename}`, undefined, 'success');
+      }
+      
+      // Cleanup
+      setTimeout(async () => {
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(fileUri);
+          if (fileInfo.exists) {
+            await FileSystem.deleteAsync(fileUri);
+          }
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temp file:', cleanupError);
+        }
+      }, 5000);
+      
+    } catch (error) {
+      console.error('Export to Excel error:', error);
+      showAlert('Error', 'Failed to export class statistics to Excel.', undefined, 'error');
+    }
+  };
+  
   
   
   
@@ -9102,7 +9331,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                            
 
-                           // Sort the exercise results based on current sort settings
+                           // Sort the exercise results based on current sort settings (default: score descending)
 
                            const sortedResults = [...exerciseResults].sort((a: any, b: any) => {
 
@@ -9115,6 +9344,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                              let aValue, bValue;
 
                              
+
+                             // Default sorting by score (descending) if no specific sort is set
+                             if (!resultsSortBy || resultsSortBy === 'score') {
+                               aValue = a.scorePercentage || 0;
+                               bValue = b.scorePercentage || 0;
+                               return bValue - aValue; // Descending order (highest to lowest)
+                             }
 
                              if (resultsSortBy === 'attempts') {
 
@@ -9176,21 +9412,14 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
 
-                             } else if (resultsSortBy === 'score') {
-
-                               aValue = a.scorePercentage || 0;
-
-                               bValue = b.scorePercentage || 0;
-
-                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
-
                              } else if (resultsSortBy === 'remarks') {
 
                                const getRemarks = (score: number) => {
-                                 if (score >= 90) return 'Excellent';
-                                 if (score >= 75) return 'Good';
-                                 if (score >= 60) return 'Fair';
-                                 return 'Needs Work';
+                                 if (score >= 85) return 'Highly Proficient';
+                                 if (score >= 75) return 'Proficient';
+                                 if (score >= 50) return 'Nearly Proficient';
+                                 if (score >= 25) return 'Low Proficient';
+                                 return 'Not Proficient';
                                };
 
                                const remarksA = getRemarks(a.scorePercentage || 0);
@@ -9199,7 +9428,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                // Define order for remarks
 
-                               const remarksOrder = { 'Needs Work': 0, 'Fair': 1, 'Good': 2, 'Excellent': 3 };
+                               const remarksOrder = { 'Not Proficient': 0, 'Low Proficient': 1, 'Nearly Proficient': 2, 'Proficient': 3, 'Highly Proficient': 4 };
 
                                aValue = remarksOrder[remarksA as keyof typeof remarksOrder] || 0;
 
@@ -9340,39 +9569,41 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                <View style={styles.resultsStudentTable}>
 
                                  <View style={styles.resultsTableSectionHeader}>
-
                                    <Text style={styles.resultsTableTitle}>Student Results</Text>
-
-                                   <TouchableOpacity 
-
-                                     style={styles.resultsExportBtn}
-
-                                     onPress={() => handleExportToExcel(exerciseTitle, sortedResults, classStudents)}
-
-                                   >
-
-                                     <MaterialCommunityIcons name="file-excel" size={14} color="#10b981" />
-
-                                     <Text style={styles.resultsExportBtnText}>Excel</Text>
-
-                                   </TouchableOpacity>
-
+                                   <View style={styles.resultsTableActions}>
+                                     <TouchableOpacity 
+                                       style={styles.resultsViewAllBtn}
+                                       onPress={() => setShowAllStudents(!showAllStudents)}
+                                     >
+                                       <MaterialCommunityIcons 
+                                         name={showAllStudents ? "eye-off" : "eye"} 
+                                         size={14} 
+                                         color="#64748b" 
+                                       />
+                                       <Text style={styles.resultsViewAllBtnText}>
+                                         {showAllStudents ? 'Show Top 6' : 'View All'}
+                                       </Text>
+                                     </TouchableOpacity>
+                                     
+                                     <TouchableOpacity 
+                                       style={styles.resultsExportBtn}
+                                       onPress={() => handleExportToExcel(exerciseTitle, sortedResults, classStudents)}
+                                     >
+                                       <MaterialCommunityIcons name="file-excel" size={14} color="#10b981" />
+                                       <Text style={styles.resultsExportBtnText}>Excel</Text>
+                                     </TouchableOpacity>
+                                   </View>
                                  </View>
 
                                  
 
                                  <ScrollView 
-
                                    horizontal={width < 400}
-
                                    showsHorizontalScrollIndicator={width < 400}
-
                                    style={styles.tableScrollContainer}
-
                                    nestedScrollEnabled={true}
-
                                    keyboardShouldPersistTaps="handled"
-
+                                   scrollEnabled={showAllStudents}
                                  >
 
                                    <View style={styles.tableContainer}>
@@ -9381,19 +9612,19 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                      <View style={styles.resultsTableHeader}>
 
-                                       <Text style={[styles.tableHeaderText, { width: 35 }]}>#</Text>
+                                       <Text style={[styles.tableHeaderText, { width: 35, textAlign: 'center' }]}>#</Text>
 
                                        <TouchableOpacity 
 
-                                         style={[styles.sortableHeaderCell, { flex: 2 }]}
+                                         style={[styles.sortableHeaderCell, { maxWidth: 120, justifyContent: 'flex-start' }]}
 
                                          onPress={() => handleSort('name')}
 
                                        >
 
-                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'name' && styles.activeSort]}>
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'name' && styles.activeSort, { textAlign: 'left' }]}>
 
-                                           Student
+                                           Name
 
                                          </Text>
 
@@ -9415,13 +9646,73 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        <TouchableOpacity 
 
-                                         style={[styles.sortableHeaderCell, { flex: 1 }]}
+                                         style={[styles.sortableHeaderCell, { flex: 1.5, justifyContent: 'center' }]}
+
+                                         onPress={() => handleSort('remarks')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'remarks' && styles.activeSort, { textAlign: 'center' }]}>
+
+                                           Remarks
+
+                                         </Text>
+
+                                         {resultsSortBy === 'remarks' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
+
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1, justifyContent: 'center' }]}
+
+                                         onPress={() => handleSort('score')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'score' && styles.activeSort, { textAlign: 'center' }]}>
+
+                                           Score%
+
+                                         </Text>
+
+                                         {resultsSortBy === 'score' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
+
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1, justifyContent: 'center' }]}
 
                                          onPress={() => handleSort('correct')}
 
                                        >
 
-                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'correct' && styles.activeSort]}>
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'correct' && styles.activeSort, { textAlign: 'center' }]}>
 
                                            Correct
 
@@ -9445,43 +9736,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        <TouchableOpacity 
 
-                                         style={[styles.sortableHeaderCell, { flex: 1 }]}
-
-                                         onPress={() => handleSort('score')}
-
-                                       >
-
-                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'score' && styles.activeSort]}>
-
-                                           Score
-
-                                         </Text>
-
-                                         {resultsSortBy === 'score' && (
-
-                                           <MaterialIcons 
-
-                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
-
-                                             size={14} 
-
-                                             color="#3b82f6" 
-
-                                           />
-
-                                         )}
-
-                                       </TouchableOpacity>
-
-                                       <TouchableOpacity 
-
-                                         style={[styles.sortableHeaderCell, { flex: 1 }]}
+                                         style={[styles.sortableHeaderCell, { flex: 1, justifyContent: 'center' }]}
 
                                          onPress={() => handleSort('attempts')}
 
                                        >
 
-                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'attempts' && styles.activeSort]}>
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'attempts' && styles.activeSort, { textAlign: 'center' }]}>
 
                                            Attempts
 
@@ -9505,13 +9766,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        <TouchableOpacity 
 
-                                         style={[styles.sortableHeaderCell, { flex: 1 }]}
+                                         style={[styles.sortableHeaderCell, { flex: 1, justifyContent: 'center' }]}
 
                                          onPress={() => handleSort('time')}
 
                                        >
 
-                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'time' && styles.activeSort]}>
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'time' && styles.activeSort, { textAlign: 'center' }]}>
 
                                            Time
 
@@ -9533,35 +9794,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        </TouchableOpacity>
 
-                                       <TouchableOpacity 
-
-                                         style={[styles.sortableHeaderCell, { flex: 1.5 }]}
-
-                                         onPress={() => handleSort('remarks')}
-
-                                       >
-
-                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'remarks' && styles.activeSort]}>
-
-                                           Remarks
-
-                                         </Text>
-
-                                         {resultsSortBy === 'remarks' && (
-
-                                           <MaterialIcons 
-
-                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
-
-                                             size={14} 
-
-                                             color="#3b82f6" 
-
-                                           />
-
-                                         )}
-
-                                       </TouchableOpacity>
+                                       <Text style={[styles.tableHeaderText, { flex: 1, textAlign: 'center' }]}>Submission</Text>
 
                                      </View>
 
@@ -9569,7 +9802,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                      {/* Table Rows */}
 
-                                    {sortedResults.map((result: any, idx: number) => {
+                                    {(showAllStudents ? sortedResults : sortedResults.slice(0, 6)).map((result: any, idx: number) => {
 
                                       // Find student by studentId from the result (proper database lookup)
                                       let student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
@@ -9638,18 +9871,20 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                          scorePercentage = Math.round((totalCorrect / totalQuestions) * 100);
                                        }
 
-                                       // Get remarks based on score
+                                       // Get remarks based on new proficiency levels
                                        const getRemarks = (score: number) => {
-                                         if (score >= 90) return 'Excellent';
-                                         if (score >= 75) return 'Good';
-                                         if (score >= 60) return 'Fair';
-                                         return 'Needs Work';
+                                         if (score >= 85) return 'Highly Proficient';
+                                         if (score >= 75) return 'Proficient';
+                                         if (score >= 50) return 'Nearly Proficient';
+                                         if (score >= 25) return 'Low Proficient';
+                                         return 'Not Proficient';
                                        };
 
                                        const remarks = getRemarks(scorePercentage);
-                                       const remarksColor = scorePercentage >= 90 ? '#10b981' : 
+                                       const remarksColor = scorePercentage >= 85 ? '#10b981' : 
                                                            scorePercentage >= 75 ? '#3b82f6' : 
-                                                           scorePercentage >= 60 ? '#f59e0b' : '#ef4444';
+                                                           scorePercentage >= 50 ? '#f59e0b' : 
+                                                           scorePercentage >= 25 ? '#f97316' : '#ef4444';
 
                                        
 
@@ -9667,33 +9902,56 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        
 
+                                       // Calculate submission status
+                                       const submissionStatus = (() => {
+                                         if (!result.completedAt) return 'Not Submitted';
+                                         
+                                         // Check if there's a deadline from the assignment
+                                         if (exerciseAssignment?.deadline) {
+                                           const deadline = new Date(exerciseAssignment.deadline);
+                                           const completedAt = new Date(result.completedAt);
+                                           return completedAt <= deadline ? 'On-Time' : 'Late';
+                                         }
+                                         
+                                         return 'Submitted';
+                                       })();
+
+                                       const submissionColor = submissionStatus === 'On-Time' ? '#10b981' : 
+                                                             submissionStatus === 'Late' ? '#ef4444' : '#64748b';
+
                                        return (
 
                                          <View key={result.resultId || idx} style={styles.resultsTableRow}>
 
-                                           <Text style={[styles.tableRowText, { width: 35 }]}>{idx + 1}</Text>
+                                           <Text style={[styles.tableRowText, { width: 35, textAlign: 'center' }]}>{idx + 1}</Text>
 
                                            <TouchableOpacity 
 
-                                             style={{ flex: 2, flexDirection: 'row', alignItems: 'center' }}
+                                             style={{ maxWidth: 120, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start' }}
 
                                           onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname, result.resultId)}
 
                                            >
 
-                                             <Text style={[styles.tableRowText, styles.studentNameCell, { flex: 1, color: '#3b82f6' }]}>{studentNickname}</Text>
+                                             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxWidth: 120 }}>
+
+                                               <Text style={[styles.tableRowText, styles.studentNameCell, { color: '#3b82f6', textAlign: 'left' }]}>{studentNickname}</Text>
+
+                                             </ScrollView>
 
                                            </TouchableOpacity>
 
-                                           <Text style={[styles.tableRowText, { flex: 1 }]}>{totalCorrect}/{totalQuestions}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1.5, fontWeight: '600', color: remarksColor, textAlign: 'center' }]}>{remarks}</Text>
 
-                                           <Text style={[styles.tableRowText, { flex: 1, fontWeight: '700' }]}>{scorePercentage.toFixed(0)}%</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1, fontWeight: '700', textAlign: 'center' }]}>{scorePercentage.toFixed(0)}%</Text>
 
-                                           <Text style={[styles.tableRowText, { flex: 1 }]}>{avgAttempts}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1, textAlign: 'center' }]}>{totalCorrect}/{totalQuestions}</Text>
 
-                                           <Text style={[styles.tableRowText, { flex: 1 }]}>{timeDisplay}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1, textAlign: 'center' }]}>{avgAttempts}</Text>
 
-                                           <Text style={[styles.tableRowText, { flex: 1.5, fontWeight: '600', color: remarksColor }]}>{remarks}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1, textAlign: 'center' }]}>{timeDisplay}</Text>
+
+                                           <Text style={[styles.tableRowText, { flex: 1, fontWeight: '600', color: submissionColor, textAlign: 'center' }]}>{submissionStatus}</Text>
 
                                          </View>
 
@@ -9783,16 +10041,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                    });
                                    const avgTimePerItem = allTimes.length > 0 ? allTimes.reduce((sum: number, val: number) => sum + val, 0) / allTimes.length : 0;
                                    
-                                   // Passing Rate (assuming 60% is passing)
-                                   const passingScore = 60;
+                                   // Passing Rate (assuming 75% is passing)
+                                   const passingScore = 75;
                                    const passedCount = scores.filter((score: number) => score >= passingScore).length;
                                    const passingRate = scores.length > 0 ? (passedCount / scores.length) * 100 : 0;
                                    
                                    // Item Analysis - Performance distribution
-                                   const excellentCount = scores.filter((s: number) => s >= 90).length;
-                                   const goodCount = scores.filter((s: number) => s >= 75 && s < 90).length;
-                                   const fairCount = scores.filter((s: number) => s >= 60 && s < 75).length;
-                                   const needsImprovementCount = scores.filter((s: number) => s < 60).length;
+                                   const highlyProficientCount = scores.filter((s: number) => s >= 85).length;
+                                   const proficientCount = scores.filter((s: number) => s >= 75 && s < 85).length;
+                                   const nearlyProficientCount = scores.filter((s: number) => s >= 50 && s < 75).length;
+                                   const lowProficientCount = scores.filter((s: number) => s >= 25 && s < 50).length;
+                                   const notProficientCount = scores.filter((s: number) => s < 25).length;
                                    
                                    // Create unique key for this exercise stats
                                    const statsKey = `${cls.id}-${exerciseResults[0]?.exerciseId || exerciseTitle}`;
@@ -13651,12 +13910,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
             </TouchableOpacity>
           </View>
 
-          {/* Exercise ID Badge */}
+          {/* Exercise ID Badge and Export Button */}
           {selectedExerciseForStats && (
-            <View style={styles.detailedStatsExerciseIdContainer}>
-              <Text style={styles.detailedStatsExerciseIdText}>
-                {selectedExerciseForStats.exerciseId}
-              </Text>
+            <View style={styles.detailedStatsTopSection}>
+              <View style={styles.detailedStatsExerciseIdContainer}>
+                <Text style={styles.detailedStatsExerciseIdText}>
+                  {selectedExerciseForStats.exerciseId}
+                </Text>
+              </View>
+              
+              <TouchableOpacity 
+                onPress={handleExportClassStatsToExcel} 
+                style={styles.detailedStatsExportButtonMain}
+              >
+                <MaterialCommunityIcons name="microsoft-excel" size={18} color="#ffffff" />
+                <Text style={styles.detailedStatsExportButtonMainText}>Excel</Text>
+              </TouchableOpacity>
             </View>
           )}
 
@@ -13707,13 +13976,14 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               const avgTimePerItem = totalTime / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
               
               // Performance distribution
-              const excellentCount = scores.filter((s: number) => s >= 90).length;
-              const goodCount = scores.filter((s: number) => s >= 75 && s < 90).length;
-              const fairCount = scores.filter((s: number) => s >= 60 && s < 75).length;
-              const needsImprovementCount = scores.filter((s: number) => s < 60).length;
+              const highlyProficientCount = scores.filter((s: number) => s >= 85).length;
+              const proficientCount = scores.filter((s: number) => s >= 75 && s < 85).length;
+              const nearlyProficientCount = scores.filter((s: number) => s >= 50 && s < 75).length;
+              const lowProficientCount = scores.filter((s: number) => s >= 25 && s < 50).length;
+              const notProficientCount = scores.filter((s: number) => s < 25).length;
               
-              // Calculate pass rate (students with score >= 60%)
-              const passCount = scores.filter((s: number) => s >= 60).length;
+              // Calculate pass rate (students with score >= 75%)
+              const passCount = scores.filter((s: number) => s >= 75).length;
               const passRate = scores.length > 0 ? (passCount / scores.length) * 100 : 0;
 
               return (
@@ -13834,46 +14104,57 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                     <Text style={styles.detailedStatsSubtitle}>Performance Distribution</Text>
                     <View style={styles.detailedStatsDistribution}>
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(excellentCount / scores.length) * 100}%` : '0%', backgroundColor: '#10b981' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(highlyProficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#10b981' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#10b981' }]} />
-                            <Text style={styles.detailedStatsDistText}>Excellent (90-100%)</Text>
+                            <Text style={styles.detailedStatsDistText}>Highly Proficient (85-100%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{excellentCount} ({scores.length > 0 ? ((excellentCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{highlyProficientCount} ({scores.length > 0 ? ((highlyProficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                       
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(goodCount / scores.length) * 100}%` : '0%', backgroundColor: '#3b82f6' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(proficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#3b82f6' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#3b82f6' }]} />
-                            <Text style={styles.detailedStatsDistText}>Good (75-89%)</Text>
+                            <Text style={styles.detailedStatsDistText}>Proficient (75-84%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{goodCount} ({scores.length > 0 ? ((goodCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{proficientCount} ({scores.length > 0 ? ((proficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                       
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(fairCount / scores.length) * 100}%` : '0%', backgroundColor: '#f59e0b' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(nearlyProficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#f59e0b' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#f59e0b' }]} />
-                            <Text style={styles.detailedStatsDistText}>Fair (60-74%)</Text>
+                            <Text style={styles.detailedStatsDistText}>Nearly Proficient (50-74%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{fairCount} ({scores.length > 0 ? ((fairCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{nearlyProficientCount} ({scores.length > 0 ? ((nearlyProficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                       
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(needsImprovementCount / scores.length) * 100}%` : '0%', backgroundColor: '#ef4444' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(lowProficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#f97316' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#f97316' }]} />
+                            <Text style={styles.detailedStatsDistText}>Low Proficient (25-49%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{lowProficientCount} ({scores.length > 0 ? ((lowProficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(notProficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#ef4444' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#ef4444' }]} />
-                            <Text style={styles.detailedStatsDistText}>Needs Improvement (&lt;60%)</Text>
+                            <Text style={styles.detailedStatsDistText}>Not Proficient (&lt;25%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{needsImprovementCount} ({scores.length > 0 ? ((needsImprovementCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{notProficientCount} ({scores.length > 0 ? ((notProficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                     </View>
@@ -13934,15 +14215,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                   
                   // Calculate accurate time metrics based on actual student performance
                   const timeSpentArray = questionResults
-                    .map((q: any) => q.timeSpent || 0)
+                    .map((q: any) => q.timeSpentSeconds || 0)
                     .filter(time => time > 0);
                   
                   const avgTimeSpent = timeSpentArray.length > 0 
                     ? timeSpentArray.reduce((sum, time) => sum + time, 0) / timeSpentArray.length 
                     : 0;
                   
-                  // Calculate actual time spent in seconds (more accurate)
-                  const avgTimeInSeconds = avgTimeSpent > 0 ? Math.round(avgTimeSpent / 1000) : 0;
+                  // Calculate actual time spent in seconds (already in seconds)
+                  const avgTimeInSeconds = Math.round(avgTimeSpent);
                   
                   // Calculate average attempts by students
                   const attemptsArray = questionResults.map((q: any) => q.attempts || 1);
@@ -14035,9 +14316,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                           <View style={styles.itemAnalysisTypeBadge}>
                             <Text style={styles.itemAnalysisTypeText}>{questionType}</Text>
                           </View>
-                          <View style={styles.itemAnalysisDifficultyBadge}>
-                            <MaterialCommunityIcons name="speedometer" size={12} color="#64748b" />
-                            <Text style={styles.itemAnalysisDifficultyText}>{difficultyIndex.toFixed(1)}</Text>
+                          <View style={styles.itemAnalysisAttemptsBadge}>
+                            <MaterialCommunityIcons name="repeat" size={12} color="#64748b" />
+                            <Text style={styles.itemAnalysisAttemptsText}>{avgAttempts.toFixed(1)}</Text>
                           </View>
                           <View style={styles.itemAnalysisTimeBadge}>
                             <MaterialCommunityIcons name="clock" size={12} color="#64748b" />
@@ -14064,7 +14345,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                             flex: 1,
                             alignItems: 'center',
                           }}>
-                            <Text style={styles.itemAnalysisTableHeaderText}>% of Students</Text>
+                            <Text style={styles.itemAnalysisTableHeaderText}>Percent</Text>
                           </View>
                         </View>
                         
@@ -20727,9 +21008,31 @@ const styles = StyleSheet.create({
   },
 
   tableScrollContainer: {
+    // Removed maxHeight to prevent vertical scrolling
+  },
 
-    maxHeight: staticHeight * 0.35,
+  resultsTableActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
 
+  resultsViewAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    gap: 4,
+  },
+
+  resultsViewAllBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
   },
 
   tableContainer: {
@@ -23397,6 +23700,22 @@ const styles = StyleSheet.create({
     color: '#64748b',
   },
 
+  itemAnalysisAttemptsBadge: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  itemAnalysisAttemptsText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+
   itemAnalysisQuestionText: {
     fontSize: 14,
     color: '#374151',
@@ -23606,16 +23925,26 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
+  detailedStatsTopSection: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 12,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+
   detailedStatsExerciseIdContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#dbeafe',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    marginHorizontal: 16,
-    marginTop: 8,
-    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
   },
 
   detailedStatsExerciseIdText: {
@@ -23623,6 +23952,27 @@ const styles = StyleSheet.create({
     color: '#3b82f6',
     fontWeight: '600',
     marginLeft: 4,
+  },
+
+  detailedStatsExportButtonMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#10b981',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    gap: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+
+  detailedStatsExportButtonMainText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#ffffff',
   },
 
   detailedStatsModalContent: {

@@ -100,9 +100,85 @@ const serializeReorderAnswerPattern = (question: any, ans: any): string => {
       return serializeAnswer(question, ans);
     }
     
-    const ids = Array.isArray(ans) ? ans as string[] : [];
+    // Debug logging
+    console.log('[DEBUG] serializeReorderAnswerPattern - Input ans:', ans, 'Type:', typeof ans);
+    
+    // Handle different answer formats
+    let ids: string[] = [];
+    
+    if (Array.isArray(ans)) {
+      ids = ans as string[];
+    } else if (typeof ans === 'string') {
+      // Try to parse as JSON array first
+      try {
+        const parsed = JSON.parse(ans);
+        if (Array.isArray(parsed)) {
+          ids = parsed;
+        } else {
+          // If it's a single string, treat it as one element
+          ids = [ans];
+        }
+      } catch {
+        // If parsing fails, treat as single string
+        ids = [ans];
+      }
+    } else if (ans && typeof ans === 'object') {
+      // Handle object with array property
+      ids = ans.items || ans.sequence || ans.order || [];
+    }
+    
+    console.log('[DEBUG] serializeReorderAnswerPattern - Processed ids:', ids);
+    
     const reorderItems = question.reorderItems || [];
     
+    if (ids.length === 0) {
+      return 'No items selected';
+    }
+    
+    // Check if the answer contains PNG file paths (URL encoded)
+    const isPngPaths = ids.some(id => 
+      typeof id === 'string' && 
+      (id.includes('reorder-') || id.includes('.png') || id.includes('%2F') || id.includes('exercises'))
+    );
+    
+    if (isPngPaths) {
+      // Extract item numbers from PNG file paths
+      const itemNumbers = ids.map(id => {
+        if (typeof id === 'string') {
+          // Decode URL-encoded path first
+          let decodedId = id;
+          try {
+            decodedId = decodeURIComponent(id);
+          } catch {
+            decodedId = id;
+          }
+          
+          // Look for reorder-X pattern in the filename
+          const reorderMatch = decodedId.match(/reorder-(\d+)/);
+          if (reorderMatch) {
+            // Convert 0-based to 1-based numbering
+            return (parseInt(reorderMatch[1]) + 1).toString();
+          }
+          
+          // Fallback: try to extract any number from the path
+          const numberMatch = decodedId.match(/(\d+)\.png/);
+          if (numberMatch) {
+            return (parseInt(numberMatch[1]) + 1).toString();
+          }
+        }
+        return '?';
+      }).filter(num => num !== '?');
+      
+      console.log('[DEBUG] serializeReorderAnswerPattern - Extracted itemNumbers:', itemNumbers);
+      
+      if (itemNumbers.length > 0) {
+        const result = itemNumbers.join('-');
+        console.log('[DEBUG] serializeReorderAnswerPattern - PNG path result:', result);
+        return result;
+      }
+    }
+    
+    // Original logic for non-PNG answers
     // Create a map of item ID to original position (1-based)
     const originalPositions = new Map();
     reorderItems.forEach((item: any, index: number) => {
@@ -115,7 +191,9 @@ const serializeReorderAnswerPattern = (question: any, ans: any): string => {
       return position ? position.toString() : '?';
     });
     
-    return pattern.join('-');
+    const result = pattern.join('-');
+    console.log('[DEBUG] serializeReorderAnswerPattern - Regular path result:', result);
+    return result;
   } catch (error) {
     console.error('Error serializing re-order pattern:', error);
     return serializeAnswer(question, ans);
@@ -1867,8 +1945,8 @@ ${(performanceData.questionResults || []).map((q: any, idx: number) => {
    Question Text: "${q.questionText}"
    Question Type: ${q.questionType}
    ${q.options && q.options.length > 0 ? `Options: ${q.options.join(', ')}` : ''}
-   Student Answer: "${q.studentAnswer}"
-   Correct Answer: "${q.correctAnswer}"
+   Student Answer: "${serializeReorderAnswerPattern(q, q.studentAnswer)}"
+   Correct Answer: "${serializeReorderAnswerPattern(q, q.correctAnswer)}"
    ${q.questionImage ? `Image: ${q.questionImage}` : ''}
    
    ENHANCED PERFORMANCE DATA:
@@ -1895,7 +1973,11 @@ ${(performanceData.questionResults || []).map((q: any, idx: number) => {
    - Time to First Answer: ${Math.round((q.timeBreakdown?.timeToFirstAnswer || 0) / 1000)}s
    - Time to Final Answer: ${Math.round((q.timeBreakdown?.timeToFinalAnswer || 0) / 1000)}s
    
-   ${q.attemptHistory && q.attemptHistory.length > 0 ? `Attempt History: ${(q.attemptHistory || []).map((a: any) => `"${a.answer || 'blank'}" (${Math.round((a.timeSpent || 0) / 1000)}s, ${a.attemptType}, ${a.questionPhase}, confidence: ${a.confidence})`).join(', ')}` : ''}
+   ${q.attemptHistory && q.attemptHistory.length > 0 ? `Attempt History: ${(q.attemptHistory || []).map((a: any) => {
+     const answerData = a.selectedAnswer || a.answer || a.answerValue || a.studentAnswer || a.finalAnswer || a.userAnswer || a.response;
+     const serializedAnswer = serializeReorderAnswerPattern(q, answerData) || 'blank';
+     return `"${serializedAnswer}" (${Math.round((a.timeSpent || 0) / 1000)}s, ${a.attemptType}, ${a.questionPhase}, confidence: ${a.confidence})`;
+   }).join(', ')}` : ''}
    ${classAvg ? `Class Average Time: ${Math.round(classAvg.averageTime / 1000)}s, Class Average Attempts: ${Math.round(classAvg.averageAttempts)}` : ''}`;
 }).join('\n\n')}
 
