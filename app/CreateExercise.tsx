@@ -3052,6 +3052,8 @@ Re-order Example (pattern completion):
         const REQUEST_TIMEOUT = 30000; // 30 second timeout per request
         
         
+        let firstFailureIndex: number | null = null;
+
         for (let i = 0; i < newQuestions.length; i++) {
           const question = newQuestions[i];
           
@@ -3174,6 +3176,7 @@ Re-order Example (pattern completion):
               
             } else {
               console.warn(`⚠️ No audio data returned for question: ${question.id}`);
+              if (firstFailureIndex === null) firstFailureIndex = i;
             }
             
             // Increment request counter for current key
@@ -3274,6 +3277,23 @@ Re-order Example (pattern completion):
         }
         
         setTtsUploadStatus('TTS generation completed successfully!');
+
+        // If we failed at or before 25% progress, guide the user to record voice instead of waiting
+        if (firstFailureIndex !== null) {
+          const progressFraction = (firstFailureIndex + 1) / Math.max(newQuestions.length, 1);
+          if (progressFraction <= 0.25) {
+            setTimeout(() => {
+              showCustomAlert(
+                'TTS Currently Unavailable',
+                'TTS failed early in the batch. Please consider recording your voice for these questions using the mic button. You can retry TTS later when the service is stable.'
+              );
+              // Ensure save buttons are enabled by clearing TTS generation state
+              setIsGeneratingTTS(false);
+              setTtsProgress({ current: 0, total: 0 });
+              setTtsProcessStartTime(null);
+            }, 400);
+          }
+        }
         
         // Close progress modal after a short delay
         setTimeout(() => {

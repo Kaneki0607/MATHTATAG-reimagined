@@ -1,4 +1,5 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
+import Svg, { Circle, Line, Path, Text as SvgText } from 'react-native-svg';
 
 import * as FileSystem from 'expo-file-system/legacy';
 
@@ -2058,6 +2059,7 @@ export default function TeacherDashboard() {
   }, [isShakeEnabled]);
   
   const [closingClassId, setClosingClassId] = useState<string | null>(null);
+  const [deletingClassId, setDeletingClassId] = useState<string | null>(null);
 
   // Add Student state
 
@@ -2068,7 +2070,9 @@ export default function TeacherDashboard() {
   // When set, modal operates in edit mode instead of create
   const [selectedStudentForEdit, setSelectedStudentForEdit] = useState<any | null>(null);
 
-  const [studentFullName, setStudentFullName] = useState('');
+  const [studentLastName, setStudentLastName] = useState('');
+  const [studentFirstName, setStudentFirstName] = useState('');
+  const [studentMiddleInitial, setStudentMiddleInitial] = useState('');
 
   const [studentGender, setStudentGender] = useState<'male' | 'female'>('male');
 
@@ -2110,6 +2114,10 @@ export default function TeacherDashboard() {
   // Parent info modal state
 
   const [selectedParentForInfo, setSelectedParentForInfo] = useState<any>(null);
+
+  // List tab sorting state
+  const [listSortBy, setListSortBy] = useState<'name' | 'gender'>('gender');
+  const [listSortOrder, setListSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [studentsByClass, setStudentsByClass] = useState<Record<string, any[]>>({});
 
@@ -2525,7 +2533,14 @@ export default function TeacherDashboard() {
 
   const getStudentCompletionStats = (assignment: AssignedExercise) => {
 
-    const classStudents = studentsByClass[assignment.classId] || [];
+    const allClassStudents = studentsByClass[assignment.classId] || [];
+    const targetStudentIds = assignment.targetStudentIds;
+    
+    // If targetStudentIds is provided and not empty, filter to only those students
+    // Otherwise, use all students in the class
+    const classStudents = targetStudentIds && targetStudentIds.length > 0 
+      ? allClassStudents.filter((student: any) => targetStudentIds.includes(student.studentId))
+      : allClassStudents;
 
     const totalStudents = classStudents.length;
 
@@ -3785,26 +3800,160 @@ export default function TeacherDashboard() {
 
 
 
-  const handleAssignExercise = async (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => {
+  const handleAssignExercise = async (
+    classIds: string[],
+    deadline: string,
+    acceptLateSubmissions: boolean,
+    quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4',
+    targetStudentIds?: string[]
+  ) => {
 
     try {
 
+      // Check for existing assignments and add students to them instead of creating duplicates
+      if (selectedExerciseForAssign?.id) {
+        const assignmentsToUpdate: Array<{ assignmentId: string; classId: string; className: string; newStudents: string[] }> = [];
+        const newAssignments: string[] = [];
+        const currentTargets = Array.isArray(targetStudentIds) && targetStudentIds.length > 0 ? new Set(targetStudentIds) : null;
+        
+        classIds.forEach((cid) => {
+          const existing = assignedExercises.filter((a: any) => a.classId === cid && a.exerciseId === selectedExerciseForAssign.id);
+          const classInfo = teacherClasses.find((c) => c.id === cid);
+          const className = classInfo?.name || 'Class';
+          
+          if (existing.length > 0) {
+            // Found existing assignment(s) - check if we can add students to them
+            const existingAssignment = existing[0]; // Use the first existing assignment
+            const existingTargets: string[] | null = Array.isArray(existingAssignment.targetStudentIds) && existingAssignment.targetStudentIds.length > 0 ? existingAssignment.targetStudentIds : null;
+            
+            if (currentTargets) {
+              // Adding specific students to existing assignment
+              const newStudents = Array.from(currentTargets).filter(studentId => 
+                !existingTargets || !existingTargets.includes(studentId)
+              );
+              
+              if (newStudents.length > 0) {
+                assignmentsToUpdate.push({
+                  assignmentId: existingAssignment.id,
+                  classId: cid,
+                  className,
+                  newStudents
+                });
+              } else {
+                // All students already assigned
+                showAlert(
+                  'Students Already Assigned',
+                  `All selected students are already assigned to "${selectedExerciseForAssign.title}" in ${className}.`,
+                  undefined,
+                  'info'
+                );
+                return;
+              }
+            } else {
+              // Trying to assign whole class to existing assignment
+              if (!existingTargets) {
+                // Both are whole class - exact duplicate
+                showAlert(
+                  'Assignment Already Exists',
+                  `"${selectedExerciseForAssign.title}" is already assigned to the entire ${className}.`,
+                  undefined,
+                  'info'
+                );
+                return;
+              } else {
+                // Convert existing targeted assignment to whole class
+                assignmentsToUpdate.push({
+                  assignmentId: existingAssignment.id,
+                  classId: cid,
+                  className,
+                  newStudents: [] // Empty array means convert to whole class
+                });
+              }
+            }
+          } else {
+            // No existing assignment - create new one
+            newAssignments.push(cid);
+          }
+        });
+
+        // Update existing assignments with new students
+        for (const update of assignmentsToUpdate) {
+          try {
+            const { data: currentAssignment } = await readData(`/assignedExercises/${update.assignmentId}`);
+            if (!currentAssignment) continue;
+
+            let updatedTargets: string[] | null = null;
+            
+            if (update.newStudents.length === 0) {
+              // Convert to whole class assignment
+              updatedTargets = null;
+            } else {
+              // Add new students to existing targets
+              const existingTargets = Array.isArray(currentAssignment.targetStudentIds) ? currentAssignment.targetStudentIds : [];
+              updatedTargets = [...existingTargets, ...update.newStudents];
+            }
+
+            const updatedAssignment = {
+              ...currentAssignment,
+              targetStudentIds: updatedTargets
+            };
+
+            await updateData(`/assignedExercises/${update.assignmentId}`, updatedAssignment);
+            
+            console.log(`[UpdateAssignment] Added ${update.newStudents.length} students to assignment ${update.assignmentId} in ${update.className}`);
+          } catch (error) {
+            console.error(`[UpdateAssignment] Failed to update assignment ${update.assignmentId}:`, error);
+          }
+        }
+
+        // Create new assignments for classes without existing assignments
+        if (newAssignments.length > 0) {
+          await assignExercise(
+            selectedExerciseForAssign.id,
+            newAssignments,
+            deadline,
+            currentUserId!,
+            acceptLateSubmissions,
+            'open',
+            quarter,
+            targetStudentIds
+          );
+        }
+
+        // Refresh assigned exercises to show updated student lists
+        await loadAssignedExercises();
+        
+        // Also refresh assignments data to update completion statistics
+        if (activeClasses.length > 0) {
+          await loadAssignments(activeClasses.map(c => c.id));
+        }
+
+        // Show success message
+        const totalUpdated = assignmentsToUpdate.length;
+        const totalNew = newAssignments.length;
+        
+        if (totalUpdated > 0 && totalNew > 0) {
+          showAlert('Success', `Added students to ${totalUpdated} existing assignment(s) and created ${totalNew} new assignment(s)`, undefined, 'success');
+        } else if (totalUpdated > 0) {
+          showAlert('Success', `Added students to ${totalUpdated} existing assignment(s)`, undefined, 'success');
+        } else if (totalNew > 0) {
+          showAlert('Success', `Created ${totalNew} new assignment(s)`, undefined, 'success');
+        }
+
+        return; // Exit early since we handled the assignment
+      }
+
+      // This code is now handled above in the existing assignment logic
+      // Only create new assignments if no existing assignments were found
       await assignExercise(
-
-        selectedExerciseForAssign.id, 
-
-        classIds, 
-
-        deadline, 
-
-        currentUserId!, 
-
-        acceptLateSubmissions, 
-
-        'open', // Default to open status
-
-        quarter
-
+        selectedExerciseForAssign.id,
+        classIds,
+        deadline,
+        currentUserId!,
+        acceptLateSubmissions,
+        'open',
+        quarter,
+        targetStudentIds
       );
 
       showAlert('Success', 'Exercise assigned successfully', undefined, 'success');
@@ -6247,6 +6396,83 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
   };
 
+
+  const handleDeleteClass = (cls: { id: string; name: string }) => {
+
+    showAlert(
+
+      'Delete Class',
+
+      `This will permanently delete "${cls.name}", all students in it, and their parent records. This cannot be undone. Continue?`,
+
+      [
+
+        { text: 'Cancel', style: 'cancel' },
+
+        {
+
+          text: 'Delete Class',
+
+          style: 'destructive',
+
+          onPress: async () => {
+
+            try {
+
+              setDeletingClassId(cls.id);
+
+              // Load all students to ensure we have the latest list
+              const { data: studentsData } = await readData('/students');
+              const studentsInClass = Object.values(studentsData || {}).filter((s: any) => String(s.classId) === String(cls.id));
+
+              // Delete students and their parents (including login code mapping)
+              for (const s of studentsInClass as any[]) {
+                try {
+                  if (s.parentId) {
+                    const { data: parentData } = await readData(`/parents/${s.parentId}`);
+                    if (parentData && parentData.loginCode) {
+                      await deleteData(`/parentLoginCodes/${parentData.loginCode}`);
+                    }
+                    await deleteData(`/parents/${s.parentId}`);
+                  }
+                  if (s.studentId) {
+                    await deleteData(`/students/${s.studentId}`);
+                  }
+                } catch {}
+              }
+
+              // Delete the class itself
+              await deleteData(`/classes/${cls.id}`);
+
+              showAlert('Deleted', 'Class and related records were removed.', undefined, 'success');
+
+              // Refresh classes
+              if (currentUserId) {
+                await loadTeacherClasses(currentUserId);
+              }
+
+            } catch (e) {
+
+              showAlert('Error', 'Failed to delete class.', undefined, 'error');
+
+            } finally {
+
+              setDeletingClassId(null);
+
+            }
+
+          },
+
+        },
+
+      ],
+
+      'warning'
+
+    );
+
+  };
+
   const handleShowParentsList = (classId: string) => {
 
     setSelectedClassForParentsList(classId);
@@ -6293,22 +6519,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   const parseFullName = (fullName: string): { firstName: string; middleInitial: string; surname: string } => {
     const trimmed = fullName.trim();
     if (!trimmed) return { firstName: '', middleInitial: '', surname: '' };
-
-    const parts = trimmed.split(/\s+/); // Split by whitespace
-    
+    const parts = trimmed.split(/\s+/);
     if (parts.length === 1) {
-      // Only one word - treat as first name
       return { firstName: parts[0], middleInitial: '', surname: '' };
     } else if (parts.length === 2) {
-      // Two words - First Name and Surname
       return { firstName: parts[0], middleInitial: '', surname: parts[1] };
     } else {
-      // Three or more words - First Name, Middle Initial (from middle name), and Surname
       const firstName = parts[0];
       const surname = parts[parts.length - 1];
-      // Extract middle initial from the second word
-      const middleInitial = parts[1].charAt(0).toUpperCase() + '.';
-      
+      const middleInitial = parts[1] ? (parts[1].charAt(0).toUpperCase() + '.') : '';
       return { firstName, middleInitial, surname };
     }
   };
@@ -6316,25 +6535,23 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   // Format student name for display
   const formatStudentName = (student: any): string => {
     if (!student) return 'Unknown Student';
-    
-    // If fullName exists, use it
+    const last = (student.surname || '').trim();
+    const first = (student.firstName || '').trim();
+    const mi = (student.middleInitial || '').trim();
+    if (last && first) {
+      const miPart = mi ? ` ${mi}` : '';
+      return `${last}, ${first}${miPart}`;
+    }
     if (student.fullName && student.fullName.trim()) {
+      // Try to reformat legacy fullName into Last, First MI
+      const { firstName, middleInitial, surname } = parseFullName(student.fullName);
+      const miPart = middleInitial ? ` ${middleInitial}` : '';
+      if (surname && firstName) return `${surname}, ${firstName}${miPart}`;
       return student.fullName.trim();
     }
-    
-    // If firstName and surname exist, format them
-    if (student.firstName && student.surname) {
-      const firstName = student.firstName.trim();
-      const surname = student.surname.trim();
-      const mi = student.middleInitial && student.middleInitial.trim() ? ` ${student.middleInitial.trim()}` : '';
-      return `${firstName}${mi} ${surname}`;
-    }
-    
-    // Fallback to nickname if it exists (for backwards compatibility)
     if (student.nickname && student.nickname.trim()) {
       return student.nickname.trim();
     }
-    
     return 'Unknown Student';
   };
 
@@ -6386,7 +6603,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     setSelectedStudentForEdit(null);
 
-    setStudentFullName('');
+    setStudentLastName('');
+    setStudentFirstName('');
+    setStudentMiddleInitial('');
 
     setStudentGender('male');
 
@@ -6400,7 +6619,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     if (!selectedClassForStudent) return;
 
-    if (!studentFullName.trim()) { showAlert('Error', 'Please enter student full name.', undefined, 'error'); return; }
+    if (!studentLastName.trim() || !studentFirstName.trim()) { showAlert('Error', 'Enter Lastname and Firstname (Middle Initial optional).', undefined, 'error'); return; }
 
     try {
 
@@ -6409,8 +6628,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       // Generate login code
       const loginCode = await generateLoginCode();
 
-      // Parse full name
-      const { firstName, middleInitial, surname } = parseFullName(studentFullName);
+      const firstName = studentFirstName.trim();
+      const surname = studentLastName.trim();
+      const middleInitial = studentMiddleInitial.trim() ? (studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.') : '';
 
       if (!firstName || !surname) {
         showAlert('Error', 'Please enter at least a first name and surname (e.g., "Juan Dela Cruz").', undefined, 'error');
@@ -6440,7 +6660,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         firstName,
         middleInitial: middleInitial || '',
         surname,
-        fullName: studentFullName.trim(),
+        fullName: `${surname}, ${firstName}${middleInitial ? ` ${middleInitial}` : ''}`,
         gender: studentGender,
         gradeSection: selectedClassForStudent.name || 'DEFAULT'
       });
@@ -6456,7 +6676,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       // Refresh lists
 
-      await loadStudentsAndParents(activeClasses.map((c) => c.id));
+      await loadStudentsAndParents(teacherClasses.map((c) => c.id));
 
       
 
@@ -6486,7 +6706,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
               onPress: () => {
 
-                setStudentFullName('');
+                setStudentLastName('');
+                setStudentFirstName('');
+                setStudentMiddleInitial('');
 
                 setShowAddStudentModal(true);
 
@@ -6525,14 +6747,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     if (!selectedClassForStudent || !selectedStudentForEdit) return;
 
-    if (!studentFullName.trim()) { showAlert('Error', 'Please enter student full name.', undefined, 'error'); return; }
+    if (!studentLastName.trim() || !studentFirstName.trim()) { showAlert('Error', 'Enter Lastname and Firstname (Middle Initial optional).', undefined, 'error'); return; }
 
     try {
 
       setSavingStudent(true);
 
-      // Parse full name
-      const { firstName, middleInitial, surname } = parseFullName(studentFullName);
+      const firstName = studentFirstName.trim();
+      const surname = studentLastName.trim();
+      const middleInitial = studentMiddleInitial.trim() ? (studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.') : '';
 
       if (!firstName || !surname) {
         showAlert('Error', 'Please enter at least a first name and surname (e.g., "Juan Dela Cruz").', undefined, 'error');
@@ -6545,7 +6768,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         firstName,
         middleInitial: middleInitial || '',
         surname,
-        fullName: studentFullName.trim(),
+        fullName: `${surname}, ${firstName}${middleInitial ? ` ${middleInitial}` : ''}`,
         gender: studentGender,
       });
 
@@ -6577,10 +6800,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     setSelectedClassForStudent(classInfo);
 
     // Reconstruct full name from stored components, or use fullName if available
-    const fullName = student.fullName || 
-      `${student.firstName || ''} ${student.middleInitial || ''} ${student.surname || ''}`.trim();
-
-    setStudentFullName(fullName);
+    setStudentLastName(String(student.surname || ''));
+    setStudentFirstName(String(student.firstName || ''));
+    setStudentMiddleInitial(String((student.middleInitial || '').replace(/\./g, '')));
 
     setStudentGender(String(student.gender || 'male') === 'female' ? 'female' : 'male');
 
@@ -6904,9 +7126,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             // Refresh student lists
 
-            if (activeClasses.length > 0) {
+            if (teacherClasses.length > 0) {
 
-              await loadStudentsAndParents(activeClasses.map(c => c.id));
+              await loadStudentsAndParents(teacherClasses.map(c => c.id));
 
             }
 
@@ -6918,9 +7140,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             await loadTeacherClasses(currentUserId);
 
-            if (activeClasses.length > 0) {
+            if (teacherClasses.length > 0) {
 
-              await loadStudentsAndParents(activeClasses.map(c => c.id));
+              await loadStudentsAndParents(teacherClasses.map(c => c.id));
 
             }
 
@@ -7670,6 +7892,18 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                             <MaterialCommunityIcons name="lock" size={16} color="#ef4444" />
                             <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{closingClassId === cls.id ? 'Closing…' : 'Close Class'}</Text>
                           </TouchableOpacity>
+
+                              <TouchableOpacity
+                                style={styles.moreMenuItem}
+                                onPress={() => {
+                                  setOpenMenuClassId(null);
+                                  handleDeleteClass(cls);
+                                }}
+                                disabled={deletingClassId === cls.id}
+                              >
+                                <MaterialCommunityIcons name="delete-forever" size={16} color="#ef4444" />
+                                <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{deletingClassId === cls.id ? 'Deleting…' : 'Delete Class'}</Text>
+                              </TouchableOpacity>
                         </View>
                       )}
                     </View>
@@ -8870,105 +9104,104 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     <View>
 
-                      <View style={styles.studentHeaderRow}>
+                      {/* Header row is rendered below with sortable columns */}
 
-                        <Text style={[styles.studentIndex, { width: 28 }]}>#</Text>
+                      {(() => {
+                        const rows = (studentsByClass[cls.id] || []).map((s: any) => {
+                          const p = s.parentId ? parentsById[s.parentId] : undefined;
+                          const name = formatStudentName(s);
+                          const gender = String(s.gender || '').toLowerCase() === 'female' ? 'Female' : 'Male';
+                          const parentCode = p?.loginCode || '—';
+                          const enrolled = p?.infoStatus === 'completed';
+                          const sortKeyName = `${(s.surname || '').toLowerCase()} ${(s.firstName || '').toLowerCase()} ${(s.middleInitial || '').toLowerCase()}`.trim();
+                          return { s, p, name, gender, parentCode, enrolled, sortKeyName };
+                        });
 
-                        <Text style={[styles.studentName, { fontWeight: '700', color: '#374151' }]}>Student Name</Text>
+                        const compare = (a: any, b: any) => {
+                          if (listSortBy === 'name') {
+                            const nameCmp = a.sortKeyName.localeCompare(b.sortKeyName);
+                            return listSortOrder === 'asc' ? nameCmp : -nameCmp;
+                          }
+                          // listSortBy === 'gender'
+                          const genderCmpRaw = a.gender.localeCompare(b.gender);
+                          if (genderCmpRaw === 0) {
+                            // Always A->Z within the same gender
+                            return a.sortKeyName.localeCompare(b.sortKeyName);
+                          }
+                          // Flip only the gender grouping when desc (Male on top), keep within-group unaffected
+                          return listSortOrder === 'desc' ? -genderCmpRaw : genderCmpRaw;
+                        };
 
-                        <Text style={[styles.studentCode, { color: '#374151' }]}>Parent Access Code</Text>
+                        const sorted = rows.sort(compare);
 
-                      </View>
+                        const toggleSort = (key: 'name' | 'gender') => {
+                          if (listSortBy === key) {
+                            setListSortOrder(listSortOrder === 'asc' ? 'desc' : 'asc');
+                          } else {
+                            setListSortBy(key);
+                            setListSortOrder('asc');
+                          }
+                        };
 
-                      {(studentsByClass[cls.id] || []).map((s: any, idx: number) => {
+                        return (
+                          <>
+                            <View style={[styles.studentRow, { backgroundColor: '#f8fafc', alignItems: 'center' }]}>
+                              <Text style={[styles.studentIndex, { fontWeight: '700', color: '#334155', width: 28, textAlign: 'left' }]}>#</Text>
+                              <TouchableOpacity onPress={() => toggleSort('name')} style={{ flex: 1 }}>
+                                <Text style={[styles.studentName, { fontWeight: '700', color: '#334155' }]} numberOfLines={1} ellipsizeMode="tail">Name</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity onPress={() => toggleSort('gender')} style={{ width: 80 }}>
+                                <Text style={{ color: '#334155', fontWeight: '700', width: 80, textAlign: 'left' }} numberOfLines={1}>Gender</Text>
+                              </TouchableOpacity>
+                              <Text style={[styles.studentCode, { fontWeight: '700', color: '#334155', width: 90, textAlign: 'left' }]} numberOfLines={1}>Parent Code</Text>
+                              <View style={[styles.studentActionsWrap, { width: 28 }]} />
+                            </View>
 
-                      const p = s.parentId ? parentsById[s.parentId] : undefined;
-
-                      const loginCode = p?.loginCode || 'N/A';
-
-                      return (
-
-                        <View key={s.studentId} style={styles.studentRow}>
-
-                          <Text style={styles.studentIndex}>{idx + 1}.</Text>
-
-                          <Text style={styles.studentName}>{formatStudentName(s)}</Text>
-
-                          <Text style={styles.studentCode}>{loginCode}</Text>
-
-                          <View style={styles.studentActionsWrap}>
-
-                            <TouchableOpacity
-
-                              accessibilityLabel="Student options"
-
-                              onPress={() => setStudentMenuVisible(studentMenuVisible === s.studentId ? null : s.studentId)}
-
-                              style={styles.iconBtn}
-
-                            >
-
-                              <MaterialIcons name="more-vert" size={20} color="#64748b" />
-
-                            </TouchableOpacity>
-
-                            {studentMenuVisible === s.studentId && (
-
-                              <View style={styles.studentMenuDropdown}>
-
-                                <TouchableOpacity
-
-                                  style={styles.studentMenuItem}
-
-                                  onPress={() => handleEditStudent(s, { id: cls.id, name: cls.name })}
-
-                                >
-
-                                  <MaterialIcons name="edit" size={16} color="#64748b" />
-
-                                  <Text style={styles.studentMenuText}>Edit Student</Text>
-
-                                </TouchableOpacity>
-
-                                <TouchableOpacity
-
-                                  style={styles.studentMenuItem}
-
-                                  onPress={() => handleViewParentInfo(s)}
-
-                                >
-
-                                  <MaterialIcons name="person" size={16} color="#3b82f6" />
-
-                                  <Text style={styles.studentMenuText}>View Parent Info</Text>
-
-                                </TouchableOpacity>
-
-                                <TouchableOpacity
-
-                                  style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
-
-                                  onPress={() => handleDeleteStudent(s, cls.id)}
-
-                                >
-
-                                  <MaterialIcons name="delete" size={16} color="#ef4444" />
-
-                                  <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
-
-                                </TouchableOpacity>
-
+                            {sorted.map((row: any, idx: number) => (
+                              <View key={row.s.studentId} style={[styles.studentRow, { alignItems: 'center' }]}>
+                                <Text style={[styles.studentIndex, { width: 28 }]}>{idx + 1}.</Text>
+                                <Text style={[styles.studentName, { flex: 1, minWidth: 120 }]} numberOfLines={1} ellipsizeMode="tail">{row.name}</Text>
+                                <Text style={{ width: 80, color: '#111827', textAlign: 'left' }} numberOfLines={1}>{row.gender}</Text>
+                                <Text style={[styles.studentCode, { width: 90, textAlign: 'left', color: row.enrolled ? '#111827' : '#ef4444', fontWeight: row.enrolled ? '500' : '700' }]} numberOfLines={1}>{row.parentCode}</Text>
+                                <View style={styles.studentActionsWrap}>
+                                  <TouchableOpacity
+                                    accessibilityLabel="Student options"
+                                    onPress={() => setStudentMenuVisible(studentMenuVisible === row.s.studentId ? null : row.s.studentId)}
+                                    style={styles.iconBtn}
+                                  >
+                                    <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                                  </TouchableOpacity>
+                                  {studentMenuVisible === row.s.studentId && (
+                                    <View style={styles.studentMenuDropdown}>
+                                      <TouchableOpacity
+                                        style={styles.studentMenuItem}
+                                        onPress={() => handleEditStudent(row.s, { id: cls.id, name: cls.name })}
+                                      >
+                                        <MaterialIcons name="edit" size={16} color="#64748b" />
+                                        <Text style={styles.studentMenuText}>Edit Student</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={styles.studentMenuItem}
+                                        onPress={() => handleViewParentInfo(row.s)}
+                                      >
+                                        <MaterialIcons name="person" size={16} color="#3b82f6" />
+                                        <Text style={styles.studentMenuText}>View Parent Info</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
+                                        onPress={() => handleDeleteStudent(row.s, cls.id)}
+                                      >
+                                        <MaterialIcons name="delete" size={16} color="#ef4444" />
+                                        <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
+                                      </TouchableOpacity>
+                                    </View>
+                                  )}
+                                </View>
                               </View>
-
-                            )}
-
-                          </View>
-
-                        </View>
-
-                      );
-
-                    })}
+                            ))}
+                          </>
+                        );
+                      })()}
 
                     </View>
 
@@ -11418,51 +11651,57 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               <View style={styles.infoSection}>
 
                 <View style={styles.field}>
-
-                  <Text style={styles.fieldLabel}>Full Name</Text>
-
+                  <Text style={styles.fieldLabel}>Last Name</Text>
                   <TextInput
-
                     style={styles.fieldInput}
-
-                    value={studentFullName}
-
-                    onChangeText={setStudentFullName}
-
-                    placeholder="e.g., Juan Santos, Maria Garcia, Pedro Rizal"
-
+                    value={studentLastName}
+                    onChangeText={setStudentLastName}
+                    placeholder="e.g., Dela Cruz"
                     placeholderTextColor="#6b7280"
-
                   />
-
                 </View>
 
-                {studentFullName.trim() && (() => {
-                  const parsed = parseFullName(studentFullName);
-                  return (
-                    <View style={{ 
-                      backgroundColor: '#f1f5f9', 
-                      padding: 12, 
-                      borderRadius: 8, 
-                      marginBottom: 16,
-                      borderWidth: 1,
-                      borderColor: '#e2e8f0'
-                    }}>
-                      <Text style={{ fontSize: 12, fontWeight: '600', color: '#475569', marginBottom: 6 }}>
-                        Preview:
-                      </Text>
-                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
-                        First Name: <Text style={{ fontWeight: '600' }}>{parsed.firstName || '—'}</Text>
-                      </Text>
-                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
-                        M.I.: <Text style={{ fontWeight: '600' }}>{parsed.middleInitial || '—'}</Text>
-                      </Text>
-                      <Text style={{ fontSize: 14, color: '#1e293b' }}>
-                        Surname: <Text style={{ fontWeight: '600' }}>{parsed.surname || '—'}</Text>
-                      </Text>
-                    </View>
-                  );
-                })()}
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>First Name</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={studentFirstName}
+                    onChangeText={setStudentFirstName}
+                    placeholder="e.g., Juan"
+                    placeholderTextColor="#6b7280"
+                  />
+                </View>
+
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Middle Initial</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={studentMiddleInitial}
+                    onChangeText={setStudentMiddleInitial}
+                    placeholder="e.g., R"
+                    placeholderTextColor="#6b7280"
+                    maxLength={2}
+                    autoCapitalize="characters"
+                  />
+                </View>
+
+                {(studentLastName.trim() || studentFirstName.trim() || studentMiddleInitial.trim()) && (
+                  <View style={{ 
+                    backgroundColor: '#f1f5f9', 
+                    padding: 12, 
+                    borderRadius: 8, 
+                    marginBottom: 16,
+                    borderWidth: 1,
+                    borderColor: '#e2e8f0'
+                  }}>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: '#475569', marginBottom: 6 }}>
+                      Preview:
+                    </Text>
+                    <Text style={{ fontSize: 14, color: '#1e293b' }}>
+                      {`${studentLastName.trim()}${studentLastName.trim() && studentFirstName.trim() ? ', ' : ''}${studentFirstName.trim()}${studentMiddleInitial.trim() ? ` ${studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.'}` : ''}` || '—'}
+                    </Text>
+                  </View>
+                )}
 
                 <View style={styles.field}>
 
@@ -11499,9 +11738,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 </View>
 
                 <Text style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
-
-                  Note: Enter full name in format "First Name Middle Name Surname" or "First Name Surname". Parent details will be collected securely when they first log in.
-
+                  Note: Name will be saved and shown as "Lastname, Firstname MI". Parent details will be collected when they first log in.
                 </Text>
 
               </View>
@@ -12432,13 +12669,24 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
               <View style={styles.studentListContainer}>
 
-                <Text style={styles.studentListTitle}>Students ({studentsByClass[selectedAssignmentForStatus.classId]?.length || 0})</Text>
+                {(() => {
+                  // Filter students based on assignment targets
+                  const allClassStudents = studentsByClass[selectedAssignmentForStatus.classId] || [];
+                  const targetStudentIds = selectedAssignmentForStatus.targetStudentIds;
+                  
+                  // If targetStudentIds is provided and not empty, filter to only those students
+                  // Otherwise, show all students in the class
+                  const assignedStudents = targetStudentIds && targetStudentIds.length > 0 
+                    ? allClassStudents.filter((student: any) => targetStudentIds.includes(student.studentId))
+                    : allClassStudents;
+                  
+                  return (
+                    <>
+                      <Text style={styles.studentListTitle}>Students ({assignedStudents.length})</Text>
 
-                <Text style={styles.studentListSubtitle}>Tap status badges to toggle completion</Text>
+                      <Text style={styles.studentListSubtitle}>Tap status badges to toggle completion</Text>
 
-                
-
-                {(studentsByClass[selectedAssignmentForStatus.classId] || []).map((student: any, index: number) => {
+                      {assignedStudents.map((student: any, index: number) => {
 
                   const status = getStudentStatus(student.studentId, selectedAssignmentForStatus);
 
@@ -12518,7 +12766,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                   );
 
-                })}
+                      })}
+                    </>
+                  );
+                })()}
 
               </View>
 
@@ -14158,6 +14409,358 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                         </View>
                       </View>
                     </View>
+                  </View>
+                  
+                  {/* Time vs Score Per Item Chart */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Time vs Score Per Item</Text>
+                    {selectedExerciseForStats && (() => {
+                      const { exerciseResults } = selectedExerciseForStats;
+                      const firstResult = exerciseResults[0];
+                      
+                      if (!firstResult?.questionResults?.length) {
+                        return (
+                          <View style={styles.noDataContainer}>
+                            <Text style={styles.noDataText}>No data available</Text>
+                          </View>
+                        );
+                      }
+
+                      // Calculate average time and score per item
+                      const chartData = firstResult.questionResults.map((question: any, index: number) => {
+                        const questionNumber = question.questionNumber || index + 1;
+                        
+                        // Get all student results for this question
+                        const questionResults = exerciseResults.map((result: any) => {
+                          return result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                        }).filter(Boolean);
+                        
+                        // Calculate average time
+                        const timeSpentArray = questionResults
+                          .map((q: any) => q.timeSpentSeconds || 0)
+                          .filter(time => time > 0);
+                        
+                        const avgTime = timeSpentArray.length > 0 
+                          ? timeSpentArray.reduce((sum: number, time: number) => sum + time, 0) / timeSpentArray.length 
+                          : 0;
+                        
+                        // Calculate average score (percentage of students who got it correct)
+                        const correctCount = questionResults.filter((q: any) => q.isCorrect).length;
+                        const avgScore = questionResults.length > 0 
+                          ? (correctCount / questionResults.length) * 100 
+                          : 0;
+                        
+                        return {
+                          itemNumber: questionNumber,
+                          avgTime: avgTime,
+                          avgScore: avgScore,
+                        };
+                      });
+
+                      // Find max time for scaling
+                      const maxTime = Math.max(...chartData.map((d: { itemNumber: number; avgTime: number; avgScore: number }) => d.avgTime), 1);
+                      const chartHeight = 200;
+                      
+                      // SVG Chart dimensions
+                      const svgWidth = 320;
+                      const svgHeight = chartHeight + 60; // Extra space for labels
+                      const padding = 50;
+                      const chartWidth = svgWidth - (padding * 2);
+                      const chartHeightInner = svgHeight - (padding * 2) - 40; // Space for X-axis labels
+                      
+                      // Convert data to SVG coordinates
+                      const svgData = chartData.map((data: { itemNumber: number; avgTime: number; avgScore: number }, index: number) => {
+                        const x = padding + (index / (chartData.length - 1 || 1)) * chartWidth;
+                        const timeY = padding + chartHeightInner - (data.avgTime / maxTime) * chartHeightInner;
+                        const scoreY = padding + chartHeightInner - (data.avgScore / 100) * chartHeightInner;
+                        
+                        return {
+                          x,
+                          timeY,
+                          scoreY,
+                          itemNumber: data.itemNumber,
+                          avgTime: data.avgTime,
+                          avgScore: data.avgScore,
+                        };
+                      });
+                      
+                      // Create path strings for lines
+                      const timePath = svgData.map((point: any, index: number) => 
+                        `${index === 0 ? 'M' : 'L'} ${point.x} ${point.timeY}`
+                      ).join(' ');
+                      
+                      const scorePath = svgData.map((point: any, index: number) => 
+                        `${index === 0 ? 'M' : 'L'} ${point.x} ${point.scoreY}`
+                      ).join(' ');
+                      
+                      return (
+                        <View style={styles.timeChartContainer}>
+                          {/* Legend */}
+                          <View style={styles.lineChartLegend}>
+                            <View style={styles.lineChartLegendItem}>
+                              <View style={[styles.lineChartLegendDot, { backgroundColor: '#3b82f6' }]} />
+                              <Text style={styles.lineChartLegendText}>Avg Time (sec)</Text>
+                            </View>
+                            <View style={styles.lineChartLegendItem}>
+                              <View style={[styles.lineChartLegendDot, { backgroundColor: '#10b981' }]} />
+                              <Text style={styles.lineChartLegendText}>Avg Score (%)</Text>
+                            </View>
+                          </View>
+                          
+                          <View style={styles.lineChartMainContainer}>
+                            {/* SVG Chart */}
+                            <View style={styles.lineChartContent}>
+                              <Svg width={svgWidth} height={svgHeight}>
+                                {/* Chart frame */}
+                                <Line
+                                  x1={padding}
+                                  y1={padding}
+                                  x2={padding}
+                                  y2={padding + chartHeightInner}
+                                  stroke="#cbd5e1"
+                                  strokeWidth="2"
+                                />
+                                <Line
+                                  x1={padding}
+                                  y1={padding + chartHeightInner}
+                                  x2={padding + chartWidth}
+                                  y2={padding + chartHeightInner}
+                                  stroke="#cbd5e1"
+                                  strokeWidth="2"
+                                />
+                                <Line
+                                  x1={padding + chartWidth}
+                                  y1={padding}
+                                  x2={padding + chartWidth}
+                                  y2={padding + chartHeightInner}
+                                  stroke="#cbd5e1"
+                                  strokeWidth="2"
+                                />
+                                <Line
+                                  x1={padding}
+                                  y1={padding}
+                                  x2={padding + chartWidth}
+                                  y2={padding}
+                                  stroke="#cbd5e1"
+                                  strokeWidth="2"
+                                />
+                                
+                                {/* Grid lines */}
+                                <Line
+                                  x1={padding}
+                                  y1={padding + chartHeightInner * 0.25}
+                                  x2={padding + chartWidth}
+                                  y2={padding + chartHeightInner * 0.25}
+                                  stroke="#f1f5f9"
+                                  strokeWidth="1"
+                                />
+                                <Line
+                                  x1={padding}
+                                  y1={padding + chartHeightInner * 0.5}
+                                  x2={padding + chartWidth}
+                                  y2={padding + chartHeightInner * 0.5}
+                                  stroke="#f1f5f9"
+                                  strokeWidth="1"
+                                />
+                                <Line
+                                  x1={padding}
+                                  y1={padding + chartHeightInner * 0.75}
+                                  x2={padding + chartWidth}
+                                  y2={padding + chartHeightInner * 0.75}
+                                  stroke="#f1f5f9"
+                                  strokeWidth="1"
+                                />
+                                
+                                {/* Vertical grid lines */}
+                                <Line
+                                  x1={padding + chartWidth * 0.25}
+                                  y1={padding}
+                                  x2={padding + chartWidth * 0.25}
+                                  y2={padding + chartHeightInner}
+                                  stroke="#f1f5f9"
+                                  strokeWidth="1"
+                                />
+                                <Line
+                                  x1={padding + chartWidth * 0.5}
+                                  y1={padding}
+                                  x2={padding + chartWidth * 0.5}
+                                  y2={padding + chartHeightInner}
+                                  stroke="#f1f5f9"
+                                  strokeWidth="1"
+                                />
+                                <Line
+                                  x1={padding + chartWidth * 0.75}
+                                  y1={padding}
+                                  x2={padding + chartWidth * 0.75}
+                                  y2={padding + chartHeightInner}
+                                  stroke="#f1f5f9"
+                                  strokeWidth="1"
+                                />
+                                
+                                {/* Time line (blue) */}
+                                <Path
+                                  d={timePath}
+                                  stroke="#3b82f6"
+                                  strokeWidth="3"
+                                  fill="none"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                                
+                                {/* Score line (green) */}
+                                <Path
+                                  d={scorePath}
+                                  stroke="#10b981"
+                                  strokeWidth="3"
+                                  fill="none"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                                
+                                {/* Time data points */}
+                                {svgData.map((point: any, index: number) => (
+                                  <Circle
+                                    key={`time-point-${index}`}
+                                    cx={point.x}
+                                    cy={point.timeY}
+                                    r="5"
+                                    fill="#3b82f6"
+                                    stroke="#ffffff"
+                                    strokeWidth="2"
+                                  />
+                                ))}
+                                
+                                {/* Score data points */}
+                                {svgData.map((point: any, index: number) => (
+                                  <Circle
+                                    key={`score-point-${index}`}
+                                    cx={point.x}
+                                    cy={point.scoreY}
+                                    r="5"
+                                    fill="#10b981"
+                                    stroke="#ffffff"
+                                    strokeWidth="2"
+                                  />
+                                ))}
+                                
+                                {/* X-axis labels */}
+                                {svgData.map((point: any, index: number) => (
+                                  <SvgText
+                                    key={`label-${index}`}
+                                    x={point.x}
+                                    y={svgHeight - 8}
+                                    fontSize="10"
+                                    fill="#475569"
+                                    fontWeight="600"
+                                    textAnchor="middle"
+                                  >
+                                    {point.itemNumber}
+                                  </SvgText>
+                                ))}
+                                
+                                {/* Y-axis labels for Time (left side) */}
+                                <SvgText
+                                  x={padding - 10}
+                                  y={padding + 5}
+                                  fontSize="9"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="end"
+                                >
+                                  {Math.round(maxTime)}
+                                </SvgText>
+                                <SvgText
+                                  x={padding - 10}
+                                  y={padding + chartHeightInner * 0.5 + 5}
+                                  fontSize="9"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="end"
+                                >
+                                  {Math.round(maxTime / 2)}
+                                </SvgText>
+                                <SvgText
+                                  x={padding - 10}
+                                  y={padding + chartHeightInner + 5}
+                                  fontSize="9"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="end"
+                                >
+                                  0
+                                </SvgText>
+                                
+                                {/* Y-axis labels for Score (right side) */}
+                                <SvgText
+                                  x={padding + chartWidth + 10}
+                                  y={padding + 5}
+                                  fontSize="9"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="start"
+                                >
+                                  100
+                                </SvgText>
+                                <SvgText
+                                  x={padding + chartWidth + 10}
+                                  y={padding + chartHeightInner * 0.5 + 5}
+                                  fontSize="9"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="start"
+                                >
+                                  50
+                                </SvgText>
+                                <SvgText
+                                  x={padding + chartWidth + 10}
+                                  y={padding + chartHeightInner + 5}
+                                  fontSize="9"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="start"
+                                >
+                                  0
+                                </SvgText>
+                                
+                                {/* Axis titles */}
+                                <SvgText
+                                  x={padding - 25}
+                                  y={padding + chartHeightInner * 0.5}
+                                  fontSize="10"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="middle"
+                                  transform={`rotate(-90, ${padding - 25}, ${padding + chartHeightInner * 0.5})`}
+                                >
+                                  Time (sec)
+                                </SvgText>
+                                <SvgText
+                                  x={padding + chartWidth + 25}
+                                  y={padding + chartHeightInner * 0.5}
+                                  fontSize="10"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="middle"
+                                  transform={`rotate(90, ${padding + chartWidth + 25}, ${padding + chartHeightInner * 0.5})`}
+                                >
+                                  Score (%)
+                                </SvgText>
+                                <SvgText
+                                  x={padding + chartWidth * 0.5}
+                                  y={svgHeight - 2}
+                                  fontSize="10"
+                                  fill="#64748b"
+                                  fontWeight="600"
+                                  textAnchor="middle"
+                                >
+                                  Item Number
+                                </SvgText>
+                              </Svg>
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })()}
                   </View>
                 </View>
               );
@@ -16954,7 +17557,7 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
 
     paddingVertical: 8,
 
@@ -16970,7 +17573,7 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
 
     paddingVertical: 8,
 
@@ -23927,24 +24530,29 @@ const styles = StyleSheet.create({
 
   detailedStatsTopSection: {
     paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 12,
+    paddingVertical: 12,
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 12,
+    gap: 16,
+    marginBottom: 4,
   },
 
   detailedStatsExerciseIdContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#dbeafe',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
   },
 
   detailedStatsExerciseIdText: {
@@ -23958,15 +24566,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#10b981',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    gap: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 2,
-    elevation: 2,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+    gap: 8,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
   },
 
   detailedStatsExportButtonMainText: {
@@ -23978,10 +24586,22 @@ const styles = StyleSheet.create({
   detailedStatsModalContent: {
     flex: 1,
     paddingHorizontal: 16,
+    paddingTop: 4,
+    backgroundColor: '#f8fafc',
   },
 
   detailedStatsItemAnalysisSection: {
-    marginTop: 16,
+    marginTop: 12,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
   },
 
   detailedStatsSectionTitle: {
@@ -23989,6 +24609,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1e293b',
     marginBottom: 16,
+    paddingBottom: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: '#e2e8f0',
   },
 
   detailedStatsItemCard: {
@@ -24355,7 +24978,7 @@ const styles = StyleSheet.create({
 
   detailedStatsClassStatsSection: {
     marginTop: 24,
-    marginBottom: 24,
+    marginBottom: 0,
   },
 
   // Top row styles for MPS and Pass Rate
@@ -24396,14 +25019,27 @@ const styles = StyleSheet.create({
   },
 
   detailedStatsSubsection: {
-    marginBottom: 16,
+    marginBottom: 12,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
   },
 
   detailedStatsSubtitle: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '700',
-    color: '#475569',
-    marginBottom: 8,
+    color: '#1e293b',
+    marginBottom: 16,
+    paddingBottom: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: '#e2e8f0',
   },
 
   detailedStatsGrid: {
@@ -24460,18 +25096,34 @@ const styles = StyleSheet.create({
   },
 
   detailedStatsDistribution: {
-    gap: 8,
+    gap: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 12,
   },
 
   detailedStatsDistItem: {
-    marginBottom: 6,
+    marginBottom: 8,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 2,
+    elevation: 1,
   },
 
   detailedStatsDistBar: {
-    height: 6,
-    borderRadius: 3,
-    marginBottom: 4,
-    minWidth: 2,
+    height: 8,
+    borderRadius: 4,
+    marginBottom: 8,
+    minWidth: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
   },
 
   detailedStatsDistLabel: {
@@ -24502,6 +25154,185 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#64748b',
     fontWeight: '600',
+  },
+
+  // Line Chart Styles
+  timeChartContainer: {
+    marginTop: 8,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 12,
+  },
+
+  lineChartLegend: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 16,
+    marginBottom: 8,
+  },
+
+  lineChartLegendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+
+  lineChartLegendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+
+  lineChartLegendText: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  lineChartMainContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+  },
+
+  lineChartYAxisContainer: {
+    width: 50,
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+  },
+
+  lineChartAxisLabel: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+
+  lineChartYAxis: {
+    flex: 1,
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+
+  lineChartYAxisValue: {
+    fontSize: 9,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  lineChartContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  lineChartArea: {
+    position: 'relative',
+    borderLeftWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: '#cbd5e1',
+  },
+
+  lineChartGridLine: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: '#e2e8f0',
+  },
+
+  lineChartLineContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+
+  lineChartSegment: {
+    position: 'absolute',
+    height: 3,
+    transformOrigin: 'left center',
+    borderTopLeftRadius: 1.5,
+    borderTopRightRadius: 1.5,
+    borderBottomLeftRadius: 1.5,
+    borderBottomRightRadius: 1.5,
+  },
+
+  lineChartSimpleBar: {
+    position: 'absolute',
+    height: 3,
+    marginTop: -1.5,
+    borderRadius: 1.5,
+  },
+
+  lineChartConnectingLine: {
+    position: 'absolute',
+    transformOrigin: 'left center',
+    borderRadius: 2,
+  },
+
+  lineChartPoint: {
+    position: 'absolute',
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginLeft: -5,
+    marginTop: -5,
+    borderWidth: 2,
+    borderColor: '#ffffff',
+    zIndex: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+
+  lineChartPointLabel: {
+    position: 'absolute',
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#374151',
+    top: -20,
+    left: '50%',
+    transform: [{ translateX: -15 }],
+    minWidth: 30,
+    textAlign: 'center',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 1,
+    elevation: 1,
+  },
+
+  lineChartXLabels: {
+    position: 'absolute',
+    bottom: -20,
+    left: 0,
+    right: 0,
+    height: 20,
+  },
+
+  lineChartXLabel: {
+    position: 'absolute',
+    fontSize: 9,
+    color: '#475569',
+    fontWeight: '600',
+    transform: [{ translateX: -5 }],
+  },
+
+  lineChartXAxisContainer: {
+    alignItems: 'center',
+    marginTop: 24,
+  },
+
+  svgChart: {
+    alignSelf: 'center',
   },
 
 });

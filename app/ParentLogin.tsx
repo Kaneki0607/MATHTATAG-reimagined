@@ -141,9 +141,9 @@ export default function ParentLogin() {
   const handleRegistration = async () => {
     setRegistrationLoading(true);
     
-    // Validation
-    if (!registrationData.firstName || !registrationData.lastName || !registrationData.email || !registrationData.mobile) {
-      Alert.alert('Error', 'Please fill in all required fields.');
+    // Validation (email optional)
+    if (!registrationData.firstName || !registrationData.lastName || !registrationData.mobile) {
+      Alert.alert('Error', 'Please fill in First Name, Last Name, and Mobile.');
       setRegistrationLoading(false);
       return;
     }
@@ -187,7 +187,7 @@ export default function ParentLogin() {
       const parentData = {
         firstName: registrationData.firstName,
         lastName: registrationData.lastName,
-        email: registrationData.email,
+        email: registrationData.email || '',
         mobile: registrationData.mobile,
         profilePictureUrl: profilePictureUrl,
         parentKey: parentKey.trim(),
@@ -401,7 +401,7 @@ export default function ParentLogin() {
                 
                 <TextInput
                   style={styles.registrationInput}
-                  placeholder="Email Address *"
+                  placeholder="Email Address (optional)"
                   placeholderTextColor="#1e293b"
                   value={registrationData.email}
                   onChangeText={(value) => handleRegistrationInputChange('email', value)}
