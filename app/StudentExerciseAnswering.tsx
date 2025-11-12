@@ -1137,7 +1137,7 @@ interface ExerciseInfo {
   category: string;
   description: string;
   totalQuestions: number;
-  timeLimitPerItem?: number;
+  timeLimitPerItem: number | null;
 }
 
 interface StudentInfo {
@@ -4376,7 +4376,7 @@ export default function StudentExerciseAnswering() {
         category: exerciseData?.category || 'Unknown Category',
         description: exercise?.description || exerciseData?.description || '',
         totalQuestions: totalQuestions,
-        timeLimitPerItem: exercise?.timeLimitPerItem || exerciseData?.timeLimitPerItem
+        timeLimitPerItem: exercise?.timeLimitPerItem ?? exerciseData?.timeLimitPerItem ?? null
       };
       
       // Create student info (use state or fallback)

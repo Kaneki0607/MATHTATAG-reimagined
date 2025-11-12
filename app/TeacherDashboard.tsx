@@ -16,33 +16,33 @@ import * as Sharing from 'expo-sharing';
 import { useEffect, useRef, useState } from 'react';
 
 import {
-  ActivityIndicator,
+    ActivityIndicator,
 
-  Animated,
-  Dimensions,
+    Animated,
+    Dimensions,
 
-  Image,
+    Image,
 
-  Modal,
+    Modal,
 
-  PanResponder,
-  Platform,
-  RefreshControl,
+    PanResponder,
+    Platform,
+    RefreshControl,
 
-  ScrollView,
+    ScrollView,
 
-  StyleSheet,
+    StyleSheet,
 
-  Text,
+    Text,
 
-  TextInput,
+    TextInput,
 
-  TouchableOpacity,
+    TouchableOpacity,
 
-  TouchableWithoutFeedback,
+    TouchableWithoutFeedback,
 
-  View,
-  useWindowDimensions
+    View,
+    useWindowDimensions
 } from 'react-native';
 
 import { ResponsiveCards } from '../components/ResponsiveGrid';
@@ -63,6 +63,7 @@ import { collectAppMetadata } from '../lib/app-metadata';
 import { createAnnouncement, createClass, createParent, createStudent } from '../lib/entity-helpers';
 import { logError, logErrorWithStack } from '../lib/error-logger';
 import { uploadFile } from '../lib/firebase-storage';
+import { callGeminiWithFallback, extractGeminiText, parseGeminiJson } from '../lib/gemini-utils';
 
 
 
@@ -190,6 +191,172 @@ const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, butt
 
   };
 
+  const generateGeminiAnalysis = async (resultData: any, classAverages: any): Promise<any> => {
+    let lastAnalysisText = '';
+
+    try {
+      const performanceData = {
+        score: resultData.scorePercentage,
+        totalQuestions: resultData.totalQuestions,
+        timeSpent: resultData.totalTimeSpent,
+        questionResults: resultData.questionResults || [],
+        classAverage: classAverages?.averageScore || 0,
+        classAverageTime: classAverages?.averageTime || 0,
+      };
+
+      const prompt = `You are an expert educational psychologist analyzing a Grade 1 student's math exercise performance. Provide a comprehensive analysis in JSON format.
+
+
+
+STUDENT PERFORMANCE DATA:
+
+- Score: ${performanceData.score}%
+
+- Total Questions: ${performanceData.totalQuestions}
+
+- Time Spent: ${Math.round(performanceData.timeSpent / 1000)} seconds
+
+- Class Average Score: ${Math.round(performanceData.classAverage)}%
+
+- Class Average Time: ${Math.round(performanceData.classAverageTime)} seconds
+
+
+
+DETAILED QUESTION RESULTS:
+
+${performanceData.questionResults.map((q: any) => {
+  const classAvg = classAverages?.questionAverages?.[q.questionId];
+  return `Question ${q.questionNumber}: ${q.isCorrect ? 'CORRECT' : 'INCORRECT'} (${q.attempts} attempts, ${Math.round(q.timeSpent / 1000)}s)
+   Question Text: "${q.questionText}"
+   Question Type: ${q.questionType}
+   ${q.options && q.options.length > 0 ? `Options: ${q.options.join(', ')}` : ''}
+   Student Answer: "${q.studentAnswer}"
+   Correct Answer: "${q.correctAnswer}"
+   ${q.questionImage ? `Image: ${q.questionImage}` : ''}
+   
+   ENHANCED PERFORMANCE DATA:
+   - Difficulty Level: ${q.metadata?.difficulty || 'medium'}
+   - Topic Tags: ${q.metadata?.topicTags?.join(', ') || 'none'}
+   - Cognitive Load: ${q.metadata?.cognitiveLoad || 'medium'}
+   - Question Complexity: ${q.metadata?.questionComplexity || 'medium'}
+   - Total Hesitation Time: ${Math.round((q.totalHesitationTime || 0) / 1000)}s
+   - Average Confidence: ${q.averageConfidence?.toFixed(1) || '2.0'} (1=low, 2=medium, 3=high)
+   - Significant Changes: ${q.significantChanges || 0}
+   - Phase Distribution: Reading(${q.phaseDistribution?.reading || 0}), Thinking(${q.phaseDistribution?.thinking || 0}), Answering(${q.phaseDistribution?.answering || 0}), Reviewing(${q.phaseDistribution?.reviewing || 0})
+   
+   INTERACTION PATTERNS:
+   - Total Interactions: ${q.totalInteractions || 0}
+   - Option Clicks: ${q.interactionTypes?.optionClicks || 0}
+   - Help Used: ${q.interactionTypes?.helpUsed || 0} (Help Button: ${q.helpUsage?.helpButtonClicks || 0})
+   - Answer Changes: ${q.interactionTypes?.answerChanges || 0}
+   
+   TIME BREAKDOWN:
+   - Reading Time: ${Math.round((q.timeBreakdown?.readingTime || 0) / 1000)}s
+   - Thinking Time: ${Math.round((q.timeBreakdown?.thinkingTime || 0) / 1000)}s
+   - Answering Time: ${Math.round((q.timeBreakdown?.answeringTime || 0) / 1000)}s
+   - Reviewing Time: ${Math.round((q.timeBreakdown?.reviewingTime || 0) / 1000)}s
+   - Time to First Answer: ${Math.round((q.timeToFirstAnswer || 0) / 1000)}s
+   ${q.attemptHistory && q.attemptHistory.length > 0 ? `
+   ATTEMPT HISTORY:
+   ${q.attemptHistory.map((attempt: any, attemptIdx: number) =>
+     `   Attempt ${attemptIdx + 1}: "${attempt.answer || 'blank'}" (${Math.round((attempt.timeSpent || 0) / 1000)}s)`
+   ).join('\n')}` : ''}
+   ${classAvg ? `CLASS AVERAGE: ${Math.round(classAvg.averageTime / 1000)}s, ${Math.round(classAvg.averageAttempts)} attempts` : '- Performance ranking data not available'}`;
+}).join('\n\n')}
+
+
+
+IMPORTANT: Respond with ONLY valid JSON. Do not include any markdown formatting, code blocks, or additional text. Return only the JSON object.
+
+
+
+Required JSON format:
+
+{
+  "strengths": ["strength1", "strength2", "strength3"],
+  "weaknesses": ["weakness1", "weakness2", "weakness3"],
+  "questionAnalysis": ["analysis1", "analysis2", "analysis3"],
+  "timeAnalysis": {
+    "description": "Time analysis description",
+    "studentTime": ${Math.round(performanceData.timeSpent / 1000)},
+    "classAverage": ${Math.round(performanceData.classAverageTime)}
+  },
+  "recommendations": ["recommendation1", "recommendation2", "recommendation3"],
+  "encouragement": "Encouraging message for the student"
+}
+
+
+
+Focus on:
+1. Mathematical concepts mastered
+2. Areas needing improvement
+3. Time management skills
+4. Specific question performance
+5. Age-appropriate recommendations
+6. Positive reinforcement
+
+
+
+Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
+
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.7,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 2048,
+        },
+      };
+
+      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+      console.log('Gemini model used for teacher analysis:', modelUsed);
+
+      let analysisText = extractGeminiText(data);
+      if (!analysisText) {
+        throw new Error('Invalid response from AI service');
+      }
+
+      lastAnalysisText = analysisText;
+      return parseGeminiJson<any>(analysisText);
+    } catch (error) {
+      console.error('Error generating Gemini analysis:', error);
+
+      if (lastAnalysisText) {
+        try {
+          const jsonMatches = lastAnalysisText.match(/\{[^}]*"strengths"[^}]*\}/g);
+          if (jsonMatches && jsonMatches.length > 0) {
+            console.log('Using partial Gemini analysis data.');
+            return JSON.parse(jsonMatches[0]);
+          }
+        } catch (partialError) {
+          console.warn('Failed to extract partial Gemini analysis:', partialError);
+        }
+      }
+
+      return {
+        strengths: ['Completed the exercise successfully', 'Showed persistence in problem-solving'],
+        weaknesses: ['Could improve time management', 'May need more practice with certain concepts'],
+        questionAnalysis: ['Overall good performance across questions'],
+        timeAnalysis: {
+          description: 'Student completed the exercise in a reasonable time',
+          studentTime: Math.round(resultData.totalTimeSpent / 1000),
+          classAverage: Math.round(classAverages?.averageTime || 0),
+        },
+        recommendations: ['Continue practicing regularly', 'Focus on areas that took longer'],
+        encouragement: 'Great job completing the exercise! Keep up the good work!',
+      };
+    }
+  };
+
 
 
   return (
@@ -295,9 +462,6 @@ const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, butt
   );
 
 };
-
-
-
 // Stock image library data
 
 const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
@@ -1005,7 +1169,6 @@ const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
     { name: '90 pesos', uri: require('../assets/images/Stock-Images/Money/90.png') },
 
   ],
-
   'Numbers': [
 
     // Numbers 0-9 (blue)
@@ -1635,9 +1798,6 @@ function generateYearOptions() {
   return items;
 
 }
-
-
-
 export default function TeacherDashboard() {
 
   const router = useRouter();
@@ -2412,7 +2572,6 @@ export default function TeacherDashboard() {
   
 
   // Category options
-
   const categoryOptions = [
 
     'All',
@@ -3199,9 +3358,6 @@ export default function TeacherDashboard() {
     }
 
   };
-
-
-
   const loadAssignments = async (classIds: string[]) => {
 
     try {
@@ -3965,9 +4121,6 @@ export default function TeacherDashboard() {
     }
 
   };
-
-
-
   const handleEditAssignment = (assignment: AssignedExercise) => {
 
     setEditingAssignment(assignment);
@@ -4664,9 +4817,9 @@ export default function TeacherDashboard() {
 
 
 
-  // Function to generate Gemini analysis with retry logic
+  // Legacy Gemini analysis implementation (kept for reference)
 
-  const generateGeminiAnalysis = async (resultData: any, classAverages: any, retryCount: number = 0): Promise<any> => {
+  const legacyGenerateGeminiAnalysis = async (resultData: any, classAverages: any, retryCount: number = 0): Promise<any> => {
 
     const maxRetries = 3;
 
@@ -4715,9 +4868,6 @@ STUDENT PERFORMANCE DATA:
 - Class Average Score: ${Math.round(performanceData.classAverage)}%
 
 - Class Average Time: ${Math.round(performanceData.classAverageTime)} seconds
-
-
-
 DETAILED QUESTION RESULTS:
 
 ${performanceData.questionResults.map((q: any, idx: number) => {
@@ -4854,7 +5004,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, {
 
         method: 'POST',
 
@@ -5179,9 +5329,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     await loadStudentPerformance(studentId, exerciseId, classId);
 
   };
-
-
-
   const handleExportToExcel = async (exerciseTitle: string, results: any[], students: any[]) => {
 
     try {
@@ -5779,9 +5926,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     }
 
   };
-  
-  
-  
   // Export Class Statistics to Excel
   const handleExportClassStatsToExcel = async () => {
     if (!selectedExerciseForStats) return;
@@ -6578,7 +6722,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     return { text: 'Pending', color: '#f59e0b' };
 
   };
-
   // Get student initials for avatar
   const getStudentInitials = (student: any): string => {
     if (student.firstName && student.surname) {
@@ -7341,9 +7484,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     }
 
   };
-
-
-
   const takeReportPhoto = async () => {
 
     try {
@@ -8018,9 +8158,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
            </>
 
          )}
-
-
-
          {activeTab === 'exercises' && (
 
            <View style={styles.exercisesSection}>
@@ -8593,7 +8730,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                    })()}
 
                  </>
-
                ) : (
 
                  // Assigned Exercises Tab
@@ -9219,9 +9355,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
            </View>
 
          )}
-
-
-
          {activeTab === 'results' && (
 
            <View style={{ paddingBottom: 140 }}>
@@ -9553,7 +9686,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                           
 
                           // Determine if exercise is still accepting results
-
                           const isAcceptingResults = exerciseAssignment ? 
 
                             exerciseAssignment.acceptingStatus === 'open' && 
@@ -10198,7 +10330,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                               </View>
 
-                               
                                {/* Class Statistics Section */}
                                <View style={styles.resultsStatsSection}>
                                  <View style={styles.resultsStatsHeader}>
@@ -10355,7 +10486,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                  </View>
 
                );
-
              })
 
              )}
@@ -10996,7 +11126,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
       {/* Add Class Modal */}
-
       <Modal visible={showAddClassModal} animationType="slide" transparent>
 
         <View style={styles.modalOverlay}>
@@ -11770,7 +11899,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
       {/* Class List Modal */}
-
       <Modal visible={showListModal} animationType="slide" transparent>
 
         <View style={styles.modalOverlay}>
@@ -12570,7 +12698,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           </View>
 
         </View>
-
       </Modal>
 
 
@@ -13225,7 +13352,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
                 {/* Question Details */}
-
                 {studentPerformanceData?.studentResult?.questionResults && studentPerformanceData.studentResult.questionResults.length > 0 && (
 
                   <View style={styles.studentPerformanceQuestionDetailsCard}>
@@ -13879,7 +14005,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
       {/* Technical Report Modal */}
-
       <Modal visible={showTechReportModal} animationType="slide" transparent>
 
         <View style={styles.modalOverlay}>
@@ -14179,7 +14304,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               </TouchableOpacity>
             </View>
           )}
-
           <ScrollView style={styles.detailedStatsModalContent} showsVerticalScrollIndicator={false}>
             {/* Class Statistics Section */}
             {selectedExerciseForStats && (() => {
@@ -14765,7 +14889,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 </View>
               );
             })()}
-
             {/* Item Analysis Section */}
             <View style={styles.detailedStatsItemAnalysisSection}>
               <Text style={styles.detailedStatsSectionTitle}>Item Analysis</Text>
@@ -15082,9 +15205,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   );
 
 }
-
-
-
 const styles = StyleSheet.create({
 
   container: {
@@ -15874,7 +15994,6 @@ const styles = StyleSheet.create({
   actionButtons: {
 
     marginBottom: Math.min(20, staticHeight * 0.025),
-
   },
 
   actionCard: {
@@ -16654,7 +16773,6 @@ const styles = StyleSheet.create({
     borderRadius: 20,
 
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
-
   },
 
   moreMenu: {
@@ -17446,7 +17564,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
 
     lineHeight: 12,
-
   },
 
   statDivider: {
@@ -18245,7 +18362,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
 
     color: '#1e293b',
-
   },
 
   closeButton: {
@@ -19045,7 +19161,6 @@ const styles = StyleSheet.create({
   filterContainer: {
 
     marginBottom: 20,
-
   },
 
   searchContainer: {
@@ -19841,7 +19956,6 @@ const styles = StyleSheet.create({
     flex: 1,
 
     paddingHorizontal: 20,
-
   },
 
   assignmentModalActions: {
@@ -20641,7 +20755,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
 
     color: '#64748b',
-
   },
 
   deleteWarningText: {
@@ -21429,7 +21542,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
 
     borderColor: '#e2e8f0',
-
   },
 
   exerciseTableHeader: {
@@ -22229,7 +22341,6 @@ const styles = StyleSheet.create({
     color: '#374151',
 
     marginBottom: 4,
-
   },
 
   studentPerformanceScoreNote: {
@@ -23025,7 +23136,6 @@ const styles = StyleSheet.create({
     flex: 0,
 
     width: '100%',
-
   },
 
   alertButtonCancel: {

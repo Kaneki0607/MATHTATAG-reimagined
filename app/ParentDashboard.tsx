@@ -1,10 +1,9 @@
-
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { Accelerometer } from 'expo-sensors';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Animated, Dimensions, Easing, Image, KeyboardAvoidingView, Modal, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import { useResponsive } from '../hooks/useResponsive';
 import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
@@ -12,6 +11,7 @@ import { collectAppMetadata } from '../lib/app-metadata';
 import { logError, logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
+import { callGeminiWithFallback, extractGeminiText, parseGeminiJson } from '../lib/gemini-utils';
 
 // Utility functions for answer formatting (from StudentExerciseAnswering.tsx)
 const extractFileName = (value: any): string => {
@@ -548,7 +548,6 @@ const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, butt
     </Modal>
   );
 };
-
 export default function ParentDashboard() {
   const router = useRouter();
   const { width, height } = useWindowDimensions();
@@ -627,6 +626,44 @@ export default function ParentDashboard() {
   // Animation values for smooth transitions
   const questionFadeAnim = useRef(new Animated.Value(1)).current;
   const slideAnim = useRef(new Animated.Value(0)).current;
+  
+  const correctAnswerStats = useMemo(() => {
+    if (!selectedResult) {
+      return { correct: 0, incorrect: 0, total: 0, percentage: 0 };
+    }
+
+    const rawQuestionResults = selectedResult.questionResults;
+    let questionResults: any[] = [];
+
+    if (Array.isArray(rawQuestionResults)) {
+      questionResults = rawQuestionResults;
+    } else if (rawQuestionResults && typeof rawQuestionResults === 'object') {
+      questionResults = Object.values(rawQuestionResults);
+    }
+
+    let totalQuestions = questionResults.length;
+
+    if (!totalQuestions) {
+      totalQuestions = selectedResult.totalQuestions || selectedResult.resultsSummary?.totalItems || 0;
+    }
+
+    let correctAnswers = questionResults.filter((q: any) => q?.isCorrect).length;
+
+    if (correctAnswers === 0 && typeof selectedResult.resultsSummary?.totalCorrect === 'number') {
+      correctAnswers = selectedResult.resultsSummary.totalCorrect;
+    }
+
+    const boundedTotal = Math.max(totalQuestions, correctAnswers);
+    const incorrectAnswers = Math.max(boundedTotal - correctAnswers, 0);
+    const percentage = boundedTotal > 0 ? Math.round((correctAnswers / boundedTotal) * 100) : 0;
+
+    return {
+      correct: correctAnswers,
+      incorrect: incorrectAnswers,
+      total: boundedTotal,
+      percentage,
+    };
+  }, [selectedResult]);
   
   // Profile modal state
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -1231,7 +1268,6 @@ export default function ParentDashboard() {
       scorePercentage: resultData.scorePercentage || resultData.resultsSummary?.meanPercentageScore || 0
     };
   };
-
   // Calculate comprehensive performance metrics for class ranking
   const calculatePerformanceMetrics = async (resultData: any, exerciseData: any) => {
     try {
@@ -1601,6 +1637,15 @@ export default function ParentDashboard() {
           const avgTime = totalTime / sameExerciseResults.length;
           const avgScore = (sameExerciseResults || []).reduce((sum, r) => sum + (r.resultsSummary?.meanPercentageScore || r.scorePercentage || 0), 0) / sameExerciseResults.length;
           
+          // Calculate average accuracy
+          const avgAccuracy = (sameExerciseResults || []).reduce((sum, r) => {
+            const questionResults = r.questionResults || [];
+            const totalQuestions = questionResults.length || 1;
+            const correctAnswers = questionResults.filter((q: any) => q?.isCorrect).length;
+            const accuracy = totalQuestions > 0 ? (correctAnswers / totalQuestions) * 100 : 0;
+            return sum + accuracy;
+          }, 0) / sameExerciseResults.length;
+          
           // Calculate per-question averages
           const questionAverages: any = {};
           const questions = exerciseData.questions || [];
@@ -1636,6 +1681,7 @@ export default function ParentDashboard() {
           setClassAverages({
             averageTime: avgTime,
             averageScore: avgScore,
+            averageAccuracy: Math.round(avgAccuracy),
             totalStudents: sameExerciseResults.length,
             questionAverages: questionAverages
           });
@@ -1873,8 +1919,6 @@ export default function ParentDashboard() {
 
   const generateGeminiAnalysis = async (resultData: any) => {
     try {
-      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
-      
       // Prepare comprehensive performance data for analysis
       const performanceData = {
         score: resultData.scorePercentage || resultData.resultsSummary?.meanPercentageScore || 0,
@@ -1924,20 +1968,14 @@ CLASS COMPARISON:
 PERFORMANCE RANKING DATA:
 ${performanceRanking?.currentStudent ? `
 - Percentile: ${performanceRanking.currentStudent.percentile}th percentile
-- Overall Performance Score: ${Math.round(performanceRanking.currentStudent.overallScore)}/100
-- Efficiency Score: ${Math.round(performanceRanking.currentStudent.efficiencyScore)}/100 (attempts and time efficiency)
-- Consistency Score: ${Math.round(performanceRanking.currentStudent.consistencyScore)}/100 (performance consistency)
-- Mastery Score: ${Math.round(performanceRanking.currentStudent.masteryScore * 100)}/100 (quick correct answers)
-- Quick Correct Answers: ${performanceRanking.currentStudent.quickCorrectAnswers}/${performanceData.totalQuestions} questions
+- Accuracy: ${performanceData.score}%
+- Correct Answers: ${performanceData.totalCorrect}/${performanceData.totalQuestions} questions
 - Average Attempts per Question: ${performanceRanking.currentStudent.avgAttemptsPerQuestion.toFixed(1)}
 - Average Time per Question: ${Math.round(performanceRanking.currentStudent.avgTimePerQuestion / 1000)}s
 - Performance Level: ${performanceRanking.performanceLevel}
 
 CLASS COMPARISON:
-- Class Average Efficiency: ${Math.round(performanceRanking.classStats.averageEfficiency)}/100
-- Class Average Consistency: ${Math.round(performanceRanking.classStats.averageConsistency)}/100
-- Class Average Mastery: ${Math.round(performanceRanking.classStats.averageMastery * 100)}/100
-- Class Average Overall Score: ${Math.round(performanceRanking.classStats.averageOverallScore)}/100
+- Class Average Accuracy: ${Math.round(performanceData.classAverage)}%
 ` : '- Performance ranking data not available'}
 
 DETAILED QUESTION RESULTS:
@@ -1982,8 +2020,6 @@ ${(performanceData.questionResults || []).map((q: any, idx: number) => {
    }).join(', ')}` : ''}
    ${classAvg ? `Class Average Time: ${Math.round(classAvg.averageTime / 1000)}s, Class Average Attempts: ${Math.round(classAvg.averageAttempts)}` : ''}`;
 }).join('\n\n')}
-
-
 ANALYSIS REQUIREMENTS:
 1. Analyze the student's performance ranking and percentile within the class
 2. Compare efficiency, consistency, and mastery scores against class averages
@@ -1997,7 +2033,6 @@ ANALYSIS REQUIREMENTS:
 10. Provide specific recommendations based on performance ranking and class comparison
 11. Focus on the specific math concepts, difficulty levels, and cognitive demands in the questions
 12. Consider the student's confidence levels, hesitation patterns, and class standing in recommendations
-
 Please provide analysis in this JSON format:
 {
   "overallPerformance": {
@@ -2066,96 +2101,78 @@ Focus on:
 5. Make recommendations relevant to the specific skills tested
 6. Cultural sensitivity for Filipino families`;
 
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: [{
-              parts: [{
-                text: prompt
-              }]
-            }]
-          })
-        }
-      );
+      const requestBody = {
+        contents: [{
+          parts: [{
+            text: prompt
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.7,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 2048,
+        },
+      };
 
-      const data = await response.json();
-      if (data.candidates && data.candidates[0] && data.candidates[0].content) {
-        let analysisText = data.candidates[0].content.parts[0].text;
-        
-        // Clean up the response text to extract JSON
-        analysisText = analysisText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        
-        // Remove any leading/trailing text that's not JSON
-        const jsonStart = analysisText.indexOf('{');
-        const jsonEnd = analysisText.lastIndexOf('}');
-        
-        if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-          analysisText = analysisText.substring(jsonStart, jsonEnd + 1);
-        }
-        
-        // Additional cleaning for common issues
-        analysisText = analysisText
-          .replace(/,\s*}/g, '}')  // Remove trailing commas
-          .replace(/,\s*]/g, ']')  // Remove trailing commas in arrays
-          .replace(/\n/g, ' ')     // Replace newlines with spaces
-          .replace(/\s+/g, ' ')    // Replace multiple spaces with single space
-          .trim();
-        
-        try {
-          const analysis = JSON.parse(analysisText);
-          setGeminiAnalysis(analysis);
-        } catch (parseError) {
-          console.error('Failed to parse Gemini response:', parseError);
-          
-          // Try to extract partial data from the response
-          try {
-            const fallbackAnalysis = {
-              overallPerformance: {
-                level: performanceData.score >= 80 ? 'excellent' : performanceData.score >= 60 ? 'good' : 'needs_improvement',
-                description: `Nakakuha ang bata ng ${performanceData.score}% sa pagsusulit na ito.`,
-                score: performanceData.score
-              },
-              strengths: ['Nakumpleto ang lahat ng tanong', 'Nagpakita ng pagsisikap'],
-              weaknesses: ['Kailangan pa ng karagdagang pagsasanay sa ilang tanong'],
-              questionAnalysis: ['Ang bata ay nakasagot nang tama sa lahat ng tanong'],
-              timeAnalysis: {
-                studentTime: Math.round(performanceData.timeSpent / 1000),
-                classAverage: Math.round(performanceData.classAverageTime / 1000),
-                comparison: 'similar',
-                description: 'Ang bilis ng pagsagot ay nasa normal na saklaw'
-              },
-              recommendations: ['Mag-practice pa ng mga katulad na pagsasanay', 'Magbasa nang mabuti ang mga tanong'],
-              encouragement: 'Magaling! Nakumpleto mo ang pagsasanay na ito! Patuloy na mag-practice para mas lalong gumaling!'
-            };
-            setGeminiAnalysis(fallbackAnalysis);
-          } catch (fallbackError) {
-            console.error('Fallback analysis failed:', fallbackError);
-            // Use minimal fallback
-            setGeminiAnalysis({
-              overallPerformance: {
-                level: 'good',
-                description: 'Nakumpleto ang pagsusulit',
-                score: performanceData.score
-              },
-              strengths: ['Nakumpleto ang lahat ng tanong'],
-              weaknesses: ['Kailangan pa ng practice'],
-              questionAnalysis: ['Nakasagot nang tama sa lahat ng tanong'],
-              timeAnalysis: {
-                studentTime: Math.round(performanceData.timeSpent / 1000),
-                classAverage: Math.round(performanceData.classAverageTime / 1000),
-                comparison: 'similar',
-                description: 'Normal na bilis'
-              },
-              recommendations: ['Mag-practice pa'],
-              encouragement: 'Magaling!'
-            });
-          }
-        }
+      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+      console.log('Gemini model used for parent analysis:', modelUsed);
+
+      const responseText = extractGeminiText(data);
+      if (!responseText) {
+        throw new Error('Invalid response from AI service');
+      }
+
+      try {
+        const analysis = parseGeminiJson<any>(responseText);
+        setGeminiAnalysis(analysis);
+        return;
+      } catch (parseError) {
+        console.error('Failed to parse Gemini response:', parseError);
+        console.error('Raw Gemini response:', responseText);
+      }
+
+      try {
+        const fallbackAnalysis = {
+          overallPerformance: {
+            level: performanceData.score >= 80 ? 'excellent' : performanceData.score >= 60 ? 'good' : 'needs_improvement',
+            description: `Nakakuha ang bata ng ${performanceData.score}% sa pagsusulit na ito.`,
+            score: performanceData.score
+          },
+          strengths: ['Nakumpleto ang lahat ng tanong', 'Nagpakita ng pagsisikap'],
+          weaknesses: ['Kailangan pa ng karagdagang pagsasanay sa ilang tanong'],
+          questionAnalysis: ['Ang bata ay nakasagot nang tama sa lahat ng tanong'],
+          timeAnalysis: {
+            studentTime: Math.round(performanceData.timeSpent / 1000),
+            classAverage: Math.round(performanceData.classAverageTime / 1000),
+            comparison: 'similar',
+            description: 'Ang bilis ng pagsagot ay nasa normal na saklaw'
+          },
+          recommendations: ['Mag-practice pa ng mga katulad na pagsasanay', 'Magbasa nang mabuti ang mga tanong'],
+          encouragement: 'Magaling! Nakumpleto mo ang pagsasanay na ito! Patuloy na mag-practice para mas lalong gumaling!'
+        };
+        setGeminiAnalysis(fallbackAnalysis);
+      } catch (fallbackError) {
+        console.error('Fallback analysis failed:', fallbackError);
+        // Minimal fallback
+        setGeminiAnalysis({
+          overallPerformance: {
+            level: 'good',
+            description: 'Nakumpleto ang pagsusulit',
+            score: performanceData.score
+          },
+          strengths: ['Nakumpleto ang lahat ng tanong'],
+          weaknesses: ['Kailangan pa ng practice'],
+          questionAnalysis: ['Nakasagot nang tama sa lahat ng tanong'],
+          timeAnalysis: {
+            studentTime: Math.round(performanceData.timeSpent / 1000),
+            classAverage: Math.round(performanceData.classAverageTime / 1000),
+            comparison: 'similar',
+            description: 'Normal na bilis'
+          },
+          recommendations: ['Mag-practice pa'],
+          encouragement: 'Magaling!'
+        });
       }
     } catch (error) {
       console.error('Failed to generate Gemini analysis:', error);
@@ -2769,7 +2786,6 @@ Focus on:
       console.error('Camera error:', error);
     }
   };
-
   const handleRegistration = async () => {
     setRegistrationLoading(true);
     
@@ -3380,7 +3396,6 @@ Focus on:
       setSubmittingReport(false);
     }
   };
-
   return (
     <View style={styles.container}>
       <View style={styles.backgroundPattern} />
@@ -4096,7 +4111,6 @@ Focus on:
             )}
           </View>
         )}
-
         {/* History Section - Modern with Quarterly Grouping */}
         {activeSection === 'history' && !showQuestionResult && (
           <View style={styles.historySection}>
@@ -4371,89 +4385,17 @@ Focus on:
                     </View>
                   </View>
                   
-                  <View style={styles.performanceScoreContainer}>
-                    <Text style={styles.performanceScoreNumber}>
-                      {performanceRanking?.currentStudent ? 
-                        Math.round(performanceRanking.currentStudent.overallScore) : 
-                        (selectedResult.scorePercentage || selectedResult.resultsSummary?.meanPercentageScore || 0)
-                      }
+                  {/* Correct Answers Summary - Highlighted */}
+                  <View style={styles.correctAnswersSummary}>
+                    <View style={styles.correctAnswersCountRow}>
+                      <Text style={styles.correctAnswersLabel}>Correct Answers</Text>
+                      <Text style={styles.correctAnswersValue}>
+                        {correctAnswerStats.correct}/{correctAnswerStats.total}
+                      </Text>
+                    </View>
+                    <Text style={styles.correctAnswersPercentage}>
+                      {correctAnswerStats.total > 0 ? `${correctAnswerStats.percentage}% Accuracy` : 'No responses recorded'}
                     </Text>
-                    <Text style={styles.performanceScoreLabel}>PERFORMANCE SCORE</Text>
-                  </View>
-
-                  {/* Performance Metrics Grid */}
-                  <View style={styles.performanceMetricsGrid}>
-                    <View style={styles.performanceMetricItem}>
-                      <Text style={styles.performanceMetricValue}>
-                        {performanceRanking?.currentStudent ? 
-                          `${Math.round(performanceRanking.currentStudent.efficiencyScore)}/100` :
-                          (() => {
-                            const questionResults = selectedResult.questionResults || [];
-                            const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
-                            const totalQuestions = questionResults.length || 1;
-                            const avgAttemptsPerQuestion = totalQuestions > 0 ? totalAttempts / totalQuestions : 0;
-                            let efficiencyScore;
-                            if (avgAttemptsPerQuestion <= 1) efficiencyScore = 100;
-                            else if (avgAttemptsPerQuestion <= 1.5) efficiencyScore = 90;
-                            else if (avgAttemptsPerQuestion <= 2) efficiencyScore = 80;
-                            else if (avgAttemptsPerQuestion <= 2.5) efficiencyScore = 70;
-                            else if (avgAttemptsPerQuestion <= 3) efficiencyScore = 60;
-                            else efficiencyScore = 50;
-                            return `${efficiencyScore}/100`;
-                          })()
-                        }
-                      </Text>
-                      <Text style={styles.performanceMetricLabel}>EFFICIENCY</Text>
-                    </View>
-                    <View style={styles.performanceMetricItem}>
-                      <Text style={styles.performanceMetricValue}>
-                        {performanceRanking?.currentStudent ? 
-                          `${Math.round(performanceRanking.currentStudent.consistencyScore)}/100` :
-                          (() => {
-                            const questionResults = selectedResult.questionResults || [];
-                            const totalQuestions = questionResults.length || 1;
-                            const correctAnswers = questionResults.filter((q: any) => q.isCorrect).length;
-                            const consistencyScore = Math.round((correctAnswers / totalQuestions) * 100);
-                            return `${consistencyScore}/100`;
-                          })()
-                        }
-                      </Text>
-                      <Text style={styles.performanceMetricLabel}>CONSISTENCY</Text>
-                    </View>
-                    <View style={styles.performanceMetricItem}>
-                      <Text style={styles.performanceMetricValue}>
-                        {performanceRanking?.currentStudent ? 
-                          `${Math.round(performanceRanking.currentStudent.masteryScore)}/100` :
-                          (() => {
-                            const questionResults = selectedResult.questionResults || [];
-                            const totalQuestions = questionResults.length || 1;
-                            const correctAnswers = questionResults.filter((q: any) => q.isCorrect).length;
-                            const masteryScore = Math.round((correctAnswers / totalQuestions) * 100);
-                            return `${masteryScore}/100`;
-                          })()
-                        }
-                      </Text>
-                      <Text style={styles.performanceMetricLabel}>MASTERY</Text>
-                    </View>
-                    <View style={styles.performanceMetricItem}>
-                      <Text style={styles.performanceMetricValue}>{selectedResult.totalQuestions || selectedResult.resultsSummary?.totalItems || 3}</Text>
-                      <Text style={styles.performanceMetricLabel}>QUESTIONS</Text>
-                    </View>
-                    <View style={styles.performanceMetricItem}>
-                      <Text style={styles.performanceMetricValue}>
-                        {Math.round((selectedResult.totalTimeSpent || selectedResult.resultsSummary?.totalTimeSpentSeconds * 1000 || 78000) / 1000)}s
-                      </Text>
-                      <Text style={styles.performanceMetricLabel}>DURATION</Text>
-                    </View>
-                    <View style={styles.performanceMetricItem}>
-                      <Text style={styles.performanceMetricValue}>
-                        {selectedResult.resultsSummary?.totalAttempts || 
-                         (selectedResult.questionResults ? 
-                           selectedResult.questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0) : 9)
-                        }
-                      </Text>
-                      <Text style={styles.performanceMetricLabel}>ATTEMPTS</Text>
-                    </View>
                   </View>
 
                   {/* Summary Statistics */}
@@ -4462,9 +4404,14 @@ Focus on:
                       <Text style={styles.summaryStatLabel}>Average Attempts per Question:</Text>
                       <Text style={styles.summaryStatValue}>
                         {(() => {
-                          const questionResults = selectedResult.questionResults || [];
-                          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
-                          const totalQuestions = questionResults.length || 1;
+                          const rawQuestionResults = selectedResult.questionResults;
+                          const questionResults = Array.isArray(rawQuestionResults)
+                            ? rawQuestionResults
+                            : rawQuestionResults && typeof rawQuestionResults === 'object'
+                              ? Object.values(rawQuestionResults)
+                              : [];
+                          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q?.attempts || 1), 0);
+                          const totalQuestions = questionResults.length || selectedResult.totalQuestions || selectedResult.resultsSummary?.totalItems || 1;
                           return (totalQuestions > 0 ? totalAttempts / totalQuestions : 0).toFixed(1);
                         })()}
                       </Text>
@@ -4473,9 +4420,14 @@ Focus on:
                       <Text style={styles.summaryStatLabel}>Average Time per Question:</Text>
                       <Text style={styles.summaryStatValue}>
                         {(() => {
-                          const questionResults = selectedResult.questionResults || [];
-                          const totalTime = questionResults.reduce((sum: number, q: any) => sum + (q.timeSpent || 0), 0);
-                          const totalQuestions = questionResults.length || 1;
+                          const rawQuestionResults = selectedResult.questionResults;
+                          const questionResults = Array.isArray(rawQuestionResults)
+                            ? rawQuestionResults
+                            : rawQuestionResults && typeof rawQuestionResults === 'object'
+                              ? Object.values(rawQuestionResults)
+                              : [];
+                          const totalTime = questionResults.reduce((sum: number, q: any) => sum + (q?.timeSpent || 0), 0);
+                          const totalQuestions = questionResults.length || selectedResult.totalQuestions || selectedResult.resultsSummary?.totalItems || 1;
                           return `${(totalQuestions > 0 ? totalTime / totalQuestions / 1000 : 0).toFixed(0)}s`;
                         })()}
                       </Text>
@@ -4483,12 +4435,9 @@ Focus on:
                     <View style={styles.summaryStatRow}>
                       <Text style={styles.summaryStatLabel}>Correct / Incorrect Count:</Text>
                       <Text style={styles.summaryStatValue}>
-                        {(() => {
-                          const questionResults = selectedResult.questionResults || [];
-                          const correctAnswers = questionResults.filter((q: any) => q.isCorrect).length;
-                          const incorrectAnswers = questionResults.length - correctAnswers;
-                          return `${correctAnswers}/${incorrectAnswers}`;
-                        })()}
+                        {correctAnswerStats.total > 0
+                          ? `${correctAnswerStats.correct}/${correctAnswerStats.incorrect}`
+                          : '0/0'}
                       </Text>
                     </View>
                   </View>
@@ -4857,10 +4806,7 @@ Focus on:
                       </TouchableOpacity>
                     </View>
                   )}
-
                 </View>
-
-
                 {/* Existing Analysis Sections - Keep all existing functionality */}
                 {/* Class Comparison */}
                 {classAverages && (
@@ -4874,32 +4820,24 @@ Focus on:
                     </View>
                     <View style={styles.comparisonRow}>
                       <View style={styles.comparisonItem}>
-                        <Text style={styles.comparisonLabel}>
-                          {performanceRanking?.currentStudent ? 'Your Performance' : 'Your Score'}
-                        </Text>
+                        <Text style={styles.comparisonLabel}>Your Performance</Text>
                         <Text style={styles.comparisonValue}>
-                          {performanceRanking?.currentStudent ? 
-                            Math.round(performanceRanking.currentStudent.overallScore) : 
-                            (selectedResult.scorePercentage || 0)
-                          }
+                          {correctAnswerStats.percentage}%
                         </Text>
                       </View>
                       <View style={styles.comparisonItem}>
-                        <Text style={styles.comparisonLabel}>
-                          {performanceRanking?.currentStudent ? 'Class Average' : 'Class Average'}
-                        </Text>
+                        <Text style={styles.comparisonLabel}>Class Average</Text>
                         <Text style={styles.comparisonValue}>
-                          {performanceRanking?.currentStudent ? 
-                            Math.round(performanceRanking.classStats.averageOverallScore) : 
-                            Math.round(classAverages.averageScore)
-                          }
+                          {classAverages.averageAccuracy || Math.round(classAverages.averageScore) || 0}%
                         </Text>
                       </View>
                     </View>
                     <View style={styles.comparisonRow}>
                       <View style={styles.comparisonItem}>
                         <Text style={styles.comparisonLabel}>Your Time</Text>
-                        <Text style={styles.comparisonValue}>{Math.round((selectedResult.totalTimeSpent || 0) / 1000)}s</Text>
+                        <Text style={styles.comparisonValue}>
+                          {Math.round((selectedResult.totalTimeSpent || selectedResult.resultsSummary?.totalTimeSpentSeconds * 1000 || 0) / 1000)}s
+                        </Text>
                       </View>
                       <View style={styles.comparisonItem}>
                         <Text style={styles.comparisonLabel}>Class Average</Text>
@@ -5550,7 +5488,6 @@ Focus on:
     </View>
   );
 }
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -7938,16 +7875,17 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
   },
-  techReportModalTitleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
   techReportModalTitle: {
     fontSize: 20,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
+  },
+  techReportModalTitleContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
   },
   techReportModalContent: {
     flex: 1,
@@ -9464,6 +9402,29 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#374151',
     letterSpacing: 1,
+  },
+  correctAnswersSummary: {
+    marginBottom: 20,
+  },
+  correctAnswersCountRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  correctAnswersLabel: {
+    fontSize: 12,
+    color: '#374151',
+  },
+  correctAnswersValue: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  correctAnswersPercentage: {
+    fontSize: 12,
+    color: '#374151',
+    textAlign: 'center',
   },
   performanceMetricsGrid: {
     flexDirection: 'row',
