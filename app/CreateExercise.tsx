@@ -20,11 +20,16 @@ import {
   View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
-import { getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
+import { getActiveApiKeys, getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
 import { createExercise } from '../lib/entity-helpers';
 import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
+import {
+  callGeminiWithFallback,
+  extractGeminiText,
+  parseGeminiJson
+} from '../lib/gemini-utils';
 
 // Import ElevenLabs API key management
 
@@ -864,7 +869,6 @@ interface Question {
   recordedTtsUrl?: string; // Teacher-recorded audio (takes priority over ttsAudioUrl)
   ttsStatus?: 'idle' | 'generating' | 'ready' | 'failed'; // TTS generation status
 }
-
 export default function CreateExercise() {
   const router = useRouter();
   
@@ -904,6 +908,36 @@ export default function CreateExercise() {
   useEffect(() => {
     preloadImages();
   }, [preloadImages]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const checkTtsApiKeys = async () => {
+      try {
+        const activeKeys = await getActiveApiKeys();
+        if (!isMounted) return;
+
+        const hasKeys = Array.isArray(activeKeys) && activeKeys.length > 0;
+        setHasActiveTTSKeys(hasKeys);
+        if (!hasKeys) {
+          setGenerateAITTS(false);
+        }
+      } catch (error) {
+        console.warn('Failed to check ElevenLabs API keys:', error);
+        if (isMounted) {
+          setHasActiveTTSKeys(false);
+          setGenerateAITTS(false);
+        }
+      }
+    };
+
+    checkTtsApiKeys();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const { edit } = useLocalSearchParams();
   const [exerciseTitle, setExerciseTitle] = useState('');
   const [exerciseDescription, setExerciseDescription] = useState('');
@@ -911,7 +945,7 @@ export default function CreateExercise() {
   const [exerciseCode, setExerciseCode] = useState('');
   const [exerciseCategory, setExerciseCategory] = useState('');
   const [timeLimitPerItem, setTimeLimitPerItem] = useState<number | null>(120); // Default 2 minutes (120 seconds)
-  const [maxAttemptsPerItem, setMaxAttemptsPerItem] = useState<number | null>(null); // null = unlimited attempts
+  const [maxAttemptsPerItem, setMaxAttemptsPerItem] = useState<number | null>(1); // null = unlimited attempts
   const [questions, setQuestions] = useState<Question[]>([]);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [showCustomCategoryModal, setShowCustomCategoryModal] = useState(false);
@@ -1131,7 +1165,8 @@ export default function CreateExercise() {
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // AI TTS Toggle state (for AI question generator)
-  const [generateAITTS, setGenerateAITTS] = useState(true);
+  const [generateAITTS, setGenerateAITTS] = useState<boolean>(true);
+  const [hasActiveTTSKeys, setHasActiveTTSKeys] = useState<boolean | null>(null);
 
   // Timer for TTS process (generation + upload)
   useEffect(() => {
@@ -1330,7 +1365,6 @@ export default function CreateExercise() {
       console.error('Error fetching teacher data:', error);
     }
   };
-
   const loadExerciseForEdit = async (exerciseId: string) => {
     try {
       setLoading(true);
@@ -1344,7 +1378,13 @@ export default function CreateExercise() {
         setExerciseCode(data.exerciseCode || '');
         setExerciseCategory(data.category || '');
         setTimeLimitPerItem(data.timeLimitPerItem || 120);
-        setMaxAttemptsPerItem(data.maxAttemptsPerItem || null);
+        if (data.maxAttemptsPerItem === null) {
+          setMaxAttemptsPerItem(null);
+        } else if (typeof data.maxAttemptsPerItem === 'number') {
+          setMaxAttemptsPerItem(data.maxAttemptsPerItem);
+        } else {
+          setMaxAttemptsPerItem(1);
+        }
         // Migrate old order arrays to reorderItems structure
         const migratedQuestions = (data.questions || []).map((q: any) => {
           if (q.type === 're-order' && q.order && !q.reorderItems) {
@@ -1681,7 +1721,6 @@ export default function CreateExercise() {
       color: '#ef4444',
     },
   ];
-
   // Dynamic stock image categories - Updated with new Stock-Images categories
   const stockImageCategories = [
     {
@@ -2133,9 +2172,6 @@ export default function CreateExercise() {
     setIsGeneratingQuestions(true);
 
     try {
-      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
-      
-      
       // Get available stock images for reference (without category names)
       const allAvailableImages = Object.keys(stockImages)
         .flatMap(category => stockImages[category].map(img => img.name))
@@ -2169,16 +2205,13 @@ When referencing images, use ONLY the image name itself.
 ✅ ALWAYS write: "Cat"
 ❌ NEVER write: "Numbers: 5"
 ✅ ALWAYS write: "5"
-
 === PREMIUM VISUAL PRESENTATION STANDARDS ===
-
 VISUAL ACCURACY REQUIREMENTS:
 1. **questionImages should provide CONTEXT, NEVER reveal the answer**
 2. Images must be EXACTLY relevant - no approximations or "close enough" matches
 3. The visual should clarify what to look at, not give away the answer
 4. If asking about a specific object, show THAT object (answer is the name/color/count, not the object itself)
 5. Images should support understanding, not just decorate
-
 IMAGE MATCHING PRECISION & WHEN TO USE IMAGES:
 - Question: "Ano ang hugis nito?" → Use questionImages: ["Triangle"] (show shape, answer is the NAME)
 - Question: "Ilan ang mga ito?" → Use questionImages: ["Apple", "Apple", "Apple"] (show objects, answer is the COUNT)
@@ -2476,103 +2509,38 @@ Re-order Example (pattern completion):
 - Only use available stock images by exact name
 - Better no image than wrong image`;
 
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
-      
-      // Retry logic for 503 errors
-      let response;
-      let attempts = 0;
-      const maxAttempts = 10;
-      
-      while (attempts < maxAttempts) {
-        try {
-          response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.8,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 2048,
         },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.8,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: 2048,
-          }
-        })
-      });
+      };
 
-          if (response.ok) {
-            break; // Success, exit retry loop
-          } else if (response.status === 503) {
-            attempts++;
-            console.warn(`API returned 503 (Service Unavailable). Attempt ${attempts}/${maxAttempts}. Retrying in 1 second...`);
-            if (attempts < maxAttempts) {
-              await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-              continue; // Retry
-            } else {
-              const errorText = await response.text();
-              console.error('API Error after max attempts:', response.status, errorText);
-              throw new Error(`API Error: ${response.status} - Service unavailable after ${maxAttempts} attempts`);
-            }
-          } else {
-            // Other error, don't retry
-        const errorText = await response.text();
-        console.error('API Error:', response.status, errorText);
-        throw new Error(`API Error: ${response.status}`);
-          }
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          if (errorMessage.includes('503') && attempts < maxAttempts) {
-            attempts++;
-            console.warn(`Network error during API call. Attempt ${attempts}/${maxAttempts}. Retrying in 1 second...`);
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            continue;
-          } else {
-            throw error; // Re-throw if not a 503 error or max attempts reached
-          }
-        }
-      }
+      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+      console.log('Gemini model used for question generation:', modelUsed);
 
-      if (!response) {
-        throw new Error('Failed to get response from API after all retry attempts');
-      }
-
-      const data = await response.json();
-      
-      const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      
+      const generatedText = extractGeminiText(data);
       if (!generatedText) {
         throw new Error('No content generated by AI');
       }
-      
-      
-      // Clean and extract JSON from the response
-      let cleanText = generatedText.trim();
-      
-      // Remove any markdown formatting
-      cleanText = cleanText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-      
-      // Find JSON array in the response
-      const jsonMatch = cleanText.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) {
-        console.error('No JSON array found in response:', cleanText);
-        throw new Error('No valid JSON array found in AI response');
-      }
 
-      let questionsData;
+      let questionsData: any[];
       try {
-        questionsData = JSON.parse(jsonMatch[0]);
+        questionsData = parseGeminiJson<any[]>(generatedText);
       } catch (parseError) {
         console.error('JSON Parse Error:', parseError);
-        console.error('Raw JSON string:', jsonMatch[0]);
+        console.error('Raw Gemini response:', generatedText);
         throw new Error('Invalid JSON format from AI response');
       }
       
@@ -2596,7 +2564,6 @@ Re-order Example (pattern completion):
         }
         return null;
       };
-
       // Convert to Question objects with proper validation and image assignment
       const newQuestions: Question[] = questionsData.map((q: any, index: number) => {
         // Validate required fields
@@ -3024,12 +2991,9 @@ Re-order Example (pattern completion):
         setIsGeneratingQuestions(false);
         return;
       }
-      
       // Generate TTS audio for all new questions sequentially to avoid rate limits
       setIsGeneratingTTS(true);
-      
       // TTS generation will run in background without blocking modal
-      
       // Process questions in batches of 2 using the same API key, then randomly select next key
       const processTTSSequentially = async () => {
         // Initialize progress tracking
@@ -3332,7 +3296,6 @@ Re-order Example (pattern completion):
   // TTS Preprocessing Function - Direct Gemini API call
   const preprocessTextForTTS = async (text: string): Promise<string> => {
     try {
-      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
       const prompt = `Enhance this text for Text-to-Speech by improving punctuation and rhythm for natural speech delivery.
 
       Rules:
@@ -3341,49 +3304,38 @@ Re-order Example (pattern completion):
       3. Make it sound lively, like a cheerful Grade 1 teacher or storyteller.
       4. Keep the original language (about 90% Filipino, 10% English mix).
       5. Maintain natural expressions suited for young learners.
-      6. Do NOT include “Ok class” since this will play per student.
+      6. Do NOT include "Ok class" since this will play per student.
       7. Do NOT reveal answers — give hints only.
-      8. Avoid using too many English words. Prioritize simple Filipino that’s easy for Grade 1 pupils.
+      8. Avoid using too many English words. Prioritize simple Filipino that's easy for Grade 1 pupils.
       
       Original text: "${text}"
       
       Enhanced text:`;
       
-
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: [
+      const requestBody = {
+        contents: [
+          {
+            parts: [
               {
-                parts: [
-                  {
-                    text: prompt
-                  }
-                ]
-              }
-            ]
-          })
-        }
-      );
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.5,
+          topP: 0.9,
+          maxOutputTokens: 256,
+        },
+      };
 
-      if (!response.ok) {
-        console.warn('⚠️ Gemini API failed, using original text');
-        return text;
-      }
+      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+      console.log('Gemini model used for TTS preprocessing:', modelUsed);
 
-      const data = await response.json();
-      let processedText = data.candidates?.[0]?.content?.parts?.[0]?.text || text;
-      console.log('Processed text:', processedText);
-      
+      const processedText = extractGeminiText(data) || text;
       return processedText.trim();
-      
     } catch (error) {
-      console.warn('⚠️ Gemini preprocessing failed, using original text');
+      console.warn('⚠️ Gemini preprocessing failed, using original text', error);
       return text;
     }
   };
@@ -3401,7 +3353,6 @@ Re-order Example (pattern completion):
     // Generate new TTS
     await generateTTS(text, true);
   };
-
   // TTS Functions
   const generateTTS = async (text: string, isRegenerate: boolean = false) => {
     if (!text.trim()) {
@@ -3811,7 +3762,6 @@ Re-order Example (pattern completion):
       return isMainQuestionFailed || hasFailedSubQuestions;
     });
   };
-
   // Function to retry all failed TTS generations
   const retryAllFailedTTS = async () => {
     const failedQuestions = getFailedTTSQuestions();
@@ -3930,8 +3880,6 @@ Re-order Example (pattern completion):
     setImproveError(null);
 
     try {
-      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
-      
       const prompt = `You are an expert educational content writer for Grade 1 students. Rewrite the following exercise title and description to make them engaging and appealing.
 
 Current Title: "${exerciseTitle}"
@@ -3959,52 +3907,40 @@ Please respond with a JSON object in this exact format:
   "title": "Short 3-word title here",
   "description": "Short 2-3 sentence description here"
 }`;
-
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
-      
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.7,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 1024,
         },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: 1024,
-          }
-        }),
-      });
+      };
 
-      if (!response.ok) {
-        throw new Error(`API request failed: ${response.status}`);
-      }
+      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+      console.log('Gemini model used for exercise improvement:', modelUsed);
 
-      const data = await response.json();
-      
-      if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+      const responseText = extractGeminiText(data);
+      if (!responseText) {
         throw new Error('Invalid response from AI service');
       }
 
-      const responseText = data.candidates[0].content.parts[0].text;
-      
-      // Extract JSON from response
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
+      let improvedData: any;
+      try {
+        improvedData = parseGeminiJson<any>(responseText);
+      } catch (parseError) {
+        console.error('JSON Parse Error (improveExerciseDetails):', parseError);
+        console.error('Raw Gemini response:', responseText);
         throw new Error('Could not parse AI response');
       }
-
-      const improvedData = JSON.parse(jsonMatch[0]);
       
       if (improvedData.title) {
         setExerciseTitle(improvedData.title);
@@ -4015,7 +3951,15 @@ Please respond with a JSON object in this exact format:
 
     } catch (error) {
       console.error('Error improving exercise details:', error);
-      setImproveError('Failed to improve description. Please try again.');
+      const message = error instanceof Error ? error.message : 'Failed to improve description.';
+      const lowerMessage = message.toLowerCase();
+      setImproveError(
+        lowerMessage.includes('gemini') ||
+        lowerMessage.includes('api request') ||
+        lowerMessage.includes('invalid response')
+        ? 'Gemini is unavailable right now. Please check your API access or try again later.'
+        : 'Failed to improve description. Please try again.'
+      );
     } finally {
       setIsImprovingDescription(false);
     }
@@ -4304,7 +4248,6 @@ Please respond with a JSON object in this exact format:
     setRecordingDuration(0);
     startRecording();
   };
-
   const saveRecordedVoice = async () => {
     if (!recordedAudioUri || !recordingQuestionId) return;
 
@@ -4787,7 +4730,6 @@ Please respond with a JSON object in this exact format:
       showCustomAlert('Error', 'Failed to pick a file');
     }
   };
-
   const uploadResourceFile = async (): Promise<string | null> => {
     if (!resourceFile) return null;
     try {
@@ -4807,7 +4749,6 @@ Please respond with a JSON object in this exact format:
       setUploading(false);
     }
   };
-
   const openStockImageModal = (context: {
     questionId: string;
     optionIndex?: number;
@@ -5261,7 +5202,6 @@ Please respond with a JSON object in this exact format:
       }
     }
   };
-
   // Helper function to sort reorder items based on direction
   const sortReorderItems = (items: ReorderItem[], direction: 'asc' | 'desc' = 'asc'): ReorderItem[] => {
     if (!items || items.length === 0) return items;
@@ -5723,7 +5663,6 @@ Please respond with a JSON object in this exact format:
                   </View>
                 </View>
               )}
-
               {editingQuestion.type === 'multiple-choice' && (
                 <View style={styles.inputGroup}>
                   <Text style={styles.inputLabel}>Answer Options</Text>
@@ -6067,7 +6006,6 @@ Please respond with a JSON object in this exact format:
                   </TouchableOpacity>
                 </View>
               )}
-
               {editingQuestion.type === 're-order' && (
                 <View style={styles.inputGroup}>
                   <Text style={styles.inputLabel}>Items to Reorder</Text>
@@ -6497,7 +6435,6 @@ Please respond with a JSON object in this exact format:
                             </View>
                           </View>
                         )}
-
                         {sub.type === 'matching' && (
                           <View style={styles.inputGroup}>
                             <Text style={styles.inputLabel}>Matching Pairs</Text>
@@ -6983,7 +6920,6 @@ Please respond with a JSON object in this exact format:
       </View>
     );
   }
-
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
@@ -7138,7 +7074,7 @@ Please respond with a JSON object in this exact format:
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.timeLimitOption, maxAttemptsPerItem !== null && styles.timeLimitOptionActive]}
-                onPress={() => setMaxAttemptsPerItem(3)}
+                onPress={() => setMaxAttemptsPerItem(1)}
               >
                 <MaterialCommunityIcons name="repeat" size={20} color={maxAttemptsPerItem !== null ? "#ffffff" : "#64748b"} />
                 <Text style={[styles.timeLimitText, maxAttemptsPerItem !== null && styles.timeLimitTextActive]}>Set Limit</Text>
@@ -7165,7 +7101,7 @@ Please respond with a JSON object in this exact format:
                       }
                     }}
                     keyboardType="numeric"
-                    placeholder="3"
+                    placeholder="1"
                   />
                   <TouchableOpacity
                     style={styles.timeLimitButton}
@@ -7433,12 +7369,27 @@ Please respond with a JSON object in this exact format:
                     </View>
                   </View>
                   <TouchableOpacity
-                    style={[styles.aiTTSToggle, generateAITTS && styles.aiTTSToggleActive]}
-                    onPress={() => setGenerateAITTS(!generateAITTS)}
-                  >
-                    <View style={[styles.aiTTSToggleThumb, generateAITTS && styles.aiTTSToggleThumbActive]} />
-                  </TouchableOpacity>
-                </View>
+                    style={[styles.aiTTSToggle, generateAITTS && styles.aiTTSToggleActive, hasActiveTTSKeys === false && styles.aiTTSToggleDisabled]}
+                    onPress={() => {
+                      if (hasActiveTTSKeys === false) {
+                        showCustomAlert(
+                          'ElevenLabs Unavailable',
+                          'No active ElevenLabs API key is available. Add or reactivate a key in Firebase to enable AI-generated TTS.'
+                        );
+                        return;
+                      }
+                      setGenerateAITTS(!generateAITTS);
+                    }}
+                    disabled={hasActiveTTSKeys === false}
+                   >
+                     <View style={[styles.aiTTSToggleThumb, generateAITTS && styles.aiTTSToggleThumbActive]} />
+                   </TouchableOpacity>
+                 </View>
+                {hasActiveTTSKeys === false && (
+                  <Text style={styles.aiTTSToggleWarning}>
+                    ElevenLabs API keys are not available, so TTS generation is turned off.
+                  </Text>
+                )}
 
                 <View style={styles.aiModalRow}>
                   <View style={styles.aiModalInputGroup}>
@@ -8269,7 +8220,6 @@ Please respond with a JSON object in this exact format:
                 contentContainerStyle={styles.horizontalImageContainer}
               />
             </View>
-
             {/* Comparing Quantities Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Comparing Quantities</Text>
@@ -8731,7 +8681,6 @@ Please respond with a JSON object in this exact format:
                 contentContainerStyle={styles.horizontalImageContainer}
               />
             </View>
-
             {/* Numbers Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Numbers</Text>
@@ -9200,7 +9149,6 @@ Please respond with a JSON object in this exact format:
     </View>
   );
 }
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -12082,5 +12030,14 @@ const styles = StyleSheet.create({
   },
   aiTTSToggleThumbActive: {
     transform: [{ translateX: 24 }],
+  },
+  aiTTSToggleDisabled: {
+    backgroundColor: '#e2e8f0',
+  },
+  aiTTSToggleWarning: {
+    fontSize: 12,
+    color: '#ef4444',
+    marginTop: 4,
+    textAlign: 'center',
   },
 });

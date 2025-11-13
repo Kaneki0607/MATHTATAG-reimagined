@@ -88,9 +88,45 @@ export default function TeacherLogin() {
 
 
 
+  const getFriendlyAuthMessage = (rawMessage?: string | null) => {
+    if (!rawMessage) {
+      return 'Something went wrong while signing you in. Please try again.';
+    }
+
+    const message = rawMessage.toLowerCase();
+
+    if (
+      message.includes('invalid-credential') ||
+      message.includes('invalid credential') ||
+      message.includes('wrong-password') ||
+      message.includes('invalid password') ||
+      message.includes('invalid login')
+    ) {
+      return 'The email or password you entered is incorrect. Please check and try again.';
+    }
+
+    if (message.includes('user-not-found') || message.includes('user not found')) {
+      return "We couldn't find an account with that email. Double-check the address or sign up.";
+    }
+
+    if (message.includes('user-disabled') || message.includes('user disabled')) {
+      return 'This account is currently disabled. Please contact support for help.';
+    }
+
+    if (message.includes('too-many-requests') || message.includes('too many attempts')) {
+      return 'Too many sign-in attempts. Wait a moment and try again.';
+    }
+
+    if (message.includes('network-request-failed') || message.includes('network error')) {
+      return 'Check your internet connection and try again.';
+    }
+
+    return 'Something went wrong while signing you in. Please try again.';
+  };
+
   const handleLogin = async () => {
     if (!email || !password) {
-      Alert.alert('Error', 'Please enter both email and password.');
+      Alert.alert('Sign-in reminder', 'Enter your email and password to sign in.');
       return;
     }
 
@@ -104,7 +140,7 @@ export default function TeacherLogin() {
           setUnverifiedUser(unverified);
           setShowVerificationModal(true);
         } else {
-          Alert.alert('Login Error', error);
+          Alert.alert('Sign-in issue', getFriendlyAuthMessage(error));
         }
         setLoading(false);
         return;
@@ -116,7 +152,7 @@ export default function TeacherLogin() {
         
         if (teacherError) {
           console.error('Error fetching teacher data:', teacherError);
-          Alert.alert('Error', 'Failed to verify account status. Please try again.');
+          Alert.alert('Sign-in issue', "We couldn't check your account right now. Please try again in a moment.");
           setLoading(false);
           return;
         }
@@ -148,12 +184,12 @@ export default function TeacherLogin() {
           setCurrentUserId(user.uid);
           router.replace('/TeacherDashboard');
         } else {
-          Alert.alert('Error', 'Teacher account not found. Please contact support.');
+          Alert.alert('Sign-in issue', "We couldn't find your teacher account. Please reach out to support for help.");
           setLoading(false);
         }
       }
     } catch (error) {
-      Alert.alert('Error', 'An unexpected error occurred during login.');
+      Alert.alert('Sign-in issue', 'Something unexpected happened. Please try signing in again.');
     } finally {
       setLoading(false);
     }

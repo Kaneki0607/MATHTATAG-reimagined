@@ -11,26 +11,26 @@ import * as Speech from 'expo-speech';
 // import * as Network from 'expo-network';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Animated,
-    Dimensions,
-    Easing,
-    Image,
-    ImageBackground,
-    LayoutAnimation,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  Animated,
+  Dimensions,
+  Easing,
+  Image,
+  ImageBackground,
+  LayoutAnimation,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import { collectAppMetadata } from '../lib/app-metadata';
 import { logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
 import { generateResultId } from '../lib/id-generator';
 import {
-    validateAndRepairExerciseResult
+  validateAndRepairExerciseResult
 } from '../lib/result-validation-utils';
 
 // Structured logging helpers (toggleable)
@@ -1137,7 +1137,7 @@ interface ExerciseInfo {
   category: string;
   description: string;
   totalQuestions: number;
-  timeLimitPerItem?: number;
+  timeLimitPerItem: number | null;
 }
 
 interface StudentInfo {
@@ -4376,7 +4376,7 @@ export default function StudentExerciseAnswering() {
         category: exerciseData?.category || 'Unknown Category',
         description: exercise?.description || exerciseData?.description || '',
         totalQuestions: totalQuestions,
-        timeLimitPerItem: exercise?.timeLimitPerItem || exerciseData?.timeLimitPerItem
+        timeLimitPerItem: exercise?.timeLimitPerItem ?? exerciseData?.timeLimitPerItem ?? null
       };
       
       // Create student info (use state or fallback)

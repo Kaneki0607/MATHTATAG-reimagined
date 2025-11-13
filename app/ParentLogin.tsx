@@ -229,7 +229,7 @@ export default function ParentLogin() {
     
     // Simple validation
     if (!parentKey.trim()) {
-      setError('Please enter a Parent Key.');
+      setError('Enter your Parent Key to continue.');
       setLoading(false);
       return;
     }
@@ -239,7 +239,7 @@ export default function ParentLogin() {
       const parentIdResult = await readData(`/parentLoginCodes/${parentKey.trim()}`);
       
       if (!parentIdResult.data) {
-        setError('Invalid parent key. Please contact your teacher.');
+        setError("We can't find that Parent Key. Double-check with your teacher and try again.");
         setLoading(false);
         return;
       }
@@ -262,7 +262,7 @@ export default function ParentLogin() {
       }
     } catch (error) {
       setLoading(false);
-      setError('Failed to verify parent key. Please try again.');
+      setError("We couldn't verify your Parent Key right now. Please try again in a moment.");
     }
   };
 
