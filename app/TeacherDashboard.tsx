@@ -294,8 +294,9 @@ Focus on:
 4. Specific question performance
 5. Age-appropriate recommendations
 6. Positive reinforcement
-
-
+LANGUAGE RULES:
+- Always spell out all numbers in proper modern Tagalog words (hal. 12 → "labindalawa", 21 → "dalawampu't isa").
+- Huwag gumamit ng digits na hinaluan ng Tagalog o Spanish shortcuts tulad ng "dose" o "bente".
 
 Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
 
@@ -4997,8 +4998,9 @@ Focus on:
 5. Age-appropriate recommendations
 
 6. Positive reinforcement
-
-
+LANGUAGE RULES:
+- Always spell out all numbers in proper modern Tagalog words (hal. 12 → "labindalawa", 21 → "dalawampu't isa").
+- Iwasan ang digits na hinaluan ng Tagalog o Spanish shortcuts gaya ng "dose" o "bente".
 
 Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
 

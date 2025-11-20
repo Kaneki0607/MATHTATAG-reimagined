@@ -5391,8 +5391,7 @@ export default function StudentExerciseAnswering() {
                       logAttempt(question, optionValue, 'final');
                       syncAttemptCount(question.id);
                       // FIXED: Don't increment attempts on correct answer
-                      console.log('[MC-Grid-Correct] Answer correct on first try - no attempt logged');
-                      logAttempt(question, optionValue, 'final');
+                      console.log('[MC-Grid-Correct] Answer correct on first try - single final attempt recorded');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
                     }

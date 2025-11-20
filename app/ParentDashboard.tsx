@@ -296,6 +296,91 @@ interface Task {
   studentGradeSection?: string;
 }
 
+interface RMAAStatus {
+  code: 'R' | 'M' | 'A' | 'AA';
+  label: string;
+  description: string;
+  interventions: string[];
+  encouragement: string;
+  accentColor: string;
+  backgroundColor: string;
+}
+
+const getPerformanceRemarks = (score: number): string => {
+  const normalizedScore = Number.isFinite(score) ? score : 0;
+  if (normalizedScore >= 85) return 'Highly Proficient';
+  if (normalizedScore >= 75) return 'Proficient';
+  if (normalizedScore >= 50) return 'Nearly Proficient';
+  if (normalizedScore >= 25) return 'Low Proficient';
+  return 'Not Proficient';
+};
+
+const getRMAAStatus = (score: number): RMAAStatus => {
+  const normalizedScore = Number.isFinite(score) ? score : 0;
+
+  if (normalizedScore >= 90) {
+    return {
+      code: 'AA',
+      label: 'Advanced',
+      description: 'Handa na sa mas mahihirap na gawain at kailangang bigyan ng enrichment activities.',
+      interventions: [
+        'Magbigay ng mas hamong word problems o logic puzzles',
+        'Hikayating ipaliwanag niya ang konsepto sa kapatid o kaklase',
+        'Panatilihin ang regular na schedule ng independent practice'
+      ],
+      encouragement: 'Ipagpatuloy ang paghamon sa sarili—ang galing mo!',
+      accentColor: '#16a34a',
+      backgroundColor: '#dcfce7',
+    };
+  }
+
+  if (normalizedScore >= 75) {
+    return {
+      code: 'A',
+      label: 'Approaching Mastery',
+      description: 'Malapit nang makamit ang mastery. Kailangan lamang ng tuloy-tuloy na pagsasanay.',
+      interventions: [
+        'Mag-review ng maling sagot at alamin kung bakit',
+        'Maglaan ng karagdagang 10-15 minutong drills bawat araw',
+        'Gamitin ang tunay na sitwasyon (pera, oras, sukatan) sa pag-eensayo'
+      ],
+      encouragement: 'Konting push na lang! Malapit nang makamit ang mastery.',
+      accentColor: '#2563eb',
+      backgroundColor: '#dbeafe',
+    };
+  }
+
+  if (normalizedScore >= 60) {
+    return {
+      code: 'M',
+      label: 'Monitoring',
+      description: 'May pag-unlad ngunit kailangan pang bantayan upang mas maging consistent.',
+      interventions: [
+        'Gumawa ng maikling daily review (5 tanong bawat gabi)',
+        'Gamitin ang manipulatives o drawing para mas maintindihan ang tanong',
+        'I-monitor ang oras ng pagsagot upang maiwasan ang pagmamadali'
+      ],
+      encouragement: 'Nakikita ang progreso—ituloy ang mahinahong pagkatuto.',
+      accentColor: '#f59e0b',
+      backgroundColor: '#fef3c7',
+    };
+  }
+
+  return {
+    code: 'R',
+    label: 'Remediation',
+    description: 'Kailangan ng agarang gabay at pagbalik sa pundamental na konsepto.',
+    interventions: [
+      'Balikan ang mga aralin gamit ang konkretong bagay o larawan',
+      'Gumawa ng guided practice kasama ang magulang o guro',
+      'Hatiin ang mahirap na tanong sa mas maliliit na hakbang'
+    ],
+    encouragement: 'Simulan muli nang dahan-dahan—kasama ninyo ang guro sa proseso.',
+    accentColor: '#dc2626',
+    backgroundColor: '#fee2e2',
+  };
+};
+
 const { width: staticWidth, height: staticHeight } = Dimensions.get('window');
 
 interface CustomAlertProps {
@@ -616,6 +701,9 @@ export default function ParentDashboard() {
   const [classAverages, setClassAverages] = useState<any>(null);
   const [performanceRanking, setPerformanceRanking] = useState<any>(null);
   
+  // Latest exercise result data for RMAA Status
+  const [latestExerciseResult, setLatestExerciseResult] = useState<any>(null);
+  
   // Detailed History Modal state
   const [dailyQuote, setDailyQuote] = useState<{quote: string, author: string} | null>(null);
   
@@ -664,6 +752,106 @@ export default function ParentDashboard() {
       percentage,
     };
   }, [selectedResult]);
+
+  const latestCompletedExerciseTask = useMemo(() => {
+    const completedExercises = tasks
+      .filter(
+        (task) =>
+          task.isAssignedExercise &&
+          task.status === 'completed' &&
+          typeof task.score === 'number' &&
+          task.resultId // Only include tasks with resultId (analyzed results)
+      )
+      .sort((a, b) => {
+        const aDate = new Date(a.completedAt || a.createdAt || 0).getTime();
+        const bDate = new Date(b.completedAt || b.createdAt || 0).getTime();
+        return bDate - aDate;
+      });
+    return completedExercises[0] || null;
+  }, [tasks]);
+
+  // Fetch latest exercise result data when latestCompletedExerciseTask changes
+  useEffect(() => {
+    const fetchLatestExerciseResult = async () => {
+      if (!latestCompletedExerciseTask?.resultId) {
+        setLatestExerciseResult(null);
+        return;
+      }
+
+      try {
+        const resultData = await readData(`/ExerciseResults/${latestCompletedExerciseTask.resultId}`);
+        if (resultData.data) {
+          // Check if result has been properly analyzed (has resultsSummary with meanPercentageScore)
+          const hasAnalyzedData = resultData.data.resultsSummary?.meanPercentageScore !== undefined ||
+                                  resultData.data.scorePercentage !== undefined;
+          
+          if (hasAnalyzedData) {
+            setLatestExerciseResult(resultData.data);
+          } else {
+            setLatestExerciseResult(null);
+          }
+        } else {
+          setLatestExerciseResult(null);
+        }
+      } catch (error) {
+        console.error('Failed to fetch latest exercise result:', error);
+        setLatestExerciseResult(null);
+      }
+    };
+
+    fetchLatestExerciseResult();
+  }, [latestCompletedExerciseTask?.resultId]);
+
+  // Use actual result data score instead of task score
+  const latestCompletedScore = useMemo(() => {
+    if (latestExerciseResult) {
+      // Prefer resultsSummary.meanPercentageScore, fallback to scorePercentage
+      return latestExerciseResult.resultsSummary?.meanPercentageScore ?? 
+             latestExerciseResult.scorePercentage ?? 
+             null;
+    }
+    // Fallback to task score if result data not available
+    if (latestCompletedExerciseTask && typeof latestCompletedExerciseTask.score === 'number') {
+      return latestCompletedExerciseTask.score;
+    }
+    return null;
+  }, [latestExerciseResult, latestCompletedExerciseTask]);
+
+  const latestRMAAStatus = useMemo(() => {
+    if (latestCompletedScore === null || !latestExerciseResult) {
+      return null;
+    }
+    return getRMAAStatus(latestCompletedScore);
+  }, [latestCompletedScore, latestExerciseResult]);
+
+  const latestRemarks = useMemo(() => {
+    if (latestCompletedScore === null || !latestExerciseResult) {
+      return null;
+    }
+    // Use remarks from result if available, otherwise calculate
+    return latestExerciseResult.resultsSummary?.remarks || 
+           getPerformanceRemarks(latestCompletedScore);
+  }, [latestCompletedScore, latestExerciseResult]);
+
+  const selectedResultScore = useMemo(() => {
+    if (!selectedResult) return 0;
+    return (
+      selectedResult.scorePercentage ??
+      selectedResult.resultsSummary?.meanPercentageScore ??
+      selectedResult.resultsSummary?.score ??
+      0
+    );
+  }, [selectedResult]);
+
+  const selectedResultRMAAStatus = useMemo(() => {
+    if (!selectedResult) return null;
+    return getRMAAStatus(selectedResultScore);
+  }, [selectedResult, selectedResultScore]);
+
+  const selectedResultRemarks = useMemo(() => {
+    if (!selectedResult) return '';
+    return selectedResult.resultsSummary?.remarks || getPerformanceRemarks(selectedResultScore);
+  }, [selectedResult, selectedResultScore]);
   
   // Profile modal state
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -1111,10 +1299,13 @@ export default function ParentDashboard() {
             category: resultData.data.exerciseCategory || 'Mathematics'
           },
           // Ensure assignmentMetadata is present
-          assignmentMetadata: resultData.data.assignmentMetadata || {
-            assignedExerciseId: task.assignedExerciseId || resultData.data.assignedExerciseId,
-            classId: task.classIds?.[0] || resultData.data.classId,
-            parentId: resultData.data.parentId
+          assignmentMetadata: {
+            ...(resultData.data.assignmentMetadata || {}),
+            assignedExerciseId: resultData.data.assignmentMetadata?.assignedExerciseId || task.assignedExerciseId || resultData.data.assignedExerciseId,
+            classId: resultData.data.assignmentMetadata?.classId || task.classIds?.[0] || resultData.data.classId,
+            parentId: resultData.data.assignmentMetadata?.parentId || resultData.data.parentId,
+            deadline: resultData.data.assignmentMetadata?.deadline || task.dueDate,
+            acceptLateSubmissions: resultData.data.assignmentMetadata?.acceptLateSubmissions ?? true
           }
         };
         
@@ -2099,7 +2290,10 @@ Focus on:
 3. Analyze patterns in the actual questions answered
 4. Provide specific guidance based on the question types and content
 5. Make recommendations relevant to the specific skills tested
-6. Cultural sensitivity for Filipino families`;
+6. Cultural sensitivity for Filipino families
+LANGUAGE RULES:
+- Always spell out all numbers in proper modern Tagalog words (hal. 12 → "labindalawa", 21 → "dalawampu't isa").
+- Huwag gumamit ng halo-halong digits at Tagalog o Spanish shortcuts gaya ng "dose" o "bente".`;
 
       const requestBody = {
         contents: [{
@@ -3585,6 +3779,76 @@ Focus on:
               </View>
             </View>
 
+            {/* RMAA Status Snapshot */}
+            <View style={styles.rmaaSection}>
+              <View style={styles.sectionHeaderRow}>
+                <View style={styles.modernSectionLabelContainer}>
+                  <MaterialCommunityIcons name="shield-star" size={24} color="#3b82f6" />
+                  <Text style={styles.modernSectionLabel}>RMAA Status</Text>
+                </View>
+                {latestCompletedExerciseTask?.resultId && latestExerciseResult && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      setActiveSection('history');
+                      handleShowQuestionResult(latestCompletedExerciseTask);
+                    }}
+                  >
+                    <Text style={styles.modernSeeAllText}>Tingnan Resulta →</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {latestCompletedExerciseTask && latestExerciseResult && latestRMAAStatus && latestRemarks ? (
+                <View style={[styles.rmaaCard, { borderColor: latestRMAAStatus.accentColor }]}>
+                  <View style={styles.rmaaBadgeRow}>
+                    <View style={[styles.rmaaBadge, { backgroundColor: latestRMAAStatus.backgroundColor }]}>
+                      <Text style={[styles.rmaaBadgeCode, { color: latestRMAAStatus.accentColor }]}>{latestRMAAStatus.code}</Text>
+                      <Text style={[styles.rmaaBadgeLabel, { color: latestRMAAStatus.accentColor }]}>{latestRMAAStatus.label}</Text>
+                    </View>
+                    <Text style={styles.rmaaRecentExercise} numberOfLines={1}>
+                      {latestCompletedExerciseTask.title}
+                    </Text>
+                  </View>
+
+                  <View style={styles.rmaaScoreRow}>
+                    <Text style={[styles.rmaaScoreValue, { color: latestRMAAStatus.accentColor }]}>
+                      {Math.round(latestCompletedScore ?? 0)}%
+                    </Text>
+                    <View style={styles.rmaaRemarksPill}>
+                      <MaterialIcons name="military-tech" size={14} color="#ffffff" />
+                      <Text style={styles.rmaaRemarksText}>{latestRemarks}</Text>
+                    </View>
+                  </View>
+
+                  <Text style={styles.rmaaDescription}>{latestRMAAStatus.description}</Text>
+                  <View style={styles.rmaaInterventionsList}>
+                    {latestRMAAStatus.interventions.slice(0, 2).map((tip, index) => (
+                      <View
+                        key={`${latestRMAAStatus.code}-tip-${index}`}
+                        style={styles.rmaaInterventionItem}
+                      >
+                        <MaterialCommunityIcons
+                          name="lightbulb-on"
+                          size={14}
+                          color={latestRMAAStatus.accentColor}
+                        />
+                        <Text style={styles.rmaaInterventionText}>{tip}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={styles.rmaaEncouragement}>{latestRMAAStatus.encouragement}</Text>
+                </View>
+              ) : (
+                <View style={styles.rmaaEmptyCard}>
+                  <MaterialCommunityIcons name="chart-timeline-variant" size={32} color="#cbd5e1" />
+                  <Text style={styles.rmaaEmptyText}>Wala pang natapos na resulta.</Text>
+                  <Text style={styles.rmaaEmptySubtext}>
+                    Kapag may score na ang bata at na-analyze na, lalabas dito ang kanyang RMAA status.
+                  </Text>
+                </View>
+              )}
+            </View>
+
             {/* Active Subjects/Exercises */}
             <View style={[styles.activeSection, { marginBottom: 8 }]}>
               <View style={styles.sectionHeaderRow}>
@@ -4307,9 +4571,46 @@ Focus on:
                         'Oct 19, 2025 - 9:02PM'
                       }
                     </Text>
-                    <View style={styles.onTimeBadge}>
-                      <Text style={styles.onTimeText}>On-Time</Text>
-                    </View>
+                    {(() => {
+                      // Calculate submission status: On-Time or Late
+                      const completedAt = selectedResult.exerciseSession?.completedAt || 
+                                        selectedResult.submittedAt || 
+                                        selectedResult.completedAt;
+                      const deadline = selectedResult.assignmentMetadata?.deadline || 
+                                     selectedResult.dueDate;
+                      const acceptLateSubmissions = selectedResult.assignmentMetadata?.acceptLateSubmissions ?? true;
+                      
+                      let submissionStatus: 'On-Time' | 'Late' | 'Unknown' = 'Unknown';
+                      let statusColor = '#64748b';
+                      
+                      if (completedAt && deadline) {
+                        const completedDate = new Date(completedAt);
+                        const deadlineDate = new Date(deadline);
+                        
+                        if (completedDate <= deadlineDate) {
+                          submissionStatus = 'On-Time';
+                          statusColor = '#10b981';
+                        } else if (acceptLateSubmissions) {
+                          submissionStatus = 'Late';
+                          statusColor = '#f59e0b';
+                        } else {
+                          submissionStatus = 'Late';
+                          statusColor = '#ef4444';
+                        }
+                      } else if (completedAt) {
+                        // If no deadline, assume on-time
+                        submissionStatus = 'On-Time';
+                        statusColor = '#10b981';
+                      }
+                      
+                      return (
+                        <View style={[styles.onTimeBadge, { backgroundColor: statusColor === '#10b981' ? '#dcfce7' : statusColor === '#f59e0b' ? '#fef3c7' : '#fee2e2' }]}>
+                          <Text style={[styles.onTimeText, { color: statusColor }]}>
+                            {submissionStatus === 'On-Time' ? 'On-Time' : submissionStatus === 'Late' ? 'Late' : '—'}
+                          </Text>
+                        </View>
+                      );
+                    })()}
                   </View>
                   <View style={styles.studentStatusRow}>
                     <View style={[
@@ -4352,6 +4653,80 @@ Focus on:
                     </Text>
                   </View>
                 </View>
+
+                {selectedResultRMAAStatus && (
+                  <View style={styles.rmaaDetailCard}>
+                    <View style={styles.rmaaDetailHeader}>
+                      <Text style={styles.rmaaDetailTitle}>RMAA Status</Text>
+                      <View
+                        style={[
+                          styles.rmaaDetailBadge,
+                          {
+                            backgroundColor: selectedResultRMAAStatus.backgroundColor,
+                            borderColor: selectedResultRMAAStatus.accentColor,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.rmaaDetailBadgeCode,
+                            { color: selectedResultRMAAStatus.accentColor },
+                          ]}
+                        >
+                          {selectedResultRMAAStatus.code}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.rmaaDetailBadgeLabel,
+                            { color: selectedResultRMAAStatus.accentColor },
+                          ]}
+                        >
+                          {selectedResultRMAAStatus.label}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.rmaaDetailStatsRow}>
+                      <View style={styles.rmaaDetailStat}>
+                        <Text style={styles.rmaaDetailStatLabel}>Score</Text>
+                        <Text
+                          style={[
+                            styles.rmaaDetailStatValue,
+                            { color: selectedResultRMAAStatus.accentColor },
+                          ]}
+                        >
+                          {Math.round(selectedResultScore)}%
+                        </Text>
+                      </View>
+                      <View style={styles.rmaaDetailStat}>
+                        <Text style={styles.rmaaDetailStatLabel}>Remarks</Text>
+                        <Text style={styles.rmaaDetailStatValue}>{selectedResultRemarks}</Text>
+                      </View>
+                      <View style={styles.rmaaDetailStat}>
+                        <Text style={styles.rmaaDetailStatLabel}>Status</Text>
+                        <Text style={styles.rmaaDetailStatValue}>{selectedResultRMAAStatus.label}</Text>
+                      </View>
+                    </View>
+
+                    <Text style={styles.rmaaDetailDescription}>
+                      {selectedResultRMAAStatus.description}
+                    </Text>
+
+                    <View style={styles.rmaaDetailInterventions}>
+                      {selectedResultRMAAStatus.interventions.map((tip, index) => (
+                        <View key={`rmaa-detail-tip-${index}`} style={styles.rmaaDetailInterventionItem}>
+                          <MaterialCommunityIcons
+                            name="check-circle"
+                            size={14}
+                            color={selectedResultRMAAStatus.accentColor}
+                          />
+                          <Text style={styles.rmaaDetailInterventionText}>{tip}</Text>
+                        </View>
+                      ))}
+                    </View>
+                    <Text style={styles.rmaaEncouragement}>{selectedResultRMAAStatus.encouragement}</Text>
+                  </View>
+                )}
 
                 {/* Performance Overview Card */}
                 <View style={styles.performanceOverviewCard}>
@@ -8584,6 +8959,194 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#64748b',
     textAlign: 'center',
+  },
+  rmaaSection: {
+    marginBottom: 16,
+  },
+  rmaaCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 1.5,
+    padding: 16,
+    gap: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  rmaaBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  rmaaBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    gap: 6,
+  },
+  rmaaBadgeCode: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  rmaaBadgeLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  },
+  rmaaRecentExercise: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#475569',
+    textAlign: 'right',
+  },
+  rmaaScoreRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  rmaaScoreValue: {
+    fontSize: 36,
+    fontWeight: '800',
+  },
+  rmaaRemarksPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  rmaaRemarksText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  rmaaDescription: {
+    fontSize: 12,
+    color: '#475569',
+    lineHeight: 18,
+  },
+  rmaaInterventionsList: {
+    gap: 6,
+  },
+  rmaaInterventionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  rmaaInterventionText: {
+    fontSize: 12,
+    color: '#1f2937',
+    flex: 1,
+  },
+  rmaaEncouragement: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#111827',
+  },
+  rmaaEmptyCard: {
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: '#cbd5e1',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#f8fafc',
+  },
+  rmaaEmptyText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  rmaaEmptySubtext: {
+    fontSize: 11,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  rmaaDetailCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    gap: 12,
+  },
+  rmaaDetailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  rmaaDetailTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111827',
+  },
+  rmaaDetailBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderWidth: 1,
+    gap: 6,
+  },
+  rmaaDetailBadgeCode: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  rmaaDetailBadgeLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  rmaaDetailStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  rmaaDetailStat: {
+    flex: 1,
+    padding: 8,
+    borderRadius: 10,
+    backgroundColor: '#f8fafc',
+  },
+  rmaaDetailStatLabel: {
+    fontSize: 11,
+    color: '#94a3b8',
+    marginBottom: 2,
+    fontWeight: '600',
+  },
+  rmaaDetailStatValue: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1f2937',
+  },
+  rmaaDetailDescription: {
+    fontSize: 12,
+    color: '#475569',
+    lineHeight: 18,
+  },
+  rmaaDetailInterventions: {
+    gap: 6,
+  },
+  rmaaDetailInterventionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  rmaaDetailInterventionText: {
+    fontSize: 12,
+    color: '#1f2937',
+    flex: 1,
   },
 
   // Section Header Row

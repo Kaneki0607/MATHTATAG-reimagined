@@ -30,6 +30,7 @@ import {
   extractGeminiText,
   parseGeminiJson
 } from '../lib/gemini-utils';
+import { convertNumbersToTagalogEnhanced } from '../lib/tagalog-number-utils';
 
 // Import ElevenLabs API key management
 
@@ -3296,6 +3297,10 @@ Re-order Example (pattern completion):
   // TTS Preprocessing Function - Direct Gemini API call
   const preprocessTextForTTS = async (text: string): Promise<string> => {
     try {
+      // CRITICAL: Convert numbers to Tagalog BEFORE processing
+      // This ensures TTS will pronounce numbers correctly
+      const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(text);
+      
       const prompt = `Enhance this text for Text-to-Speech by improving punctuation and rhythm for natural speech delivery.
 
       Rules:
@@ -3307,8 +3312,10 @@ Re-order Example (pattern completion):
       6. Do NOT include "Ok class" since this will play per student.
       7. Do NOT reveal answers — give hints only.
       8. Avoid using too many English words. Prioritize simple Filipino that's easy for Grade 1 pupils.
+      9. IMPORTANT: All numbers are already converted to Tagalog words - DO NOT change them back to digits.
+      10. Keep all Tagalog number words as-is (e.g., "labindalawa", "dalawampu't isa").
       
-      Original text: "${text}"
+      Original text: "${textWithTagalogNumbers}"
       
       Enhanced text:`;
       
@@ -3332,11 +3339,17 @@ Re-order Example (pattern completion):
       const { data, modelUsed } = await callGeminiWithFallback(requestBody);
       console.log('Gemini model used for TTS preprocessing:', modelUsed);
 
-      const processedText = extractGeminiText(data) || text;
+      let processedText = extractGeminiText(data) || textWithTagalogNumbers;
+      
+      // CRITICAL: Ensure numbers remain as Tagalog words after Gemini processing
+      // Re-convert any numbers that might have been changed back to digits
+      processedText = convertNumbersToTagalogEnhanced(processedText);
+      
       return processedText.trim();
     } catch (error) {
-      console.warn('⚠️ Gemini preprocessing failed, using original text', error);
-      return text;
+      console.warn('⚠️ Gemini preprocessing failed, using original text with Tagalog numbers', error);
+      // Still convert numbers even if Gemini fails
+      return convertNumbersToTagalogEnhanced(text);
     }
   };
 
@@ -3579,10 +3592,12 @@ Re-order Example (pattern completion):
     console.log('🎤 AI TTS Generation Started for question:', questionId);
 
     try {
+      // CRITICAL: Convert numbers to Tagalog before sending to TTS
+      const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(processedText);
 
       // Prepare request payload
       const requestPayload: any = {
-        text: processedText,
+        text: textWithTagalogNumbers,
         model_id: 'eleven_turbo_v2_5',
         voice_settings: {
           speed: 0.8,
@@ -3595,7 +3610,7 @@ Re-order Example (pattern completion):
       // ElevenLabs API call with multiple API key fallback
       try {
         const result = await callElevenLabsWithFallback(
-          processedText,
+          textWithTagalogNumbers,
           'jBpfuIE2acCO8z3wKNLl',
           true, // useV3
           'mp3_44100_128'
@@ -3650,10 +3665,12 @@ Re-order Example (pattern completion):
     const startTime = Date.now();
 
     try {
+      // CRITICAL: Convert numbers to Tagalog before sending to TTS
+      const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(processedText);
 
       // Prepare request payload
       const requestPayload: any = {
-        text: processedText,
+        text: textWithTagalogNumbers,
         model_id: 'eleven_turbo_v2_5',
         voice_settings: {
           speed: 0.8,
