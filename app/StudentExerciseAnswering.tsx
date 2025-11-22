@@ -8837,8 +8837,8 @@ const styles = StyleSheet.create({
   },
   questionImageThumb: {
     flex: 1,
-    minWidth: 70,
-    maxWidth: 100,
+    minWidth: 140,
+    maxWidth: 200,
     aspectRatio: 1,
     borderRadius: 8,
     marginHorizontal: 4,
@@ -8883,7 +8883,7 @@ const styles = StyleSheet.create({
   },
   questionImage: {
     width: '100%',
-    height: 200,
+    height: 500,
     borderRadius: 8,
     backgroundColor: '#f8fafc',
   },
@@ -8892,8 +8892,8 @@ const styles = StyleSheet.create({
   },
   questionImageSmall: {
     flex: 1,
-    minWidth: 80,
-    maxWidth: 120,
+    minWidth: 160,
+    maxWidth: 240,
     aspectRatio: 1,
     borderRadius: 8,
     marginHorizontal: 4,
@@ -8910,8 +8910,8 @@ const styles = StyleSheet.create({
   questionImageAuto: {
     flex: 1,
     aspectRatio: 1,
-    maxWidth: 140,
-    minWidth: 90,
+    maxWidth: 280,
+    minWidth: 180,
     borderRadius: 8,
     marginHorizontal: 4,
     borderWidth: 2,

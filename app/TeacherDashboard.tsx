@@ -13,7 +13,7 @@ import { Accelerometer } from 'expo-sensors';
 
 import * as Sharing from 'expo-sharing';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   ActivityIndicator,
@@ -22,7 +22,7 @@ import {
   Dimensions,
 
   Image,
-
+  InteractionManager,
   Modal,
 
   PanResponder,
@@ -191,175 +191,6 @@ const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, butt
 
   };
 
-  const generateGeminiAnalysis = async (resultData: any, classAverages: any): Promise<any> => {
-    let lastAnalysisText = '';
-
-    try {
-      const performanceData = {
-        score: resultData.scorePercentage,
-        totalQuestions: resultData.totalQuestions,
-        timeSpent: resultData.totalTimeSpent,
-        questionResults: resultData.questionResults || [],
-        classAverage: classAverages?.averageScore || 0,
-        classAverageTime: classAverages?.averageTime || 0,
-      };
-
-      const prompt = `You are an expert educational psychologist analyzing a Grade 1 student's math exercise performance. Provide a comprehensive analysis in JSON format.
-
-
-
-STUDENT PERFORMANCE DATA:
-
-- Score: ${performanceData.score}%
-
-- Total Questions: ${performanceData.totalQuestions}
-
-- Time Spent: ${Math.round(performanceData.timeSpent / 1000)} seconds
-
-- Class Average Score: ${Math.round(performanceData.classAverage)}%
-
-- Class Average Time: ${Math.round(performanceData.classAverageTime)} seconds
-
-
-
-DETAILED QUESTION RESULTS:
-
-${performanceData.questionResults.map((q: any) => {
-  const classAvg = classAverages?.questionAverages?.[q.questionId];
-  return `Question ${q.questionNumber}: ${q.isCorrect ? 'CORRECT' : 'INCORRECT'} (${q.attempts} attempts, ${Math.round(q.timeSpent / 1000)}s)
-   Question Text: "${q.questionText}"
-   Question Type: ${q.questionType}
-   ${q.options && q.options.length > 0 ? `Options: ${q.options.join(', ')}` : ''}
-   Student Answer: "${q.studentAnswer}"
-   Correct Answer: "${q.correctAnswer}"
-   ${q.questionImage ? `Image: ${q.questionImage}` : ''}
-   
-   ENHANCED PERFORMANCE DATA:
-   - Difficulty Level: ${q.metadata?.difficulty || 'medium'}
-   - Topic Tags: ${q.metadata?.topicTags?.join(', ') || 'none'}
-   - Cognitive Load: ${q.metadata?.cognitiveLoad || 'medium'}
-   - Question Complexity: ${q.metadata?.questionComplexity || 'medium'}
-   - Total Hesitation Time: ${Math.round((q.totalHesitationTime || 0) / 1000)}s
-   - Average Confidence: ${q.averageConfidence?.toFixed(1) || '2.0'} (1=low, 2=medium, 3=high)
-   - Significant Changes: ${q.significantChanges || 0}
-   - Phase Distribution: Reading(${q.phaseDistribution?.reading || 0}), Thinking(${q.phaseDistribution?.thinking || 0}), Answering(${q.phaseDistribution?.answering || 0}), Reviewing(${q.phaseDistribution?.reviewing || 0})
-   
-   INTERACTION PATTERNS:
-   - Total Interactions: ${q.totalInteractions || 0}
-   - Option Clicks: ${q.interactionTypes?.optionClicks || 0}
-   - Help Used: ${q.interactionTypes?.helpUsed || 0} (Help Button: ${q.helpUsage?.helpButtonClicks || 0})
-   - Answer Changes: ${q.interactionTypes?.answerChanges || 0}
-   
-   TIME BREAKDOWN:
-   - Reading Time: ${Math.round((q.timeBreakdown?.readingTime || 0) / 1000)}s
-   - Thinking Time: ${Math.round((q.timeBreakdown?.thinkingTime || 0) / 1000)}s
-   - Answering Time: ${Math.round((q.timeBreakdown?.answeringTime || 0) / 1000)}s
-   - Reviewing Time: ${Math.round((q.timeBreakdown?.reviewingTime || 0) / 1000)}s
-   - Time to First Answer: ${Math.round((q.timeToFirstAnswer || 0) / 1000)}s
-   ${q.attemptHistory && q.attemptHistory.length > 0 ? `
-   ATTEMPT HISTORY:
-   ${q.attemptHistory.map((attempt: any, attemptIdx: number) =>
-     `   Attempt ${attemptIdx + 1}: "${attempt.answer || 'blank'}" (${Math.round((attempt.timeSpent || 0) / 1000)}s)`
-   ).join('\n')}` : ''}
-   ${classAvg ? `CLASS AVERAGE: ${Math.round(classAvg.averageTime / 1000)}s, ${Math.round(classAvg.averageAttempts)} attempts` : '- Performance ranking data not available'}`;
-}).join('\n\n')}
-
-
-
-IMPORTANT: Respond with ONLY valid JSON. Do not include any markdown formatting, code blocks, or additional text. Return only the JSON object.
-
-
-
-Required JSON format:
-
-{
-  "strengths": ["strength1", "strength2", "strength3"],
-  "weaknesses": ["weakness1", "weakness2", "weakness3"],
-  "questionAnalysis": ["analysis1", "analysis2", "analysis3"],
-  "timeAnalysis": {
-    "description": "Time analysis description",
-    "studentTime": ${Math.round(performanceData.timeSpent / 1000)},
-    "classAverage": ${Math.round(performanceData.classAverageTime)}
-  },
-  "recommendations": ["recommendation1", "recommendation2", "recommendation3"],
-  "encouragement": "Encouraging message for the student"
-}
-
-
-
-Focus on:
-1. Mathematical concepts mastered
-2. Areas needing improvement
-3. Time management skills
-4. Specific question performance
-5. Age-appropriate recommendations
-6. Positive reinforcement
-LANGUAGE RULES:
-- Always spell out all numbers in proper modern Tagalog words (hal. 12 → "labindalawa", 21 → "dalawampu't isa").
-- Huwag gumamit ng digits na hinaluan ng Tagalog o Spanish shortcuts tulad ng "dose" o "bente".
-
-Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
-
-      const requestBody = {
-        contents: [
-          {
-            parts: [
-              {
-                text: prompt,
-              },
-            ],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.7,
-          topK: 40,
-          topP: 0.95,
-          maxOutputTokens: 2048,
-        },
-      };
-
-      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
-      console.log('Gemini model used for teacher analysis:', modelUsed);
-
-      let analysisText = extractGeminiText(data);
-      if (!analysisText) {
-        throw new Error('Invalid response from AI service');
-      }
-
-      lastAnalysisText = analysisText;
-      return parseGeminiJson<any>(analysisText);
-    } catch (error) {
-      console.error('Error generating Gemini analysis:', error);
-
-      if (lastAnalysisText) {
-        try {
-          const jsonMatches = lastAnalysisText.match(/\{[^}]*"strengths"[^}]*\}/g);
-          if (jsonMatches && jsonMatches.length > 0) {
-            console.log('Using partial Gemini analysis data.');
-            return JSON.parse(jsonMatches[0]);
-          }
-        } catch (partialError) {
-          console.warn('Failed to extract partial Gemini analysis:', partialError);
-        }
-      }
-
-      return {
-        strengths: ['Completed the exercise successfully', 'Showed persistence in problem-solving'],
-        weaknesses: ['Could improve time management', 'May need more practice with certain concepts'],
-        questionAnalysis: ['Overall good performance across questions'],
-        timeAnalysis: {
-          description: 'Student completed the exercise in a reasonable time',
-          studentTime: Math.round(resultData.totalTimeSpent / 1000),
-          classAverage: Math.round(classAverages?.averageTime || 0),
-        },
-        recommendations: ['Continue practicing regularly', 'Focus on areas that took longer'],
-        encouragement: 'Great job completing the exercise! Keep up the good work!',
-      };
-    }
-  };
-
-
-
   return (
 
     <Modal
@@ -463,6 +294,174 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   );
 
 };
+
+const generateGeminiAnalysis = async (resultData: any, classAverages: any): Promise<any> => {
+  let lastAnalysisText = '';
+
+  try {
+    const performanceData = {
+      score: resultData.scorePercentage,
+      totalQuestions: resultData.totalQuestions,
+      timeSpent: resultData.totalTimeSpent,
+      questionResults: resultData.questionResults || [],
+      classAverage: classAverages?.averageScore || 0,
+      classAverageTime: classAverages?.averageTime || 0,
+    };
+
+    const prompt = `You are an expert educational psychologist analyzing a Grade 1 student's math exercise performance. Provide a comprehensive analysis in JSON format.
+
+
+
+STUDENT PERFORMANCE DATA:
+
+- Score: ${performanceData.score}%
+
+- Total Questions: ${performanceData.totalQuestions}
+
+- Time Spent: ${Math.round(performanceData.timeSpent / 1000)} seconds
+
+- Class Average Score: ${Math.round(performanceData.classAverage)}%
+
+- Class Average Time: ${Math.round(performanceData.classAverageTime)} seconds
+
+
+
+DETAILED QUESTION RESULTS:
+
+${performanceData.questionResults.map((q: any) => {
+  const classAvg = classAverages?.questionAverages?.[q.questionId];
+  return `Question ${q.questionNumber}: ${q.isCorrect ? 'CORRECT' : 'INCORRECT'} (${q.attempts} attempts, ${Math.round(q.timeSpent / 1000)}s)
+   Question Text: "${q.questionText}"
+   Question Type: ${q.questionType}
+   ${q.options && q.options.length > 0 ? `Options: ${q.options.join(', ')}` : ''}
+   Student Answer: "${q.studentAnswer}"
+   Correct Answer: "${q.correctAnswer}"
+   ${q.questionImage ? `Image: ${q.questionImage}` : ''}
+   
+   ENHANCED PERFORMANCE DATA:
+   - Difficulty Level: ${q.metadata?.difficulty || 'medium'}
+   - Topic Tags: ${q.metadata?.topicTags?.join(', ') || 'none'}
+   - Cognitive Load: ${q.metadata?.cognitiveLoad || 'medium'}
+   - Question Complexity: ${q.metadata?.questionComplexity || 'medium'}
+   - Total Hesitation Time: ${Math.round((q.totalHesitationTime || 0) / 1000)}s
+   - Average Confidence: ${q.averageConfidence?.toFixed(1) || '2.0'} (1=low, 2=medium, 3=high)
+   - Significant Changes: ${q.significantChanges || 0}
+   - Phase Distribution: Reading(${q.phaseDistribution?.reading || 0}), Thinking(${q.phaseDistribution?.thinking || 0}), Answering(${q.phaseDistribution?.answering || 0}), Reviewing(${q.phaseDistribution?.reviewing || 0})
+   
+   INTERACTION PATTERNS:
+   - Total Interactions: ${q.totalInteractions || 0}
+   - Option Clicks: ${q.interactionTypes?.optionClicks || 0}
+   - Help Used: ${q.interactionTypes?.helpUsed || 0} (Help Button: ${q.helpUsage?.helpButtonClicks || 0})
+   - Answer Changes: ${q.interactionTypes?.answerChanges || 0}
+   
+   TIME BREAKDOWN:
+   - Reading Time: ${Math.round((q.timeBreakdown?.readingTime || 0) / 1000)}s
+   - Thinking Time: ${Math.round((q.timeBreakdown?.thinkingTime || 0) / 1000)}s
+   - Answering Time: ${Math.round((q.timeBreakdown?.answeringTime || 0) / 1000)}s
+   - Reviewing Time: ${Math.round((q.timeBreakdown?.reviewingTime || 0) / 1000)}s
+   - Time to First Answer: ${Math.round((q.timeToFirstAnswer || 0) / 1000)}s
+   ${q.attemptHistory && q.attemptHistory.length > 0 ? `
+   ATTEMPT HISTORY:
+   ${q.attemptHistory.map((attempt: any, attemptIdx: number) =>
+     `   Attempt ${attemptIdx + 1}: "${attempt.answer || 'blank'}" (${Math.round((attempt.timeSpent || 0) / 1000)}s)`
+   ).join('\n')}` : ''}
+   ${classAvg ? `CLASS AVERAGE: ${Math.round(classAvg.averageTime / 1000)}s, ${Math.round(classAvg.averageAttempts)} attempts` : '- Performance ranking data not available'}`;
+}).join('\n\n')}
+
+
+
+IMPORTANT: Respond with ONLY valid JSON. Do not include any markdown formatting, code blocks, or additional text. Return only the JSON object.
+
+
+
+Required JSON format:
+
+{
+  "strengths": ["strength1", "strength2", "strength3"],
+  "weaknesses": ["weakness1", "weakness2", "weakness3"],
+  "questionAnalysis": ["analysis1", "analysis2", "analysis3"],
+  "timeAnalysis": {
+    "description": "Time analysis description",
+    "studentTime": ${Math.round(performanceData.timeSpent / 1000)},
+    "classAverage": ${Math.round(performanceData.classAverageTime)}
+  },
+  "recommendations": ["recommendation1", "recommendation2", "recommendation3"],
+  "encouragement": "Encouraging message for the student"
+}
+
+
+
+Focus on:
+1. Mathematical concepts mastered
+2. Areas needing improvement
+3. Time management skills
+4. Specific question performance
+5. Age-appropriate recommendations
+6. Positive reinforcement
+LANGUAGE RULES:
+- Always spell out all numbers in proper modern Tagalog words (hal. 12 → "labindalawa", 21 → "dalawampu't isa").
+- Huwag gumamit ng digits na hinaluan ng Tagalog o Spanish shortcuts tulad ng "dose" o "bente".
+
+Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
+
+    const requestBody = {
+      contents: [
+        {
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 2048,
+      },
+    };
+
+    const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+    console.log('Gemini model used for teacher analysis:', modelUsed);
+
+    let analysisText = extractGeminiText(data);
+    if (!analysisText) {
+      throw new Error('Invalid response from AI service');
+    }
+
+    lastAnalysisText = analysisText;
+    return parseGeminiJson<any>(analysisText);
+  } catch (error) {
+    console.error('Error generating Gemini analysis:', error);
+
+    if (lastAnalysisText) {
+      try {
+        const jsonMatches = lastAnalysisText.match(/\{[^}]*"strengths"[^}]*\}/g);
+        if (jsonMatches && jsonMatches.length > 0) {
+          console.log('Using partial Gemini analysis data.');
+          return JSON.parse(jsonMatches[0]);
+        }
+      } catch (partialError) {
+        console.warn('Failed to extract partial Gemini analysis:', partialError);
+      }
+    }
+
+    return {
+      strengths: ['Completed the exercise successfully', 'Showed persistence in problem-solving'],
+      weaknesses: ['Could improve time management', 'May need more practice with certain concepts'],
+      questionAnalysis: ['Overall good performance across questions'],
+      timeAnalysis: {
+        description: 'Student completed the exercise in a reasonable time',
+        studentTime: Math.round(resultData.totalTimeSpent / 1000),
+        classAverage: Math.round(classAverages?.averageTime || 0),
+      },
+      recommendations: ['Continue practicing regularly', 'Focus on areas that took longer'],
+      encouragement: 'Great job completing the exercise! Keep up the good work!',
+    };
+  }
+};
+
 // Stock image library data
 
 const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
@@ -1805,6 +1804,7 @@ export default function TeacherDashboard() {
   const { width, height } = useWindowDimensions();
   const responsive = useResponsive();
   const layout = useResponsiveLayout();
+  const shouldAllowHorizontalSwipe = Platform.OS === 'android' || width < 640;
   
   // Responsive values
   const containerPadding = useResponsiveValue({
@@ -2430,9 +2430,18 @@ export default function TeacherDashboard() {
 
   // Student results view state
   const [showAllStudents, setShowAllStudents] = useState(false);
+  const [detailedStatsData, setDetailedStatsData] = useState<any>(null);
+  const [detailedStatsLoading, setDetailedStatsLoading] = useState(false);
+  const statsPreparationHandle = useRef<ReturnType<typeof InteractionManager.runAfterInteractions> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      statsPreparationHandle.current?.cancel?.();
+    };
+  }, []);
 
   // Helper function to format answers for display based on exercise type
-  const formatAnswerForDisplay = (answer: string, questionType: string): string => {
+  const formatAnswerForDisplay = useCallback((answer: string, questionType: string): string => {
     if (!answer || answer === 'No answer') return 'No answer';
     
     // Helper function to clean filename
@@ -2548,6 +2557,373 @@ export default function TeacherDashboard() {
     }
     
     return makeReadable(answer);
+  }, []);
+
+  const buildDetailedStatsData = useCallback((exerciseResults: any[]) => {
+    if (!exerciseResults || exerciseResults.length === 0) {
+      return null;
+    }
+
+    const sanitizedScores = exerciseResults.map((result: any) =>
+      typeof result.scorePercentage === 'number' ? result.scorePercentage : 0
+    );
+    const totalStudents = sanitizedScores.length;
+    const safeTotalStudents = Math.max(totalStudents, 1);
+    const mps =
+      sanitizedScores.reduce((sum: number, score: number) => sum + score, 0) / safeTotalStudents;
+
+    const sortedScores = [...sanitizedScores].sort((a, b) => a - b);
+    const median =
+      sortedScores.length === 0
+        ? 0
+        : sortedScores.length % 2 === 0
+        ? (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2
+        : sortedScores[Math.floor(sortedScores.length / 2)];
+
+    const scoreCounts: Record<number, number> = {};
+    sortedScores.forEach((score: number) => {
+      const rounded = Math.round(score);
+      scoreCounts[rounded] = (scoreCounts[rounded] || 0) + 1;
+    });
+    const scoreCountKeys = Object.keys(scoreCounts);
+    const mode =
+      scoreCountKeys.length > 0
+        ? parseInt(
+            scoreCountKeys.reduce((prev, curr) =>
+              scoreCounts[parseInt(prev, 10)] >= scoreCounts[parseInt(curr, 10)] ? prev : curr
+            ),
+            10
+          )
+        : 0;
+
+    const variance =
+      sanitizedScores.reduce((sum: number, score: number) => sum + Math.pow(score - mps, 2), 0) /
+      safeTotalStudents;
+    const stdDev = Math.sqrt(variance);
+
+    const highestScore = sanitizedScores.length ? Math.max(...sanitizedScores) : 0;
+    const lowestScore = sanitizedScores.length ? Math.min(...sanitizedScores) : 0;
+    const range = highestScore - lowestScore;
+
+    const topStudentResult = exerciseResults.find(
+      (result: any) => (result.scorePercentage || 0) === highestScore
+    );
+    const bottomStudentResult = exerciseResults.find(
+      (result: any) => (result.scorePercentage || 0) === lowestScore
+    );
+
+    const topStudentName =
+      topStudentResult?.studentInfo?.name || topStudentResult?.studentName || '—';
+    const bottomStudentName =
+      bottomStudentResult?.studentInfo?.name || bottomStudentResult?.studentName || '—';
+
+    const passCount = sanitizedScores.filter((score: number) => score >= 75).length;
+    const passRate = totalStudents > 0 ? (passCount / totalStudents) * 100 : 0;
+
+    const distribution = {
+      highlyProficientCount: sanitizedScores.filter((s) => s >= 85).length,
+      proficientCount: sanitizedScores.filter((s) => s >= 75 && s < 85).length,
+      nearlyProficientCount: sanitizedScores.filter((s) => s >= 50 && s < 75).length,
+      lowProficientCount: sanitizedScores.filter((s) => s >= 25 && s < 50).length,
+      notProficientCount: sanitizedScores.filter((s) => s < 25).length,
+    };
+
+    const totalAttempts = exerciseResults.reduce((sum: number, result: any) => {
+      const attemptsForResult =
+        result.questionResults?.reduce(
+          (questionSum: number, question: any) => questionSum + (question.attempts || 1),
+          0
+        ) || 0;
+      return sum + attemptsForResult;
+    }, 0);
+
+    const questionCount = Math.max(exerciseResults[0]?.questionResults?.length || 0, 1);
+    const avgAttemptsPerItem =
+      totalStudents > 0 ? (totalAttempts / questionCount) / totalStudents : 0;
+
+    const totalTime = exerciseResults.reduce(
+      (sum: number, result: any) => sum + (result.totalTimeSpent || 0),
+      0
+    );
+    const avgTimePerItem =
+      totalStudents > 0 ? (totalTime / questionCount) / totalStudents : 0;
+
+    const firstResult = exerciseResults[0];
+    let chartData: Array<{ itemNumber: number; avgTime: number; avgScore: number }> = [];
+    if (firstResult?.questionResults?.length) {
+      chartData = firstResult.questionResults.map((question: any, questionIndex: number) => {
+        const questionNumber = question.questionNumber || questionIndex + 1;
+        const questionResults = exerciseResults
+          .map((result: any) =>
+            result.questionResults?.find((q: any) => q.questionId === question.questionId)
+          )
+          .filter(Boolean);
+
+        const timeSpentArray = questionResults
+          .map((q: any) => q.timeSpentSeconds || 0)
+          .filter((time: number) => time > 0);
+
+        const avgTime =
+          timeSpentArray.length > 0
+            ? timeSpentArray.reduce((sum: number, time: number) => sum + time, 0) /
+              timeSpentArray.length
+            : 0;
+
+        const correctCount = questionResults.filter((q: any) => q.isCorrect).length;
+        const avgScore =
+          questionResults.length > 0 ? (correctCount / questionResults.length) * 100 : 0;
+
+        return { itemNumber: questionNumber, avgTime, avgScore };
+      });
+    }
+
+    let itemAnalysis: any[] = [];
+    if (firstResult?.questionResults?.length) {
+      const answeredQuestions = firstResult.questionResults.filter((question: any) => {
+        return exerciseResults.some((result: any) => {
+          const qResult = result.questionResults?.find(
+            (q: any) => q.questionId === question.questionId
+          );
+          return qResult && (qResult.studentAnswer || qResult.answer);
+        });
+      });
+
+      const sortedByScoreDesc = [...exerciseResults].sort(
+        (a: any, b: any) => (b.scorePercentage || 0) - (a.scorePercentage || 0)
+      );
+      const topSegmentCount = Math.max(1, Math.ceil(sortedByScoreDesc.length * 0.27));
+      const topPerformers = sortedByScoreDesc.slice(0, topSegmentCount);
+      const bottomPerformers = [...sortedByScoreDesc].reverse().slice(0, topSegmentCount);
+
+      itemAnalysis = answeredQuestions
+        .map((question: any, questionIndex: number) => {
+          let questionType = (question.questionType || 'Unknown').toLowerCase();
+          if (questionType.includes('multiple-choice')) questionType = 'Multiple Choice';
+          else if (questionType.includes('identification')) questionType = 'Identification';
+          else if (questionType.includes('re-order')) questionType = 'Re-order';
+          else if (questionType.includes('matching')) questionType = 'Matching';
+          else questionType = 'General';
+
+          const questionResults = exerciseResults
+            .map((result: any) =>
+              result.questionResults?.find((q: any) => q.questionId === question.questionId)
+            )
+            .filter(Boolean);
+
+          if (questionResults.length === 0) return null;
+
+          const timeSpentArray = questionResults
+            .map((q: any) => q.timeSpentSeconds || 0)
+            .filter((time: number) => time > 0);
+
+          const avgTimeInSeconds =
+            timeSpentArray.length > 0
+              ? Math.round(
+                  timeSpentArray.reduce((sum: number, time: number) => sum + time, 0) /
+                    timeSpentArray.length
+                )
+              : 0;
+
+          const attemptsArray = questionResults.map((q: any) => q.attempts || 1);
+          const avgAttempts =
+            attemptsArray.length > 0
+              ? attemptsArray.reduce((sum: number, attempts: number) => sum + attempts, 0) /
+                attemptsArray.length
+              : 1;
+
+          const correctAnswer = question.correctAnswer || question.answer;
+
+          const answerDistribution: Record<string, { count: number; isCorrect: boolean }> = {};
+          let totalStudentsAnswered = 0;
+          let correctResponses = 0;
+          let noAnswerCount = 0;
+
+          exerciseResults.forEach((result: any) => {
+            const qResult = result.questionResults?.find(
+              (q: any) => q.questionId === question.questionId
+            );
+            if (qResult && (qResult.studentAnswer || qResult.answer)) {
+              totalStudentsAnswered++;
+              const rawAnswer = qResult.studentAnswer || qResult.answer;
+              const formattedAnswer = formatAnswerForDisplay(
+                rawAnswer,
+                question.questionType || ''
+              );
+              let isCorrect = false;
+              if (correctAnswer) {
+                const formattedCorrectAnswer = formatAnswerForDisplay(
+                  correctAnswer,
+                  question.questionType || ''
+                );
+                isCorrect = formattedAnswer === formattedCorrectAnswer;
+              } else {
+                isCorrect = qResult.isCorrect || false;
+              }
+              if (isCorrect) {
+                correctResponses++;
+              }
+              if (!answerDistribution[formattedAnswer]) {
+                answerDistribution[formattedAnswer] = { count: 0, isCorrect };
+              }
+              answerDistribution[formattedAnswer].count++;
+            } else {
+              noAnswerCount++;
+            }
+          });
+
+          if (noAnswerCount > 0) {
+            answerDistribution['No Answer'] = { count: noAnswerCount, isCorrect: false };
+          }
+
+          const sortedAnswers = Object.entries(answerDistribution)
+            .sort(([, a], [, b]) => b.count - a.count)
+            .map(([answerText, data]) => ({
+              text: answerText,
+              count: data.count,
+              isCorrect: data.isCorrect,
+              percentage:
+                totalStudents > 0 ? Math.round((data.count / totalStudents) * 100) : 0,
+            }));
+
+          const difficultyIndex =
+            totalStudentsAnswered > 0 ? (correctResponses / totalStudentsAnswered) * 100 : 0;
+
+          const topCorrect = topPerformers.filter((result: any) => {
+            const qResult = result.questionResults?.find(
+              (q: any) => q.questionId === question.questionId
+            );
+            return qResult?.isCorrect || false;
+          }).length;
+
+          const bottomCorrect = bottomPerformers.filter((result: any) => {
+            const qResult = result.questionResults?.find(
+              (q: any) => q.questionId === question.questionId
+            );
+            return qResult?.isCorrect || false;
+          }).length;
+
+          const discriminationIndex =
+            topPerformers.length > 0 && bottomPerformers.length > 0
+              ? ((topCorrect / topPerformers.length) -
+                  (bottomCorrect / bottomPerformers.length)) *
+                100
+              : 0;
+
+          return {
+            questionId: question.questionId || questionIndex,
+            questionNumber: question.questionNumber || questionIndex + 1,
+            questionText: question.questionText || `Question ${questionIndex + 1}`,
+            questionType,
+            avgAttempts,
+            avgTimeInSeconds,
+            answers: sortedAnswers,
+            totalStudents,
+            difficultyIndex,
+            discriminationIndex,
+          };
+        })
+        .filter(Boolean);
+    }
+
+    return {
+      totalStudents,
+      mps,
+      median,
+      mode,
+      stdDev,
+      range,
+      highestScore,
+      lowestScore,
+      topStudentName,
+      bottomStudentName,
+      passCount,
+      passRate,
+      distribution,
+      avgAttemptsPerItem,
+      avgTimePerItem,
+      chartData,
+      itemAnalysis,
+    };
+  }, [formatAnswerForDisplay]);
+
+  const prepareDetailedStats = useCallback(
+    (exerciseResults: any[]) => {
+      statsPreparationHandle.current?.cancel?.();
+      setDetailedStatsLoading(true);
+      setDetailedStatsData(null);
+
+      // Set a timeout to ensure loading state doesn't hang forever
+      const timeoutId = setTimeout(() => {
+        console.warn('Statistics preparation taking too long, forcing completion');
+        setDetailedStatsLoading(false);
+      }, 10000); // 10 second timeout
+
+      statsPreparationHandle.current = InteractionManager.runAfterInteractions(() => {
+        try {
+          if (!exerciseResults || !Array.isArray(exerciseResults) || exerciseResults.length === 0) {
+            throw new Error('Invalid exercise results data');
+          }
+          const prepared = buildDetailedStatsData(exerciseResults);
+          setDetailedStatsData(prepared);
+        } catch (error) {
+          console.error('Failed to prepare detailed statistics', error);
+          // Don't show alert here, let the UI handle it with error state
+          setDetailedStatsData(null);
+        } finally {
+          clearTimeout(timeoutId);
+          setDetailedStatsLoading(false);
+        }
+      });
+    },
+    [buildDetailedStatsData]
+  );
+
+  const handleOpenDetailedStats = (
+    exerciseTitle: string,
+    classId: string,
+    exerciseResults: any[]
+  ) => {
+    if (!exerciseResults || exerciseResults.length === 0) {
+      showAlert('No Data', 'There are no submissions for this exercise yet.', undefined, 'info');
+      return;
+    }
+
+    const payload = {
+      exerciseTitle,
+      exerciseId: exerciseResults[0]?.exerciseId || '',
+      classId,
+      exerciseResults,
+    };
+
+    setSelectedExerciseForStats(payload);
+    setShowDetailedStatsModal(true);
+    prepareDetailedStats(exerciseResults);
+  };
+
+  const handleRetryDetailedStats = useCallback(() => {
+    if (selectedExerciseForStats?.exerciseResults?.length) {
+      prepareDetailedStats(selectedExerciseForStats.exerciseResults);
+    }
+  }, [prepareDetailedStats, selectedExerciseForStats]);
+
+  const handleCloseDetailedStats = () => {
+    statsPreparationHandle.current?.cancel?.();
+    setDetailedStatsLoading(false);
+    setDetailedStatsData(null);
+    setShowDetailedStatsModal(false);
+  };
+
+  const formatMillisecondsToLabel = (milliseconds: number) => {
+    if (!milliseconds || milliseconds <= 0) return '0s';
+    const minutes = Math.floor(milliseconds / 60000);
+    const seconds = Math.floor((milliseconds % 60000) / 1000);
+    return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+  };
+
+  const getAttemptsDescriptor = (value: number) => {
+    if (value < 1.5) return 'Excellent';
+    if (value < 2.5) return 'Good';
+    return 'Fair';
   };
 
   // Technical Report Modal state
@@ -5062,7 +5438,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           await new Promise(resolve => setTimeout(resolve, retryDelay));
 
-          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+          return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
 
         }
 
@@ -5088,7 +5464,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           await new Promise(resolve => setTimeout(resolve, retryDelay));
 
-          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+          return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
 
         }
 
@@ -5162,7 +5538,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           await new Promise(resolve => setTimeout(resolve, retryDelay));
 
-          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+          return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
 
         }
 
@@ -5228,7 +5604,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         await new Promise(resolve => setTimeout(resolve, retryDelay));
 
-        return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+        return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
 
       }
 
@@ -9240,11 +9616,28 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                   <TouchableWithoutFeedback onPress={() => setStudentMenuVisible(null)}>
 
-                    <View>
+                    <View style={styles.studentTableWrapper}>
 
-                      {/* Header row is rendered below with sortable columns */}
+                      <ScrollView
 
-                      {(() => {
+                        horizontal
+
+                        showsHorizontalScrollIndicator={false}
+
+                        contentContainerStyle={styles.studentTableScrollContent}
+
+                      >
+
+                        <View
+                          style={[
+                            styles.studentTableContent,
+                            { minWidth: Math.max(width - 48, 280) }
+                          ]}
+                        >
+
+                          {/* Header row is rendered below with sortable columns */}
+
+                          {(() => {
                         const rows = (studentsByClass[cls.id] || []).map((s: any) => {
                           const p = s.parentId ? parentsById[s.parentId] : undefined;
                           const name = formatStudentName(s);
@@ -9292,7 +9685,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                 <Text style={{ color: '#334155', fontWeight: '700', width: 80, textAlign: 'left' }} numberOfLines={1}>Gender</Text>
                               </TouchableOpacity>
                               <Text style={[styles.studentCode, { fontWeight: '700', color: '#334155', width: 90, textAlign: 'left' }]} numberOfLines={1}>Parent Code</Text>
-                              <View style={[styles.studentActionsWrap, { width: 28 }]} />
+                              <View style={styles.studentActionsHeader} />
                             </View>
 
                             {sorted.map((row: any, idx: number) => (
@@ -9340,6 +9733,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                           </>
                         );
                       })()}
+
+                        </View>
+
+                      </ScrollView>
 
                     </View>
 
@@ -9964,14 +10361,18 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                  
 
-                                 <ScrollView 
-                                   horizontal={width < 400}
-                                   showsHorizontalScrollIndicator={width < 400}
-                                   style={styles.tableScrollContainer}
-                                   nestedScrollEnabled={true}
-                                   keyboardShouldPersistTaps="handled"
-                                   scrollEnabled={showAllStudents}
-                                 >
+                                <ScrollView 
+                                  horizontal={shouldAllowHorizontalSwipe}
+                                  showsHorizontalScrollIndicator={shouldAllowHorizontalSwipe}
+                                  style={styles.tableScrollContainer}
+                                  contentContainerStyle={[
+                                    styles.tableScrollContent,
+                                    shouldAllowHorizontalSwipe ? { minWidth: 720 } : null
+                                  ]}
+                                  nestedScrollEnabled={true}
+                                  keyboardShouldPersistTaps="handled"
+                                  scrollEnabled={shouldAllowHorizontalSwipe}
+                                >
 
                                    <View style={styles.tableContainer}>
 
@@ -10446,15 +10847,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                       {/* Toggle Button */}
                                       <TouchableOpacity 
                                         style={styles.statsToggleButton}
-                                        onPress={() => {
-                                          setSelectedExerciseForStats({
-                                            exerciseTitle,
-                                            exerciseId: exerciseResults[0]?.exerciseId || '',
-                                            classId: cls.id,
-                                            exerciseResults
-                                          });
-                                          setShowDetailedStatsModal(true);
-                                        }}
+                                        onPress={() => handleOpenDetailedStats(
+                                          exerciseTitle,
+                                          cls.id,
+                                          exerciseResults
+                                        )}
                                       >
                                         <Text style={styles.statsToggleText}>
                                           Show Detailed Statistics
@@ -14281,7 +14678,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               <Text style={styles.detailedStatsModalTitle}>Class Statistics</Text>
             </View>
             <TouchableOpacity 
-              onPress={() => setShowDetailedStatsModal(false)} 
+              onPress={handleCloseDetailedStats} 
               style={styles.detailedStatsCloseButton}
             >
               <AntDesign name="close" size={24} color="#64748b" />
@@ -14306,13 +14703,44 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               </TouchableOpacity>
             </View>
           )}
+          
+          {/* Loading State */}
+          {detailedStatsLoading && (
+            <View style={styles.detailedStatsLoadingContainer}>
+              <ActivityIndicator size="large" color="#3b82f6" />
+              <Text style={styles.detailedStatsLoadingText}>Preparing statistics...</Text>
+            </View>
+          )}
+
+          {/* Content - Only show when not loading */}
+          {!detailedStatsLoading && (
           <ScrollView style={styles.detailedStatsModalContent} showsVerticalScrollIndicator={false}>
             {/* Class Statistics Section */}
             {selectedExerciseForStats && (() => {
+              try {
               const { exerciseResults } = selectedExerciseForStats;
-              const scores = exerciseResults.map((r: any) => r.scorePercentage || 0);
               
-              if (scores.length === 0) return null;
+              if (!exerciseResults || !Array.isArray(exerciseResults) || exerciseResults.length === 0) {
+                return (
+                  <View style={styles.detailedStatsErrorContainer}>
+                    <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
+                    <Text style={styles.detailedStatsErrorText}>No data available</Text>
+                    <Text style={styles.detailedStatsErrorSubtext}>There are no submissions for this exercise yet.</Text>
+                  </View>
+                );
+              }
+
+              const scores = exerciseResults.map((r: any) => r.scorePercentage || 0).filter((s: number) => !isNaN(s) && isFinite(s));
+              
+              if (scores.length === 0) {
+                return (
+                  <View style={styles.detailedStatsErrorContainer}>
+                    <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
+                    <Text style={styles.detailedStatsErrorText}>Invalid data</Text>
+                    <Text style={styles.detailedStatsErrorSubtext}>Unable to calculate statistics from the available data.</Text>
+                  </View>
+                );
+              }
               
               // Calculate statistics
               const mps = scores.reduce((sum: number, score: number) => sum + score, 0) / scores.length;
@@ -14890,6 +15318,25 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                   </View>
                 </View>
               );
+              } catch (error: any) {
+                console.error('Error rendering detailed statistics:', error);
+                return (
+                  <View style={styles.detailedStatsErrorContainer}>
+                    <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
+                    <Text style={styles.detailedStatsErrorText}>Error Loading Statistics</Text>
+                    <Text style={styles.detailedStatsErrorSubtext}>
+                      An error occurred while processing the statistics. Please try again.
+                    </Text>
+                    <TouchableOpacity 
+                      style={styles.detailedStatsRetryButton}
+                      onPress={handleRetryDetailedStats}
+                    >
+                      <MaterialCommunityIcons name="refresh" size={18} color="#ffffff" />
+                      <Text style={styles.detailedStatsRetryButtonText}>Retry</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
             })()}
             {/* Item Analysis Section */}
             <View style={styles.detailedStatsItemAnalysisSection}>
@@ -15169,6 +15616,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               })()}
             </View>
           </ScrollView>
+          )}
         </View>
       </Modal>
 
@@ -17670,6 +18118,26 @@ const styles = StyleSheet.create({
 
   },
 
+  studentTableWrapper: {
+
+    width: '100%',
+
+    marginTop: 8,
+
+  },
+
+  studentTableScrollContent: {
+
+    paddingBottom: 4,
+
+  },
+
+  studentTableContent: {
+
+    paddingRight: 0,
+
+  },
+
   studentRow: {
 
     flexDirection: 'row',
@@ -17738,7 +18206,23 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
+    justifyContent: 'flex-end',
+
     gap: 10,
+
+    width: 40,
+
+    minWidth: 40,
+
+  },
+
+  studentActionsHeader: {
+
+    width: 40,
+
+    alignItems: 'flex-end',
+
+    justifyContent: 'flex-end',
 
   },
 
@@ -21727,6 +22211,9 @@ const styles = StyleSheet.create({
   tableScrollContainer: {
     // Removed maxHeight to prevent vertical scrolling
   },
+  tableScrollContent: {
+    flexGrow: 1,
+  },
 
   resultsTableActions: {
     flexDirection: 'row',
@@ -24700,6 +25187,68 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 4,
     backgroundColor: '#f8fafc',
+  },
+
+  detailedStatsLoadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 60,
+    backgroundColor: '#f8fafc',
+  },
+
+  detailedStatsLoadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+
+  detailedStatsErrorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 32,
+    backgroundColor: '#f8fafc',
+  },
+
+  detailedStatsErrorText: {
+    marginTop: 16,
+    fontSize: 18,
+    color: '#1e293b',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+
+  detailedStatsErrorSubtext: {
+    marginTop: 8,
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+
+  detailedStatsRetryButton: {
+    marginTop: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+    gap: 8,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+
+  detailedStatsRetryButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ffffff',
   },
 
   detailedStatsItemAnalysisSection: {
