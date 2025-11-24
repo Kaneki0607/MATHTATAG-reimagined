@@ -14669,21 +14669,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       </Modal>
 
       {/* Detailed Statistics Modal */}
-      <Modal visible={showDetailedStatsModal} animationType="slide" transparent={false}>
-        <View style={styles.detailedStatsModalContainer}>
-          {/* Header */}
-          <View style={styles.detailedStatsModalHeader}>
-            <View style={styles.detailedStatsModalTitleContainer}>
-              <MaterialCommunityIcons name="chart-box" size={24} color="#8b5cf6" />
-              <Text style={styles.detailedStatsModalTitle}>Class Statistics</Text>
-            </View>
-            <TouchableOpacity 
-              onPress={handleCloseDetailedStats} 
-              style={styles.detailedStatsCloseButton}
-            >
-              <AntDesign name="close" size={24} color="#64748b" />
-            </TouchableOpacity>
-          </View>
+      <Modal visible={showDetailedStatsModal} animationType="fade" transparent={true}>
+        <TouchableWithoutFeedback onPress={handleCloseDetailedStats}>
+          <View style={styles.detailedStatsModalBackdrop}>
+            <TouchableWithoutFeedback>
+              <View style={[styles.detailedStatsModalPanelContainer, {
+                maxWidth: width < 640 ? width - 32 : Math.min(600, width - 64),
+                maxHeight: height * 0.9,
+              }]}>
+                <View style={[styles.detailedStatsModalPanel, {
+                  maxHeight: height * 0.9,
+                }]}>
+                  {/* Header */}
+                  <View style={styles.detailedStatsModalHeader}>
+                    <View style={styles.detailedStatsModalTitleContainer}>
+                      <MaterialCommunityIcons name="chart-box" size={24} color="#8b5cf6" />
+                      <Text style={styles.detailedStatsModalTitle}>Class Statistics</Text>
+                    </View>
+                    <TouchableOpacity 
+                      onPress={handleCloseDetailedStats} 
+                      style={styles.detailedStatsCloseButton}
+                    >
+                      <AntDesign name="close" size={24} color="#64748b" />
+                    </TouchableOpacity>
+                  </View>
 
           {/* Exercise ID Badge and Export Button */}
           {selectedExerciseForStats && (
@@ -15617,7 +15626,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
             </View>
           </ScrollView>
           )}
-        </View>
+                </View>
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
       </Modal>
 
       {/* Custom Alert */}
@@ -25089,9 +25102,30 @@ const styles = StyleSheet.create({
   },
 
   // Detailed Statistics Modal Styles
-  detailedStatsModalContainer: {
+  detailedStatsModalBackdrop: {
     flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  
+  detailedStatsModalPanelContainer: {
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  
+  detailedStatsModalPanel: {
+    width: '100%',
     backgroundColor: '#f8fafc',
+    borderRadius: 16,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
   },
 
   detailedStatsModalHeader: {
@@ -25103,6 +25137,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
   },
 
   detailedStatsModalTitleContainer: {
@@ -25183,14 +25219,16 @@ const styles = StyleSheet.create({
   },
 
   detailedStatsModalContent: {
-    flex: 1,
+    maxHeight: '100%',
     paddingHorizontal: 16,
     paddingTop: 4,
+    paddingBottom: 16,
     backgroundColor: '#f8fafc',
   },
 
   detailedStatsLoadingContainer: {
-    flex: 1,
+    minHeight: 200,
+    maxHeight: 400,
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: 60,
@@ -25205,7 +25243,8 @@ const styles = StyleSheet.create({
   },
 
   detailedStatsErrorContainer: {
-    flex: 1,
+    minHeight: 200,
+    maxHeight: 400,
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: 60,
