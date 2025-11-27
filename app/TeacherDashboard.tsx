@@ -9193,6 +9193,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                       });
 
                       
+                      // Sort assignments within each quarter from earliest to latest assigned
+                      Object.keys(groupedByQuarter).forEach((q) => {
+                        groupedByQuarter[q].sort((a: any, b: any) => {
+                          const ta = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
+                          const tb = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
+                          return ta - tb;
+                        });
+                      });
+                      
 
                       const quarters = ['Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4', 'No Quarter'].filter(
 
@@ -14673,13 +14682,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         <TouchableWithoutFeedback onPress={handleCloseDetailedStats}>
           <View style={styles.detailedStatsModalBackdrop}>
             <TouchableWithoutFeedback>
-              <View style={[styles.detailedStatsModalPanelContainer, {
-                maxWidth: width < 640 ? width - 32 : Math.min(600, width - 64),
-                maxHeight: height * 0.9,
-              }]}>
-                <View style={[styles.detailedStatsModalPanel, {
-                  maxHeight: height * 0.9,
-                }]}>
+              <View style={[styles.detailedStatsModalPanelContainer]}>
+                <View style={[styles.detailedStatsModalPanel]}>
                   {/* Header */}
                   <View style={styles.detailedStatsModalHeader}>
                     <View style={styles.detailedStatsModalTitleContainer}>
@@ -25105,27 +25109,26 @@ const styles = StyleSheet.create({
   detailedStatsModalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 16,
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
+    padding: 0,
   },
   
   detailedStatsModalPanelContainer: {
     width: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
+    height: '100%',
+    flex: 1,
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
   },
   
   detailedStatsModalPanel: {
     width: '100%',
+    height: '100%',
+    flex: 1,
     backgroundColor: '#f8fafc',
-    borderRadius: 16,
+    borderRadius: 0,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
   },
 
   detailedStatsModalHeader: {
@@ -25137,8 +25140,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
   },
 
   detailedStatsModalTitleContainer: {
