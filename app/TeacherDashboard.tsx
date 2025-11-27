@@ -1,5 +1,5 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
-import Svg, { Circle, Line, Path, Text as SvgText } from 'react-native-svg';
+import React from 'react';
 
 import * as FileSystem from 'expo-file-system/legacy';
 
@@ -48,8 +48,6 @@ import {
 import { ResponsiveCards } from '../components/ResponsiveGrid';
 import { useResponsive } from '../hooks/useResponsive';
 import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
-
-import * as XLSX from 'xlsx';
 
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
 
@@ -294,6 +292,26 @@ const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, butt
   );
 
 };
+
+// Error boundary to prevent the Detailed Statistics modal from crashing the entire screen
+class ModalErrorBoundary extends React.Component<{ fallback: React.ReactNode; children?: React.ReactNode }, { hasError: boolean }> {
+  constructor(props: { fallback: React.ReactNode; children?: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch() {
+    // no-op; we only need to render fallback
+  }
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback as any;
+    }
+    return this.props.children as any;
+  }
+}
 
 const generateGeminiAnalysis = async (resultData: any, classAverages: any): Promise<any> => {
   let lastAnalysisText = '';
@@ -2433,12 +2451,16 @@ export default function TeacherDashboard() {
   const [detailedStatsData, setDetailedStatsData] = useState<any>(null);
   const [detailedStatsLoading, setDetailedStatsLoading] = useState(false);
   const statsPreparationHandle = useRef<ReturnType<typeof InteractionManager.runAfterInteractions> | null>(null);
+  const [showItemAnalysis, setShowItemAnalysis] = useState(false);
+
 
   useEffect(() => {
     return () => {
       statsPreparationHandle.current?.cancel?.();
     };
   }, []);
+
+
 
   // Helper function to format answers for display based on exercise type
   const formatAnswerForDisplay = useCallback((answer: string, questionType: string): string => {
@@ -2897,6 +2919,7 @@ export default function TeacherDashboard() {
 
     setSelectedExerciseForStats(payload);
     setShowDetailedStatsModal(true);
+    setShowItemAnalysis(false);
     prepareDetailedStats(exerciseResults);
   };
 
@@ -5709,7 +5732,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   };
   const handleExportToExcel = async (exerciseTitle: string, results: any[], students: any[]) => {
 
+    let XLSX: any;
     try {
+      const XLSXLib: any = await import('xlsx');
+      XLSX = XLSXLib.default || XLSXLib;
 
       // Create a workbook
 
@@ -6308,7 +6334,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   const handleExportClassStatsToExcel = async () => {
     if (!selectedExerciseForStats) return;
     
+    let XLSX: any;
     try {
+      const XLSXLib: any = await import('xlsx');
+      XLSX = XLSXLib.default || XLSXLib;
       const { exerciseTitle, exerciseId, exerciseResults, classId } = selectedExerciseForStats;
       
       // Create a workbook
@@ -6531,7 +6560,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   
   
   const handleExportQuarterToExcel = async (quarter: string, classId: string, resultsByExercise: any, students: any[]) => {
+    let XLSX: any;
     try {
+      const XLSXLib: any = await import('xlsx');
+      XLSX = XLSXLib.default || XLSXLib;
       // Get class info for filename
       const classInfo = activeClasses.find(c => c.id === classId);
       const className = classInfo?.name || 'Class';
@@ -14681,9 +14713,27 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       <Modal visible={showDetailedStatsModal} animationType="fade" transparent={true}>
         <TouchableWithoutFeedback onPress={handleCloseDetailedStats}>
           <View style={styles.detailedStatsModalBackdrop}>
-            <TouchableWithoutFeedback>
-              <View style={[styles.detailedStatsModalPanelContainer]}>
-                <View style={[styles.detailedStatsModalPanel]}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <ModalErrorBoundary
+                fallback={(
+                  <View style={styles.detailedStatsErrorContainer}>
+                    <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
+                    <Text style={styles.detailedStatsErrorText}>Unable to load statistics</Text>
+                    <Text style={styles.detailedStatsErrorSubtext}>
+                      Something went wrong while rendering. Try again on this device.
+                    </Text>
+                    <TouchableOpacity 
+                      style={styles.detailedStatsRetryButton}
+                      onPress={handleRetryDetailedStats}
+                    >
+                      <MaterialCommunityIcons name="refresh" size={18} color="#ffffff" />
+                      <Text style={styles.detailedStatsRetryButtonText}>Retry</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              >
+                <View style={[styles.detailedStatsModalPanelContainer]} onStartShouldSetResponder={() => true}>
+                  <View style={[styles.detailedStatsModalPanel]}>
                   {/* Header */}
                   <View style={styles.detailedStatsModalHeader}>
                     <View style={styles.detailedStatsModalTitleContainer}>
@@ -14727,13 +14777,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           {/* Content - Only show when not loading */}
           {!detailedStatsLoading && (
-          <ScrollView style={styles.detailedStatsModalContent} showsVerticalScrollIndicator={false}>
+          <ScrollView
+            style={styles.detailedStatsModalContent}
+            showsVerticalScrollIndicator={false}
+            bounces={true}
+            overScrollMode="always"
+            decelerationRate="fast"
+            scrollEventThrottle={16}
+            contentContainerStyle={{ paddingBottom: 32 }}
+            keyboardShouldPersistTaps="handled"
+          >
             {/* Class Statistics Section */}
-            {selectedExerciseForStats && (() => {
+            {detailedStatsData && (() => {
               try {
-              const { exerciseResults } = selectedExerciseForStats;
-              
-              if (!exerciseResults || !Array.isArray(exerciseResults) || exerciseResults.length === 0) {
+              const stats = detailedStatsData;
+              const total = Math.max(stats?.totalStudents || 0, 0);
+              if (!total) {
                 return (
                   <View style={styles.detailedStatsErrorContainer}>
                     <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
@@ -14743,66 +14802,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 );
               }
 
-              const scores = exerciseResults.map((r: any) => r.scorePercentage || 0).filter((s: number) => !isNaN(s) && isFinite(s));
-              
-              if (scores.length === 0) {
-                return (
-                  <View style={styles.detailedStatsErrorContainer}>
-                    <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
-                    <Text style={styles.detailedStatsErrorText}>Invalid data</Text>
-                    <Text style={styles.detailedStatsErrorSubtext}>Unable to calculate statistics from the available data.</Text>
-                  </View>
-                );
-              }
-              
-              // Calculate statistics
-              const mps = scores.reduce((sum: number, score: number) => sum + score, 0) / scores.length;
-              const sortedScores = [...scores].sort((a: number, b: number) => a - b);
-              const median = sortedScores.length % 2 === 0 
-                ? (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2
-                : sortedScores[Math.floor(sortedScores.length / 2)];
-              
-              // Calculate mode (most frequent score)
-              const scoreCounts: { [key: number]: number } = {};
-              scores.forEach((score: number) => {
-                const roundedScore = Math.round(score);
-                scoreCounts[roundedScore] = (scoreCounts[roundedScore] || 0) + 1;
-              });
-              const mode = Object.keys(scoreCounts).reduce((a, b) => 
-                scoreCounts[parseInt(a)] > scoreCounts[parseInt(b)] ? a : b
-              );
-              
-              // Calculate standard deviation
-              const variance = scores.reduce((sum: number, score: number) => sum + Math.pow(score - mps, 2), 0) / scores.length;
-              const stdDev = Math.sqrt(variance);
-              
-              const highestScore = Math.max(...scores);
-              const lowestScore = Math.min(...scores);
-              const range = highestScore - lowestScore;
-              
-              // Find top and bottom students
-              const topStudent = exerciseResults.find((r: any) => r.scorePercentage === highestScore);
-              const bottomStudent = exerciseResults.find((r: any) => r.scorePercentage === lowestScore);
-              
-              // Calculate efficiency metrics
-              const totalAttempts = exerciseResults.reduce((sum: number, result: any) => {
-                return sum + (result.questionResults?.reduce((qSum: number, q: any) => qSum + (q.attempts || 1), 0) || 0);
-              }, 0);
-              const avgAttemptsPerItem = totalAttempts / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
-              
-              const totalTime = exerciseResults.reduce((sum: number, result: any) => sum + (result.totalTimeSpent || 0), 0);
-              const avgTimePerItem = totalTime / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
-              
-              // Performance distribution
-              const highlyProficientCount = scores.filter((s: number) => s >= 85).length;
-              const proficientCount = scores.filter((s: number) => s >= 75 && s < 85).length;
-              const nearlyProficientCount = scores.filter((s: number) => s >= 50 && s < 75).length;
-              const lowProficientCount = scores.filter((s: number) => s >= 25 && s < 50).length;
-              const notProficientCount = scores.filter((s: number) => s < 25).length;
-              
-              // Calculate pass rate (students with score >= 75%)
-              const passCount = scores.filter((s: number) => s >= 75).length;
-              const passRate = scores.length > 0 ? (passCount / scores.length) * 100 : 0;
+              const {
+                mps,
+                median,
+                mode,
+                stdDev,
+                range,
+                highestScore,
+                lowestScore,
+                passCount,
+                passRate,
+                avgAttemptsPerItem,
+                avgTimePerItem,
+                topStudentName,
+                bottomStudentName,
+                distribution,
+              } = stats;
+
+              const {
+                highlyProficientCount = 0,
+                proficientCount = 0,
+                nearlyProficientCount = 0,
+                lowProficientCount = 0,
+                notProficientCount = 0,
+              } = distribution || {};
 
               return (
                 <View style={styles.detailedStatsClassStatsSection}>
@@ -14818,7 +14841,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                       <MaterialCommunityIcons name="chart-line" size={16} color="#64748b" />
                       <Text style={styles.detailedStatsTopLabel}>Pass Rate</Text>
                       <Text style={[styles.detailedStatsTopValue, { color: '#ef4444' }]}>{passRate.toFixed(1)}%</Text>
-                      <Text style={styles.detailedStatsTopSubtext}>{passCount}/{scores.length}</Text>
+                      <Text style={styles.detailedStatsTopSubtext}>{passCount}/{total}</Text>
                     </View>
                   </View>
 
@@ -14877,7 +14900,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                         <Text style={[styles.detailedStatsLabel, { color: '#10b981' }]}>Highest</Text>
                         <Text style={[styles.detailedStatsValue, { color: '#10b981' }]}>{highestScore.toFixed(1)}%</Text>
                         <Text style={[styles.detailedStatsSubtext, { fontSize: 10, color: '#10b981' }]} numberOfLines={1}>
-                          {topStudent ? (topStudent.studentInfo?.name || 'Unknown') : '—'}
+                          {topStudentName || '—'}
                         </Text>
                       </View>
                       
@@ -14886,7 +14909,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                         <Text style={[styles.detailedStatsLabel, { color: '#ef4444' }]}>Lowest</Text>
                         <Text style={[styles.detailedStatsValue, { color: '#ef4444' }]}>{lowestScore.toFixed(1)}%</Text>
                         <Text style={[styles.detailedStatsSubtext, { fontSize: 10, color: '#ef4444' }]} numberOfLines={1}>
-                          {bottomStudent ? (bottomStudent.studentInfo?.name || 'Unknown') : '—'}
+                          {bottomStudentName || '—'}
                         </Text>
                       </View>
                     </View>
@@ -14922,413 +14945,63 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                     <Text style={styles.detailedStatsSubtitle}>Performance Distribution</Text>
                     <View style={styles.detailedStatsDistribution}>
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(highlyProficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#10b981' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(highlyProficientCount / total) * 100}%` : '0%', backgroundColor: '#10b981' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#10b981' }]} />
                             <Text style={styles.detailedStatsDistText}>Highly Proficient (85-100%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{highlyProficientCount} ({scores.length > 0 ? ((highlyProficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{highlyProficientCount} ({total > 0 ? ((highlyProficientCount / total) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                       
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(proficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#3b82f6' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(proficientCount / total) * 100}%` : '0%', backgroundColor: '#3b82f6' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#3b82f6' }]} />
                             <Text style={styles.detailedStatsDistText}>Proficient (75-84%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{proficientCount} ({scores.length > 0 ? ((proficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{proficientCount} ({total > 0 ? ((proficientCount / total) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                       
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(nearlyProficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#f59e0b' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(nearlyProficientCount / total) * 100}%` : '0%', backgroundColor: '#f59e0b' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#f59e0b' }]} />
                             <Text style={styles.detailedStatsDistText}>Nearly Proficient (50-74%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{nearlyProficientCount} ({scores.length > 0 ? ((nearlyProficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{nearlyProficientCount} ({total > 0 ? ((nearlyProficientCount / total) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                       
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(lowProficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#f97316' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(lowProficientCount / total) * 100}%` : '0%', backgroundColor: '#f97316' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#f97316' }]} />
                             <Text style={styles.detailedStatsDistText}>Low Proficient (25-49%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{lowProficientCount} ({scores.length > 0 ? ((lowProficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{lowProficientCount} ({total > 0 ? ((lowProficientCount / total) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                       
                       <View style={styles.detailedStatsDistItem}>
-                        <View style={[styles.detailedStatsDistBar, { width: scores.length > 0 ? `${(notProficientCount / scores.length) * 100}%` : '0%', backgroundColor: '#ef4444' }]} />
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(notProficientCount / total) * 100}%` : '0%', backgroundColor: '#ef4444' }]} />
                         <View style={styles.detailedStatsDistLabel}>
                           <View style={styles.detailedStatsDistLabelRow}>
                             <View style={[styles.detailedStatsDistDot, { backgroundColor: '#ef4444' }]} />
                             <Text style={styles.detailedStatsDistText}>Not Proficient (&lt;25%)</Text>
                           </View>
-                          <Text style={styles.detailedStatsDistCount}>{notProficientCount} ({scores.length > 0 ? ((notProficientCount / scores.length) * 100).toFixed(0) : 0}%)</Text>
+                          <Text style={styles.detailedStatsDistCount}>{notProficientCount} ({total > 0 ? ((notProficientCount / total) * 100).toFixed(0) : 0}%)</Text>
                         </View>
                       </View>
                     </View>
                   </View>
                   
-                  {/* Time vs Score Per Item Chart */}
-                  <View style={styles.detailedStatsSubsection}>
-                    <Text style={styles.detailedStatsSubtitle}>Time vs Score Per Item</Text>
-                    {selectedExerciseForStats && (() => {
-                      const { exerciseResults } = selectedExerciseForStats;
-                      const firstResult = exerciseResults[0];
-                      
-                      if (!firstResult?.questionResults?.length) {
-                        return (
-                          <View style={styles.noDataContainer}>
-                            <Text style={styles.noDataText}>No data available</Text>
-                          </View>
-                        );
-                      }
-
-                      // Calculate average time and score per item
-                      const chartData = firstResult.questionResults.map((question: any, index: number) => {
-                        const questionNumber = question.questionNumber || index + 1;
-                        
-                        // Get all student results for this question
-                        const questionResults = exerciseResults.map((result: any) => {
-                          return result.questionResults?.find((q: any) => q.questionId === question.questionId);
-                        }).filter(Boolean);
-                        
-                        // Calculate average time
-                        const timeSpentArray = questionResults
-                          .map((q: any) => q.timeSpentSeconds || 0)
-                          .filter(time => time > 0);
-                        
-                        const avgTime = timeSpentArray.length > 0 
-                          ? timeSpentArray.reduce((sum: number, time: number) => sum + time, 0) / timeSpentArray.length 
-                          : 0;
-                        
-                        // Calculate average score (percentage of students who got it correct)
-                        const correctCount = questionResults.filter((q: any) => q.isCorrect).length;
-                        const avgScore = questionResults.length > 0 
-                          ? (correctCount / questionResults.length) * 100 
-                          : 0;
-                        
-                        return {
-                          itemNumber: questionNumber,
-                          avgTime: avgTime,
-                          avgScore: avgScore,
-                        };
-                      });
-
-                      // Find max time for scaling
-                      const maxTime = Math.max(...chartData.map((d: { itemNumber: number; avgTime: number; avgScore: number }) => d.avgTime), 1);
-                      const chartHeight = 200;
-                      
-                      // SVG Chart dimensions
-                      const svgWidth = 320;
-                      const svgHeight = chartHeight + 60; // Extra space for labels
-                      const padding = 50;
-                      const chartWidth = svgWidth - (padding * 2);
-                      const chartHeightInner = svgHeight - (padding * 2) - 40; // Space for X-axis labels
-                      
-                      // Convert data to SVG coordinates
-                      const svgData = chartData.map((data: { itemNumber: number; avgTime: number; avgScore: number }, index: number) => {
-                        const x = padding + (index / (chartData.length - 1 || 1)) * chartWidth;
-                        const timeY = padding + chartHeightInner - (data.avgTime / maxTime) * chartHeightInner;
-                        const scoreY = padding + chartHeightInner - (data.avgScore / 100) * chartHeightInner;
-                        
-                        return {
-                          x,
-                          timeY,
-                          scoreY,
-                          itemNumber: data.itemNumber,
-                          avgTime: data.avgTime,
-                          avgScore: data.avgScore,
-                        };
-                      });
-                      
-                      // Create path strings for lines
-                      const timePath = svgData.map((point: any, index: number) => 
-                        `${index === 0 ? 'M' : 'L'} ${point.x} ${point.timeY}`
-                      ).join(' ');
-                      
-                      const scorePath = svgData.map((point: any, index: number) => 
-                        `${index === 0 ? 'M' : 'L'} ${point.x} ${point.scoreY}`
-                      ).join(' ');
-                      
-                      return (
-                        <View style={styles.timeChartContainer}>
-                          {/* Legend */}
-                          <View style={styles.lineChartLegend}>
-                            <View style={styles.lineChartLegendItem}>
-                              <View style={[styles.lineChartLegendDot, { backgroundColor: '#3b82f6' }]} />
-                              <Text style={styles.lineChartLegendText}>Avg Time (sec)</Text>
-                            </View>
-                            <View style={styles.lineChartLegendItem}>
-                              <View style={[styles.lineChartLegendDot, { backgroundColor: '#10b981' }]} />
-                              <Text style={styles.lineChartLegendText}>Avg Score (%)</Text>
-                            </View>
-                          </View>
-                          
-                          <View style={styles.lineChartMainContainer}>
-                            {/* SVG Chart */}
-                            <View style={styles.lineChartContent}>
-                              <Svg width={svgWidth} height={svgHeight}>
-                                {/* Chart frame */}
-                                <Line
-                                  x1={padding}
-                                  y1={padding}
-                                  x2={padding}
-                                  y2={padding + chartHeightInner}
-                                  stroke="#cbd5e1"
-                                  strokeWidth="2"
-                                />
-                                <Line
-                                  x1={padding}
-                                  y1={padding + chartHeightInner}
-                                  x2={padding + chartWidth}
-                                  y2={padding + chartHeightInner}
-                                  stroke="#cbd5e1"
-                                  strokeWidth="2"
-                                />
-                                <Line
-                                  x1={padding + chartWidth}
-                                  y1={padding}
-                                  x2={padding + chartWidth}
-                                  y2={padding + chartHeightInner}
-                                  stroke="#cbd5e1"
-                                  strokeWidth="2"
-                                />
-                                <Line
-                                  x1={padding}
-                                  y1={padding}
-                                  x2={padding + chartWidth}
-                                  y2={padding}
-                                  stroke="#cbd5e1"
-                                  strokeWidth="2"
-                                />
-                                
-                                {/* Grid lines */}
-                                <Line
-                                  x1={padding}
-                                  y1={padding + chartHeightInner * 0.25}
-                                  x2={padding + chartWidth}
-                                  y2={padding + chartHeightInner * 0.25}
-                                  stroke="#f1f5f9"
-                                  strokeWidth="1"
-                                />
-                                <Line
-                                  x1={padding}
-                                  y1={padding + chartHeightInner * 0.5}
-                                  x2={padding + chartWidth}
-                                  y2={padding + chartHeightInner * 0.5}
-                                  stroke="#f1f5f9"
-                                  strokeWidth="1"
-                                />
-                                <Line
-                                  x1={padding}
-                                  y1={padding + chartHeightInner * 0.75}
-                                  x2={padding + chartWidth}
-                                  y2={padding + chartHeightInner * 0.75}
-                                  stroke="#f1f5f9"
-                                  strokeWidth="1"
-                                />
-                                
-                                {/* Vertical grid lines */}
-                                <Line
-                                  x1={padding + chartWidth * 0.25}
-                                  y1={padding}
-                                  x2={padding + chartWidth * 0.25}
-                                  y2={padding + chartHeightInner}
-                                  stroke="#f1f5f9"
-                                  strokeWidth="1"
-                                />
-                                <Line
-                                  x1={padding + chartWidth * 0.5}
-                                  y1={padding}
-                                  x2={padding + chartWidth * 0.5}
-                                  y2={padding + chartHeightInner}
-                                  stroke="#f1f5f9"
-                                  strokeWidth="1"
-                                />
-                                <Line
-                                  x1={padding + chartWidth * 0.75}
-                                  y1={padding}
-                                  x2={padding + chartWidth * 0.75}
-                                  y2={padding + chartHeightInner}
-                                  stroke="#f1f5f9"
-                                  strokeWidth="1"
-                                />
-                                
-                                {/* Time line (blue) */}
-                                <Path
-                                  d={timePath}
-                                  stroke="#3b82f6"
-                                  strokeWidth="3"
-                                  fill="none"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                                
-                                {/* Score line (green) */}
-                                <Path
-                                  d={scorePath}
-                                  stroke="#10b981"
-                                  strokeWidth="3"
-                                  fill="none"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                                
-                                {/* Time data points */}
-                                {svgData.map((point: any, index: number) => (
-                                  <Circle
-                                    key={`time-point-${index}`}
-                                    cx={point.x}
-                                    cy={point.timeY}
-                                    r="5"
-                                    fill="#3b82f6"
-                                    stroke="#ffffff"
-                                    strokeWidth="2"
-                                  />
-                                ))}
-                                
-                                {/* Score data points */}
-                                {svgData.map((point: any, index: number) => (
-                                  <Circle
-                                    key={`score-point-${index}`}
-                                    cx={point.x}
-                                    cy={point.scoreY}
-                                    r="5"
-                                    fill="#10b981"
-                                    stroke="#ffffff"
-                                    strokeWidth="2"
-                                  />
-                                ))}
-                                
-                                {/* X-axis labels */}
-                                {svgData.map((point: any, index: number) => (
-                                  <SvgText
-                                    key={`label-${index}`}
-                                    x={point.x}
-                                    y={svgHeight - 8}
-                                    fontSize="10"
-                                    fill="#475569"
-                                    fontWeight="600"
-                                    textAnchor="middle"
-                                  >
-                                    {point.itemNumber}
-                                  </SvgText>
-                                ))}
-                                
-                                {/* Y-axis labels for Time (left side) */}
-                                <SvgText
-                                  x={padding - 10}
-                                  y={padding + 5}
-                                  fontSize="9"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="end"
-                                >
-                                  {Math.round(maxTime)}
-                                </SvgText>
-                                <SvgText
-                                  x={padding - 10}
-                                  y={padding + chartHeightInner * 0.5 + 5}
-                                  fontSize="9"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="end"
-                                >
-                                  {Math.round(maxTime / 2)}
-                                </SvgText>
-                                <SvgText
-                                  x={padding - 10}
-                                  y={padding + chartHeightInner + 5}
-                                  fontSize="9"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="end"
-                                >
-                                  0
-                                </SvgText>
-                                
-                                {/* Y-axis labels for Score (right side) */}
-                                <SvgText
-                                  x={padding + chartWidth + 10}
-                                  y={padding + 5}
-                                  fontSize="9"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="start"
-                                >
-                                  100
-                                </SvgText>
-                                <SvgText
-                                  x={padding + chartWidth + 10}
-                                  y={padding + chartHeightInner * 0.5 + 5}
-                                  fontSize="9"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="start"
-                                >
-                                  50
-                                </SvgText>
-                                <SvgText
-                                  x={padding + chartWidth + 10}
-                                  y={padding + chartHeightInner + 5}
-                                  fontSize="9"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="start"
-                                >
-                                  0
-                                </SvgText>
-                                
-                                {/* Axis titles */}
-                                <SvgText
-                                  x={padding - 25}
-                                  y={padding + chartHeightInner * 0.5}
-                                  fontSize="10"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="middle"
-                                  transform={`rotate(-90, ${padding - 25}, ${padding + chartHeightInner * 0.5})`}
-                                >
-                                  Time (sec)
-                                </SvgText>
-                                <SvgText
-                                  x={padding + chartWidth + 25}
-                                  y={padding + chartHeightInner * 0.5}
-                                  fontSize="10"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="middle"
-                                  transform={`rotate(90, ${padding + chartWidth + 25}, ${padding + chartHeightInner * 0.5})`}
-                                >
-                                  Score (%)
-                                </SvgText>
-                                <SvgText
-                                  x={padding + chartWidth * 0.5}
-                                  y={svgHeight - 2}
-                                  fontSize="10"
-                                  fill="#64748b"
-                                  fontWeight="600"
-                                  textAnchor="middle"
-                                >
-                                  Item Number
-                                </SvgText>
-                              </Svg>
-                            </View>
-                          </View>
-                        </View>
-                      );
-                    })()}
-                  </View>
+                  {/* Time vs Score Per Item Chart removed per request */}
                 </View>
               );
               } catch (error: any) {
@@ -15357,6 +15030,18 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               
               {selectedExerciseForStats && (() => {
                 const { exerciseResults } = selectedExerciseForStats;
+                // Lazy-load Item Analysis to avoid initial heavy computation on mobile
+                if (!showItemAnalysis) {
+                  return (
+                    <TouchableOpacity 
+                      style={[styles.statsToggleButton, { alignSelf: 'flex-start', marginTop: 8 }]}
+                      onPress={() => setShowItemAnalysis(true)}
+                    >
+                      <Text style={styles.statsToggleText}>Show Item Analysis</Text>
+                      <MaterialCommunityIcons name="chevron-right" size={18} color="#3b82f6" />
+                    </TouchableOpacity>
+                  );
+                }
                 const firstResult = exerciseResults[0];
                 
                 if (!firstResult?.questionResults?.length) {
@@ -15632,6 +15317,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           )}
                 </View>
               </View>
+            </ModalErrorBoundary>
             </TouchableWithoutFeedback>
           </View>
         </TouchableWithoutFeedback>
@@ -25157,6 +24843,8 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
 
+
+
   detailedStatsCloseButton: {
     width: 32,
     height: 32,
@@ -25222,10 +24910,10 @@ const styles = StyleSheet.create({
   },
 
   detailedStatsModalContent: {
-    maxHeight: '100%',
+    flexGrow: 1,
     paddingHorizontal: 16,
-    paddingTop: 4,
-    paddingBottom: 16,
+    paddingTop: 8,
+    paddingBottom: 0,
     backgroundColor: '#f8fafc',
   },
 
@@ -25295,6 +24983,7 @@ const styles = StyleSheet.create({
 
   detailedStatsItemAnalysisSection: {
     marginTop: 12,
+    marginBottom: 24,
     backgroundColor: '#ffffff',
     borderRadius: 12,
     padding: 16,
