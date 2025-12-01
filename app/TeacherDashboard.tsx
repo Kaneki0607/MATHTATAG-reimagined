@@ -1,4 +1,5 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
+import React from 'react';
 
 import * as FileSystem from 'expo-file-system/legacy';
 
@@ -8,9 +9,11 @@ import * as Print from 'expo-print';
 
 import { useRouter } from 'expo-router';
 
+import { Accelerometer } from 'expo-sensors';
+
 import * as Sharing from 'expo-sharing';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   ActivityIndicator,
@@ -19,7 +22,7 @@ import {
   Dimensions,
 
   Image,
-
+  InteractionManager,
   Modal,
 
   PanResponder,
@@ -44,8 +47,7 @@ import {
 
 import { ResponsiveCards } from '../components/ResponsiveGrid';
 import { useResponsive } from '../hooks/useResponsive';
-
-import * as XLSX from 'xlsx';
+import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
 
 import { AssignExerciseForm } from '../components/AssignExerciseForm';
 
@@ -53,10 +55,13 @@ import { AssignedExercise, useExercises } from '../hooks/useExercises';
 
 import { onAuthChange, signOutUser } from '../lib/firebase-auth';
 
-import { deleteData, pushData, readData, updateData, writeData } from '../lib/firebase-database';
+import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
 
+import { collectAppMetadata } from '../lib/app-metadata';
+import { createAnnouncement, createClass, createParent, createStudent } from '../lib/entity-helpers';
 import { logError, logErrorWithStack } from '../lib/error-logger';
 import { uploadFile } from '../lib/firebase-storage';
+import { callGeminiWithFallback, extractGeminiText, parseGeminiJson } from '../lib/gemini-utils';
 
 
 
@@ -184,8 +189,6 @@ const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, butt
 
   };
 
-
-
   return (
 
     <Modal
@@ -290,7 +293,192 @@ const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, butt
 
 };
 
+// Error boundary to prevent the Detailed Statistics modal from crashing the entire screen
+class ModalErrorBoundary extends React.Component<{ fallback: React.ReactNode; children?: React.ReactNode }, { hasError: boolean }> {
+  constructor(props: { fallback: React.ReactNode; children?: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch() {
+    // no-op; we only need to render fallback
+  }
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback as any;
+    }
+    return this.props.children as any;
+  }
+}
 
+const generateGeminiAnalysis = async (resultData: any, classAverages: any): Promise<any> => {
+  let lastAnalysisText = '';
+
+  try {
+    const performanceData = {
+      score: resultData.scorePercentage,
+      totalQuestions: resultData.totalQuestions,
+      timeSpent: resultData.totalTimeSpent,
+      questionResults: resultData.questionResults || [],
+      classAverage: classAverages?.averageScore || 0,
+      classAverageTime: classAverages?.averageTime || 0,
+    };
+
+    const prompt = `You are an expert educational psychologist analyzing a Grade 1 student's math exercise performance. Provide a comprehensive analysis in JSON format.
+
+
+
+STUDENT PERFORMANCE DATA:
+
+- Score: ${performanceData.score}%
+
+- Total Questions: ${performanceData.totalQuestions}
+
+- Time Spent: ${Math.round(performanceData.timeSpent / 1000)} seconds
+
+- Class Average Score: ${Math.round(performanceData.classAverage)}%
+
+- Class Average Time: ${Math.round(performanceData.classAverageTime)} seconds
+
+
+
+DETAILED QUESTION RESULTS:
+
+${performanceData.questionResults.map((q: any) => {
+  const classAvg = classAverages?.questionAverages?.[q.questionId];
+  return `Question ${q.questionNumber}: ${q.isCorrect ? 'CORRECT' : 'INCORRECT'} (${q.attempts} attempts, ${Math.round(q.timeSpent / 1000)}s)
+   Question Text: "${q.questionText}"
+   Question Type: ${q.questionType}
+   ${q.options && q.options.length > 0 ? `Options: ${q.options.join(', ')}` : ''}
+   Student Answer: "${q.studentAnswer}"
+   Correct Answer: "${q.correctAnswer}"
+   ${q.questionImage ? `Image: ${q.questionImage}` : ''}
+   
+   ENHANCED PERFORMANCE DATA:
+   - Difficulty Level: ${q.metadata?.difficulty || 'medium'}
+   - Topic Tags: ${q.metadata?.topicTags?.join(', ') || 'none'}
+   - Cognitive Load: ${q.metadata?.cognitiveLoad || 'medium'}
+   - Question Complexity: ${q.metadata?.questionComplexity || 'medium'}
+   - Total Hesitation Time: ${Math.round((q.totalHesitationTime || 0) / 1000)}s
+   - Average Confidence: ${q.averageConfidence?.toFixed(1) || '2.0'} (1=low, 2=medium, 3=high)
+   - Significant Changes: ${q.significantChanges || 0}
+   - Phase Distribution: Reading(${q.phaseDistribution?.reading || 0}), Thinking(${q.phaseDistribution?.thinking || 0}), Answering(${q.phaseDistribution?.answering || 0}), Reviewing(${q.phaseDistribution?.reviewing || 0})
+   
+   INTERACTION PATTERNS:
+   - Total Interactions: ${q.totalInteractions || 0}
+   - Option Clicks: ${q.interactionTypes?.optionClicks || 0}
+   - Help Used: ${q.interactionTypes?.helpUsed || 0} (Help Button: ${q.helpUsage?.helpButtonClicks || 0})
+   - Answer Changes: ${q.interactionTypes?.answerChanges || 0}
+   
+   TIME BREAKDOWN:
+   - Reading Time: ${Math.round((q.timeBreakdown?.readingTime || 0) / 1000)}s
+   - Thinking Time: ${Math.round((q.timeBreakdown?.thinkingTime || 0) / 1000)}s
+   - Answering Time: ${Math.round((q.timeBreakdown?.answeringTime || 0) / 1000)}s
+   - Reviewing Time: ${Math.round((q.timeBreakdown?.reviewingTime || 0) / 1000)}s
+   - Time to First Answer: ${Math.round((q.timeToFirstAnswer || 0) / 1000)}s
+   ${q.attemptHistory && q.attemptHistory.length > 0 ? `
+   ATTEMPT HISTORY:
+   ${q.attemptHistory.map((attempt: any, attemptIdx: number) =>
+     `   Attempt ${attemptIdx + 1}: "${attempt.answer || 'blank'}" (${Math.round((attempt.timeSpent || 0) / 1000)}s)`
+   ).join('\n')}` : ''}
+   ${classAvg ? `CLASS AVERAGE: ${Math.round(classAvg.averageTime / 1000)}s, ${Math.round(classAvg.averageAttempts)} attempts` : '- Performance ranking data not available'}`;
+}).join('\n\n')}
+
+
+
+IMPORTANT: Respond with ONLY valid JSON. Do not include any markdown formatting, code blocks, or additional text. Return only the JSON object.
+
+
+
+Required JSON format:
+
+{
+  "strengths": ["strength1", "strength2", "strength3"],
+  "weaknesses": ["weakness1", "weakness2", "weakness3"],
+  "questionAnalysis": ["analysis1", "analysis2", "analysis3"],
+  "timeAnalysis": {
+    "description": "Time analysis description",
+    "studentTime": ${Math.round(performanceData.timeSpent / 1000)},
+    "classAverage": ${Math.round(performanceData.classAverageTime)}
+  },
+  "recommendations": ["recommendation1", "recommendation2", "recommendation3"],
+  "encouragement": "Encouraging message for the student"
+}
+
+
+
+Focus on:
+1. Mathematical concepts mastered
+2. Areas needing improvement
+3. Time management skills
+4. Specific question performance
+5. Age-appropriate recommendations
+6. Positive reinforcement
+LANGUAGE RULES:
+- Always spell out all numbers in proper modern Tagalog words (hal. 12 → "labindalawa", 21 → "dalawampu't isa").
+- Huwag gumamit ng digits na hinaluan ng Tagalog o Spanish shortcuts tulad ng "dose" o "bente".
+
+Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
+
+    const requestBody = {
+      contents: [
+        {
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 2048,
+      },
+    };
+
+    const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+    console.log('Gemini model used for teacher analysis:', modelUsed);
+
+    let analysisText = extractGeminiText(data);
+    if (!analysisText) {
+      throw new Error('Invalid response from AI service');
+    }
+
+    lastAnalysisText = analysisText;
+    return parseGeminiJson<any>(analysisText);
+  } catch (error) {
+    console.error('Error generating Gemini analysis:', error);
+
+    if (lastAnalysisText) {
+      try {
+        const jsonMatches = lastAnalysisText.match(/\{[^}]*"strengths"[^}]*\}/g);
+        if (jsonMatches && jsonMatches.length > 0) {
+          console.log('Using partial Gemini analysis data.');
+          return JSON.parse(jsonMatches[0]);
+        }
+      } catch (partialError) {
+        console.warn('Failed to extract partial Gemini analysis:', partialError);
+      }
+    }
+
+    return {
+      strengths: ['Completed the exercise successfully', 'Showed persistence in problem-solving'],
+      weaknesses: ['Could improve time management', 'May need more practice with certain concepts'],
+      questionAnalysis: ['Overall good performance across questions'],
+      timeAnalysis: {
+        description: 'Student completed the exercise in a reasonable time',
+        studentTime: Math.round(resultData.totalTimeSpent / 1000),
+        classAverage: Math.round(classAverages?.averageTime || 0),
+      },
+      recommendations: ['Continue practicing regularly', 'Focus on areas that took longer'],
+      encouragement: 'Great job completing the exercise! Keep up the good work!',
+    };
+  }
+};
 
 // Stock image library data
 
@@ -999,7 +1187,6 @@ const stockImages: Record<string, Array<{ name: string; uri: any }>> = {
     { name: '90 pesos', uri: require('../assets/images/Stock-Images/Money/90.png') },
 
   ],
-
   'Numbers': [
 
     // Numbers 0-9 (blue)
@@ -1629,14 +1816,21 @@ function generateYearOptions() {
   return items;
 
 }
-
-
-
 export default function TeacherDashboard() {
 
   const router = useRouter();
   const { width, height } = useWindowDimensions();
   const responsive = useResponsive();
+  const layout = useResponsiveLayout();
+  const shouldAllowHorizontalSwipe = Platform.OS === 'android' || width < 640;
+  
+  // Responsive values
+  const containerPadding = useResponsiveValue({
+    mobile: 16,
+    tablet: 24,
+    desktop: 32,
+    default: 16,
+  });
 
   const [teacherData, setTeacherData] = useState<TeacherData | null>(null);
 
@@ -1808,8 +2002,6 @@ export default function TeacherDashboard() {
 
   };
 
-  const [annAllClasses, setAnnAllClasses] = useState(true);
-
   const [annSelectedClassIds, setAnnSelectedClassIds] = useState<string[]>([]);
 
   const [teacherClasses, setTeacherClasses] = useState<{
@@ -1839,6 +2031,11 @@ export default function TeacherDashboard() {
   const pan = useRef(new Animated.ValueXY({ x: width - 80, y: height - 170 })).current;
   const opacity = useRef(new Animated.Value(1)).current;
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  // Shake detection state
+  const [isShakeEnabled, setIsShakeEnabled] = useState(true);
+  const lastShakeTime = useRef(0);
+  const shakeThreshold = 12; // Lowered for better sensitivity (was 15)
   
   // Function to fade out the button after inactivity
   const fadeOut = () => {
@@ -1888,11 +2085,14 @@ export default function TeacherDashboard() {
     };
   }, []);
   
-  // PanResponder for dragging
+  // PanResponder for dragging with improved tap detection
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        // Only set responder if moved more than 5 pixels (this allows taps to work)
+        return Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5;
+      },
       onPanResponderGrant: () => {
         resetInactivityTimer();
         pan.setOffset({
@@ -1907,6 +2107,14 @@ export default function TeacherDashboard() {
       ),
       onPanResponderRelease: (_, gesture) => {
         pan.flattenOffset();
+        
+        // Check if this was a tap (minimal movement)
+        const wasTap = Math.abs(gesture.dx) < 5 && Math.abs(gesture.dy) < 5;
+        
+        if (wasTap) {
+          // This was a tap, let the TouchableOpacity handle it
+          return;
+        }
         
         // Get current position
         const currentX = (pan.x as any)._value;
@@ -1942,7 +2150,95 @@ export default function TeacherDashboard() {
     })
   ).current;
   
+  // Shake detection with improved compatibility
+  useEffect(() => {
+    if (!isShakeEnabled) return;
+    
+    let subscription: any;
+    let isSubscribed = true;
+    
+    const startShakeDetection = async () => {
+      try {
+        console.log('🚀 Starting shake detection...');
+        
+        // Platform check - only enable on Android/iOS
+        if (Platform.OS !== 'android' && Platform.OS !== 'ios') {
+          console.log('⚠️ Shake detection only available on mobile devices');
+          return;
+        }
+        
+        console.log('✓ Platform check passed:', Platform.OS);
+        
+        // Check if accelerometer is available with timeout
+        const availabilityPromise = Accelerometer.isAvailableAsync();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout checking accelerometer')), 2000)
+        );
+        
+        const isAvailable = await Promise.race([availabilityPromise, timeoutPromise])
+          .catch(() => false) as boolean;
+        
+        if (!isAvailable) {
+          console.log('❌ Accelerometer not available on this device');
+          return;
+        }
+        
+        console.log('✓ Accelerometer available, threshold:', shakeThreshold);
+        
+        // Set update interval (60fps) - works on all Android versions
+        Accelerometer.setUpdateInterval(16);
+        
+        subscription = Accelerometer.addListener(({ x, y, z }) => {
+          if (!isSubscribed) return;
+          
+          // Calculate total acceleration (magnitude of acceleration vector)
+          const acceleration = Math.sqrt(x * x + y * y + z * z);
+          
+          // Check if acceleration exceeds threshold
+          if (acceleration > shakeThreshold) {
+            const currentTime = Date.now();
+            
+            // Prevent multiple triggers within 1 second
+            if (currentTime - lastShakeTime.current > 1000) {
+              console.log('🔔 Shake detected! Acceleration:', acceleration.toFixed(2));
+              lastShakeTime.current = currentTime;
+              
+              // Trigger FAB action
+              handleShakeTrigger();
+            }
+          }
+        });
+      } catch (error) {
+        console.log('Shake detection not available:', error);
+        // Silently fail - shake is optional feature
+      }
+    };
+    
+    const handleShakeTrigger = () => {
+      // Show FAB if hidden
+      fadeIn();
+      resetInactivityTimer();
+      
+      // Open tech report modal
+      setShowTechReportModal(true);
+    };
+    
+    startShakeDetection();
+    
+    return () => {
+      isSubscribed = false;
+      if (subscription) {
+        try {
+          subscription.remove();
+        } catch (error) {
+          console.log('Error removing accelerometer subscription:', error);
+        }
+      }
+    };
+  }, [isShakeEnabled]);
+  
   const [closingClassId, setClosingClassId] = useState<string | null>(null);
+  const [deletingClassId, setDeletingClassId] = useState<string | null>(null);
 
   // Add Student state
 
@@ -1950,7 +2246,12 @@ export default function TeacherDashboard() {
 
   const [selectedClassForStudent, setSelectedClassForStudent] = useState<{ id: string; name: string } | null>(null);
 
-  const [studentNickname, setStudentNickname] = useState('');
+  // When set, modal operates in edit mode instead of create
+  const [selectedStudentForEdit, setSelectedStudentForEdit] = useState<any | null>(null);
+
+  const [studentLastName, setStudentLastName] = useState('');
+  const [studentFirstName, setStudentFirstName] = useState('');
+  const [studentMiddleInitial, setStudentMiddleInitial] = useState('');
 
   const [studentGender, setStudentGender] = useState<'male' | 'female'>('male');
 
@@ -1964,19 +2265,38 @@ export default function TeacherDashboard() {
 
   const [showParentInfoModal, setShowParentInfoModal] = useState(false);
 
-  const [selectedParentInfo, setSelectedParentInfo] = useState<any>(null);
+  // Export menu state
+
+  const [exportMenuVisible, setExportMenuVisible] = useState<string | null>(null);
 
   
 
   // Results sorting state
 
-  const [resultsSortBy, setResultsSortBy] = useState<'attempts' | 'time'>('attempts');
+  const [resultsSortBy, setResultsSortBy] = useState<'name' | 'correct' | 'score' | 'remarks' | 'attempts' | 'time'>('attempts');
 
   const [resultsSortOrder, setResultsSortOrder] = useState<'asc' | 'desc'>('asc');
+  
+  // Quarter filtering state for Results tab
+  const [selectedQuarter, setSelectedQuarter] = useState<string>('All Quarters');
 
   // List modal state
 
   const [showListModal, setShowListModal] = useState(false);
+
+  // Parents list modal state
+
+  const [showParentsListModal, setShowParentsListModal] = useState(false);
+
+  const [selectedClassForParentsList, setSelectedClassForParentsList] = useState<string | null>(null);
+
+  // Parent info modal state
+
+  const [selectedParentForInfo, setSelectedParentForInfo] = useState<any>(null);
+
+  // List tab sorting state
+  const [listSortBy, setListSortBy] = useState<'name' | 'gender'>('gender');
+  const [listSortOrder, setListSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [studentsByClass, setStudentsByClass] = useState<Record<string, any[]>>({});
 
@@ -2064,6 +2384,48 @@ export default function TeacherDashboard() {
 
   const [selectedExerciseForPerformance, setSelectedExerciseForPerformance] = useState<any>(null);
 
+  // Exercise Result modal (view/edit/delete)
+  const [showExerciseResultModal, setShowExerciseResultModal] = useState(false);
+  const [selectedExerciseResultId, setSelectedExerciseResultId] = useState<string | null>(null);
+  const [selectedExerciseResultData, setSelectedExerciseResultData] = useState<any>(null);
+  const [editableQuestionResults, setEditableQuestionResults] = useState<any[]>([]);
+  const [editableSummary, setEditableSummary] = useState<any>(null);
+  const [loadingExerciseResult, setLoadingExerciseResult] = useState<boolean>(false);
+  const [showDeviceInfo, setShowDeviceInfo] = useState<boolean>(false);
+  const [filterMode, setFilterMode] = useState<'all' | 'correct' | 'wrong'>('all');
+  const [sortMode, setSortMode] = useState<'default' | 'attempts' | 'time' | 'type'>('default');
+  const [expandedQuestions, setExpandedQuestions] = useState<Record<string, boolean>>({});
+  const [teacherRemarks, setTeacherRemarks] = useState<string>('');
+  const [relatedStats, setRelatedStats] = useState<{ previousCount: number; previousAvgScore: number; lastScores: number[] } | null>(null);
+
+  // Helper: show friendly text for values that might be URLs (e.g., image choices)
+  const toFriendlyText = (value: any, maxLen: number = 40): string => {
+    if (value === null || value === undefined) return '';
+    const str = String(value).trim();
+    let out = str;
+    if (str.startsWith('http://') || str.startsWith('https://')) {
+      try {
+        const parts = str.split('/');
+        const lastPart = parts[parts.length - 1];
+        out = lastPart.split('?')[0];
+      } catch {
+        out = str;
+      }
+    }
+    if (out.length > maxLen) return out.slice(0, maxLen) + '...';
+    return out;
+  };
+
+  const isImageUrl = (value: any): boolean => {
+    if (!value) return false;
+    const s = String(value).toLowerCase();
+    return s.startsWith('http://') || s.startsWith('https://');
+  };
+
+  const toggleQuestionExpanded = (qid: string) => {
+    setExpandedQuestions(prev => ({ ...prev, [qid]: !prev[qid] }));
+  };
+
   const [studentPerformanceData, setStudentPerformanceData] = useState<any>(null);
 
   const [loadingStudentPerformance, setLoadingStudentPerformance] = useState(false);
@@ -2072,7 +2434,520 @@ export default function TeacherDashboard() {
 
   const [classAverages, setClassAverages] = useState<any>(null);
 
+  // Class statistics expansion state
+  const [expandedStats, setExpandedStats] = useState<Record<string, boolean>>({});
 
+  // Detailed Statistics Modal state
+  const [showDetailedStatsModal, setShowDetailedStatsModal] = useState(false);
+  const [selectedExerciseForStats, setSelectedExerciseForStats] = useState<{
+    exerciseTitle: string;
+    exerciseId: string;
+    classId: string;
+    exerciseResults: any[];
+  } | null>(null);
+
+  // Student results view state
+  const [showAllStudents, setShowAllStudents] = useState(false);
+  const [detailedStatsData, setDetailedStatsData] = useState<any>(null);
+  const [detailedStatsLoading, setDetailedStatsLoading] = useState(false);
+  const statsPreparationHandle = useRef<ReturnType<typeof InteractionManager.runAfterInteractions> | null>(null);
+  const [showItemAnalysis, setShowItemAnalysis] = useState(false);
+
+
+  useEffect(() => {
+    return () => {
+      statsPreparationHandle.current?.cancel?.();
+    };
+  }, []);
+
+
+
+  // Helper function to format answers for display based on exercise type
+  const formatAnswerForDisplay = useCallback((answer: string, questionType: string): string => {
+    if (!answer || answer === 'No answer') return 'No answer';
+    
+    // Helper function to clean filename
+    const cleanFilename = (filename: string): string => {
+      return filename
+        .replace(/\.(png|jpg|jpeg)$/i, '')
+        .replace(/reorder-/g, '')
+        .replace(/question-/g, '')
+        .replace(/item-/gi, '')
+        .replace(/item/gi, '')
+        .replace(/^[0-9]+-/, '') // Remove leading numbers with dash
+        .replace(/^[0-9]+/, '') // Remove leading numbers
+        .replace(/^[A-Za-z]+-/, '') // Remove leading letters with dash
+        .replace(/^[A-Za-z]+/, '') // Remove leading letters
+        .trim();
+    };
+    
+    // Helper function to make text more readable
+    const makeReadable = (text: string): string => {
+      return text
+        .replace(/_/g, ' ') // Replace underscores with spaces
+        .replace(/-/g, ' ') // Replace dashes with spaces
+        .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+        .trim()
+        .split(' ')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()) // Capitalize first letter
+        .join(' ');
+    };
+    
+    // Handle URL-encoded answers
+    if (answer.includes('%2F') || answer.includes('exercises%2F')) {
+      try {
+        const decodedAnswer = decodeURIComponent(answer);
+        
+        // For re-order questions, show as numbered sequence
+        if (questionType.toLowerCase().includes('re-order')) {
+          const items = decodedAnswer.split(',').map((item: string, index: number) => {
+            const cleanItem = item.trim();
+            const parts = cleanItem.split('/');
+            const filename = parts[parts.length - 1];
+            const cleanNumber = cleanFilename(filename);
+            return cleanNumber;
+          });
+          return items.map((item, index) => `${index + 1}. ${item}`).join(', ');
+        }
+        
+        // For matching questions, show as pairs
+        if (questionType.toLowerCase().includes('matching')) {
+          const items = decodedAnswer.split(',');
+          const pairs = [];
+          for (let i = 0; i < items.length; i += 2) {
+            if (i + 1 < items.length) {
+              const left = makeReadable(cleanFilename(items[i].trim().split('/').pop() || ''));
+              const right = makeReadable(cleanFilename(items[i + 1].trim().split('/').pop() || ''));
+              pairs.push(`${left} → ${right}`);
+            }
+          }
+          return pairs.join(', ');
+        }
+        
+        // For identification questions, show as clean list
+        if (questionType.toLowerCase().includes('identification')) {
+          const items = decodedAnswer.split(',');
+          return items.map((item: string) => {
+            const filename = makeReadable(cleanFilename(item.trim().split('/').pop() || ''));
+            return filename;
+          }).filter(item => item.length > 0).join(', ');
+        }
+        
+        // For multiple choice questions, show as selected options
+        if (questionType.toLowerCase().includes('multiple-choice')) {
+          const items = decodedAnswer.split(',');
+          return items.map((item: string, index: number) => {
+            const filename = makeReadable(cleanFilename(item.trim().split('/').pop() || ''));
+            return `Option ${String.fromCharCode(65 + index)}: ${filename}`;
+          }).join(', ');
+        }
+        
+        // Default: extract and clean filenames
+        const items = decodedAnswer.split(',');
+        return items.map((item: string) => {
+          const filename = makeReadable(cleanFilename(item.trim().split('/').pop() || ''));
+          return filename;
+        }).filter(item => item.length > 0).join(', ');
+      } catch (error) {
+        console.error('Error decoding answer:', error);
+        return answer;
+      }
+    }
+    
+    // Handle JSON arrays (for re-order questions)
+    if (answer.startsWith('[') && answer.endsWith(']')) {
+      try {
+        const parsedAnswer = JSON.parse(answer);
+        if (Array.isArray(parsedAnswer)) {
+          if (questionType.toLowerCase().includes('re-order')) {
+            return parsedAnswer.map((item: any, index: number) => `${index + 1}. ${item}`).join(', ');
+          }
+          return parsedAnswer.join(', ');
+        }
+      } catch (error) {
+        console.error('Error parsing JSON answer:', error);
+      }
+    }
+    
+    // Handle comma-separated values
+    if (answer.includes(',')) {
+      const items = answer.split(',').map((item: string, index: number) => {
+        const cleanItem = makeReadable(item.trim());
+        return `${index + 1}. ${cleanItem}`;
+      });
+      return items.join(', ');
+    }
+    
+    return makeReadable(answer);
+  }, []);
+
+  const buildDetailedStatsData = useCallback((exerciseResults: any[]) => {
+    if (!exerciseResults || exerciseResults.length === 0) {
+      return null;
+    }
+
+    const sanitizedScores = exerciseResults.map((result: any) =>
+      typeof result.scorePercentage === 'number' ? result.scorePercentage : 0
+    );
+    const totalStudents = sanitizedScores.length;
+    const safeTotalStudents = Math.max(totalStudents, 1);
+    const mps =
+      sanitizedScores.reduce((sum: number, score: number) => sum + score, 0) / safeTotalStudents;
+
+    const sortedScores = [...sanitizedScores].sort((a, b) => a - b);
+    const median =
+      sortedScores.length === 0
+        ? 0
+        : sortedScores.length % 2 === 0
+        ? (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2
+        : sortedScores[Math.floor(sortedScores.length / 2)];
+
+    const scoreCounts: Record<number, number> = {};
+    sortedScores.forEach((score: number) => {
+      const rounded = Math.round(score);
+      scoreCounts[rounded] = (scoreCounts[rounded] || 0) + 1;
+    });
+    const scoreCountKeys = Object.keys(scoreCounts);
+    const mode =
+      scoreCountKeys.length > 0
+        ? parseInt(
+            scoreCountKeys.reduce((prev, curr) =>
+              scoreCounts[parseInt(prev, 10)] >= scoreCounts[parseInt(curr, 10)] ? prev : curr
+            ),
+            10
+          )
+        : 0;
+
+    const variance =
+      sanitizedScores.reduce((sum: number, score: number) => sum + Math.pow(score - mps, 2), 0) /
+      safeTotalStudents;
+    const stdDev = Math.sqrt(variance);
+
+    const highestScore = sanitizedScores.length ? Math.max(...sanitizedScores) : 0;
+    const lowestScore = sanitizedScores.length ? Math.min(...sanitizedScores) : 0;
+    const range = highestScore - lowestScore;
+
+    const topStudentResult = exerciseResults.find(
+      (result: any) => (result.scorePercentage || 0) === highestScore
+    );
+    const bottomStudentResult = exerciseResults.find(
+      (result: any) => (result.scorePercentage || 0) === lowestScore
+    );
+
+    const topStudentName =
+      topStudentResult?.studentInfo?.name || topStudentResult?.studentName || '—';
+    const bottomStudentName =
+      bottomStudentResult?.studentInfo?.name || bottomStudentResult?.studentName || '—';
+
+    const passCount = sanitizedScores.filter((score: number) => score >= 75).length;
+    const passRate = totalStudents > 0 ? (passCount / totalStudents) * 100 : 0;
+
+    const distribution = {
+      highlyProficientCount: sanitizedScores.filter((s) => s >= 85).length,
+      proficientCount: sanitizedScores.filter((s) => s >= 75 && s < 85).length,
+      nearlyProficientCount: sanitizedScores.filter((s) => s >= 50 && s < 75).length,
+      lowProficientCount: sanitizedScores.filter((s) => s >= 25 && s < 50).length,
+      notProficientCount: sanitizedScores.filter((s) => s < 25).length,
+    };
+
+    const totalAttempts = exerciseResults.reduce((sum: number, result: any) => {
+      const attemptsForResult =
+        result.questionResults?.reduce(
+          (questionSum: number, question: any) => questionSum + (question.attempts || 1),
+          0
+        ) || 0;
+      return sum + attemptsForResult;
+    }, 0);
+
+    const questionCount = Math.max(exerciseResults[0]?.questionResults?.length || 0, 1);
+    const avgAttemptsPerItem =
+      totalStudents > 0 ? (totalAttempts / questionCount) / totalStudents : 0;
+
+    const totalTime = exerciseResults.reduce(
+      (sum: number, result: any) => sum + (result.totalTimeSpent || 0),
+      0
+    );
+    const avgTimePerItem =
+      totalStudents > 0 ? (totalTime / questionCount) / totalStudents : 0;
+
+    const firstResult = exerciseResults[0];
+    let chartData: Array<{ itemNumber: number; avgTime: number; avgScore: number }> = [];
+    if (firstResult?.questionResults?.length) {
+      chartData = firstResult.questionResults.map((question: any, questionIndex: number) => {
+        const questionNumber = question.questionNumber || questionIndex + 1;
+        const questionResults = exerciseResults
+          .map((result: any) =>
+            result.questionResults?.find((q: any) => q.questionId === question.questionId)
+          )
+          .filter(Boolean);
+
+        const timeSpentArray = questionResults
+          .map((q: any) => q.timeSpentSeconds || 0)
+          .filter((time: number) => time > 0);
+
+        const avgTime =
+          timeSpentArray.length > 0
+            ? timeSpentArray.reduce((sum: number, time: number) => sum + time, 0) /
+              timeSpentArray.length
+            : 0;
+
+        const correctCount = questionResults.filter((q: any) => q.isCorrect).length;
+        const avgScore =
+          questionResults.length > 0 ? (correctCount / questionResults.length) * 100 : 0;
+
+        return { itemNumber: questionNumber, avgTime, avgScore };
+      });
+    }
+
+    let itemAnalysis: any[] = [];
+    if (firstResult?.questionResults?.length) {
+      const answeredQuestions = firstResult.questionResults.filter((question: any) => {
+        return exerciseResults.some((result: any) => {
+          const qResult = result.questionResults?.find(
+            (q: any) => q.questionId === question.questionId
+          );
+          return qResult && (qResult.studentAnswer || qResult.answer);
+        });
+      });
+
+      const sortedByScoreDesc = [...exerciseResults].sort(
+        (a: any, b: any) => (b.scorePercentage || 0) - (a.scorePercentage || 0)
+      );
+      const topSegmentCount = Math.max(1, Math.ceil(sortedByScoreDesc.length * 0.27));
+      const topPerformers = sortedByScoreDesc.slice(0, topSegmentCount);
+      const bottomPerformers = [...sortedByScoreDesc].reverse().slice(0, topSegmentCount);
+
+      itemAnalysis = answeredQuestions
+        .map((question: any, questionIndex: number) => {
+          let questionType = (question.questionType || 'Unknown').toLowerCase();
+          if (questionType.includes('multiple-choice')) questionType = 'Multiple Choice';
+          else if (questionType.includes('identification')) questionType = 'Identification';
+          else if (questionType.includes('re-order')) questionType = 'Re-order';
+          else if (questionType.includes('matching')) questionType = 'Matching';
+          else questionType = 'General';
+
+          const questionResults = exerciseResults
+            .map((result: any) =>
+              result.questionResults?.find((q: any) => q.questionId === question.questionId)
+            )
+            .filter(Boolean);
+
+          if (questionResults.length === 0) return null;
+
+          const timeSpentArray = questionResults
+            .map((q: any) => q.timeSpentSeconds || 0)
+            .filter((time: number) => time > 0);
+
+          const avgTimeInSeconds =
+            timeSpentArray.length > 0
+              ? Math.round(
+                  timeSpentArray.reduce((sum: number, time: number) => sum + time, 0) /
+                    timeSpentArray.length
+                )
+              : 0;
+
+          const attemptsArray = questionResults.map((q: any) => q.attempts || 1);
+          const avgAttempts =
+            attemptsArray.length > 0
+              ? attemptsArray.reduce((sum: number, attempts: number) => sum + attempts, 0) /
+                attemptsArray.length
+              : 1;
+
+          const correctAnswer = question.correctAnswer || question.answer;
+
+          const answerDistribution: Record<string, { count: number; isCorrect: boolean }> = {};
+          let totalStudentsAnswered = 0;
+          let correctResponses = 0;
+          let noAnswerCount = 0;
+
+          exerciseResults.forEach((result: any) => {
+            const qResult = result.questionResults?.find(
+              (q: any) => q.questionId === question.questionId
+            );
+            if (qResult && (qResult.studentAnswer || qResult.answer)) {
+              totalStudentsAnswered++;
+              const rawAnswer = qResult.studentAnswer || qResult.answer;
+              const formattedAnswer = formatAnswerForDisplay(
+                rawAnswer,
+                question.questionType || ''
+              );
+              let isCorrect = false;
+              if (correctAnswer) {
+                const formattedCorrectAnswer = formatAnswerForDisplay(
+                  correctAnswer,
+                  question.questionType || ''
+                );
+                isCorrect = formattedAnswer === formattedCorrectAnswer;
+              } else {
+                isCorrect = qResult.isCorrect || false;
+              }
+              if (isCorrect) {
+                correctResponses++;
+              }
+              if (!answerDistribution[formattedAnswer]) {
+                answerDistribution[formattedAnswer] = { count: 0, isCorrect };
+              }
+              answerDistribution[formattedAnswer].count++;
+            } else {
+              noAnswerCount++;
+            }
+          });
+
+          if (noAnswerCount > 0) {
+            answerDistribution['No Answer'] = { count: noAnswerCount, isCorrect: false };
+          }
+
+          const sortedAnswers = Object.entries(answerDistribution)
+            .sort(([, a], [, b]) => b.count - a.count)
+            .map(([answerText, data]) => ({
+              text: answerText,
+              count: data.count,
+              isCorrect: data.isCorrect,
+              percentage:
+                totalStudents > 0 ? Math.round((data.count / totalStudents) * 100) : 0,
+            }));
+
+          const difficultyIndex =
+            totalStudentsAnswered > 0 ? (correctResponses / totalStudentsAnswered) * 100 : 0;
+
+          const topCorrect = topPerformers.filter((result: any) => {
+            const qResult = result.questionResults?.find(
+              (q: any) => q.questionId === question.questionId
+            );
+            return qResult?.isCorrect || false;
+          }).length;
+
+          const bottomCorrect = bottomPerformers.filter((result: any) => {
+            const qResult = result.questionResults?.find(
+              (q: any) => q.questionId === question.questionId
+            );
+            return qResult?.isCorrect || false;
+          }).length;
+
+          const discriminationIndex =
+            topPerformers.length > 0 && bottomPerformers.length > 0
+              ? ((topCorrect / topPerformers.length) -
+                  (bottomCorrect / bottomPerformers.length)) *
+                100
+              : 0;
+
+          return {
+            questionId: question.questionId || questionIndex,
+            questionNumber: question.questionNumber || questionIndex + 1,
+            questionText: question.questionText || `Question ${questionIndex + 1}`,
+            questionType,
+            avgAttempts,
+            avgTimeInSeconds,
+            answers: sortedAnswers,
+            totalStudents,
+            difficultyIndex,
+            discriminationIndex,
+          };
+        })
+        .filter(Boolean);
+    }
+
+    return {
+      totalStudents,
+      mps,
+      median,
+      mode,
+      stdDev,
+      range,
+      highestScore,
+      lowestScore,
+      topStudentName,
+      bottomStudentName,
+      passCount,
+      passRate,
+      distribution,
+      avgAttemptsPerItem,
+      avgTimePerItem,
+      chartData,
+      itemAnalysis,
+    };
+  }, [formatAnswerForDisplay]);
+
+  const prepareDetailedStats = useCallback(
+    (exerciseResults: any[]) => {
+      statsPreparationHandle.current?.cancel?.();
+      setDetailedStatsLoading(true);
+      setDetailedStatsData(null);
+
+      // Set a timeout to ensure loading state doesn't hang forever
+      const timeoutId = setTimeout(() => {
+        console.warn('Statistics preparation taking too long, forcing completion');
+        setDetailedStatsLoading(false);
+      }, 10000); // 10 second timeout
+
+      statsPreparationHandle.current = InteractionManager.runAfterInteractions(() => {
+        try {
+          if (!exerciseResults || !Array.isArray(exerciseResults) || exerciseResults.length === 0) {
+            throw new Error('Invalid exercise results data');
+          }
+          const prepared = buildDetailedStatsData(exerciseResults);
+          setDetailedStatsData(prepared);
+        } catch (error) {
+          console.error('Failed to prepare detailed statistics', error);
+          // Don't show alert here, let the UI handle it with error state
+          setDetailedStatsData(null);
+        } finally {
+          clearTimeout(timeoutId);
+          setDetailedStatsLoading(false);
+        }
+      });
+    },
+    [buildDetailedStatsData]
+  );
+
+  const handleOpenDetailedStats = (
+    exerciseTitle: string,
+    classId: string,
+    exerciseResults: any[]
+  ) => {
+    if (!exerciseResults || exerciseResults.length === 0) {
+      showAlert('No Data', 'There are no submissions for this exercise yet.', undefined, 'info');
+      return;
+    }
+
+    const payload = {
+      exerciseTitle,
+      exerciseId: exerciseResults[0]?.exerciseId || '',
+      classId,
+      exerciseResults,
+    };
+
+    setSelectedExerciseForStats(payload);
+    setShowDetailedStatsModal(true);
+    setShowItemAnalysis(false);
+    prepareDetailedStats(exerciseResults);
+  };
+
+  const handleRetryDetailedStats = useCallback(() => {
+    if (selectedExerciseForStats?.exerciseResults?.length) {
+      prepareDetailedStats(selectedExerciseForStats.exerciseResults);
+    }
+  }, [prepareDetailedStats, selectedExerciseForStats]);
+
+  const handleCloseDetailedStats = () => {
+    statsPreparationHandle.current?.cancel?.();
+    setDetailedStatsLoading(false);
+    setDetailedStatsData(null);
+    setShowDetailedStatsModal(false);
+  };
+
+  const formatMillisecondsToLabel = (milliseconds: number) => {
+    if (!milliseconds || milliseconds <= 0) return '0s';
+    const minutes = Math.floor(milliseconds / 60000);
+    const seconds = Math.floor((milliseconds % 60000) / 1000);
+    return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+  };
+
+  const getAttemptsDescriptor = (value: number) => {
+    if (value < 1.5) return 'Excellent';
+    if (value < 2.5) return 'Good';
+    return 'Fair';
+  };
 
   // Technical Report Modal state
 
@@ -2097,7 +2972,6 @@ export default function TeacherDashboard() {
   
 
   // Category options
-
   const categoryOptions = [
 
     'All',
@@ -2218,7 +3092,14 @@ export default function TeacherDashboard() {
 
   const getStudentCompletionStats = (assignment: AssignedExercise) => {
 
-    const classStudents = studentsByClass[assignment.classId] || [];
+    const allClassStudents = studentsByClass[assignment.classId] || [];
+    const targetStudentIds = assignment.targetStudentIds;
+    
+    // If targetStudentIds is provided and not empty, filter to only those students
+    // Otherwise, use all students in the class
+    const classStudents = targetStudentIds && targetStudentIds.length > 0 
+      ? allClassStudents.filter((student: any) => targetStudentIds.includes(student.studentId))
+      : allClassStudents;
 
     const totalStudents = classStudents.length;
 
@@ -2250,25 +3131,73 @@ export default function TeacherDashboard() {
 
       const matchingStudent = classStudents.find((student: any) => {
 
-        // Try Firebase parent ID match (new format)
+        // Strategy 1: Direct studentId match (most reliable)
 
-        if (result.parentId === student.parentId) return true;
-
-        
-
-        // Try studentId match (if available in result)
-
-        if (result.studentId === student.studentId) return true;
-
-        
-
-        // Try login code match (old format - backward compatibility)
-
-        const parentData = parentsById[student.parentId];
-
-        if (parentData && parentData.loginCode && result.parentId === parentData.loginCode) {
-
+        if (result.studentId && student.studentId && result.studentId === student.studentId) {
+          console.log('[COMPLETION MATCH] Matched by studentId:', result.studentId, 'for student:', student.fullName);
           return true;
+
+        }
+
+        
+
+        // Strategy 2: Firebase parent ID match (new format)
+
+        if (result.parentId && student.parentId && result.parentId === student.parentId) {
+          console.log('[COMPLETION MATCH] Matched by parentId:', result.parentId, 'for student:', student.fullName);
+          return true;
+
+        }
+
+        
+
+        // Strategy 3: Student name match (fallback for data structure compatibility)
+
+        if (result.studentInfo && result.studentInfo.name && student.fullName) {
+
+          // Normalize names for comparison
+
+          const resultName = result.studentInfo.name.toLowerCase().trim();
+
+          const studentName = student.fullName.toLowerCase().trim();
+
+          if (resultName === studentName) {
+            console.log('[COMPLETION MATCH] Matched by name:', studentName);
+            return true;
+
+          }
+
+        }
+
+        
+
+        // Strategy 4: Login code match (old format - backward compatibility)
+
+        if (result.parentId && student.parentId) {
+
+          const parentData = parentsById[student.parentId];
+
+          if (parentData && parentData.loginCode && result.parentId === parentData.loginCode) {
+
+            return true;
+
+          }
+
+        }
+
+        
+
+        // Strategy 5: Check if result.parentId matches student's parent login code directly
+
+        if (result.parentId && student.parentId) {
+
+          const parentData = parentsById[student.parentId];
+
+          if (parentData && parentData.loginCode === result.parentId) {
+
+            return true;
+
+          }
 
         }
 
@@ -2284,6 +3213,17 @@ export default function TeacherDashboard() {
 
         completedStudentIds.add(matchingStudent.studentId);
 
+      } else {
+        console.log('[COMPLETION NO MATCH] Could not match result:', {
+          resultStudentId: result.studentId,
+          resultParentId: result.parentId,
+          resultStudentInfo: result.studentInfo,
+          availableStudents: classStudents.map((s: any) => ({ 
+            id: s.studentId, 
+            name: s.fullName,
+            parentId: s.parentId 
+          }))
+        });
       }
 
     });
@@ -2293,6 +3233,20 @@ export default function TeacherDashboard() {
     const completedCount = completedStudentIds.size;
 
     
+
+    // Debug logging to help understand completion tracking
+
+    console.log(`[COMPLETION DEBUG] Assignment: ${assignment.exercise?.title}`);
+
+    console.log(`[COMPLETION DEBUG] Class: ${assignment.classId}`);
+
+    console.log(`[COMPLETION DEBUG] Total students: ${totalStudents}`);
+
+    console.log(`[COMPLETION DEBUG] Exercise results found: ${assignmentResults.length}`);
+
+    console.log(`[COMPLETION DEBUG] Completed students: ${completedCount}`);
+
+    console.log(`[COMPLETION DEBUG] Completion percentage: ${totalStudents > 0 ? Math.round((completedCount / totalStudents) * 100) : 0}%`);
 
     
 
@@ -2324,38 +3278,64 @@ export default function TeacherDashboard() {
 
     const student = studentsByClass[assignment.classId]?.find((s: any) => s.studentId === studentId);
 
-    if (!student) return 'pending';
+    if (!student) {
+      console.log('[STATUS CHECK] Student not found:', studentId);
+      return 'pending';
+    }
 
     
 
-    // Check for exercise results using both Firebase parent ID and login code (for backward compatibility)
+    // Check for exercise results using multiple matching strategies
 
     const studentResult = classResults.find((result: any) => {
 
+      // Must match the exercise
       if (result.exerciseId !== assignment.exerciseId) return false;
+      
+      // Must match the assignment ID if both are available
+      if (result.assignedExerciseId && assignment.id && result.assignedExerciseId !== assignment.id) {
+        return false;
+      }
 
       
 
-      // Try to match by Firebase parent ID (new format)
+      // Strategy 1: Try to match by studentId directly (most reliable)
 
-      if (result.parentId === student.parentId) return true;
-
-      
-
-      // Try to match by studentId directly (if available in result)
-
-      if (result.studentId === studentId) return true;
+      if (result.studentId && result.studentId === studentId) {
+        console.log('[STATUS MATCH] Matched by studentId:', studentId);
+        return true;
+      }
 
       
 
-      // Try to match by login code (old format - backward compatibility)
+      // Strategy 2: Try to match by studentInfo.name
 
-      // This requires resolving the student's parent to their login code
+      if (result.studentInfo?.name && student.fullName) {
+        const resultName = result.studentInfo.name.toLowerCase().trim();
+        const studentName = student.fullName.toLowerCase().trim();
+        if (resultName === studentName) {
+          console.log('[STATUS MATCH] Matched by name:', studentName);
+          return true;
+        }
+      }
+
+      
+
+      // Strategy 3: Try to match by Firebase parent ID
+
+      if (result.parentId && student.parentId && result.parentId === student.parentId) {
+        console.log('[STATUS MATCH] Matched by parentId:', student.parentId);
+        return true;
+      }
+
+      
+
+      // Strategy 4: Try to match by login code (old format - backward compatibility)
 
       const parentData = parentsById[student.parentId];
 
       if (parentData && parentData.loginCode && result.parentId === parentData.loginCode) {
-
+        console.log('[STATUS MATCH] Matched by login code');
         return true;
 
       }
@@ -2365,6 +3345,16 @@ export default function TeacherDashboard() {
       return false;
 
     });
+
+    
+    if (!studentResult) {
+      console.log('[STATUS CHECK] No result found for student:', {
+        studentId,
+        studentName: student.fullName,
+        exerciseId: assignment.exerciseId,
+        availableResults: classResults.length
+      });
+    }
 
     
 
@@ -2610,47 +3600,53 @@ export default function TeacherDashboard() {
 
     try {
 
-      const { data } = await readData('/sections');
+      // Primary source of truth: /classes (this is where createClass writes)
+      const [{ data: classesData, error: classesErr }, { data: sectionsData }] = await Promise.all([
+        readData('/classes'),
+        readData('/sections'), // optional: for legacy fields like schoolName/status
+      ]);
 
-      const list = Object.entries(data || {})
+      if (classesErr) {
+        console.error('[LoadTeacherClasses] Error reading classes:', classesErr);
+        logError('LoadTeacherClasses', classesErr);
+        return;
+      }
 
+      // Build a quick lookup for any matching section extras by classId
+      const sectionExtrasById: Record<string, any> = Object.fromEntries(
+        Object.entries(sectionsData || {}).map(([sid, sv]: any) => [sid, sv || {}])
+      );
+
+      const list = Object.entries(classesData || {})
         .map(([id, v]: any) => ({ id, ...(v || {}) }))
+        .filter((c: any) => c.teacherId === teacherId)
+        .map((c: any) => {
+          const extras = sectionExtrasById[c.id] || {};
+          return {
+            id: c.id,
+            name: c.name ?? 'Untitled',
+            schoolYear: c.schoolYear ?? extras.schoolYear,
+            schoolName: c.schoolName ?? extras.schoolName,
+            status: c.status ?? extras.status ?? 'active',
+          };
+        });
 
-        .filter((s: any) => s.teacherId === teacherId)
-
-        .map((s: any) => ({
-
-          id: s.id,
-
-          name: s.name ?? 'Untitled',
-
-          schoolYear: s.schoolYear,
-
-          schoolName: s.schoolName,
-
-          status: s.status ?? 'active',
-
-        }));
+      console.log(`[LoadTeacherClasses] Found ${list.length} classes for teacher ${teacherId}`);
 
       setTeacherClasses(list);
-
       setActiveClasses(list.filter((c) => c.status !== 'inactive'));
 
       // After classes load, refresh related data
-
       await Promise.all([
-
         loadStudentsAndParents(list.map((c) => c.id)),
-
         loadAssignments(list.map((c) => c.id)),
-
         loadClassAnalytics(list.map((c) => c.id)),
-
       ]);
 
-    } catch (e) {
+    } catch (e: any) {
 
-      // ignore
+      console.error('[LoadTeacherClasses] Exception:', e);
+      logError('LoadTeacherClasses', e?.message || String(e));
 
     }
 
@@ -2762,9 +3758,6 @@ export default function TeacherDashboard() {
     }
 
   };
-
-
-
   const loadAssignments = async (classIds: string[]) => {
 
     try {
@@ -2885,15 +3878,60 @@ export default function TeacherDashboard() {
 
       Object.entries(exerciseResultsData || {}).forEach(([resultId, result]: any) => {
 
-        const r = { resultId, ...(result || {}) };
-
+        // Parse the new result structure
+        // Result key format: exerciseId_studentId_timestamp_random
+        const keyParts = resultId.split('_');
+        let studentId = null;
         
-
-        // Find the classId for this result using parentId
-
-        const classId = r.parentId ? parentToClassMap[r.parentId] : null;
-
+        // Extract studentId from the key (second part)
+        if (keyParts.length >= 2) {
+          studentId = keyParts[1];
+        }
         
+        // Also check if studentInfo has the studentId
+        if (!studentId && result?.studentInfo?.studentId) {
+          studentId = result.studentInfo.studentId;
+        }
+
+        // Get data from nested structure
+        const exerciseId = result?.exerciseInfo?.exerciseId || result?.exerciseId;
+        const classId = result?.assignmentMetadata?.classId || result?.classId;
+        const assignedExerciseId = result?.assignedExerciseId || result?.assignmentId || result?.assignmentMetadata?.assignmentId;
+        
+        // Debug logging
+        console.log('[RESULT PARSING]', {
+          resultId,
+          extractedStudentId: studentId,
+          exerciseId,
+          classId,
+          hasStudentInfo: !!result?.studentInfo,
+          studentInfoId: result?.studentInfo?.studentId
+        });
+
+        // Create a flattened result object that maintains backward compatibility
+        const r = { 
+          resultId,
+          exerciseId,
+          classId,
+          studentId,
+          assignedExerciseId,
+          // Preserve root-level properties (with fallbacks to nested structure)
+          exerciseTitle: result?.exerciseTitle || result?.exerciseInfo?.title || result?.exerciseInfo?.exerciseTitle,
+          scorePercentage: result?.scorePercentage ?? result?.resultsSummary?.meanPercentageScore,
+          totalTimeSpent: result?.totalTimeSpent ?? (result?.resultsSummary?.totalTimeSpentSeconds ? result.resultsSummary.totalTimeSpentSeconds * 1000 : undefined),
+          questionResults: result?.questionResults,
+          completedAt: result?.completedAt || result?.exerciseSession?.completedAt,
+          submittedAt: result?.submittedAt || result?.exerciseSession?.submittedAt,
+          studentInfo: result?.studentInfo,
+          // Add nested structures for reference
+          resultsSummary: result?.resultsSummary,
+          exerciseSession: result?.exerciseSession,
+          assignmentMetadata: result?.assignmentMetadata,
+          exerciseInfo: result?.exerciseInfo,
+          deviceInfo: result?.deviceInfo,
+          // Keep original parentId for backward compatibility
+          parentId: result?.parentId,
+        };
 
         
 
@@ -2903,7 +3941,9 @@ export default function TeacherDashboard() {
 
           if (!resultsByClassArray[classId]) resultsByClassArray[classId] = [];
 
-          resultsByClass[classId].add(r.exerciseId);
+          if (exerciseId) {
+            resultsByClass[classId].add(exerciseId);
+          }
 
           resultsByClassArray[classId].push(r);
 
@@ -2914,17 +3954,87 @@ export default function TeacherDashboard() {
       
 
       // Update stats with actual completion data from ExerciseResults
+      // An assignment is considered "completed" if:
+      // 1. ALL students in the class have completed it, OR
+      // 2. The assignment is closed (acceptingStatus !== 'open')
 
-      Object.entries(resultsByClass).forEach(([classId, completedExerciseIds]) => {
-
-        if (stats[classId]) {
-
-          stats[classId].completed = completedExerciseIds.size;
-
-          stats[classId].pending = Math.max(0, stats[classId].total - completedExerciseIds.size);
-
+      const assignmentCompletionStatus: Record<string, Set<string>> = {}; // classId -> Set of truly completed assignmentIds
+      
+      Object.entries(assignmentsData || {}).forEach(([assignmentId, assignment]: any) => {
+        const a = { id: assignmentId, ...(assignment || {}) };
+        
+        if (!classIds.includes(a.classId)) return;
+        
+        // Count students in this class
+        const classStudentCount = Object.values(studentsData || {}).filter((s: any) => 
+          s.classId === a.classId
+        ).length;
+        
+        // Count completed students for this assignment
+        const assignmentResults = resultsByClassArray[a.classId]?.filter((result: any) => 
+          result.exerciseId === a.exerciseId && 
+          result.assignedExerciseId === assignmentId
+        ) || [];
+        
+        // Match results to actual students
+        const completedStudentIds = new Set<string>();
+        assignmentResults.forEach((result: any) => {
+          const matchingStudent = Object.values(studentsData || {}).find((student: any) => {
+            if (student.classId !== a.classId) return false;
+            
+            // Try multiple matching strategies
+            if (result.studentId && student.studentId === result.studentId) return true;
+            if (result.studentInfo?.name && student.fullName && 
+                result.studentInfo.name.toLowerCase().trim() === student.fullName.toLowerCase().trim()) return true;
+            if (result.parentId && student.parentId === result.parentId) return true;
+            
+            return false;
+          });
+          
+          if (matchingStudent) {
+            completedStudentIds.add((matchingStudent as any).studentId);
+          }
+        });
+        
+        const allStudentsCompleted = classStudentCount > 0 && completedStudentIds.size >= classStudentCount;
+        const assignmentClosed = a.acceptingStatus !== 'open';
+        
+        // Debug logging
+        console.log('[ASSIGNMENT COMPLETION CHECK]', {
+          assignmentId,
+          exerciseTitle: a.exercise?.title,
+          classId: a.classId,
+          totalStudents: classStudentCount,
+          completedStudents: completedStudentIds.size,
+          allStudentsCompleted,
+          acceptingStatus: a.acceptingStatus,
+          assignmentClosed,
+          isCompleted: allStudentsCompleted || assignmentClosed
+        });
+        
+        // Assignment is completed if all students finished OR teacher closed it
+        if (allStudentsCompleted || assignmentClosed) {
+          if (!assignmentCompletionStatus[a.classId]) {
+            assignmentCompletionStatus[a.classId] = new Set();
+          }
+          assignmentCompletionStatus[a.classId].add(assignmentId);
         }
+      });
 
+      // Update stats based on true completion status
+      Object.entries(assignmentCompletionStatus).forEach(([classId, completedAssignmentIds]) => {
+        if (stats[classId]) {
+          stats[classId].completed = completedAssignmentIds.size;
+          stats[classId].pending = Math.max(0, stats[classId].total - completedAssignmentIds.size);
+        }
+      });
+      
+      // Ensure all classes have proper counts even if no assignments are completed
+      Object.keys(stats).forEach(classId => {
+        if (!assignmentCompletionStatus[classId]) {
+          stats[classId].completed = 0;
+          stats[classId].pending = stats[classId].total;
+        }
       });
 
       
@@ -2964,7 +4074,7 @@ export default function TeacherDashboard() {
 
       const { data: analyticsData } = await readData('/classAnalytics');
 
-      const { data: exerciseResults } = await readData('/exerciseResults');
+      const { data: exerciseResults } = await readData('/ExerciseResults');
 
       
 
@@ -2984,7 +4094,26 @@ export default function TeacherDashboard() {
 
         if (exerciseResults) {
 
-          const classResults = Object.values(exerciseResults).filter((result: any) => 
+          // Parse results with new structure
+          const parsedResults = Object.entries(exerciseResults).map(([resultId, result]: any) => {
+            const keyParts = resultId.split('_');
+            const extractedStudentId = keyParts.length >= 2 ? keyParts[1] : null;
+            
+            return {
+              resultId,
+              exerciseId: result?.exerciseInfo?.exerciseId || result?.exerciseId,
+              classId: result?.assignmentMetadata?.classId || result?.classId,
+              studentId: extractedStudentId || result?.studentId,
+              exerciseTitle: result?.exerciseTitle || result?.exerciseInfo?.title || result?.exerciseInfo?.exerciseTitle,
+              scorePercentage: result?.scorePercentage ?? result?.resultsSummary?.meanPercentageScore,
+              totalTimeSpent: result?.totalTimeSpent ?? (result?.resultsSummary?.totalTimeSpentSeconds ? result.resultsSummary.totalTimeSpentSeconds * 1000 : undefined),
+              questionResults: result?.questionResults,
+              studentInfo: result?.studentInfo,
+              resultsSummary: result?.resultsSummary,
+            };
+          });
+
+          const classResults = parsedResults.filter((result: any) => 
 
             result.classId === classId
 
@@ -3002,32 +4131,27 @@ export default function TeacherDashboard() {
 
             
 
+            // More accurate class analytics calculation
             classResults.forEach((result: any) => {
-
               if (result.questionResults) {
-
                 result.questionResults.forEach((q: any) => {
-
-                  totalAttempts += q.attempts || 1;
-
-                  totalTime += q.timeSpent || 0;
-
+                  // Use actual attempts if available, otherwise default to 1
+                  const attempts = q.attempts || 1;
+                  totalAttempts += attempts;
+                  
+                  // Use actual time spent if available
+                  const timeSpent = q.timeSpent || 0;
+                  totalTime += timeSpent;
+                  
                   totalQuestions++;
-
                 });
-
               }
-
             });
 
-            
-
             if (totalQuestions > 0) {
-
-              classAnalytics.averageAttempts = totalAttempts / totalQuestions;
-
-              classAnalytics.averageTime = totalTime / classResults.length; // Average time per exercise
-
+              // More accurate average calculations
+              classAnalytics.averageAttempts = Math.round((totalAttempts / totalQuestions) * 10) / 10;
+              classAnalytics.averageTime = Math.round(totalTime / classResults.length); // Average time per exercise
             }
 
           }
@@ -3232,26 +4356,160 @@ export default function TeacherDashboard() {
 
 
 
-  const handleAssignExercise = async (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => {
+  const handleAssignExercise = async (
+    classIds: string[],
+    deadline: string,
+    acceptLateSubmissions: boolean,
+    quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4',
+    targetStudentIds?: string[]
+  ) => {
 
     try {
 
+      // Check for existing assignments and add students to them instead of creating duplicates
+      if (selectedExerciseForAssign?.id) {
+        const assignmentsToUpdate: Array<{ assignmentId: string; classId: string; className: string; newStudents: string[] }> = [];
+        const newAssignments: string[] = [];
+        const currentTargets = Array.isArray(targetStudentIds) && targetStudentIds.length > 0 ? new Set(targetStudentIds) : null;
+        
+        classIds.forEach((cid) => {
+          const existing = assignedExercises.filter((a: any) => a.classId === cid && a.exerciseId === selectedExerciseForAssign.id);
+          const classInfo = teacherClasses.find((c) => c.id === cid);
+          const className = classInfo?.name || 'Class';
+          
+          if (existing.length > 0) {
+            // Found existing assignment(s) - check if we can add students to them
+            const existingAssignment = existing[0]; // Use the first existing assignment
+            const existingTargets: string[] | null = Array.isArray(existingAssignment.targetStudentIds) && existingAssignment.targetStudentIds.length > 0 ? existingAssignment.targetStudentIds : null;
+            
+            if (currentTargets) {
+              // Adding specific students to existing assignment
+              const newStudents = Array.from(currentTargets).filter(studentId => 
+                !existingTargets || !existingTargets.includes(studentId)
+              );
+              
+              if (newStudents.length > 0) {
+                assignmentsToUpdate.push({
+                  assignmentId: existingAssignment.id,
+                  classId: cid,
+                  className,
+                  newStudents
+                });
+              } else {
+                // All students already assigned
+                showAlert(
+                  'Students Already Assigned',
+                  `All selected students are already assigned to "${selectedExerciseForAssign.title}" in ${className}.`,
+                  undefined,
+                  'info'
+                );
+                return;
+              }
+            } else {
+              // Trying to assign whole class to existing assignment
+              if (!existingTargets) {
+                // Both are whole class - exact duplicate
+                showAlert(
+                  'Assignment Already Exists',
+                  `"${selectedExerciseForAssign.title}" is already assigned to the entire ${className}.`,
+                  undefined,
+                  'info'
+                );
+                return;
+              } else {
+                // Convert existing targeted assignment to whole class
+                assignmentsToUpdate.push({
+                  assignmentId: existingAssignment.id,
+                  classId: cid,
+                  className,
+                  newStudents: [] // Empty array means convert to whole class
+                });
+              }
+            }
+          } else {
+            // No existing assignment - create new one
+            newAssignments.push(cid);
+          }
+        });
+
+        // Update existing assignments with new students
+        for (const update of assignmentsToUpdate) {
+          try {
+            const { data: currentAssignment } = await readData(`/assignedExercises/${update.assignmentId}`);
+            if (!currentAssignment) continue;
+
+            let updatedTargets: string[] | null = null;
+            
+            if (update.newStudents.length === 0) {
+              // Convert to whole class assignment
+              updatedTargets = null;
+            } else {
+              // Add new students to existing targets
+              const existingTargets = Array.isArray(currentAssignment.targetStudentIds) ? currentAssignment.targetStudentIds : [];
+              updatedTargets = [...existingTargets, ...update.newStudents];
+            }
+
+            const updatedAssignment = {
+              ...currentAssignment,
+              targetStudentIds: updatedTargets
+            };
+
+            await updateData(`/assignedExercises/${update.assignmentId}`, updatedAssignment);
+            
+            console.log(`[UpdateAssignment] Added ${update.newStudents.length} students to assignment ${update.assignmentId} in ${update.className}`);
+          } catch (error) {
+            console.error(`[UpdateAssignment] Failed to update assignment ${update.assignmentId}:`, error);
+          }
+        }
+
+        // Create new assignments for classes without existing assignments
+        if (newAssignments.length > 0) {
+          await assignExercise(
+            selectedExerciseForAssign.id,
+            newAssignments,
+            deadline,
+            currentUserId!,
+            acceptLateSubmissions,
+            'open',
+            quarter,
+            targetStudentIds
+          );
+        }
+
+        // Refresh assigned exercises to show updated student lists
+        await loadAssignedExercises();
+        
+        // Also refresh assignments data to update completion statistics
+        if (activeClasses.length > 0) {
+          await loadAssignments(activeClasses.map(c => c.id));
+        }
+
+        // Show success message
+        const totalUpdated = assignmentsToUpdate.length;
+        const totalNew = newAssignments.length;
+        
+        if (totalUpdated > 0 && totalNew > 0) {
+          showAlert('Success', `Added students to ${totalUpdated} existing assignment(s) and created ${totalNew} new assignment(s)`, undefined, 'success');
+        } else if (totalUpdated > 0) {
+          showAlert('Success', `Added students to ${totalUpdated} existing assignment(s)`, undefined, 'success');
+        } else if (totalNew > 0) {
+          showAlert('Success', `Created ${totalNew} new assignment(s)`, undefined, 'success');
+        }
+
+        return; // Exit early since we handled the assignment
+      }
+
+      // This code is now handled above in the existing assignment logic
+      // Only create new assignments if no existing assignments were found
       await assignExercise(
-
-        selectedExerciseForAssign.id, 
-
-        classIds, 
-
-        deadline, 
-
-        currentUserId!, 
-
-        acceptLateSubmissions, 
-
-        'open', // Default to open status
-
-        quarter
-
+        selectedExerciseForAssign.id,
+        classIds,
+        deadline,
+        currentUserId!,
+        acceptLateSubmissions,
+        'open',
+        quarter,
+        targetStudentIds
       );
 
       showAlert('Success', 'Exercise assigned successfully', undefined, 'success');
@@ -3263,9 +4521,6 @@ export default function TeacherDashboard() {
     }
 
   };
-
-
-
   const handleEditAssignment = (assignment: AssignedExercise) => {
 
     setEditingAssignment(assignment);
@@ -3710,7 +4965,31 @@ export default function TeacherDashboard() {
 
 
 
-      const results = Object.values(allResults) as any[];
+      // Parse results with new structure
+      const results = Object.entries(allResults).map(([resultId, result]: any) => {
+        // Extract studentId from key format: exerciseId_studentId_timestamp_random
+        const keyParts = resultId.split('_');
+        const extractedStudentId = keyParts.length >= 2 ? keyParts[1] : null;
+        
+        return {
+          resultId,
+          exerciseId: result?.exerciseInfo?.exerciseId || result?.exerciseId,
+          classId: result?.assignmentMetadata?.classId || result?.classId,
+          studentId: extractedStudentId || result?.studentId,
+          exerciseTitle: result?.exerciseTitle || result?.exerciseInfo?.title || result?.exerciseInfo?.exerciseTitle,
+          scorePercentage: result?.scorePercentage ?? result?.resultsSummary?.meanPercentageScore,
+          totalTimeSpent: result?.totalTimeSpent ?? (result?.resultsSummary?.totalTimeSpentSeconds ? result.resultsSummary.totalTimeSpentSeconds * 1000 : undefined),
+          questionResults: result?.questionResults,
+          completedAt: result?.completedAt || result?.exerciseSession?.completedAt,
+          submittedAt: result?.submittedAt || result?.exerciseSession?.submittedAt,
+          studentInfo: result?.studentInfo,
+          resultsSummary: result?.resultsSummary,
+          exerciseSession: result?.exerciseSession,
+          assignmentMetadata: result?.assignmentMetadata,
+          exerciseInfo: result?.exerciseInfo,
+          deviceInfo: result?.deviceInfo,
+        };
+      });
 
       const studentResult = results.find((result: any) => 
 
@@ -3938,9 +5217,9 @@ export default function TeacherDashboard() {
 
 
 
-  // Function to generate Gemini analysis with retry logic
+  // Legacy Gemini analysis implementation (kept for reference)
 
-  const generateGeminiAnalysis = async (resultData: any, classAverages: any, retryCount: number = 0): Promise<any> => {
+  const legacyGenerateGeminiAnalysis = async (resultData: any, classAverages: any, retryCount: number = 0): Promise<any> => {
 
     const maxRetries = 3;
 
@@ -3989,9 +5268,6 @@ STUDENT PERFORMANCE DATA:
 - Class Average Score: ${Math.round(performanceData.classAverage)}%
 
 - Class Average Time: ${Math.round(performanceData.classAverageTime)} seconds
-
-
-
 DETAILED QUESTION RESULTS:
 
 ${performanceData.questionResults.map((q: any, idx: number) => {
@@ -4121,14 +5397,15 @@ Focus on:
 5. Age-appropriate recommendations
 
 6. Positive reinforcement
-
-
+LANGUAGE RULES:
+- Always spell out all numbers in proper modern Tagalog words (hal. 12 → "labindalawa", 21 → "dalawampu't isa").
+- Iwasan ang digits na hinaluan ng Tagalog o Spanish shortcuts gaya ng "dose" o "bente".
 
 Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
 
 
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, {
 
         method: 'POST',
 
@@ -4184,7 +5461,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           await new Promise(resolve => setTimeout(resolve, retryDelay));
 
-          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+          return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
 
         }
 
@@ -4210,7 +5487,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           await new Promise(resolve => setTimeout(resolve, retryDelay));
 
-          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+          return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
 
         }
 
@@ -4284,7 +5561,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           await new Promise(resolve => setTimeout(resolve, retryDelay));
 
-          return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+          return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
 
         }
 
@@ -4350,7 +5627,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         await new Promise(resolve => setTimeout(resolve, retryDelay));
 
-        return generateGeminiAnalysis(resultData, classAverages, retryCount + 1);
+        return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
 
       }
 
@@ -4392,7 +5669,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
   // Function to handle student name click
 
-  const handleStudentNameClick = async (studentId: string, exerciseId: string, classId: string, studentNickname: string) => {
+  const handleStudentNameClick = async (studentId: string, exerciseId: string, classId: string, studentNickname: string, resultId?: string) => {
 
     // Find the student data
 
@@ -4401,6 +5678,44 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     if (!student) return;
 
 
+
+    // If a specific exercise result ID is provided, open Exercise Result modal instead
+    if (resultId) {
+      try {
+        setLoadingExerciseResult(true);
+        setSelectedExerciseResultId(resultId);
+        const { data } = await readData(`/ExerciseResults/${resultId}`);
+        setSelectedExerciseResultData(data);
+        setEditableQuestionResults((data?.questionResults || []).map((qr: any) => ({ ...qr })));
+        setEditableSummary(data?.resultsSummary || null);
+        setTeacherRemarks(data?.teacherRemarks || '');
+
+        // Load related results to show trend (same student + exercise)
+        try {
+          const { data: allResults } = await readData('/ExerciseResults');
+          if (allResults && data?.studentId && (data?.exerciseInfo?.exerciseId || data?.exerciseId)) {
+            const studentId = data.studentId;
+            const exerciseId = data?.exerciseInfo?.exerciseId || data?.exerciseId;
+            const list = Object.entries(allResults).filter(([rid, r]: any) => {
+              if (rid === resultId) return false;
+              const eId = r?.exerciseInfo?.exerciseId || r?.exerciseId;
+              return r?.studentId === studentId && eId === exerciseId;
+            }).map(([rid, r]: any) => r);
+            const scores = list.map((r: any) => r?.resultsSummary?.meanPercentageScore).filter((x: any) => typeof x === 'number');
+            const avg = scores.length > 0 ? Math.round(scores.reduce((a: number, b: number) => a + b, 0) / scores.length) : 0;
+            setRelatedStats({ previousCount: list.length, previousAvgScore: avg, lastScores: scores.slice(-3) });
+          } else {
+            setRelatedStats(null);
+          }
+        } catch {
+          setRelatedStats(null);
+        }
+        setShowExerciseResultModal(true);
+      } finally {
+        setLoadingExerciseResult(false);
+      }
+      return;
+    }
 
     setSelectedStudentPerformance(student);
 
@@ -4415,30 +5730,264 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     await loadStudentPerformance(studentId, exerciseId, classId);
 
   };
-
-
-
   const handleExportToExcel = async (exerciseTitle: string, results: any[], students: any[]) => {
 
+    let XLSX: any;
     try {
+      const XLSXLib: any = await import('xlsx');
+      XLSX = XLSXLib.default || XLSXLib;
 
-      // Prepare data for Excel
+      // Create a workbook
 
-      const excelData = results.map((result: any, idx: number) => {
+      const wb = XLSX.utils.book_new();
 
-        const student = students.find((s: any) => s.studentId === result.studentId);
+      
 
-        const studentNickname = student?.nickname || 'Unknown Student';
+      // SHEET 1: CLASS STATISTICS
 
+      const classStatsData = [];
+
+      if (results.length > 0) {
+
+        // Calculate class statistics
+
+        const totalStudents = results.length;
+
+        const totalQuestions = results[0]?.questionResults?.length || 0;
+
+        // More accurate total correct calculation
+        const totalCorrect = results.reduce((sum, result) => {
+          if (result.resultsSummary?.totalCorrect !== undefined) {
+            return sum + result.resultsSummary.totalCorrect;
+          } else {
+            // Count actual correct answers from question results
+            const questionResults = result.questionResults || [];
+            const correctCount = questionResults.filter((q: any) => q.isCorrect === true).length;
+            return sum + correctCount;
+          }
+        }, 0);
+
+        const totalPossible = totalStudents * totalQuestions;
+
+        const mps = totalPossible > 0 ? ((totalCorrect / totalPossible) * 100).toFixed(1) : '0.0';
+
+        const passingStudents = results.filter(result => (result.scorePercentage || 0) >= 75).length;
+
+        const passRate = ((passingStudents / totalStudents) * 100).toFixed(1);
+
+        const avgTimePerItem = results.reduce((sum, result) => {
+
+          const questionResults = result.questionResults || [];
+
+          const totalTime = questionResults.reduce((timeSum: number, q: any) => timeSum + (q.timeSpentSeconds || 0), 0);
+
+          return sum + (totalTime / Math.max(questionResults.length, 1));
+
+        }, 0) / totalStudents;
+
+        const avgAttemptsPerItem = results.reduce((sum, result) => {
+          const questionResults = result.questionResults || [];
+          const totalAttempts = questionResults.reduce((attemptSum: number, q: any) => {
+            // Use actual attempts if available, otherwise default to 1
+            const attempts = q.attempts || 1;
+            return attemptSum + attempts;
+          }, 0);
+          return sum + (totalAttempts / Math.max(questionResults.length, 1));
+        }, 0) / totalStudents;
+
+        // CENTRAL TENDENCY CALCULATIONS
+        const scores = results.map(result => result.scorePercentage || 0);
+        const times = results.map(result => Math.round((result.totalTimeSpent || 0) / 1000));
+        const attempts = results.map(result => {
+          const questionResults = result.questionResults || [];
+          return questionResults.reduce((sum: number, q: any) => {
+            // Use actual attempts if available, otherwise default to 1
+            const attempts = q.attempts || 1;
+            return sum + attempts;
+          }, 0);
+        });
+
+        // Sort arrays for median calculation
+        const sortedScores = [...scores].sort((a, b) => a - b);
+        const sortedTimes = [...times].sort((a, b) => a - b);
+        const sortedAttempts = [...attempts].sort((a, b) => a - b);
+
+        // Calculate mean, median, mode
+        const meanScore = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+        const medianScore = sortedScores.length % 2 === 0 
+          ? (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2
+          : sortedScores[Math.floor(sortedScores.length / 2)];
+
+        const meanTime = times.reduce((sum, time) => sum + time, 0) / times.length;
+        const medianTime = sortedTimes.length % 2 === 0 
+          ? (sortedTimes[sortedTimes.length / 2 - 1] + sortedTimes[sortedTimes.length / 2]) / 2
+          : sortedTimes[Math.floor(sortedTimes.length / 2)];
+
+        const meanAttempts = attempts.reduce((sum, attempt) => sum + attempt, 0) / attempts.length;
+        const medianAttempts = sortedAttempts.length % 2 === 0 
+          ? (sortedAttempts[sortedAttempts.length / 2 - 1] + sortedAttempts[sortedAttempts.length / 2]) / 2
+          : sortedAttempts[Math.floor(sortedAttempts.length / 2)];
+
+        // DISPERSION CALCULATIONS
+        const scoreVariance = scores.reduce((sum, score) => sum + Math.pow(score - meanScore, 2), 0) / scores.length;
+        const scoreStdDev = Math.sqrt(scoreVariance);
+        const scoreRange = Math.max(...scores) - Math.min(...scores);
+
+        const timeVariance = times.reduce((sum, time) => sum + Math.pow(time - meanTime, 2), 0) / times.length;
+        const timeStdDev = Math.sqrt(timeVariance);
+        const timeRange = Math.max(...times) - Math.min(...times);
+
+        const attemptVariance = attempts.reduce((sum, attempt) => sum + Math.pow(attempt - meanAttempts, 2), 0) / attempts.length;
+        const attemptStdDev = Math.sqrt(attemptVariance);
+        const attemptRange = Math.max(...attempts) - Math.min(...attempts);
+
+        // Quartiles calculation
+        const getQuartiles = (arr: number[]) => {
+          const sorted = [...arr].sort((a, b) => a - b);
+          const q1Index = Math.floor(sorted.length * 0.25);
+          const q3Index = Math.floor(sorted.length * 0.75);
+          return {
+            q1: sorted[q1Index],
+            q3: sorted[q3Index],
+            iqr: sorted[q3Index] - sorted[q1Index]
+          };
+        };
+
+        const scoreQuartiles = getQuartiles(scores);
+        const timeQuartiles = getQuartiles(times);
+        const attemptQuartiles = getQuartiles(attempts);
+
+        // EFFICIENCY CALCULATIONS
+        const completedStudents = results.filter(result => result.completedAt).length;
+        const completionRate = ((completedStudents / totalStudents) * 100).toFixed(1);
+
+        // Time efficiency: students who completed in reasonable time (below median + 1 std dev)
+        const timeThreshold = meanTime + timeStdDev;
+        const timeEfficientStudents = results.filter(result => 
+          Math.round((result.totalTimeSpent || 0) / 1000) <= timeThreshold
+        ).length;
+        const timeEfficiencyRate = ((timeEfficientStudents / totalStudents) * 100).toFixed(1);
+
+        // Attempt efficiency: students who used minimal attempts (below median + 1 std dev)
+        const attemptThreshold = meanAttempts + attemptStdDev;
+        const attemptEfficientStudents = results.filter(result => {
+          const questionResults = result.questionResults || [];
+          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+          return totalAttempts <= attemptThreshold;
+        }).length;
+        const attemptEfficiencyRate = ((attemptEfficientStudents / totalStudents) * 100).toFixed(1);
+
+        // Overall efficiency: students who are both time and attempt efficient
+        const overallEfficientStudents = results.filter(result => {
+          const totalTime = Math.round((result.totalTimeSpent || 0) / 1000);
+          const questionResults = result.questionResults || [];
+          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+          return totalTime <= timeThreshold && totalAttempts <= attemptThreshold;
+        }).length;
+        const overallEfficiencyRate = ((overallEfficientStudents / totalStudents) * 100).toFixed(1);
+
+        classStatsData.push(
+          // BASIC STATISTICS
+          { 'Metric': 'Exercise Title', 'Value': exerciseTitle },
+          { 'Metric': 'Total Students', 'Value': totalStudents },
+          { 'Metric': 'Total Questions', 'Value': totalQuestions },
+          { 'Metric': 'Total Correct Answers', 'Value': totalCorrect },
+          { 'Metric': 'Total Possible Points', 'Value': totalPossible },
+          { 'Metric': 'Mean Percentage Score (MPS)', 'Value': `${mps}%` },
+          { 'Metric': 'Passing Students (≥75%)', 'Value': passingStudents },
+          { 'Metric': 'Pass Rate', 'Value': `${passRate}%` },
+          
+          // CENTRAL TENDENCY - SCORES
+          { 'Metric': '--- CENTRAL TENDENCY (SCORES) ---', 'Value': '---' },
+          { 'Metric': 'Mean Score', 'Value': `${meanScore.toFixed(1)}%` },
+          { 'Metric': 'Median Score', 'Value': `${medianScore.toFixed(1)}%` },
+          { 'Metric': 'Mode Score (Most Common)', 'Value': `${Math.round(meanScore)}%` },
+          
+          // CENTRAL TENDENCY - TIME
+          { 'Metric': '--- CENTRAL TENDENCY (TIME) ---', 'Value': '---' },
+          { 'Metric': 'Mean Time (seconds)', 'Value': `${meanTime.toFixed(1)}` },
+          { 'Metric': 'Median Time (seconds)', 'Value': `${medianTime.toFixed(1)}` },
+          { 'Metric': 'Average Time per Item', 'Value': `${avgTimePerItem.toFixed(1)}s` },
+          
+          // CENTRAL TENDENCY - ATTEMPTS
+          { 'Metric': '--- CENTRAL TENDENCY (ATTEMPTS) ---', 'Value': '---' },
+          { 'Metric': 'Mean Total Attempts', 'Value': `${meanAttempts.toFixed(1)}` },
+          { 'Metric': 'Median Total Attempts', 'Value': `${medianAttempts.toFixed(1)}` },
+          { 'Metric': 'Average Attempts per Item', 'Value': `${avgAttemptsPerItem.toFixed(1)}` },
+          
+          // DISPERSION - SCORES
+          { 'Metric': '--- DISPERSION (SCORES) ---', 'Value': '---' },
+          { 'Metric': 'Score Standard Deviation', 'Value': `${scoreStdDev.toFixed(1)}` },
+          { 'Metric': 'Score Variance', 'Value': `${scoreVariance.toFixed(1)}` },
+          { 'Metric': 'Score Range', 'Value': `${scoreRange.toFixed(1)}` },
+          { 'Metric': 'Score Q1 (25th percentile)', 'Value': `${scoreQuartiles.q1.toFixed(1)}%` },
+          { 'Metric': 'Score Q3 (75th percentile)', 'Value': `${scoreQuartiles.q3.toFixed(1)}%` },
+          { 'Metric': 'Score IQR (Interquartile Range)', 'Value': `${scoreQuartiles.iqr.toFixed(1)}` },
+          
+          // DISPERSION - TIME
+          { 'Metric': '--- DISPERSION (TIME) ---', 'Value': '---' },
+          { 'Metric': 'Time Standard Deviation (seconds)', 'Value': `${timeStdDev.toFixed(1)}` },
+          { 'Metric': 'Time Variance', 'Value': `${timeVariance.toFixed(1)}` },
+          { 'Metric': 'Time Range (seconds)', 'Value': `${timeRange.toFixed(1)}` },
+          { 'Metric': 'Time Q1 (25th percentile)', 'Value': `${timeQuartiles.q1.toFixed(1)}s` },
+          { 'Metric': 'Time Q3 (75th percentile)', 'Value': `${timeQuartiles.q3.toFixed(1)}s` },
+          { 'Metric': 'Time IQR (Interquartile Range)', 'Value': `${timeQuartiles.iqr.toFixed(1)}s` },
+          
+          // DISPERSION - ATTEMPTS
+          { 'Metric': '--- DISPERSION (ATTEMPTS) ---', 'Value': '---' },
+          { 'Metric': 'Attempt Standard Deviation', 'Value': `${attemptStdDev.toFixed(1)}` },
+          { 'Metric': 'Attempt Variance', 'Value': `${attemptVariance.toFixed(1)}` },
+          { 'Metric': 'Attempt Range', 'Value': `${attemptRange.toFixed(1)}` },
+          { 'Metric': 'Attempt Q1 (25th percentile)', 'Value': `${attemptQuartiles.q1.toFixed(1)}` },
+          { 'Metric': 'Attempt Q3 (75th percentile)', 'Value': `${attemptQuartiles.q3.toFixed(1)}` },
+          { 'Metric': 'Attempt IQR (Interquartile Range)', 'Value': `${attemptQuartiles.iqr.toFixed(1)}` },
+          
+          // EFFICIENCY METRICS
+          { 'Metric': '--- EFFICIENCY METRICS ---', 'Value': '---' },
+          { 'Metric': 'Completion Rate', 'Value': `${completionRate}%` },
+          { 'Metric': 'Time Efficiency Rate', 'Value': `${timeEfficiencyRate}%` },
+          { 'Metric': 'Attempt Efficiency Rate', 'Value': `${attemptEfficiencyRate}%` },
+          { 'Metric': 'Overall Efficiency Rate', 'Value': `${overallEfficiencyRate}%` },
+          { 'Metric': 'Time Efficient Students', 'Value': `${timeEfficientStudents}/${totalStudents}` },
+          { 'Metric': 'Attempt Efficient Students', 'Value': `${attemptEfficientStudents}/${totalStudents}` },
+          { 'Metric': 'Overall Efficient Students', 'Value': `${overallEfficientStudents}/${totalStudents}` }
+        );
+
+      }
+
+      const classStatsWs = XLSX.utils.json_to_sheet(classStatsData);
+
+      classStatsWs['!cols'] = [{ wch: 30 }, { wch: 20 }];
+
+      XLSX.utils.book_append_sheet(wb, classStatsWs, 'Class Statistics');
+
+      
+
+      // SHEET 2: STUDENT RESULTS
+
+      const studentResultsData = results.map((result: any, idx: number) => {
+
+        // Try to find student by studentId, then by studentInfo.name, then by parentId
+        let student = students.find((s: any) => s.studentId === result.studentId);
         
+        if (!student && result.studentInfo?.name) {
+          student = students.find((s: any) => 
+            s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+          );
+        }
+        
+        if (!student && result.parentId) {
+          student = students.find((s: any) => s.parentId === result.parentId);
+        }
+
+        const studentNickname = student ? formatStudentName(student) : 
+          (result.studentInfo?.name || 'Unknown Student');
 
         const questionResults = result.questionResults || [];
 
         const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
 
         const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
-
-        
 
         const totalTimeSeconds = Math.round((result.totalTimeSpent || 0) / 1000);
 
@@ -4448,13 +5997,19 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${remainingSeconds}s` : `${totalTimeSeconds}s`;
 
-        
+        const totalCorrect = result.resultsSummary?.totalCorrect || questionResults.filter((q: any) => q.isCorrect).length;
+
+        const totalQuestions = questionResults.length;
 
         return {
 
           '#': idx + 1,
 
           'Student': studentNickname,
+
+          'Correct Answers': `${totalCorrect}/${totalQuestions}`,
+
+          'Score %': `${Math.round(result.scorePercentage || 0)}%`,
 
           'Avg Attempts': avgAttempts,
 
@@ -4468,27 +6023,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       });
 
+      const studentResultsWs = XLSX.utils.json_to_sheet(studentResultsData);
 
-
-      // Create a workbook
-
-      const wb = XLSX.utils.book_new();
-
-      
-
-      // Convert data to worksheet
-
-      const ws = XLSX.utils.json_to_sheet(excelData);
-
-      
-
-      // Set column widths
-
-      ws['!cols'] = [
+      studentResultsWs['!cols'] = [
 
         { wch: 5 },   // #
 
-        { wch: 20 },  // Student
+        { wch: 25 },  // Student
+
+        { wch: 18 },  // Correct Answers
+
+        { wch: 12 },  // Score %
 
         { wch: 15 },  // Avg Attempts
 
@@ -4496,15 +6041,209 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         { wch: 18 },  // Time (formatted)
 
-        { wch: 20 }   // Completed At
+        { wch: 25 }   // Completed At
 
       ];
 
+      XLSX.utils.book_append_sheet(wb, studentResultsWs, 'Student Results');
+
       
 
-      // Add worksheet to workbook
+      // SHEET 3: ITEM ANALYSIS
 
-      XLSX.utils.book_append_sheet(wb, ws, 'Results');
+      const itemAnalysisData: Array<{Question: string, Metric: string, Value: string | number}> = [];
+
+      if (results.length > 0 && results[0]?.questionResults?.length > 0) {
+
+        const firstResult = results[0];
+
+        const questionResults = firstResult.questionResults || [];
+
+        
+
+        questionResults.forEach((question: any, questionIndex: number) => {
+
+          // More accurate question number calculation
+          const questionNumber = question.questionNumber || questionIndex + 1;
+
+          const correctAnswer = question.correctAnswer || 'N/A';
+
+          const questionText = question.questionText || `Question ${questionNumber}`;
+
+          // More accurate question type calculation
+          let questionType = question.questionType || 'Unknown';
+          if (questionType.includes('multiple-choice')) {
+            questionType = 'Multiple Choice';
+          } else if (questionType.includes('identification')) {
+            questionType = 'Identification';
+          } else if (questionType.includes('re-order')) {
+            questionType = 'Re-order';
+          } else if (questionType.includes('matching')) {
+            questionType = 'Matching';
+          }
+
+          // Calculate metrics based on actual student results
+          const questionResults = results.map((result: any) => {
+            return result.questionResults?.find((q: any) => q.questionNumber === questionNumber);
+          }).filter(Boolean);
+          
+          // Calculate difficulty based on student performance
+          const correctCountForDifficulty = questionResults.filter((q: any) => q.isCorrect === true).length;
+          const accuracy = questionResults.length > 0 ? correctCountForDifficulty / questionResults.length : 0;
+          
+          let difficulty = '2.0'; // Default medium difficulty
+          if (accuracy >= 0.9) difficulty = '1.0';      // Very Easy (90%+ correct)
+          else if (accuracy >= 0.8) difficulty = '1.2'; // Easy (80-89% correct)
+          else if (accuracy >= 0.7) difficulty = '1.5'; // Easy-Medium (70-79% correct)
+          else if (accuracy >= 0.6) difficulty = '2.0';  // Medium (60-69% correct)
+          else if (accuracy >= 0.5) difficulty = '2.5';  // Medium-Hard (50-59% correct)
+          else if (accuracy >= 0.4) difficulty = '3.0';  // Hard (40-49% correct)
+          else if (accuracy >= 0.3) difficulty = '3.5';  // Very Hard (30-39% correct)
+          else difficulty = '4.0';                      // Extremely Hard (<30% correct)
+          
+          // Calculate average time spent by students
+          const timeSpentArray = questionResults.map((q: any) => q.timeSpent || 0).filter(time => time > 0);
+          const avgTimeSpent = timeSpentArray.length > 0 
+            ? timeSpentArray.reduce((sum, time) => sum + time, 0) / timeSpentArray.length 
+            : 0;
+          
+          // Calculate time allowed based on student performance
+          let timeAllowed = 25; // Default
+          if (avgTimeSpent > 0) {
+            // Set time allowed to 1.5x the average time spent (giving students reasonable buffer)
+            timeAllowed = Math.max(15, Math.min(60, Math.round(avgTimeSpent * 1.5 / 1000)));
+          } else {
+            // Fallback based on question type if no time data
+            if (questionType.toLowerCase().includes('re-order')) {
+              timeAllowed = 20;
+            } else if (questionType.toLowerCase().includes('matching')) {
+              timeAllowed = 30;
+            } else if (questionType.toLowerCase().includes('identification')) {
+              timeAllowed = 15;
+            }
+          }
+
+          
+
+          // Analyze all students' responses to this question
+
+          const studentResponses = results.map(result => {
+
+            const studentQuestion = result.questionResults?.find((q: any) => q.questionNumber === questionNumber);
+
+            return {
+
+              student: result.studentInfo?.name || 'Unknown',
+
+              answer: studentQuestion?.studentAnswer || 'No answer',
+
+              isCorrect: studentQuestion?.isCorrect || false,
+
+              attempts: studentQuestion?.attempts || 1,
+
+              timeSpent: studentQuestion?.timeSpentSeconds || 0
+
+            };
+
+          });
+
+          
+
+          // Count correct vs incorrect responses
+
+          const correctCount = studentResponses.filter(response => response.isCorrect).length;
+
+          const incorrectCount = studentResponses.filter(response => !response.isCorrect).length;
+
+          
+
+          // Group incorrect answers
+
+          const incorrectAnswers = studentResponses.filter(response => !response.isCorrect);
+
+          const answerCounts: Record<string, number> = {};
+
+          incorrectAnswers.forEach(response => {
+
+            const answer = response.answer || 'No answer';
+
+            answerCounts[answer] = (answerCounts[answer] || 0) + 1;
+
+          });
+
+          
+
+          // Calculate averages
+
+          const avgTimePerQuestion = studentResponses.reduce((sum, response) => sum + response.timeSpent, 0) / studentResponses.length;
+
+          const avgAttemptsPerQuestion = studentResponses.reduce((sum, response) => sum + response.attempts, 0) / studentResponses.length;
+
+          
+
+          // Add question summary
+
+          itemAnalysisData.push(
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Question Text', 'Value': questionText },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Correct Answer', 'Value': correctAnswer },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Students Answered Correctly', 'Value': correctCount },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Students Answered Incorrectly', 'Value': incorrectCount },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Average Time (seconds)', 'Value': avgTimePerQuestion.toFixed(1) },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': 'Average Attempts', 'Value': avgAttemptsPerQuestion.toFixed(1) },
+
+            { 'Question': `Q${questionNumber}`, 'Metric': '---', 'Value': '---' }
+
+          );
+
+          
+
+          // Add incorrect answer details
+
+          Object.entries(answerCounts).forEach(([answer, count]) => {
+
+            itemAnalysisData.push({
+
+              'Question': `Q${questionNumber}`,
+
+              'Metric': 'Incorrect Answer',
+
+              'Value': `${answer} (${count} students)`
+
+            });
+
+          });
+
+          
+
+          // Add separator between questions
+
+          if (questionIndex < questionResults.length - 1) {
+
+            itemAnalysisData.push(
+
+              { 'Question': '', 'Metric': '', 'Value': '' },
+
+              { 'Question': '', 'Metric': '', 'Value': '' }
+
+            );
+
+          }
+
+        });
+
+      }
+
+      const itemAnalysisWs = XLSX.utils.json_to_sheet(itemAnalysisData as any[]);
+
+      itemAnalysisWs['!cols'] = [{ wch: 10 }, { wch: 25 }, { wch: 40 }];
+
+      XLSX.utils.book_append_sheet(wb, itemAnalysisWs, 'Item Analysis');
 
       
 
@@ -4516,7 +6255,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       // Create filename
 
-      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_results.xlsx`;
+      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_detailed_analysis.xlsx`;
 
       const fileUri = `${FileSystem.cacheDirectory}${filename}`;
 
@@ -4540,17 +6279,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 
-          dialogTitle: `Export ${exerciseTitle} Results`,
+          dialogTitle: `Export ${exerciseTitle} Detailed Analysis`,
 
           UTI: 'com.microsoft.excel.xlsx'
 
         });
 
-        showAlert('Success', 'Excel file exported successfully!', undefined, 'success');
+        showAlert('Success', 'Detailed Excel analysis exported successfully!', undefined, 'success');
 
       } else {
 
-        showAlert('Success', `Results exported to ${filename}`, undefined, 'success');
+        showAlert('Success', `Detailed analysis exported to ${filename}`, undefined, 'success');
 
       }
 
@@ -4586,114 +6325,531 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       console.error('Export error:', error);
 
-      showAlert('Error', 'Failed to export results to Excel. Please try again.', undefined, 'error');
+      showAlert('Error', 'Failed to export detailed analysis to Excel. Please try again.', undefined, 'error');
 
     }
 
   };
+  // Export Class Statistics to Excel
+  const handleExportClassStatsToExcel = async () => {
+    if (!selectedExerciseForStats) return;
+    
+    let XLSX: any;
+    try {
+      const XLSXLib: any = await import('xlsx');
+      XLSX = XLSXLib.default || XLSXLib;
+      const { exerciseTitle, exerciseId, exerciseResults, classId } = selectedExerciseForStats;
+      
+      // Create a workbook
+      const wb = XLSX.utils.book_new();
+      
+      // Calculate all statistics
+      const scores = exerciseResults.map((r: any) => r.scorePercentage || 0);
+      const sortedScores = [...scores].sort((a: number, b: number) => a - b);
+      
+      if (scores.length === 0) {
+        showAlert('Error', 'No data available to export.', undefined, 'error');
+        return;
+      }
+      
+      // CENTRAL TENDENCY
+      const mps = scores.reduce((sum: number, score: number) => sum + score, 0) / scores.length;
+      const median = sortedScores.length % 2 === 0 
+        ? (sortedScores[sortedScores.length / 2 - 1] + sortedScores[sortedScores.length / 2]) / 2
+        : sortedScores[Math.floor(sortedScores.length / 2)];
+      
+      const scoreCounts: { [key: number]: number } = {};
+      scores.forEach((score: number) => {
+        const roundedScore = Math.round(score);
+        scoreCounts[roundedScore] = (scoreCounts[roundedScore] || 0) + 1;
+      });
+      const mode = Object.keys(scoreCounts).reduce((a, b) => 
+        scoreCounts[parseInt(a)] > scoreCounts[parseInt(b)] ? a : b
+      );
+      
+      // DISPERSION
+      const variance = scores.reduce((sum: number, score: number) => sum + Math.pow(score - mps, 2), 0) / scores.length;
+      const stdDev = Math.sqrt(variance);
+      const highestScore = Math.max(...scores);
+      const lowestScore = Math.min(...scores);
+      const range = highestScore - lowestScore;
+      
+      // TOP & BOTTOM PERFORMERS
+      const topStudent = exerciseResults.find((r: any) => r.scorePercentage === highestScore);
+      const bottomStudent = exerciseResults.find((r: any) => r.scorePercentage === lowestScore);
+      
+      // EFFICIENCY METRICS
+      const totalAttempts = exerciseResults.reduce((sum: number, result: any) => {
+        return sum + (result.questionResults?.reduce((qSum: number, q: any) => qSum + (q.attempts || 1), 0) || 0);
+      }, 0);
+      const avgAttemptsPerItem = totalAttempts / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
+      
+      const totalTime = exerciseResults.reduce((sum: number, result: any) => sum + (result.totalTimeSpent || 0), 0);
+      const avgTimePerItem = totalTime / (exerciseResults[0]?.questionResults?.length || 1) / exerciseResults.length;
+      
+      // PERFORMANCE DISTRIBUTION
+      const highlyProficientCount = scores.filter((s: number) => s >= 85).length;
+      const proficientCount = scores.filter((s: number) => s >= 75 && s < 85).length;
+      const nearlyProficientCount = scores.filter((s: number) => s >= 50 && s < 75).length;
+      const lowProficientCount = scores.filter((s: number) => s >= 25 && s < 50).length;
+      const notProficientCount = scores.filter((s: number) => s < 25).length;
+      
+      // PASS RATE
+      const passCount = scores.filter((s: number) => s >= 75).length;
+      const passRate = scores.length > 0 ? (passCount / scores.length) * 100 : 0;
+      
+      // SHEET 1: OVERVIEW
+      const overviewData = [
+        { 'Metric': 'Exercise Title', 'Value': exerciseTitle },
+        { 'Metric': 'Exercise ID', 'Value': exerciseId },
+        { 'Metric': 'Total Students', 'Value': scores.length },
+        { 'Metric': 'Mean Percentage Score (MPS)', 'Value': `${mps.toFixed(1)}%` },
+        { 'Metric': 'Pass Rate (≥60%)', 'Value': `${passRate.toFixed(1)}%` },
+        { 'Metric': 'Students Passed', 'Value': `${passCount}/${scores.length}` }
+      ];
+      
+      const overviewWs = XLSX.utils.json_to_sheet(overviewData);
+      overviewWs['!cols'] = [{ wch: 35 }, { wch: 25 }];
+      XLSX.utils.book_append_sheet(wb, overviewWs, 'Overview');
+      
+      // SHEET 2: CENTRAL TENDENCY
+      const centralTendencyData = [
+        { 'Statistic': 'Mean', 'Value': `${mps.toFixed(1)}%`, 'Description': 'Average score across all students' },
+        { 'Statistic': 'Median', 'Value': `${median.toFixed(1)}%`, 'Description': 'Middle value when scores are sorted' },
+        { 'Statistic': 'Mode', 'Value': `${mode}%`, 'Description': 'Most frequently occurring score' }
+      ];
+      
+      const centralTendencyWs = XLSX.utils.json_to_sheet(centralTendencyData);
+      centralTendencyWs['!cols'] = [{ wch: 20 }, { wch: 15 }, { wch: 40 }];
+      XLSX.utils.book_append_sheet(wb, centralTendencyWs, 'Central Tendency');
+      
+      // SHEET 3: DISPERSION
+      const dispersionData = [
+        { 'Statistic': 'Standard Deviation', 'Value': stdDev.toFixed(1), 'Interpretation': stdDev < 10 ? 'Low variability' : stdDev < 20 ? 'Moderate variability' : 'High variability' },
+        { 'Statistic': 'Range', 'Value': `${range.toFixed(1)}%`, 'Interpretation': `${lowestScore.toFixed(0)}% to ${highestScore.toFixed(0)}%` },
+        { 'Statistic': 'Highest Score', 'Value': `${highestScore.toFixed(1)}%`, 'Interpretation': topStudent ? (topStudent.studentInfo?.name || 'Unknown') : '—' },
+        { 'Statistic': 'Lowest Score', 'Value': `${lowestScore.toFixed(1)}%`, 'Interpretation': bottomStudent ? (bottomStudent.studentInfo?.name || 'Unknown') : '—' }
+      ];
+      
+      const dispersionWs = XLSX.utils.json_to_sheet(dispersionData);
+      dispersionWs['!cols'] = [{ wch: 25 }, { wch: 20 }, { wch: 40 }];
+      XLSX.utils.book_append_sheet(wb, dispersionWs, 'Dispersion');
+      
+      // SHEET 4: EFFICIENCY
+      const avgTimeDisplay = avgTimePerItem > 60000 
+        ? `${Math.floor(avgTimePerItem / 60000)}m ${Math.floor((avgTimePerItem % 60000) / 1000)}s`
+        : `${Math.floor(avgTimePerItem / 1000)}s`;
+      
+      const efficiencyData = [
+        { 'Metric': 'Avg Attempts per Item', 'Value': avgAttemptsPerItem.toFixed(1), 'Assessment': avgAttemptsPerItem < 1.5 ? 'Excellent' : avgAttemptsPerItem < 2.5 ? 'Good' : 'Fair' },
+        { 'Metric': 'Avg Time per Item', 'Value': avgTimeDisplay, 'Assessment': '—' }
+      ];
+      
+      const efficiencyWs = XLSX.utils.json_to_sheet(efficiencyData);
+      efficiencyWs['!cols'] = [{ wch: 30 }, { wch: 20 }, { wch: 20 }];
+      XLSX.utils.book_append_sheet(wb, efficiencyWs, 'Efficiency');
+      
+      // SHEET 5: PERFORMANCE DISTRIBUTION
+      const performanceDistData = [
+        { 'Category': 'Highly Proficient (85-100%)', 'Count': highlyProficientCount, 'Percentage': `${scores.length > 0 ? ((highlyProficientCount / scores.length) * 100).toFixed(0) : 0}%` },
+        { 'Category': 'Proficient (75-84%)', 'Count': proficientCount, 'Percentage': `${scores.length > 0 ? ((proficientCount / scores.length) * 100).toFixed(0) : 0}%` },
+        { 'Category': 'Nearly Proficient (50-74%)', 'Count': nearlyProficientCount, 'Percentage': `${scores.length > 0 ? ((nearlyProficientCount / scores.length) * 100).toFixed(0) : 0}%` },
+        { 'Category': 'Low Proficient (25-49%)', 'Count': lowProficientCount, 'Percentage': `${scores.length > 0 ? ((lowProficientCount / scores.length) * 100).toFixed(0) : 0}%` },
+        { 'Category': 'Not Proficient (<25%)', 'Count': notProficientCount, 'Percentage': `${scores.length > 0 ? ((notProficientCount / scores.length) * 100).toFixed(0) : 0}%` }
+      ];
+      
+      const performanceDistWs = XLSX.utils.json_to_sheet(performanceDistData);
+      performanceDistWs['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 15 }];
+      XLSX.utils.book_append_sheet(wb, performanceDistWs, 'Performance Distribution');
+      
+      // SHEET 6: ITEM ANALYSIS
+      const firstResult = exerciseResults[0];
+      if (firstResult?.questionResults?.length) {
+        const itemAnalysisData: any[] = [];
+        
+        firstResult.questionResults.forEach((question: any, questionIndex: number) => {
+          const questionNumber = question.questionNumber || questionIndex + 1;
+          const questionText = question.questionText || `Question ${questionNumber}`;
+          
+          let questionType = question.questionType || 'Unknown';
+          if (questionType.includes('multiple-choice')) {
+            questionType = 'Multiple Choice';
+          } else if (questionType.includes('identification')) {
+            questionType = 'Identification';
+          } else if (questionType.includes('re-order')) {
+            questionType = 'Re-order';
+          } else if (questionType.includes('matching')) {
+            questionType = 'Matching';
+          }
+          
+          const questionResults = exerciseResults.map((result: any) => {
+            return result.questionResults?.find((q: any) => q.questionId === question.questionId);
+          }).filter(Boolean);
+          
+          const correctCount = questionResults.filter((q: any) => q.isCorrect).length;
+          const difficultyIndex = questionResults.length > 0 ? (correctCount / questionResults.length) * 100 : 0;
+          
+          const avgTime = questionResults.reduce((sum: any, q: any) => sum + (q.timeSpent || 0), 0) / questionResults.length;
+          const avgTimeSeconds = Math.round(avgTime / 1000);
+          
+          const avgAttempts = questionResults.reduce((sum: any, q: any) => sum + (q.attempts || 1), 0) / questionResults.length;
+          
+          itemAnalysisData.push({
+            'Question #': questionNumber,
+            'Question Text': questionText,
+            'Type': questionType,
+            'Difficulty Index (%)': difficultyIndex.toFixed(1),
+            'Correct Count': correctCount,
+            'Total Responses': questionResults.length,
+            'Avg Time (s)': avgTimeSeconds,
+            'Avg Attempts': avgAttempts.toFixed(1)
+          });
+        });
+        
+        const itemAnalysisWs = XLSX.utils.json_to_sheet(itemAnalysisData);
+        itemAnalysisWs['!cols'] = [
+          { wch: 12 }, // Question #
+          { wch: 40 }, // Question Text
+          { wch: 18 }, // Type
+          { wch: 18 }, // Difficulty Index
+          { wch: 15 }, // Correct Count
+          { wch: 15 }, // Total Responses
+          { wch: 12 }, // Avg Time
+          { wch: 15 }  // Avg Attempts
+        ];
+        XLSX.utils.book_append_sheet(wb, itemAnalysisWs, 'Item Analysis');
+      }
+      
+      // Generate Excel file
+      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+      const filename = `${exerciseTitle.replace(/[^a-zA-Z0-9]/g, '_')}_class_statistics.xlsx`;
+      const fileUri = `${FileSystem.cacheDirectory}${filename}`;
+      
+      await FileSystem.writeAsStringAsync(fileUri, wbout, { encoding: 'base64' });
+      
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          dialogTitle: `Export Class Statistics - ${exerciseTitle}`,
+          UTI: 'com.microsoft.excel.xlsx'
+        });
+        showAlert('Success', 'Class statistics exported to Excel successfully!', undefined, 'success');
+      } else {
+        showAlert('Success', `Exported to ${filename}`, undefined, 'success');
+      }
+      
+      // Cleanup
+      setTimeout(async () => {
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(fileUri);
+          if (fileInfo.exists) {
+            await FileSystem.deleteAsync(fileUri);
+          }
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temp file:', cleanupError);
+        }
+      }, 5000);
+      
+    } catch (error) {
+      console.error('Export to Excel error:', error);
+      showAlert('Error', 'Failed to export class statistics to Excel.', undefined, 'error');
+    }
+  };
+  
+  
+  
+  
+  const handleExportQuarterToExcel = async (quarter: string, classId: string, resultsByExercise: any, students: any[]) => {
+    let XLSX: any;
+    try {
+      const XLSXLib: any = await import('xlsx');
+      XLSX = XLSXLib.default || XLSXLib;
+      // Get class info for filename
+      const classInfo = activeClasses.find(c => c.id === classId);
+      const className = classInfo?.name || 'Class';
+      
+      // Create a map of all students with their results for each exercise
+      const studentResultsMap: Record<string, any> = {};
+      
+      // Initialize all students
+      students.forEach((student: any) => {
+        const studentName = formatStudentName(student);
+        studentResultsMap[studentName] = {
+          studentName,
+          student,
+          exercises: {}
+        };
+      });
+      
+      // Process each exercise's results
+      Object.entries(resultsByExercise).forEach(([exerciseTitle, exerciseResults]: [string, any]) => {
+        (exerciseResults as any[]).forEach((result: any) => {
+          // Try to find student by multiple strategies
+          let student = students.find((s: any) => s.studentId === result.studentId);
+          
+          if (!student && result.studentInfo?.name) {
+            student = students.find((s: any) => 
+              s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+            );
+          }
+          
+          if (!student && result.parentId) {
+            student = students.find((s: any) => s.parentId === result.parentId);
+          }
+
+          const studentName = student ? formatStudentName(student) : 
+            (result.studentInfo?.name || 'Unknown Student');
+
+          // Initialize student if not exists
+          if (!studentResultsMap[studentName]) {
+            studentResultsMap[studentName] = {
+              studentName,
+              student,
+              exercises: {}
+            };
+          }
+
+          // Calculate metrics for this exercise
+          const questionResults = result.questionResults || [];
+          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+          const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
+          
+          const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
+          const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
+          const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
+          
+          // Store exercise results for this student
+          studentResultsMap[studentName].exercises[exerciseTitle] = {
+            scorePercentage: `${Math.round(result.scorePercentage || 0)}%`,
+            avgAttempts,
+            timeFormatted: timeDisplay,
+            completedAt: result.completedAt ? new Date(result.completedAt).toLocaleString() : 'N/A'
+          };
+        });
+      });
+      
+      // Create headers for the wide format
+      const exerciseTitles = Object.keys(resultsByExercise);
+      const headers = ['#', 'Student'];
+      
+      // Add columns for each exercise
+      exerciseTitles.forEach(exerciseTitle => {
+        headers.push(`${exerciseTitle} - Score %`);
+        headers.push(`${exerciseTitle} - Avg Attempts`);
+        headers.push(`${exerciseTitle} - Time (formatted)`);
+        headers.push(`${exerciseTitle} - Completed At`);
+      });
+      
+      // Create Excel data in wide format
+      const excelData: any[] = [];
+      let rowNumber = 1;
+      
+      // Sort students alphabetically
+      const sortedStudents = Object.values(studentResultsMap).sort((a: any, b: any) => 
+        a.studentName.localeCompare(b.studentName)
+      );
+      
+      sortedStudents.forEach((studentData: any) => {
+        const row: any = {
+          '#': rowNumber++,
+          'Student': studentData.studentName
+        };
+        
+        // Add data for each exercise
+        exerciseTitles.forEach(exerciseTitle => {
+          const exerciseData = studentData.exercises[exerciseTitle];
+          if (exerciseData) {
+            row[`${exerciseTitle} - Score %`] = exerciseData.scorePercentage;
+            row[`${exerciseTitle} - Avg Attempts`] = exerciseData.avgAttempts;
+            row[`${exerciseTitle} - Time (formatted)`] = exerciseData.timeFormatted;
+            row[`${exerciseTitle} - Completed At`] = exerciseData.completedAt;
+          } else {
+            // No data for this exercise
+            row[`${exerciseTitle} - Score %`] = 'N/A';
+            row[`${exerciseTitle} - Avg Attempts`] = 'N/A';
+            row[`${exerciseTitle} - Time (formatted)`] = 'N/A';
+            row[`${exerciseTitle} - Completed At`] = 'N/A';
+          }
+        });
+        
+        excelData.push(row);
+      });
+
+      // Create a workbook
+      const wb = XLSX.utils.book_new();
+      
+      // Convert data to worksheet
+      const ws = XLSX.utils.json_to_sheet(excelData);
+      
+      // Set column widths for wide format
+      const colWidths = [
+        { wch: 5 },   // #
+        { wch: 20 },  // Student
+      ];
+      
+      // Add widths for each exercise's columns
+      exerciseTitles.forEach(() => {
+        colWidths.push({ wch: 12 }); // Score %
+        colWidths.push({ wch: 15 }); // Avg Attempts
+        colWidths.push({ wch: 18 }); // Time (formatted)
+        colWidths.push({ wch: 25 }); // Completed At
+      });
+      
+      ws['!cols'] = colWidths;
+      
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(wb, ws, quarter.replace(' ', '_'));
+      
+      // Generate Excel file as base64
+      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+      
+      // Create filename
+      const filename = `${className}_${quarter.replace(' ', '_')}_ClassRecord.xlsx`;
+      const fileUri = `${FileSystem.cacheDirectory}${filename}`;
+      
+      // Write file to device
+      await FileSystem.writeAsStringAsync(fileUri, wbout, {
+        encoding: 'base64',
+      });
+      
+      // Share the file
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          dialogTitle: `Export ${quarter} Class Record`,
+          UTI: 'com.microsoft.excel.xlsx'
+        });
+        showAlert('Success', `${quarter} class record exported successfully!`, undefined, 'success');
+      } else {
+        showAlert('Success', `Results exported to ${filename}`, undefined, 'success');
+      }
+      
+      // Clean up the file after a delay
+      setTimeout(async () => {
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(fileUri);
+          if (fileInfo.exists) {
+            await FileSystem.deleteAsync(fileUri);
+          }
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temporary Excel file:', cleanupError);
+        }
+      }, 5000);
+      
+    } catch (error) {
+      console.error('Quarter export error:', error);
+      showAlert('Error', 'Failed to export quarter results. Please try again.', undefined, 'error');
+    }
+  };
 
 
+
+  const exportClassListToExcel = async (cls: { id: string; name: string }) => {
+    try {
+      const students = [...(studentsByClass[cls.id] || [])].sort((a, b) =>
+        formatStudentName(a).localeCompare(formatStudentName(b))
+      );
+
+      // Create CSV content
+      const csvHeaders = ['No.', 'Student Name', 'Parent Access Code'];
+      const csvRows = students.map((s: any, idx: number) => {
+        const loginCode = s.parentId ? (parentsById[s.parentId]?.loginCode || '—') : '—';
+        return [idx + 1, formatStudentName(s), loginCode];
+      });
+
+      // Convert to CSV format
+      const csvContent = [
+        csvHeaders.join(','),
+        ...csvRows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      ].join('\n');
+
+      // Create filename
+      const timestamp = new Date().toISOString().split('T')[0];
+      const filename = `${cls.name.replace(/[^a-zA-Z0-9]/g, '_')}_StudentList_${timestamp}.csv`;
+      const fileUri = `${FileSystem.documentDirectory}${filename}`;
+
+      // Write file
+      await FileSystem.writeAsStringAsync(fileUri, csvContent, { encoding: FileSystem.EncodingType.UTF8 });
+
+      // Share the file
+      const sharingAvailable = await Sharing.isAvailableAsync();
+      if (sharingAvailable) {
+        await Sharing.shareAsync(fileUri, { 
+          dialogTitle: `Export ${cls.name} Student List`,
+          mimeType: 'text/csv'
+        });
+      } else {
+        showAlert('Export Complete', `Excel file saved to: ${fileUri}`, undefined, 'success');
+      }
+
+      // Cleanup after 5 seconds
+      setTimeout(async () => {
+        try {
+          await FileSystem.deleteAsync(fileUri, { idempotent: true });
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temporary Excel file:', cleanupError);
+        }
+      }, 5000);
+
+    } catch (error) {
+      console.error('Excel export error:', error);
+      showAlert('Export Failed', 'Unable to export Excel file.', undefined, 'error');
+    }
+  };
 
   const exportClassListToPdf = async (cls: { id: string; name: string }) => {
-
     try {
-
       const students = [...(studentsByClass[cls.id] || [])].sort((a, b) =>
-
-        String(a.nickname || '').localeCompare(String(b.nickname || ''))
-
+        formatStudentName(a).localeCompare(formatStudentName(b))
       );
 
       const rows = students
-
         .map((s: any, idx: number) => {
-
           const loginCode = s.parentId ? (parentsById[s.parentId]?.loginCode || '—') : '—';
-
           return `<tr>
-
             <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;">${idx + 1}</td>
-
-            <td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(String(s.nickname || ''))}</td>
-
+            <td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(formatStudentName(s))}</td>
             <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;">${escapeHtml(String(loginCode))}</td>
-
           </tr>`;
-
         })
-
         .join('');
 
-
-
       const html = `<!DOCTYPE html>
-
         <html>
-
           <head>
-
             <meta charset="utf-8" />
-
             <title>${escapeHtml(cls.name)} — Student List</title>
-
           </head>
-
           <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji','Segoe UI Emoji','Segoe UI Symbol','Noto Color Emoji'; color:#111827;">
-
             <h1 style="font-size:20px;">${escapeHtml(cls.name)} — Student List</h1>
-
             <p style="color:#6b7280;">Generated on ${new Date().toLocaleString()}</p>
-
             <table style="border-collapse:collapse;width:100%;font-size:12px;">
-
               <thead>
-
                 <tr>
-
                   <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;width:60px;">#</th>
-
                   <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;text-align:left;">Student</th>
-
                   <th style="padding:8px;border:1px solid #e5e7eb;background:#f8fafc;width:140px;">Parent Code</th>
-
                 </tr>
-
               </thead>
-
               <tbody>
-
                 ${rows || `<tr><td colspan="3" style="padding:12px;text-align:center;border:1px solid #e5e7eb;">No students yet.</td></tr>`}
-
               </tbody>
-
             </table>
-
           </body>
-
         </html>`;
 
-
-
       const file = await Print.printToFileAsync({ html });
-
       const sharingAvailable = await Sharing.isAvailableAsync();
 
       if (sharingAvailable) {
-
         await Sharing.shareAsync(file.uri, { dialogTitle: `Export ${cls.name} Student List` });
-
       } else {
-
         showAlert('Export Complete', `PDF saved to: ${file.uri}`, undefined, 'success');
-
       }
 
     } catch (e) {
-
       showAlert('Export Failed', 'Unable to export PDF.', undefined, 'error');
-
     }
-
   };
 
 
@@ -4795,6 +6951,99 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   };
 
 
+  const handleDeleteClass = (cls: { id: string; name: string }) => {
+
+    showAlert(
+
+      'Delete Class',
+
+      `This will permanently delete "${cls.name}", all students in it, and their parent records. This cannot be undone. Continue?`,
+
+      [
+
+        { text: 'Cancel', style: 'cancel' },
+
+        {
+
+          text: 'Delete Class',
+
+          style: 'destructive',
+
+          onPress: async () => {
+
+            try {
+
+              setDeletingClassId(cls.id);
+
+              // Load all students to ensure we have the latest list
+              const { data: studentsData } = await readData('/students');
+              const studentsInClass = Object.values(studentsData || {}).filter((s: any) => String(s.classId) === String(cls.id));
+
+              // Delete students and their parents (including login code mapping)
+              for (const s of studentsInClass as any[]) {
+                try {
+                  if (s.parentId) {
+                    const { data: parentData } = await readData(`/parents/${s.parentId}`);
+                    if (parentData && parentData.loginCode) {
+                      await deleteData(`/parentLoginCodes/${parentData.loginCode}`);
+                    }
+                    await deleteData(`/parents/${s.parentId}`);
+                  }
+                  if (s.studentId) {
+                    await deleteData(`/students/${s.studentId}`);
+                  }
+                } catch {}
+              }
+
+              // Delete the class itself
+              await deleteData(`/classes/${cls.id}`);
+
+              showAlert('Deleted', 'Class and related records were removed.', undefined, 'success');
+
+              // Refresh classes
+              if (currentUserId) {
+                await loadTeacherClasses(currentUserId);
+              }
+
+            } catch (e) {
+
+              showAlert('Error', 'Failed to delete class.', undefined, 'error');
+
+            } finally {
+
+              setDeletingClassId(null);
+
+            }
+
+          },
+
+        },
+
+      ],
+
+      'warning'
+
+    );
+
+  };
+
+  const handleShowParentsList = (classId: string) => {
+
+    setSelectedClassForParentsList(classId);
+
+    setShowParentsListModal(true);
+
+  };
+
+  const handleShowParentInfo = (student: any, parent: any) => {
+
+    setSelectedParentForInfo({ student, parent });
+
+    setShowParentsListModal(false);
+
+    setShowParentInfoModal(true);
+
+  };
 
   const generateLoginCode = () => String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
 
@@ -4820,11 +7069,96 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
 
+  // Parse full name into First Name, MI, and Surname
+  const parseFullName = (fullName: string): { firstName: string; middleInitial: string; surname: string } => {
+    const trimmed = fullName.trim();
+    if (!trimmed) return { firstName: '', middleInitial: '', surname: '' };
+    const parts = trimmed.split(/\s+/);
+    if (parts.length === 1) {
+      return { firstName: parts[0], middleInitial: '', surname: '' };
+    } else if (parts.length === 2) {
+      return { firstName: parts[0], middleInitial: '', surname: parts[1] };
+    } else {
+      const firstName = parts[0];
+      const surname = parts[parts.length - 1];
+      const middleInitial = parts[1] ? (parts[1].charAt(0).toUpperCase() + '.') : '';
+      return { firstName, middleInitial, surname };
+    }
+  };
+
+  // Format student name for display
+  const formatStudentName = (student: any): string => {
+    if (!student) return 'Unknown Student';
+    const last = (student.surname || '').trim();
+    const first = (student.firstName || '').trim();
+    const mi = (student.middleInitial || '').trim();
+    if (last && first) {
+      const miPart = mi ? ` ${mi}` : '';
+      return `${last}, ${first}${miPart}`;
+    }
+    if (student.fullName && student.fullName.trim()) {
+      // Try to reformat legacy fullName into Last, First MI
+      const { firstName, middleInitial, surname } = parseFullName(student.fullName);
+      const miPart = middleInitial ? ` ${middleInitial}` : '';
+      if (surname && firstName) return `${surname}, ${firstName}${miPart}`;
+      return student.fullName.trim();
+    }
+    if (student.nickname && student.nickname.trim()) {
+      return student.nickname.trim();
+    }
+    return 'Unknown Student';
+  };
+
+  const getParentStatus = (parent: any) => {
+
+    if (!parent) {
+
+      return { text: 'No Parent', color: '#ef4444' };
+
+    }
+
+    if (parent.infoStatus === 'completed') {
+
+      return { text: 'Registered', color: '#10b981' };
+
+    }
+
+    if (parent.infoStatus === 'pending') {
+
+      return { text: 'Pending', color: '#f59e0b' };
+
+    }
+
+    return { text: 'Pending', color: '#f59e0b' };
+
+  };
+  // Get student initials for avatar
+  const getStudentInitials = (student: any): string => {
+    if (student.firstName && student.surname) {
+      return `${student.firstName.charAt(0)}${student.surname.charAt(0)}`.toUpperCase();
+    }
+    if (student.fullName) {
+      const parts = student.fullName.split(/\s+/);
+      if (parts.length >= 2) {
+        return `${parts[0].charAt(0)}${parts[parts.length - 1].charAt(0)}`.toUpperCase();
+      }
+      return parts[0].charAt(0).toUpperCase();
+    }
+    if (student.nickname) {
+      return student.nickname.charAt(0).toUpperCase();
+    }
+    return 'S';
+  };
+
   const handleOpenAddStudent = (cls: { id: string; name: string }) => {
 
     setSelectedClassForStudent(cls);
 
-    setStudentNickname('');
+    setSelectedStudentForEdit(null);
+
+    setStudentLastName('');
+    setStudentFirstName('');
+    setStudentMiddleInitial('');
 
     setStudentGender('male');
 
@@ -4838,59 +7172,64 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     if (!selectedClassForStudent) return;
 
-    if (!studentNickname.trim()) { showAlert('Error', 'Please enter a student nickname.', undefined, 'error'); return; }
+    if (!studentLastName.trim() || !studentFirstName.trim()) { showAlert('Error', 'Enter Lastname and Firstname (Middle Initial optional).', undefined, 'error'); return; }
 
     try {
 
       setSavingStudent(true);
 
-      const loginCode = await generateUniqueLoginCode();
+      // Generate login code
+      const loginCode = await generateLoginCode();
 
-      // Create parent placeholder (details will be collected on first login)
+      const firstName = studentFirstName.trim();
+      const surname = studentLastName.trim();
+      const middleInitial = studentMiddleInitial.trim() ? (studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.') : '';
 
-      const parentPayload = {
+      if (!firstName || !surname) {
+        showAlert('Error', 'Please enter at least a first name and surname (e.g., "Juan Dela Cruz").', undefined, 'error');
+        setSavingStudent(false);
+        return;
+      }
 
+      // Create parent with readable ID (PARENT-0001, PARENT-0002, etc.)
+      const parentResult = await createParent({
         loginCode,
+        infoStatus: 'pending'
+      });
 
-        infoStatus: 'pending',
+      if (!parentResult.success || !parentResult.parentId) {
+        showAlert('Error', parentResult.error || 'Failed to create parent.', undefined, 'error');
+        setSavingStudent(false);
+        return;
+      }
 
-        createdAt: new Date().toISOString(),
+      const parentId = parentResult.parentId;
+      console.log(`[CreateStudent] Created parent with ID: ${parentId}, login code: ${loginCode}`);
 
-      };
-
-      const { key: parentId, error: parentErr } = await pushData('/parents', parentPayload);
-
-      if (parentErr || !parentId) { showAlert('Error', parentErr || 'Failed to create parent.', undefined, 'error'); return; }
-
-      await writeData(`/parentLoginCodes/${loginCode}`, parentId);
-
-      // Create student
-
-      const studentPayload = {
-
+      // Create student with readable ID (STUDENT-SECTION-0001, etc.)
+      const studentResult = await createStudent({
         classId: selectedClassForStudent.id,
-
         parentId,
-
-        nickname: studentNickname.trim(),
-
+        firstName,
+        middleInitial: middleInitial || '',
+        surname,
+        fullName: `${surname}, ${firstName}${middleInitial ? ` ${middleInitial}` : ''}`,
         gender: studentGender,
+        gradeSection: selectedClassForStudent.name || 'DEFAULT'
+      });
 
-        createdAt: new Date().toISOString(),
+      if (!studentResult.success || !studentResult.studentId) {
+        showAlert('Error', studentResult.error || 'Failed to create student.', undefined, 'error');
+        setSavingStudent(false);
+        return;
+      }
 
-      };
-
-      const { key: studentId, error: studentErr } = await pushData('/students', studentPayload);
-
-      if (studentErr || !studentId) { showAlert('Error', studentErr || 'Failed to create student.', undefined, 'error'); return; }
-
-      await updateData(`/students/${studentId}`, { studentId });
-
-      await updateData(`/parents/${parentId}`, { parentId });
+      const studentId = studentResult.studentId;
+      console.log(`[CreateStudent] Created student with ID: ${studentId}`);
 
       // Refresh lists
 
-      await loadStudentsAndParents(activeClasses.map((c) => c.id));
+      await loadStudentsAndParents(teacherClasses.map((c) => c.id));
 
       
 
@@ -4910,7 +7249,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
           'Student Created',
 
-          `Share this Parent Login Code with the guardian: ${loginCode}`,
+          `Student: ${firstName} ${middleInitial} ${surname}\n\nShare this Parent Login Code with the guardian: ${loginCode}`,
 
           [
 
@@ -4920,7 +7259,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
               onPress: () => {
 
-                setStudentNickname('');
+                setStudentLastName('');
+                setStudentFirstName('');
+                setStudentMiddleInitial('');
 
                 setShowAddStudentModal(true);
 
@@ -4955,6 +7296,55 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   };
 
 
+  const handleUpdateStudent = async () => {
+
+    if (!selectedClassForStudent || !selectedStudentForEdit) return;
+
+    if (!studentLastName.trim() || !studentFirstName.trim()) { showAlert('Error', 'Enter Lastname and Firstname (Middle Initial optional).', undefined, 'error'); return; }
+
+    try {
+
+      setSavingStudent(true);
+
+      const firstName = studentFirstName.trim();
+      const surname = studentLastName.trim();
+      const middleInitial = studentMiddleInitial.trim() ? (studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.') : '';
+
+      if (!firstName || !surname) {
+        showAlert('Error', 'Please enter at least a first name and surname (e.g., "Juan Dela Cruz").', undefined, 'error');
+        setSavingStudent(false);
+        return;
+      }
+
+      // Update the existing student record
+      await updateData(`/students/${selectedStudentForEdit.studentId}`, {
+        firstName,
+        middleInitial: middleInitial || '',
+        surname,
+        fullName: `${surname}, ${firstName}${middleInitial ? ` ${middleInitial}` : ''}`,
+        gender: studentGender,
+      });
+
+      // Refresh lists for affected class only
+      await loadStudentsAndParents([selectedClassForStudent.id]);
+
+      // Close modal
+      setShowAddStudentModal(false);
+      setSavingStudent(false);
+      setSelectedStudentForEdit(null);
+
+      showAlert('Updated', 'Student details saved.', undefined, 'success');
+
+    } catch (e) {
+
+      showAlert('Error', 'Failed to update student.', undefined, 'error');
+      setSavingStudent(false);
+
+    }
+
+  };
+
+
 
   // Student menu handlers
 
@@ -4962,9 +7352,14 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     setSelectedClassForStudent(classInfo);
 
-    setStudentNickname(String(student.nickname || ''));
+    // Reconstruct full name from stored components, or use fullName if available
+    setStudentLastName(String(student.surname || ''));
+    setStudentFirstName(String(student.firstName || ''));
+    setStudentMiddleInitial(String((student.middleInitial || '').replace(/\./g, '')));
 
     setStudentGender(String(student.gender || 'male') === 'female' ? 'female' : 'male');
+
+    setSelectedStudentForEdit(student);
 
     setShowAddStudentModal(true);
 
@@ -4980,7 +7375,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       'Delete Student',
 
-      `Remove "${student.nickname}" from this class? This cannot be undone.`,
+      `Remove "${formatStudentName(student)}" from this class? This cannot be undone.`,
 
       [
 
@@ -5030,13 +7425,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     if (parentData) {
 
-      setSelectedParentInfo({
-
-        ...parentData,
+      setSelectedParentForInfo({
 
         student: student,
 
-        loginCode: parentData.loginCode || 'N/A'
+        parent: parentData
 
       });
 
@@ -5286,9 +7679,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             // Refresh student lists
 
-            if (activeClasses.length > 0) {
+            if (teacherClasses.length > 0) {
 
-              await loadStudentsAndParents(activeClasses.map(c => c.id));
+              await loadStudentsAndParents(teacherClasses.map(c => c.id));
 
             }
 
@@ -5300,9 +7693,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             await loadTeacherClasses(currentUserId);
 
-            if (activeClasses.length > 0) {
+            if (teacherClasses.length > 0) {
 
-              await loadStudentsAndParents(activeClasses.map(c => c.id));
+              await loadStudentsAndParents(teacherClasses.map(c => c.id));
 
             }
 
@@ -5501,9 +7894,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     }
 
   };
-
-
-
   const takeReportPhoto = async () => {
 
     try {
@@ -5580,15 +7970,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       const timestamp = new Date().toISOString();
 
-      // Generate a unique numeric-only ticket number (15 digits)
+      const random = Math.floor(Math.random() * 9000);
 
-      const now = Date.now(); // 13 digits
-
-      const random = Math.floor(Math.random() * 100); // 2 digits
-
-      const ticketNumber = `${now}${random.toString().padStart(2, '0')}`;
+      const ticketNumber = `TICKET${random.toString().padStart(4, '0')}`;
 
       const reportId = ticketNumber;
+
+      
+      // Collect app and device metadata
+      const metadata = await collectAppMetadata();
+      console.log('Collected app metadata for ticket:', metadata);
 
 
 
@@ -5632,7 +8023,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         reportedByName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
 
-        userRole: 'teacher',
+        userRole: 'teacher' as const,
 
         timestamp,
 
@@ -5640,7 +8031,19 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         screenshots: uploadedUrls,
 
-        status: 'pending',
+        status: 'pending' as const,
+
+        // Add comprehensive metadata
+        appVersion: metadata.appVersion,
+        updateId: metadata.updateId,
+        runtimeVersion: metadata.runtimeVersion,
+        platform: metadata.platform,
+        platformVersion: metadata.platformVersion,
+        deviceInfo: metadata.deviceInfo,
+        environment: metadata.environment,
+        buildProfile: metadata.buildProfile,
+        expoVersion: metadata.expoVersion,
+        submittedAt: metadata.timestamp,
 
       };
 
@@ -5887,8 +8290,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                        setAnnSelectedClassIds([]);
 
-                       setAnnAllClasses(false);
-
                      }
 
                    }}
@@ -5958,224 +8359,203 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
              <View style={styles.classroomsSection}>
 
-               <Text style={styles.sectionTitle}>Classrooms</Text>
+               <View style={styles.classroomsSectionHeader}>
+                 <View>
+                   <Text style={styles.sectionTitle}>My Classrooms</Text>
+                   <Text style={styles.sectionSubtitle}>Manage your classes and track progress</Text>
+                 </View>
+                 <View style={styles.classroomBadge}>
+                   <Text style={styles.classroomBadgeText}>{activeClasses.length}</Text>
+                 </View>
+               </View>
 
                {activeClasses.length === 0 ? (
 
-                 <Text style={styles.classroomSubtitle}>No active classes yet.</Text>
+                 <View style={styles.emptyStateContainer}>
+                   <MaterialCommunityIcons name="school-outline" size={64} color="#cbd5e1" />
+                   <Text style={styles.emptyStateTitle}>No Active Classes</Text>
+                   <Text style={styles.emptyStateText}>Create your first classroom to get started</Text>
+                 </View>
 
                ) : (
 
-                activeClasses.map((cls) => (
+                activeClasses.map((cls, index) => (
 
                   <View key={cls.id} style={styles.classroomCard}>
 
-                   <View style={styles.classroomHeader}>
-
-                      <Text style={styles.classroomTitle}>{cls.name}</Text>
-
-                      <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
-
-                      <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                    {/* Gradient Header */}
+                    <View style={[styles.classroomCardHeader, { 
+                      backgroundColor: index % 4 === 0 ? '#3b82f6' : 
+                                       index % 4 === 1 ? '#8b5cf6' :
+                                       index % 4 === 2 ? '#10b981' : '#f59e0b'
+                    }]}>
+                      <View style={styles.classroomHeaderLeft}>
+                        <View style={styles.classroomIconContainer}>
+                          <MaterialCommunityIcons name="school" size={24} color="#ffffff" />
+                        </View>
+                        <View style={styles.classroomHeaderInfo}>
+                          <Text style={styles.classroomTitle}>{cls.name}</Text>
+                          <Text style={styles.classroomSubtitle}>{cls.schoolName || 'No School Name'}</Text>
+                        </View>
+                      </View>
 
                       <TouchableOpacity
-
                         accessibilityLabel="More actions"
-
                         onPress={() => setOpenMenuClassId(openMenuClassId === cls.id ? null : cls.id)}
-
                         style={styles.moreButton}
-
                       >
-
-                        <MaterialIcons name="more-vert" size={22} color="#64748b" />
-
+                        <MaterialIcons name="more-vert" size={24} color="#ffffff" />
                       </TouchableOpacity>
 
                       {openMenuClassId === cls.id && (
-
                         <View style={styles.moreMenu}>
-
                           <TouchableOpacity
-
                             style={styles.moreMenuItem}
-
                             onPress={() => {
-
                               setOpenMenuClassId(null);
-
                               handleOpenAddStudent({ id: cls.id, name: cls.name });
-
                             }}
-
                           >
-
                             <AntDesign name="plus" size={16} color="#1e293b" />
-
                             <Text style={styles.moreMenuText}>Add Student</Text>
-
                           </TouchableOpacity>
 
                           <TouchableOpacity
-
                             style={styles.moreMenuItem}
-
                             onPress={() => {
-
                               setOpenMenuClassId(null);
-
-                              handleCloseClass(cls);
-
+                              handleShowParentsList(cls.id);
                             }}
-
-                            disabled={closingClassId === cls.id}
-
                           >
-
-                            <MaterialCommunityIcons name="lock" size={16} color="#ef4444" />
-
-                            <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{closingClassId === cls.id ? 'Closing…' : 'Close Class'}</Text>
-
+                            <MaterialCommunityIcons name="account-group-outline" size={16} color="#1e293b" />
+                            <Text style={styles.moreMenuText}>View Parents</Text>
                           </TouchableOpacity>
 
+                          <TouchableOpacity
+                            style={styles.moreMenuItem}
+                            onPress={() => {
+                              setOpenMenuClassId(null);
+                              handleCloseClass(cls);
+                            }}
+                            disabled={closingClassId === cls.id}
+                          >
+                            <MaterialCommunityIcons name="lock" size={16} color="#ef4444" />
+                            <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{closingClassId === cls.id ? 'Closing…' : 'Close Class'}</Text>
+                          </TouchableOpacity>
+
+                              <TouchableOpacity
+                                style={styles.moreMenuItem}
+                                onPress={() => {
+                                  setOpenMenuClassId(null);
+                                  handleDeleteClass(cls);
+                                }}
+                                disabled={deletingClassId === cls.id}
+                              >
+                                <MaterialCommunityIcons name="delete-forever" size={16} color="#ef4444" />
+                                <Text style={[styles.moreMenuText, { color: '#ef4444' }]}>{deletingClassId === cls.id ? 'Deleting…' : 'Delete Class'}</Text>
+                              </TouchableOpacity>
                         </View>
-
                       )}
-
                     </View>
 
-                    {/* Analytics Section (placeholder/demo) */}
+                    {/* Card Body */}
+                    <View style={styles.classroomCardBody}>
+                      {/* School Year Badge */}
+                      <View style={styles.schoolYearBadge}>
+                        <MaterialCommunityIcons name="calendar-today" size={14} color="#64748b" />
+                        <Text style={styles.schoolYearText}>SY {formatSchoolYear(cls.schoolYear)}</Text>
+                      </View>
 
-                    <View style={styles.analyticsContainer}>
+                      {/* Student Statistics Section */}
+                      <View style={styles.studentStatsContainer}>
+                        <View style={styles.studentStatsHeader}>
+                          <MaterialCommunityIcons name="account-group" size={18} color="#1e293b" />
+                          <Text style={styles.studentStatsTitle}>Student Demographics</Text>
+                        </View>
+                        <View style={styles.studentStatsGrid}>
+                          <View style={[styles.studentStatCard, styles.studentStatCardTotal]}>
+                            <View style={styles.studentStatIconContainer}>
+                              <MaterialCommunityIcons name="account-group" size={responsive.scale(20)} color="#3b82f6" />
+                            </View>
+                            <Text style={styles.studentStatValue}>{studentsByClass[cls.id]?.length ?? 0}</Text>
+                            <Text style={styles.studentStatLabel}>Total Students</Text>
+                          </View>
+                          <View style={[styles.studentStatCard, styles.studentStatCardMale]}>
+                            <View style={styles.studentStatIconContainer}>
+                              <MaterialCommunityIcons name="human-male" size={responsive.scale(20)} color="#10b981" />
+                            </View>
+                            <Text style={styles.studentStatValue}>
+                              {studentsByClass[cls.id]?.filter(s => s.gender === 'male').length ?? 0}
+                            </Text>
+                            <Text style={styles.studentStatLabel}>Male Students</Text>
+                          </View>
+                          <View style={[styles.studentStatCard, styles.studentStatCardFemale]}>
+                            <View style={styles.studentStatIconContainer}>
+                              <MaterialCommunityIcons name="human-female" size={responsive.scale(20)} color="#f59e0b" />
+                            </View>
+                            <Text style={styles.studentStatValue}>
+                              {studentsByClass[cls.id]?.filter(s => s.gender === 'female').length ?? 0}
+                            </Text>
+                            <Text style={styles.studentStatLabel}>Female Students</Text>
+                          </View>
+                        </View>
+                      </View>
 
-                       <View style={styles.analyticsHeader}>
+                      {/* Exercise Statistics */}
+                      <View style={styles.exerciseStatsContainer}>
+                        <View style={styles.exerciseStatsRow}>
+                          <View style={styles.exerciseStatItem}>
+                            <View style={[styles.exerciseStatIconBg, { backgroundColor: '#ede9fe' }]}>
+                              <MaterialCommunityIcons name="book-open-page-variant" size={18} color="#8b5cf6" />
+                            </View>
+                            <View style={styles.exerciseStatInfo}>
+                              <Text style={styles.exerciseStatValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
+                              <Text style={styles.exerciseStatLabel}>Exercises</Text>
+                            </View>
+                          </View>
 
-                         <Text style={styles.analyticsTitle}>Results</Text>
+                          <View style={styles.exerciseStatDivider} />
 
-                         <TouchableOpacity 
+                          <View style={styles.exerciseStatItem}>
+                            <View style={[styles.exerciseStatIconBg, { backgroundColor: '#dcfce7' }]}>
+                              <MaterialCommunityIcons name="check-circle-outline" size={18} color="#10b981" />
+                            </View>
+                            <View style={styles.exerciseStatInfo}>
+                              <Text style={styles.exerciseStatValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
+                              <Text style={styles.exerciseStatLabel}>Completed</Text>
+                            </View>
+                          </View>
 
-                           style={styles.viewAllButton}
+                          <View style={styles.exerciseStatDivider} />
 
-                           onPress={() => setActiveTab('results')}
+                          <View style={styles.exerciseStatItem}>
+                            <View style={[styles.exerciseStatIconBg, { backgroundColor: '#fef3c7' }]}>
+                              <MaterialCommunityIcons name="timer-outline" size={18} color="#f59e0b" />
+                            </View>
+                            <View style={styles.exerciseStatInfo}>
+                              <Text style={styles.exerciseStatValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
+                              <Text style={styles.exerciseStatLabel}>Pending</Text>
+                            </View>
+                          </View>
+                        </View>
+                      </View>
 
-                         >
-
-                           <Text style={styles.viewAllText}>View All</Text>
-
-                           <AntDesign name="arrow-right" size={14} color="#3b82f6" />
-
-                         </TouchableOpacity>
-
-                       </View>
-
-                      <ResponsiveCards 
-                        cardsPerRow={{ xs: 1, sm: 2, md: 3, lg: 3, xl: 3 }}
-                        style={styles.analyticsCards}
+                      {/* View Results Button */}
+                      <TouchableOpacity 
+                        style={styles.viewResultsButton}
+                        onPress={async () => {
+                          setActiveTab('results');
+                          // Auto-refresh data when switching to results tab to get latest completion stats
+                          if (activeClasses.length > 0) {
+                            await loadAssignments(activeClasses.map(c => c.id));
+                            await loadClassAnalytics(activeClasses.map(c => c.id));
+                          }
+                        }}
                       >
-
-                        <View style={styles.analyticsCard}>
-
-                          <View style={styles.analyticsIcon}>
-
-                            <MaterialCommunityIcons name="repeat" size={responsive.scale(24)} color="#10b981" />
-
-                          </View>
-
-                          <View style={styles.analyticsContent}>
-
-                            <Text style={styles.analyticsLabel}>Avg Attempts per Item</Text>
-
-                            <Text style={styles.analyticsValue}>{
-
-                              (() => {
-
-                                const ca = classAnalytics[cls.id] as any;
-
-                                if (!ca || !ca.averageAttempts) return '—';
-
-                                return ca.averageAttempts.toFixed(1);
-
-                              })()
-
-                            }</Text>
-
-                            <Text style={styles.analyticsChange}>Per question average</Text>
-
-                          </View>
-
-                        </View>
-
-                        <View style={styles.analyticsCard}>
-
-                          <View style={styles.analyticsIcon}>
-
-                            <MaterialCommunityIcons name="clock-outline" size={responsive.scale(24)} color="#3b82f6" />
-
-                           </View>
-
-                           <View style={styles.analyticsContent}>
-
-                            <Text style={styles.analyticsLabel}>Average Time</Text>
-
-                            <Text style={styles.analyticsValue}>{
-
-                              (() => {
-
-                                const ca = classAnalytics[cls.id] as any;
-
-                                if (!ca || !ca.averageTime) return '—';
-
-                                const minutes = Math.floor(ca.averageTime / 60000);
-
-                                const seconds = Math.floor((ca.averageTime % 60000) / 1000);
-
-                                return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-
-                              })()
-
-                            }</Text>
-
-                            <Text style={styles.analyticsChange}>Per exercise average</Text>
-
-                          </View>
-
-                        </View>
-
-                      </ResponsiveCards>
-
-                       <View style={styles.quickStats}>
-
-                         <View style={styles.statItem}>
-
-                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
-
-                           <Text style={styles.statLabel}>Exercises</Text>
-
-                         </View>
-
-                         <View style={styles.statDivider} />
-
-                         <View style={styles.statItem}>
-
-                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
-
-                           <Text style={styles.statLabel}>Completed</Text>
-
-                         </View>
-
-                         <View style={styles.statDivider} />
-
-                         <View style={styles.statItem}>
-
-                           <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
-
-                           <Text style={styles.statLabel}>Pending</Text>
-
-                         </View>
-
-                       </View>
-
-                     </View>
+                        <Text style={styles.viewResultsButtonText}>View All Results</Text>
+                        <MaterialIcons name="arrow-forward" size={18} color="#ffffff" />
+                      </TouchableOpacity>
+                    </View>
 
                    </View>
 
@@ -6188,9 +8568,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
            </>
 
          )}
-
-
-
          {activeTab === 'exercises' && (
 
            <View style={styles.exercisesSection}>
@@ -6374,6 +8751,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                              <Text style={styles.exerciseStatSeparator}>•</Text>
 
                              <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
+
+                             {exercise.isPublic && (
+                               <>
+                                 <Text style={styles.exerciseStatSeparator}>•</Text>
+                                 <Text style={styles.exerciseStat}>{exercise.timesCopied || 0} copies</Text>
+                               </>
+                             )}
 
                            </View>
 
@@ -6655,6 +9039,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                  <Text style={styles.exerciseStat}>{exercise.timesUsed || 0} uses</Text>
 
+                                 <Text style={styles.exerciseStatSeparator}>•</Text>
+
+                                 <Text style={styles.exerciseStat}>{exercise.timesCopied || 0} copies</Text>
+
                                </View>
 
                                <View style={styles.exerciseMeta}>
@@ -6752,12 +9140,27 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                    })()}
 
                  </>
-
                ) : (
 
                  // Assigned Exercises Tab
 
                  <>
+
+                   {/* Header with refresh button */}
+                   <View style={styles.assignmentsHeader}>
+                     <Text style={styles.assignmentsHeaderTitle}>Assigned Exercises</Text>
+                     <TouchableOpacity 
+                       style={styles.refreshButton}
+                       onPress={async () => {
+                         if (activeClasses.length > 0) {
+                           await loadAssignments(activeClasses.map(c => c.id));
+                           await loadClassAnalytics(activeClasses.map(c => c.id));
+                         }
+                       }}
+                     >
+                       <MaterialCommunityIcons name="refresh" size={20} color="#3b82f6" />
+                     </TouchableOpacity>
+                   </View>
 
                    {exercisesLoading ? (
 
@@ -6821,6 +9224,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                       });
 
+                      
+                      // Sort assignments within each quarter from earliest to latest assigned
+                      Object.keys(groupedByQuarter).forEach((q) => {
+                        groupedByQuarter[q].sort((a: any, b: any) => {
+                          const ta = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
+                          const tb = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
+                          return ta - tb;
+                        });
+                      });
                       
 
                       const quarters = ['Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4', 'No Quarter'].filter(
@@ -7143,7 +9555,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
              activeClasses.map((cls) => (
 
-               <View key={cls.id} style={styles.classTabCard}>
+               <TouchableWithoutFeedback key={cls.id} onPress={() => setExportMenuVisible(null)}>
+                 <View style={styles.classTabCard}>
 
                  <View style={styles.classCardHeader}>
 
@@ -7159,13 +9572,40 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                        <Text style={styles.classroomTitle}>{cls.name}</Text>
 
-                       <TouchableOpacity style={styles.exportBtn} onPress={() => exportClassListToPdf(cls)}>
+                       <TouchableOpacity 
+                         style={styles.exportMenuBtn} 
+                         onPress={() => setExportMenuVisible(exportMenuVisible === cls.id ? null : cls.id)}
+                         activeOpacity={0.7}
+                       >
 
-                         <MaterialCommunityIcons name="file-pdf-box" size={14} color="#ffffff" />
-
-                         <Text style={styles.exportBtnText}>Export PDF</Text>
+                         <MaterialIcons name="more-vert" size={20} color="#64748b" />
 
                        </TouchableOpacity>
+
+                       {exportMenuVisible === cls.id && (
+                         <View style={styles.exportMenuDropdown}>
+                           <TouchableOpacity 
+                             style={styles.exportMenuItem}
+                             onPress={() => {
+                               setExportMenuVisible(null);
+                               exportClassListToPdf(cls);
+                             }}
+                           >
+                             <MaterialCommunityIcons name="file-pdf-box" size={18} color="#ef4444" />
+                             <Text style={styles.exportMenuText}>Export PDF</Text>
+                           </TouchableOpacity>
+                           <TouchableOpacity 
+                             style={styles.exportMenuItem}
+                             onPress={() => {
+                               setExportMenuVisible(null);
+                               exportClassListToExcel(cls);
+                             }}
+                           >
+                             <MaterialCommunityIcons name="file-excel-box" size={18} color="#10b981" />
+                             <Text style={styles.exportMenuText}>Export Excel</Text>
+                           </TouchableOpacity>
+                         </View>
+                       )}
 
                      </View>
 
@@ -7217,107 +9657,127 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                   <TouchableWithoutFeedback onPress={() => setStudentMenuVisible(null)}>
 
-                    <View>
+                    <View style={styles.studentTableWrapper}>
 
-                      <View style={styles.studentHeaderRow}>
+                      <ScrollView
 
-                        <Text style={[styles.studentIndex, { width: 28 }]}>#</Text>
+                        horizontal
 
-                        <Text style={[styles.studentName, { fontWeight: '700', color: '#374151' }]}>Student Name</Text>
+                        showsHorizontalScrollIndicator={false}
 
-                        <Text style={[styles.studentCode, { color: '#374151' }]}>Parent Access Code</Text>
+                        contentContainerStyle={styles.studentTableScrollContent}
 
-                      </View>
+                      >
 
-                      {(studentsByClass[cls.id] || []).map((s: any, idx: number) => {
+                        <View
+                          style={[
+                            styles.studentTableContent,
+                            { minWidth: Math.max(width - 48, 280) }
+                          ]}
+                        >
 
-                      const p = s.parentId ? parentsById[s.parentId] : undefined;
+                          {/* Header row is rendered below with sortable columns */}
 
-                      const loginCode = p?.loginCode || 'N/A';
+                          {(() => {
+                        const rows = (studentsByClass[cls.id] || []).map((s: any) => {
+                          const p = s.parentId ? parentsById[s.parentId] : undefined;
+                          const name = formatStudentName(s);
+                          const gender = String(s.gender || '').toLowerCase() === 'female' ? 'Female' : 'Male';
+                          const parentCode = p?.loginCode || '—';
+                          const enrolled = p?.infoStatus === 'completed';
+                          const sortKeyName = `${(s.surname || '').toLowerCase()} ${(s.firstName || '').toLowerCase()} ${(s.middleInitial || '').toLowerCase()}`.trim();
+                          return { s, p, name, gender, parentCode, enrolled, sortKeyName };
+                        });
 
-                      return (
+                        const compare = (a: any, b: any) => {
+                          if (listSortBy === 'name') {
+                            const nameCmp = a.sortKeyName.localeCompare(b.sortKeyName);
+                            return listSortOrder === 'asc' ? nameCmp : -nameCmp;
+                          }
+                          // listSortBy === 'gender'
+                          const genderCmpRaw = a.gender.localeCompare(b.gender);
+                          if (genderCmpRaw === 0) {
+                            // Always A->Z within the same gender
+                            return a.sortKeyName.localeCompare(b.sortKeyName);
+                          }
+                          // Flip only the gender grouping when desc (Male on top), keep within-group unaffected
+                          return listSortOrder === 'desc' ? -genderCmpRaw : genderCmpRaw;
+                        };
 
-                        <View key={s.studentId} style={styles.studentRow}>
+                        const sorted = rows.sort(compare);
 
-                          <Text style={styles.studentIndex}>{idx + 1}.</Text>
+                        const toggleSort = (key: 'name' | 'gender') => {
+                          if (listSortBy === key) {
+                            setListSortOrder(listSortOrder === 'asc' ? 'desc' : 'asc');
+                          } else {
+                            setListSortBy(key);
+                            setListSortOrder('asc');
+                          }
+                        };
 
-                          <Text style={styles.studentName}>{s.nickname}</Text>
+                        return (
+                          <>
+                            <View style={[styles.studentRow, { backgroundColor: '#f8fafc', alignItems: 'center' }]}>
+                              <Text style={[styles.studentIndex, { fontWeight: '700', color: '#334155', width: 28, textAlign: 'left' }]}>#</Text>
+                              <TouchableOpacity onPress={() => toggleSort('name')} style={{ flex: 1 }}>
+                                <Text style={[styles.studentName, { fontWeight: '700', color: '#334155' }]} numberOfLines={1} ellipsizeMode="tail">Name</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity onPress={() => toggleSort('gender')} style={{ width: 80 }}>
+                                <Text style={{ color: '#334155', fontWeight: '700', width: 80, textAlign: 'left' }} numberOfLines={1}>Gender</Text>
+                              </TouchableOpacity>
+                              <Text style={[styles.studentCode, { fontWeight: '700', color: '#334155', width: 90, textAlign: 'left' }]} numberOfLines={1}>Parent Code</Text>
+                              <View style={styles.studentActionsHeader} />
+                            </View>
 
-                          <Text style={styles.studentCode}>{loginCode}</Text>
-
-                          <View style={styles.studentActionsWrap}>
-
-                            <TouchableOpacity
-
-                              accessibilityLabel="Student options"
-
-                              onPress={() => setStudentMenuVisible(studentMenuVisible === s.studentId ? null : s.studentId)}
-
-                              style={styles.iconBtn}
-
-                            >
-
-                              <MaterialIcons name="more-vert" size={20} color="#64748b" />
-
-                            </TouchableOpacity>
-
-                            {studentMenuVisible === s.studentId && (
-
-                              <View style={styles.studentMenuDropdown}>
-
-                                <TouchableOpacity
-
-                                  style={styles.studentMenuItem}
-
-                                  onPress={() => handleEditStudent(s, { id: cls.id, name: cls.name })}
-
-                                >
-
-                                  <MaterialIcons name="edit" size={16} color="#64748b" />
-
-                                  <Text style={styles.studentMenuText}>Edit Student</Text>
-
-                                </TouchableOpacity>
-
-                                <TouchableOpacity
-
-                                  style={styles.studentMenuItem}
-
-                                  onPress={() => handleViewParentInfo(s)}
-
-                                >
-
-                                  <MaterialIcons name="person" size={16} color="#3b82f6" />
-
-                                  <Text style={styles.studentMenuText}>View Parent Info</Text>
-
-                                </TouchableOpacity>
-
-                                <TouchableOpacity
-
-                                  style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
-
-                                  onPress={() => handleDeleteStudent(s, cls.id)}
-
-                                >
-
-                                  <MaterialIcons name="delete" size={16} color="#ef4444" />
-
-                                  <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
-
-                                </TouchableOpacity>
-
+                            {sorted.map((row: any, idx: number) => (
+                              <View key={row.s.studentId} style={[styles.studentRow, { alignItems: 'center' }]}>
+                                <Text style={[styles.studentIndex, { width: 28 }]}>{idx + 1}.</Text>
+                                <Text style={[styles.studentName, { flex: 1, minWidth: 120 }]} numberOfLines={1} ellipsizeMode="tail">{row.name}</Text>
+                                <Text style={{ width: 80, color: '#111827', textAlign: 'left' }} numberOfLines={1}>{row.gender}</Text>
+                                <Text style={[styles.studentCode, { width: 90, textAlign: 'left', color: row.enrolled ? '#111827' : '#ef4444', fontWeight: row.enrolled ? '500' : '700' }]} numberOfLines={1}>{row.parentCode}</Text>
+                                <View style={styles.studentActionsWrap}>
+                                  <TouchableOpacity
+                                    accessibilityLabel="Student options"
+                                    onPress={() => setStudentMenuVisible(studentMenuVisible === row.s.studentId ? null : row.s.studentId)}
+                                    style={styles.iconBtn}
+                                  >
+                                    <MaterialIcons name="more-vert" size={20} color="#64748b" />
+                                  </TouchableOpacity>
+                                  {studentMenuVisible === row.s.studentId && (
+                                    <View style={styles.studentMenuDropdown}>
+                                      <TouchableOpacity
+                                        style={styles.studentMenuItem}
+                                        onPress={() => handleEditStudent(row.s, { id: cls.id, name: cls.name })}
+                                      >
+                                        <MaterialIcons name="edit" size={16} color="#64748b" />
+                                        <Text style={styles.studentMenuText}>Edit Student</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={styles.studentMenuItem}
+                                        onPress={() => handleViewParentInfo(row.s)}
+                                      >
+                                        <MaterialIcons name="person" size={16} color="#3b82f6" />
+                                        <Text style={styles.studentMenuText}>View Parent Info</Text>
+                                      </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
+                                        onPress={() => handleDeleteStudent(row.s, cls.id)}
+                                      >
+                                        <MaterialIcons name="delete" size={16} color="#ef4444" />
+                                        <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
+                                      </TouchableOpacity>
+                                    </View>
+                                  )}
+                                </View>
                               </View>
-
-                            )}
-
-                          </View>
+                            ))}
+                          </>
+                        );
+                      })()}
 
                         </View>
 
-                      );
-
-                    })}
+                      </ScrollView>
 
                     </View>
 
@@ -7325,7 +9785,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                 )}
 
-               </View>
+                 </View>
+               </TouchableWithoutFeedback>
 
              ))
 
@@ -7334,27 +9795,49 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
            </View>
 
          )}
-
-
-
          {activeTab === 'results' && (
 
            <View style={{ paddingBottom: 140 }}>
 
-             {/* Header */}
+             {/* Compact Header with Quarter Filter */}
 
-             <View style={styles.classTabHeader}>
+             <View style={[styles.classTabHeader, { marginBottom: 12 }]}>
 
-               <View>
+               <View style={{ flex: 1 }}>
 
                  <Text style={styles.classTabTitle}>Exercise Results</Text>
 
-                 <Text style={styles.classTabSubtitle}>Track performance and analytics</Text>
+                 <Text style={[styles.classTabSubtitle, { fontSize: 11 }]}>Grouped by quarter</Text>
 
                </View>
 
-               <MaterialIcons name="assessment" size={32} color="#3b82f6" />
+               <MaterialIcons name="assessment" size={28} color="#3b82f6" />
 
+             </View>
+             
+             {/* Quarter Filter Pills */}
+             <View style={styles.quarterFilterContainer}>
+               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }}>
+                 <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 16 }}>
+                   {['All Quarters', 'Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4'].map((quarter) => (
+                     <TouchableOpacity
+                       key={quarter}
+                       style={[
+                         styles.quarterPill,
+                         selectedQuarter === quarter && styles.quarterPillActive
+                       ]}
+                       onPress={() => setSelectedQuarter(quarter)}
+                     >
+                       <Text style={[
+                         styles.quarterPillText,
+                         selectedQuarter === quarter && styles.quarterPillTextActive
+                       ]}>
+                         {quarter}
+                       </Text>
+                     </TouchableOpacity>
+                   ))}
+                 </View>
+               </ScrollView>
              </View>
 
 
@@ -7401,39 +9884,37 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                return (
 
-                 <View key={cls.id} style={styles.classTabCard}>
+                <View key={cls.id} style={styles.resultsClassCard}>
 
-                   <View style={styles.classCardHeader}>
+                  <View style={styles.resultsClassHeader}>
 
-                     <View style={styles.classIconContainer}>
+                    <View style={styles.resultsClassIcon}>
 
-                       <MaterialCommunityIcons name="google-classroom" size={24} color="#3b82f6" />
+                      <MaterialCommunityIcons name="google-classroom" size={16} color="#3b82f6" />
 
-                     </View>
+                    </View>
 
-                     <View style={{ flex: 1 }}>
+                    <View style={styles.resultsClassInfo}>
 
-                       <Text style={styles.classroomTitle}>{cls.name}</Text>
+                      <Text style={styles.resultsClassName}>{cls.name}</Text>
 
-                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                      <View style={styles.resultsClassMeta}>
 
-                         <MaterialIcons name="school" size={14} color="#64748b" />
+                        <MaterialIcons name="school" size={10} color="#64748b" />
 
-                         <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
+                        <Text style={styles.resultsClassMetaText}>{cls.schoolName || '—'}</Text>
+                        
+                        <View style={styles.resultsClassMetaDivider} />
 
-                       </View>
+                        <MaterialIcons name="calendar-today" size={10} color="#64748b" />
 
-                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                        <Text style={styles.resultsClassMetaText}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
 
-                         <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+                      </View>
 
-                         <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
+                    </View>
 
-                       </View>
-
-                     </View>
-
-                   </View>
+                  </View>
 
                   
 
@@ -7509,73 +9990,153 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                          
 
-                         // Group results by exercise for better organization
-
-                         const resultsByExercise = rankedResults.reduce((acc: any, result: any) => {
-
-                           const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
-
-                           if (!acc[exerciseTitle]) {
-
-                             acc[exerciseTitle] = [];
-
-                           }
-
-                           acc[exerciseTitle].push(result);
-
-                           return acc;
-
-                         }, {});
+                        // Group results by quarter, then by exercise
+                        const resultsByQuarterAndExercise = rankedResults.reduce((acc: any, result: any) => {
+                          // Get quarter from assignedExercises first, then fallback to assignmentMetadata
+                          let quarter = 'Unknown Quarter';
+                          
+                          // Try to find the assignment in assignedExercises to get the quarter
+                          // First try to match by assignedExerciseId if available, then by exerciseId + classId
+                          let assignment = null;
+                          
+                          if (result.assignedExerciseId) {
+                            assignment = assignedExercises.find((assignment: any) => 
+                              assignment.id === result.assignedExerciseId
+                            );
+                          }
+                          
+                          // If not found by assignedExerciseId, try by exerciseId + classId
+                          if (!assignment) {
+                            assignment = assignedExercises.find((assignment: any) => 
+                              assignment.exerciseId === result.exerciseId && 
+                              assignment.classId === result.classId
+                            );
+                          }
+                          
+                          if (assignment?.quarter) {
+                            quarter = assignment.quarter;
+                            console.log('[QUARTER MATCH] Found quarter from assignedExercises:', {
+                              exerciseId: result.exerciseId,
+                              assignedExerciseId: result.assignedExerciseId,
+                              quarter: assignment.quarter,
+                              assignmentId: assignment.id
+                            });
+                          } else if (result.assignmentMetadata?.quarter) {
+                            quarter = result.assignmentMetadata.quarter;
+                            console.log('[QUARTER MATCH] Using quarter from assignmentMetadata:', quarter);
+                          } else {
+                            console.log('[QUARTER MATCH] No quarter found for result:', {
+                              exerciseId: result.exerciseId,
+                              assignedExerciseId: result.assignedExerciseId,
+                              classId: result.classId,
+                              assignedExercisesLength: assignedExercises.length,
+                              allAssignedExercises: assignedExercises.map(a => ({ id: a.id, exerciseId: a.exerciseId, classId: a.classId, quarter: a.quarter })),
+                              availableAssignments: assignedExercises.filter(a => a.exerciseId === result.exerciseId && a.classId === result.classId).map(a => ({ id: a.id, quarter: a.quarter }))
+                            });
+                          }
+                          
+                          const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
+                          
+                          if (!acc[quarter]) {
+                            acc[quarter] = {};
+                          }
+                          
+                          if (!acc[quarter][exerciseTitle]) {
+                            acc[quarter][exerciseTitle] = [];
+                          }
+                          
+                          acc[quarter][exerciseTitle].push(result);
+                          return acc;
+                        }, {});
+                        
+                        // Filter by selected quarter
+                        const filteredQuarters = selectedQuarter === 'All Quarters' 
+                          ? resultsByQuarterAndExercise 
+                          : { [selectedQuarter]: resultsByQuarterAndExercise[selectedQuarter] || {} };
 
 
 
                          // Handle sorting function
 
-                         const handleSort = (newSortBy: 'attempts' | 'time') => {
+                        const handleSort = (newSortBy: 'name' | 'correct' | 'score' | 'remarks' | 'attempts' | 'time') => {
 
-                           if (resultsSortBy === newSortBy) {
+                          if (resultsSortBy === newSortBy) {
 
-                             setResultsSortOrder(resultsSortOrder === 'asc' ? 'desc' : 'asc');
+                            setResultsSortOrder(resultsSortOrder === 'asc' ? 'desc' : 'asc');
 
-                           } else {
+                          } else {
 
-                             setResultsSortBy(newSortBy);
+                            setResultsSortBy(newSortBy);
 
-                             setResultsSortOrder('asc');
+                            setResultsSortOrder('asc');
 
-                           }
+                          }
 
-                         };
+                        };
 
 
 
-                         return Object.entries(resultsByExercise).map(([exerciseTitle, exerciseResults]: [string, any]) => {
+                        return Object.entries(filteredQuarters).map(([quarter, resultsByExercise]: [string, any]) => (
+                          <View key={quarter} style={{ marginBottom: 16 }}>
+                            {/* Quarter Header with Export Button */}
+                            <View style={styles.resultsQuarterHeader}>
+                              <View style={styles.resultsQuarterTitleRow}>
+                                <MaterialCommunityIcons name="calendar-range" size={16} color="#8b5cf6" />
+                                <Text style={styles.resultsQuarterTitle}>{quarter}</Text>
+                              </View>
+                              <TouchableOpacity
+                                style={styles.resultsExportBtn}
+                                onPress={() => handleExportQuarterToExcel(quarter, cls.id, resultsByExercise, classStudents)}
+                              >
+                                <MaterialCommunityIcons name="microsoft-excel" size={14} color="#10b981" />
+                                <Text style={styles.resultsExportBtnText}>Export</Text>
+                              </TouchableOpacity>
+                            </View>
+                            
+                            {/* Exercises in this quarter */}
+                            {Object.entries(resultsByExercise).map(([exerciseTitle, exerciseResults]: [string, any]) => {
 
-                           // Find the assignment for this exercise to get status
+                          // Find the assignment for this exercise to get status
+                          // First try from assignedExercises, then fall back to assignmentMetadata from results
+                          let exerciseAssignment = assignedExercises.find((assignment: any) => 
 
-                           const exerciseAssignment = assignedExercises.find((assignment: any) => 
+                            assignment.exerciseId === exerciseResults[0]?.exerciseId && 
 
-                             assignment.exerciseId === exerciseResults[0]?.exerciseId && 
+                            assignment.classId === cls.id
 
-                             assignment.classId === cls.id
+                          );
+                          
+                          // If not found in assignedExercises, use the data from the first result's assignmentMetadata
+                          if (!exerciseAssignment && exerciseResults[0]?.assignmentMetadata) {
+                            const metadata = exerciseResults[0].assignmentMetadata;
+                            console.log('[RESULTS STATUS] Using assignmentMetadata fallback for', exerciseTitle, {
+                              acceptingStatus: metadata.acceptingStatus,
+                              deadline: metadata.deadline
+                            });
+                            exerciseAssignment = {
+                              id: metadata.assignmentId || exerciseResults[0].assignedExerciseId,
+                              exerciseId: exerciseResults[0].exerciseId,
+                              classId: metadata.classId,
+                              acceptingStatus: metadata.acceptingStatus,
+                              deadline: metadata.deadline,
+                              acceptLateSubmissions: metadata.acceptLateSubmissions
+                            } as any;
+                          }
 
-                           );
+                          
+
+                          // Determine if exercise is still accepting results
+                          const isAcceptingResults = exerciseAssignment ? 
+
+                            exerciseAssignment.acceptingStatus === 'open' && 
+
+                            (new Date() <= new Date(exerciseAssignment.deadline) || (exerciseAssignment.acceptLateSubmissions ?? true)) : 
+
+                            false;
 
                            
 
-                           // Determine if exercise is still accepting results
-
-                           const isAcceptingResults = exerciseAssignment ? 
-
-                             exerciseAssignment.acceptingStatus === 'open' && 
-
-                             (new Date() <= new Date(exerciseAssignment.deadline) || (exerciseAssignment.acceptLateSubmissions ?? true)) : 
-
-                             false;
-
-                           
-
-                           // Sort the exercise results based on current sort settings
+                           // Sort the exercise results based on current sort settings (default: score descending)
 
                            const sortedResults = [...exerciseResults].sort((a: any, b: any) => {
 
@@ -7589,6 +10150,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                              
 
+                             // Default sorting by score (descending) if no specific sort is set
+                             if (!resultsSortBy || resultsSortBy === 'score') {
+                               aValue = a.scorePercentage || 0;
+                               bValue = b.scorePercentage || 0;
+                               return bValue - aValue; // Descending order (highest to lowest)
+                             }
+
                              if (resultsSortBy === 'attempts') {
 
                                const aTotalAttempts = aQuestionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
@@ -7599,17 +10167,85 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                bValue = bQuestionResults.length > 0 ? bTotalAttempts / bQuestionResults.length : 1;
 
-                             } else {
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
+                             } else if (resultsSortBy === 'time') {
 
                                aValue = a.totalTimeSpent || 0;
 
                                bValue = b.totalTimeSpent || 0;
 
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
+                             } else if (resultsSortBy === 'name') {
+
+                               // Find student names for comparison
+
+                               let studentA = Object.values(studentsByClass).flat().find((s: any) => s.studentId === a.studentId);
+
+                               if (!studentA && a.studentInfo?.name) {
+                                 studentA = Object.values(studentsByClass).flat().find((s: any) => 
+                                   s.fullName && s.fullName.toLowerCase().trim() === a.studentInfo.name.toLowerCase().trim()
+                                 );
+                               }
+
+                               let studentB = Object.values(studentsByClass).flat().find((s: any) => s.studentId === b.studentId);
+
+                               if (!studentB && b.studentInfo?.name) {
+                                 studentB = Object.values(studentsByClass).flat().find((s: any) => 
+                                   s.fullName && s.fullName.toLowerCase().trim() === b.studentInfo.name.toLowerCase().trim()
+                                 );
+                               }
+
+                               const nameA = studentA ? formatStudentName(studentA) : (a.studentInfo?.name || 'Unknown Student');
+
+                               const nameB = studentB ? formatStudentName(studentB) : (b.studentInfo?.name || 'Unknown Student');
+
+                               const comparison = nameA.localeCompare(nameB);
+
+                               return resultsSortOrder === 'asc' ? comparison : -comparison;
+
+                             } else if (resultsSortBy === 'correct') {
+
+                               const aCorrect = a.resultsSummary?.totalCorrect || aQuestionResults.filter((q: any) => q.isCorrect).length;
+
+                               const bCorrect = b.resultsSummary?.totalCorrect || bQuestionResults.filter((q: any) => q.isCorrect).length;
+
+                               aValue = aCorrect;
+
+                               bValue = bCorrect;
+
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
+                             } else if (resultsSortBy === 'remarks') {
+
+                               const getRemarks = (score: number) => {
+                                 if (score >= 85) return 'Highly Proficient';
+                                 if (score >= 75) return 'Proficient';
+                                 if (score >= 50) return 'Nearly Proficient';
+                                 if (score >= 25) return 'Low Proficient';
+                                 return 'Not Proficient';
+                               };
+
+                               const remarksA = getRemarks(a.scorePercentage || 0);
+
+                               const remarksB = getRemarks(b.scorePercentage || 0);
+
+                               // Define order for remarks
+
+                               const remarksOrder = { 'Not Proficient': 0, 'Low Proficient': 1, 'Nearly Proficient': 2, 'Proficient': 3, 'Highly Proficient': 4 };
+
+                               aValue = remarksOrder[remarksA as keyof typeof remarksOrder] || 0;
+
+                               bValue = remarksOrder[remarksB as keyof typeof remarksOrder] || 0;
+
+                               return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+
                              }
 
                              
 
-                             return resultsSortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+                             return 0;
 
                            });
 
@@ -7645,23 +10281,23 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                            return (
 
-                             <View key={exerciseTitle} style={styles.exerciseResultsSection}>
+                            <View key={exerciseTitle} style={styles.resultsExerciseCard}>
 
-                               {/* Exercise Header with Status */}
+                              {/* Exercise Header with Status */}
 
-                               <View style={styles.exerciseHeader}>
+                              <View style={styles.resultsExerciseHeader}>
 
-                                 <View style={styles.exerciseTitleRow}>
+                                <View style={styles.resultsExerciseTitleRow}>
 
-                                   <MaterialCommunityIcons name="book-open-variant" size={20} color="#3b82f6" />
+                                  <MaterialCommunityIcons name="book-open-variant" size={16} color="#3b82f6" />
 
-                                   <Text style={styles.exerciseTitle}>{exerciseTitle}</Text>
+                                  <Text style={styles.resultsExerciseTitle}>{exerciseTitle}</Text>
 
                                    <View style={[
 
-                                     styles.exerciseStatusBadge,
+                                     styles.resultsExerciseStatusBadge,
 
-                                     { backgroundColor: isAcceptingResults ? '#10b981' : '#ef4444' }
+                                     { backgroundColor: isAcceptingResults ? '#10b981' : '#64748b' }
 
                                    ]}>
 
@@ -7669,13 +10305,13 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        name={isAcceptingResults ? "check-circle" : "close-circle"} 
 
-                                       size={12} 
+                                       size={10} 
 
                                        color="#ffffff" 
 
                                      />
 
-                                     <Text style={styles.exerciseStatusText}>
+                                     <Text style={styles.resultsExerciseStatusText}>
 
                                        {isAcceptingResults ? 'Open' : 'Closed'}
 
@@ -7687,195 +10323,47 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                  
 
-                                 {/* Exercise Details - 2x2 Grid */}
+                                {/* Exercise Details - Compact Inline */}
 
-                                 <View style={styles.exerciseDetailsGrid}>
+                                <View style={styles.resultsExerciseDetails}>
 
-                                   <View style={styles.exerciseDetailItem}>
+                                  <View style={styles.resultsExerciseDetailItem}>
 
-                                     <MaterialCommunityIcons name="help-circle-outline" size={16} color="#64748b" />
+                                    <MaterialCommunityIcons name="help-circle-outline" size={12} color="#64748b" />
 
-                                     <Text style={styles.exerciseDetailText}>
+                                    <Text style={styles.resultsExerciseDetailText}>
 
-                                       {exerciseResults[0]?.questionResults?.length || 0} Questions
+                                      {exerciseResults[0]?.questionResults?.length || 0} Q
 
-                                     </Text>
+                                    </Text>
 
-                                   </View>
+                                  </View>
 
-                                   <View style={styles.exerciseDetailItem}>
+                                  <View style={styles.resultsExerciseDetailItem}>
 
-                                     <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
+                                    <MaterialCommunityIcons name="account-group" size={12} color="#64748b" />
 
-                                     <Text style={styles.exerciseDetailText}>
+                                    <Text style={styles.resultsExerciseDetailText}>
 
-                                       {exerciseAssignment?.exercise?.timeLimitPerItem ? 
+                                      {exerciseResults.length}/{classStudents.length}
 
-                                         `${Math.round(exerciseAssignment.exercise.timeLimitPerItem / 60)} min per item` : 'No time limit'}
+                                    </Text>
 
-                                     </Text>
+                                  </View>
 
-                                   </View>
+                                  <View style={styles.resultsExerciseDetailItem}>
 
-                                   <View style={styles.exerciseDetailItem}>
+                                    <MaterialCommunityIcons name="school-outline" size={12} color="#64748b" />
 
-                                     <MaterialCommunityIcons name="school-outline" size={16} color="#64748b" />
+                                    <Text style={styles.resultsExerciseDetailText}>
 
-                                     <Text style={styles.exerciseDetailText}>
+                                      {exerciseAssignment?.exercise?.category || 'General'}
 
-                                       {exerciseAssignment?.exercise?.category || 'General'}
+                                    </Text>
 
-                                     </Text>
+                                  </View>
 
-                                   </View>
-
-                                   <View style={styles.exerciseDetailItem}>
-
-                                     <MaterialCommunityIcons name="chart-line" size={16} color="#64748b" />
-
-                                     <Text style={styles.exerciseDetailText}>
-
-                                       {exerciseAssignment?.exercise?.questionCount ? 
-
-                                         (exerciseAssignment.exercise.questionCount <= 5 ? 'Easy' : 
-
-                                          exerciseAssignment.exercise.questionCount <= 10 ? 'Medium' : 'Hard') : 'Medium'} Level
-
-                                     </Text>
-
-                                   </View>
-
-                                 </View>
-
-                                 
-
-                                 {/* Performance Summary Card */}
-
-                                 <View style={styles.performanceSummaryCard}>
-
-                                   <Text style={styles.performanceSummaryTitle}>Summary of Class Average</Text>
-
-                                   
-
-                                   {/* Progress Bar for Completion Rate */}
-
-                                   <View style={styles.completionProgressContainer}>
-
-                                     <Text style={styles.completionProgressLabel}>Class Completion Progress</Text>
-
-                                     <View style={styles.completionProgressBar}>
-
-                                       <View style={[styles.completionProgressFill, { 
-
-                                         width: `${Math.min(exerciseCompletionRate, 100)}%`,
-
-                                         backgroundColor: exerciseCompletionRate >= 90 ? '#10b981' : 
-
-                                                         exerciseCompletionRate >= 70 ? '#f59e0b' : '#ef4444'
-
-                                       }]} />
-
-                                     </View>
-
-                                     <Text style={styles.completionProgressText}>
-
-                                       {Math.round(exerciseCompletionRate)}% Complete
-
-                                     </Text>
-
-                                   </View>
-
-                                   
-
-                                   <View style={styles.performanceMetricsGrid}>
-
-                                     <View style={styles.performanceMetric}>
-
-                                       <View style={styles.metricIconContainer}>
-
-                                         <MaterialCommunityIcons name="clock-outline" size={12} color="#3b82f6" />
-
-                                       </View>
-
-                                       <View style={styles.metricContent}>
-
-                                         <Text style={styles.metricLabel}>Average Time</Text>
-
-                                         <Text style={styles.metricValue}>
-
-                                           {exerciseAverageTime > 0 ? 
-
-                                             (() => {
-
-                                               const totalMinutes = Math.floor(exerciseAverageTime / 60000);
-
-                                               const remainingSeconds = Math.floor((exerciseAverageTime % 60000) / 1000);
-
-                                               return totalMinutes > 0 ? `${totalMinutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
-
-                                             })() : 
-
-                                             '—'
-
-                                           }
-
-                                         </Text>
-
-                                       </View>
-
-                                     </View>
-
-                                     
-
-                                     <View style={styles.performanceMetric}>
-
-                                       <View style={styles.metricIconContainer}>
-
-                                         <MaterialCommunityIcons name="repeat" size={12} color="#10b981" />
-
-                                       </View>
-
-                                       <View style={styles.metricContent}>
-
-                                         <Text style={styles.metricLabel}>Average Attempts</Text>
-
-                                         <Text style={styles.metricValue}>
-
-                                           {exerciseAverageAttempts > 0 ? exerciseAverageAttempts.toFixed(1) : '—'}
-
-                                         </Text>
-
-                                       </View>
-
-                                     </View>
-
-                                     
-
-                                     <View style={styles.performanceMetric}>
-
-                                       <View style={styles.metricIconContainer}>
-
-                                         <MaterialCommunityIcons name="account-group" size={12} color="#f59e0b" />
-
-                                       </View>
-
-                                       <View style={styles.metricContent}>
-
-                                         <Text style={styles.metricLabel}>Completion</Text>
-
-                                         <Text style={styles.metricValue}>
-
-                                           ({exerciseResults.length}/{classStudents.length})
-
-                                         </Text>
-
-                                       </View>
-
-                                     </View>
-
-                                   </View>
-
-                                 </View>
+                                </View>
 
                                </View>
 
@@ -7883,43 +10371,49 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                {/* Student Results Table */}
 
-                               <View style={styles.studentResultsContainer}>
+                               <View style={styles.resultsStudentTable}>
 
-                                 <View style={styles.studentResultsHeader}>
-
-                                   <Text style={styles.studentResultsTitle}>Student Results</Text>
-
-                                   <TouchableOpacity 
-
-                                     style={styles.exportButton}
-
-                                     onPress={() => handleExportToExcel(exerciseTitle, sortedResults, classStudents)}
-
-                                   >
-
-                                     <MaterialCommunityIcons name="file-excel" size={14} color="#ffffff" />
-
-                                     <Text style={styles.exportButtonText}>Export Excel</Text>
-
-                                   </TouchableOpacity>
-
+                                 <View style={styles.resultsTableSectionHeader}>
+                                   <Text style={styles.resultsTableTitle}>Student Results</Text>
+                                   <View style={styles.resultsTableActions}>
+                                     <TouchableOpacity 
+                                       style={styles.resultsViewAllBtn}
+                                       onPress={() => setShowAllStudents(!showAllStudents)}
+                                     >
+                                       <MaterialCommunityIcons 
+                                         name={showAllStudents ? "eye-off" : "eye"} 
+                                         size={14} 
+                                         color="#64748b" 
+                                       />
+                                       <Text style={styles.resultsViewAllBtnText}>
+                                         {showAllStudents ? 'Show Top 6' : 'View All'}
+                                       </Text>
+                                     </TouchableOpacity>
+                                     
+                                     <TouchableOpacity 
+                                       style={styles.resultsExportBtn}
+                                       onPress={() => handleExportToExcel(exerciseTitle, sortedResults, classStudents)}
+                                     >
+                                       <MaterialCommunityIcons name="file-excel" size={14} color="#10b981" />
+                                       <Text style={styles.resultsExportBtnText}>Excel</Text>
+                                     </TouchableOpacity>
+                                   </View>
                                  </View>
 
                                  
 
-                                 <ScrollView 
-
-                                   horizontal={width < 400}
-
-                                   showsHorizontalScrollIndicator={width < 400}
-
-                                   style={styles.tableScrollContainer}
-
-                                   nestedScrollEnabled={true}
-
-                                   keyboardShouldPersistTaps="handled"
-
-                                 >
+                                <ScrollView 
+                                  horizontal={shouldAllowHorizontalSwipe}
+                                  showsHorizontalScrollIndicator={shouldAllowHorizontalSwipe}
+                                  style={styles.tableScrollContainer}
+                                  contentContainerStyle={[
+                                    styles.tableScrollContent,
+                                    shouldAllowHorizontalSwipe ? { minWidth: 720 } : null
+                                  ]}
+                                  nestedScrollEnabled={true}
+                                  keyboardShouldPersistTaps="handled"
+                                  scrollEnabled={shouldAllowHorizontalSwipe}
+                                >
 
                                    <View style={styles.tableContainer}>
 
@@ -7927,19 +10421,137 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                      <View style={styles.resultsTableHeader}>
 
-                                       <Text style={[styles.tableHeaderText, { width: 50 }]}>#</Text>
-
-                                       <Text style={[styles.tableHeaderText, { flex: 2 }]}>Student</Text>
+                                       <Text style={[styles.tableHeaderText, { width: 35, textAlign: 'center' }]}>#</Text>
 
                                        <TouchableOpacity 
 
-                                         style={styles.sortableHeaderCell}
+                                         style={[styles.sortableHeaderCell, { maxWidth: 120, justifyContent: 'flex-start' }]}
+
+                                         onPress={() => handleSort('name')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'name' && styles.activeSort, { textAlign: 'left' }]}>
+
+                                           Name
+
+                                         </Text>
+
+                                         {resultsSortBy === 'name' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
+
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1.5, justifyContent: 'center' }]}
+
+                                         onPress={() => handleSort('remarks')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'remarks' && styles.activeSort, { textAlign: 'center' }]}>
+
+                                           Remarks
+
+                                         </Text>
+
+                                         {resultsSortBy === 'remarks' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
+
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1, justifyContent: 'center' }]}
+
+                                         onPress={() => handleSort('score')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'score' && styles.activeSort, { textAlign: 'center' }]}>
+
+                                           Score%
+
+                                         </Text>
+
+                                         {resultsSortBy === 'score' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
+
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1, justifyContent: 'center' }]}
+
+                                         onPress={() => handleSort('correct')}
+
+                                       >
+
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'correct' && styles.activeSort, { textAlign: 'center' }]}>
+
+                                           Correct
+
+                                         </Text>
+
+                                         {resultsSortBy === 'correct' && (
+
+                                           <MaterialIcons 
+
+                                             name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
+
+                                             size={14} 
+
+                                             color="#3b82f6" 
+
+                                           />
+
+                                         )}
+
+                                       </TouchableOpacity>
+
+                                       <TouchableOpacity 
+
+                                         style={[styles.sortableHeaderCell, { flex: 1, justifyContent: 'center' }]}
 
                                          onPress={() => handleSort('attempts')}
 
                                        >
 
-                                         <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'attempts' && styles.activeSort]}>
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'attempts' && styles.activeSort, { textAlign: 'center' }]}>
 
                                            Attempts
 
@@ -7951,7 +10563,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                              name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
 
-                                             size={16} 
+                                             size={14} 
 
                                              color="#3b82f6" 
 
@@ -7963,15 +10575,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        <TouchableOpacity 
 
-                                         style={styles.sortableHeaderCell}
+                                         style={[styles.sortableHeaderCell, { flex: 1, justifyContent: 'center' }]}
 
                                          onPress={() => handleSort('time')}
 
                                        >
 
-                                         <Text style={[styles.tableHeaderText, { flex: 1.5 }, resultsSortBy === 'time' && styles.activeSort]}>
+                                         <Text style={[styles.tableHeaderText, resultsSortBy === 'time' && styles.activeSort, { textAlign: 'center' }]}>
 
-                                           Time Spent
+                                           Time
 
                                          </Text>
 
@@ -7981,7 +10593,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                              name={resultsSortOrder === 'asc' ? 'keyboard-arrow-up' : 'keyboard-arrow-down'} 
 
-                                             size={16} 
+                                             size={14} 
 
                                              color="#3b82f6" 
 
@@ -7991,81 +10603,164 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                        </TouchableOpacity>
 
+                                       <Text style={[styles.tableHeaderText, { flex: 1, textAlign: 'center' }]}>Submission</Text>
+
                                      </View>
 
                                    
 
                                      {/* Table Rows */}
 
-                                     {sortedResults.map((result: any, idx: number) => {
+                                    {(showAllStudents ? sortedResults : sortedResults.slice(0, 6)).map((result: any, idx: number) => {
 
-                                       // Find student by studentId from the result (proper database lookup)
+                                      // Find student by studentId from the result (proper database lookup)
+                                      let student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
+                                      
+                                      // If not found by studentId, try matching by studentInfo name
+                                      if (!student && result.studentInfo?.name) {
+                                        student = Object.values(studentsByClass).flat().find((s: any) => 
+                                          s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+                                        );
+                                      }
+                                      
+                                      // If still not found, try by parentId
+                                      if (!student && result.parentId) {
+                                        student = Object.values(studentsByClass).flat().find((s: any) => s.parentId === result.parentId);
+                                      }
 
-                                       const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result.studentId);
-
-                                       const studentNickname = student?.nickname || 'Unknown Student';
+                                      // Get student name with fallback to studentInfo
+                                      const studentNickname = student ? formatStudentName(student) : 
+                                        (result.studentInfo?.name || 'Unknown Student');
 
                                        
 
-                                       // Calculate average attempts and total time
-
+                                       // Calculate average attempts and total time - IMPROVED ACCURACY
                                        const questionResults = result.questionResults || [];
 
-                                       const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                                       // More accurate attempts calculation
+                                       const totalAttempts = questionResults.reduce((sum: number, q: any) => {
+                                         // Use actual attempts if available, otherwise default to 1
+                                         const attempts = q.attempts || 1;
+                                         return sum + attempts;
+                                       }, 0);
 
                                        const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
 
-                                       const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
+                                       // More accurate time calculation
+                                       const totalTimeMs = result.totalTimeSpent || 0;
+                                       const totalTimeMinutes = Math.floor(totalTimeMs / 60000);
+                                       const totalTimeSeconds = Math.floor((totalTimeMs % 60000) / 1000);
+                                       
+                                       // Format time display more accurately
+                                       let timeDisplay = '';
+                                       if (totalTimeMinutes > 0) {
+                                         timeDisplay = `${totalTimeMinutes}m ${totalTimeSeconds}s`;
+                                       } else {
+                                         timeDisplay = `${totalTimeSeconds}s`;
+                                       }
 
-                                       const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
+                                       
+                                       // Calculate total correct and score - IMPROVED ACCURACY
+                                       const totalQuestions = questionResults.length;
+                                       
+                                       // More accurate total correct calculation
+                                       let totalCorrect = 0;
+                                       if (result.resultsSummary?.totalCorrect !== undefined) {
+                                         totalCorrect = result.resultsSummary.totalCorrect;
+                                       } else {
+                                         // Count actual correct answers from question results
+                                         totalCorrect = questionResults.filter((q: any) => q.isCorrect === true).length;
+                                       }
+                                       
+                                       // More accurate score percentage calculation
+                                       let scorePercentage = 0;
+                                       if (result.scorePercentage !== undefined && result.scorePercentage !== null) {
+                                         scorePercentage = result.scorePercentage;
+                                       } else if (totalQuestions > 0) {
+                                         scorePercentage = Math.round((totalCorrect / totalQuestions) * 100);
+                                       }
 
-                                       const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
+                                       // Get remarks based on new proficiency levels
+                                       const getRemarks = (score: number) => {
+                                         if (score >= 85) return 'Highly Proficient';
+                                         if (score >= 75) return 'Proficient';
+                                         if (score >= 50) return 'Nearly Proficient';
+                                         if (score >= 25) return 'Low Proficient';
+                                         return 'Not Proficient';
+                                       };
+
+                                       const remarks = getRemarks(scorePercentage);
+                                       const remarksColor = scorePercentage >= 85 ? '#10b981' : 
+                                                           scorePercentage >= 75 ? '#3b82f6' : 
+                                                           scorePercentage >= 50 ? '#f59e0b' : 
+                                                           scorePercentage >= 25 ? '#f97316' : '#ef4444';
 
                                        
 
-                                       // Calculate performance level for this student
-
+                                       // Calculate performance level for this student - IMPROVED ACCURACY
                                        const studentPerformanceLevel = (() => {
-
                                          const avgAttemptsNum = parseFloat(avgAttempts);
-
-                                         const timeInSeconds = (result.totalTimeSpent || 0) / 1000;
-
+                                         const timeInSeconds = totalTimeMs / 1000;
                                          
-
-                                         if (avgAttemptsNum <= 1.2 && timeInSeconds <= 60) return 'excellent';
-
-                                         if (avgAttemptsNum <= 2.0 && timeInSeconds <= 120) return 'good';
-
-                                         if (avgAttemptsNum <= 3.0 && timeInSeconds <= 180) return 'fair';
-
+                                         // More accurate performance level calculation based on actual data
+                                         if (avgAttemptsNum <= 1.2 && timeInSeconds <= 60 && scorePercentage >= 90) return 'excellent';
+                                         if (avgAttemptsNum <= 2.0 && timeInSeconds <= 120 && scorePercentage >= 75) return 'good';
+                                         if (avgAttemptsNum <= 3.0 && timeInSeconds <= 180 && scorePercentage >= 60) return 'fair';
                                          return 'needs_improvement';
-
                                        })();
 
                                        
+
+                                       // Calculate submission status
+                                       const submissionStatus = (() => {
+                                         if (!result.completedAt) return 'Not Submitted';
+                                         
+                                         // Check if there's a deadline from the assignment
+                                         if (exerciseAssignment?.deadline) {
+                                           const deadline = new Date(exerciseAssignment.deadline);
+                                           const completedAt = new Date(result.completedAt);
+                                           return completedAt <= deadline ? 'On-Time' : 'Late';
+                                         }
+                                         
+                                         return 'Submitted';
+                                       })();
+
+                                       const submissionColor = submissionStatus === 'On-Time' ? '#10b981' : 
+                                                             submissionStatus === 'Late' ? '#ef4444' : '#64748b';
 
                                        return (
 
                                          <View key={result.resultId || idx} style={styles.resultsTableRow}>
 
-                                           <Text style={[styles.tableRowText, { width: 50 }]}>{idx + 1}</Text>
+                                           <Text style={[styles.tableRowText, { width: 35, textAlign: 'center' }]}>{idx + 1}</Text>
 
                                            <TouchableOpacity 
 
-                                             style={{ flex: 2, flexDirection: 'row', alignItems: 'center' }}
+                                             style={{ maxWidth: 120, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start' }}
 
-                                             onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname)}
+                                          onPress={() => handleStudentNameClick(result.studentId, result.exerciseId, result.classId, studentNickname, result.resultId)}
 
                                            >
 
-                                             <Text style={[styles.tableRowText, styles.studentNameCell, { flex: 1, color: '#3b82f6' }]}>{studentNickname}</Text>
+                                             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxWidth: 120 }}>
+
+                                               <Text style={[styles.tableRowText, styles.studentNameCell, { color: '#3b82f6', textAlign: 'left' }]}>{studentNickname}</Text>
+
+                                             </ScrollView>
 
                                            </TouchableOpacity>
 
-                                           <Text style={[styles.tableRowText, { flex: 1.5 }]}>{avgAttempts}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1.5, fontWeight: '600', color: remarksColor, textAlign: 'center' }]}>{remarks}</Text>
 
-                                           <Text style={[styles.tableRowText, { flex: 1.5 }]}>{timeDisplay}</Text>
+                                           <Text style={[styles.tableRowText, { flex: 1, fontWeight: '700', textAlign: 'center' }]}>{scorePercentage.toFixed(0)}%</Text>
+
+                                           <Text style={[styles.tableRowText, { flex: 1, textAlign: 'center' }]}>{totalCorrect}/{totalQuestions}</Text>
+
+                                           <Text style={[styles.tableRowText, { flex: 1, textAlign: 'center' }]}>{avgAttempts}</Text>
+
+                                           <Text style={[styles.tableRowText, { flex: 1, textAlign: 'center' }]}>{timeDisplay}</Text>
+
+                                           <Text style={[styles.tableRowText, { flex: 1, fontWeight: '600', color: submissionColor, textAlign: 'center' }]}>{submissionStatus}</Text>
 
                                          </View>
 
@@ -8077,15 +10772,152 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                                  </ScrollView>
 
-                               </View>
+                              </View>
 
-                             </View>
+                               {/* Class Statistics Section */}
+                               <View style={styles.resultsStatsSection}>
+                                 <View style={styles.resultsStatsHeader}>
+                                   <MaterialCommunityIcons name="chart-box" size={16} color="#8b5cf6" />
+                                   <Text style={styles.resultsStatsTitle}>Class Statistics</Text>
+                                 </View>
+                                 
+                                 {(() => {
+                                   // Calculate all statistics
+                                   const scores = exerciseResults.map((r: any) => r.scorePercentage || 0);
+                                   const sortedScores = [...scores].sort((a, b) => a - b);
+                                   
+                                   // Mean Percentage Score (MPS)
+                                   const mps = scores.length > 0 ? scores.reduce((sum: number, score: number) => sum + score, 0) / scores.length : 0;
+                                   
+                                   // Median
+                                   let median = 0;
+                                   if (sortedScores.length > 0) {
+                                     const mid = Math.floor(sortedScores.length / 2);
+                                     median = sortedScores.length % 2 === 0 
+                                       ? (sortedScores[mid - 1] + sortedScores[mid]) / 2 
+                                       : sortedScores[mid];
+                                   }
+                                   
+                                   // Mode (most frequent score)
+                                   const scoreFrequency: { [key: number]: number } = {};
+                                   scores.forEach((score: number) => {
+                                     const roundedScore = Math.round(score);
+                                     scoreFrequency[roundedScore] = (scoreFrequency[roundedScore] || 0) + 1;
+                                   });
+                                   let mode = 0;
+                                   let maxFreq = 0;
+                                   Object.entries(scoreFrequency).forEach(([score, freq]) => {
+                                     if (freq > maxFreq) {
+                                       maxFreq = freq;
+                                       mode = parseInt(score);
+                                     }
+                                   });
+                                   
+                                   // Standard Deviation
+                                   let stdDev = 0;
+                                   if (scores.length > 1) {
+                                     const variance = scores.reduce((sum: number, score: number) => sum + Math.pow(score - mps, 2), 0) / scores.length;
+                                     stdDev = Math.sqrt(variance);
+                                   }
+                                   
+                                   // Range
+                                   const highestScore = sortedScores.length > 0 ? sortedScores[sortedScores.length - 1] : 0;
+                                   const lowestScore = sortedScores.length > 0 ? sortedScores[0] : 0;
+                                   const range = highestScore - lowestScore;
+                                   
+                                   // Find students with highest and lowest scores
+                                   const topStudent = exerciseResults.find((r: any) => r.scorePercentage === highestScore);
+                                   const bottomStudent = exerciseResults.find((r: any) => r.scorePercentage === lowestScore);
+                                   
+                                   const getStudentName = (result: any) => {
+                                     const student = Object.values(studentsByClass).flat().find((s: any) => s.studentId === result?.studentId);
+                                     return student ? formatStudentName(student) : (result?.studentInfo?.name || 'Unknown');
+                                   };
+                                   
+                                   // Class Average Attempts per Item
+                                   const allAttempts = exerciseResults.map((r: any) => {
+                                     const questionResults = r.questionResults || [];
+                                     const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
+                                     return questionResults.length > 0 ? totalAttempts / questionResults.length : 1;
+                                   });
+                                   const avgAttemptsPerItem = allAttempts.length > 0 ? allAttempts.reduce((sum: number, val: number) => sum + val, 0) / allAttempts.length : 0;
+                                   
+                                   // Class Average Time per Item
+                                   const allTimes = exerciseResults.map((r: any) => {
+                                     const questionResults = r.questionResults || [];
+                                     return questionResults.length > 0 ? (r.totalTimeSpent || 0) / questionResults.length : 0;
+                                   });
+                                   const avgTimePerItem = allTimes.length > 0 ? allTimes.reduce((sum: number, val: number) => sum + val, 0) / allTimes.length : 0;
+                                   
+                                   // Passing Rate (assuming 75% is passing)
+                                   const passingScore = 75;
+                                   const passedCount = scores.filter((score: number) => score >= passingScore).length;
+                                   const passingRate = scores.length > 0 ? (passedCount / scores.length) * 100 : 0;
+                                   
+                                   // Item Analysis - Performance distribution
+                                   const highlyProficientCount = scores.filter((s: number) => s >= 85).length;
+                                   const proficientCount = scores.filter((s: number) => s >= 75 && s < 85).length;
+                                   const nearlyProficientCount = scores.filter((s: number) => s >= 50 && s < 75).length;
+                                   const lowProficientCount = scores.filter((s: number) => s >= 25 && s < 50).length;
+                                   const notProficientCount = scores.filter((s: number) => s < 25).length;
+                                   
+                                   // Create unique key for this exercise stats
+                                   const statsKey = `${cls.id}-${exerciseResults[0]?.exerciseId || exerciseTitle}`;
+                                   const isExpanded = expandedStats[statsKey] || false;
 
-                           );
+                                   return (
+                                    <View style={styles.resultsStatsContent}>
+                                      {/* Primary Metrics Grid */}
+                                      <View style={styles.resultsStatsGrid}>
+                                        <View style={styles.resultsStatCard}>
+                                          <MaterialCommunityIcons name="percent" size={14} color="#3b82f6" />
+                                          <Text style={styles.resultsStatLabel}>MPS</Text>
+                                          <Text style={styles.resultsStatValue}>{mps.toFixed(1)}%</Text>
+                                        </View>
+                                        
+                                        <View style={styles.resultsStatCard}>
+                                          <MaterialCommunityIcons name="chart-line" size={14} color="#10b981" />
+                                          <Text style={styles.resultsStatLabel}>Pass Rate</Text>
+                                          <Text style={[styles.resultsStatValue, { color: passingRate >= 75 ? '#10b981' : passingRate >= 50 ? '#f59e0b' : '#ef4444' }]}>
+                                            {passingRate.toFixed(1)}%
+                                          </Text>
+                                          <Text style={styles.resultsStatSubtext}>{passedCount}/{scores.length}</Text>
+                                        </View>
+                                      </View>
 
-                         });
+                                      {/* Toggle Button */}
+                                      <TouchableOpacity 
+                                        style={styles.statsToggleButton}
+                                        onPress={() => handleOpenDetailedStats(
+                                          exerciseTitle,
+                                          cls.id,
+                                          exerciseResults
+                                        )}
+                                      >
+                                        <Text style={styles.statsToggleText}>
+                                          Show Detailed Statistics
+                                        </Text>
+                                        <MaterialCommunityIcons 
+                                          name="chevron-right" 
+                                          size={18} 
+                                          color="#3b82f6" 
+                                        />
+                                      </TouchableOpacity>
+                                    </View>
+                                  );
+                                })()}
+                              </View>
 
-                       })()}
+                           </View>
+
+                          );
+
+                        })}
+                        
+                          </View>
+                        ));
+
+                      })()}
 
                      </View>
 
@@ -8094,7 +10926,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                  </View>
 
                );
-
              })
 
              )}
@@ -8167,7 +10998,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <View style={styles.classIconContainer}>
 
-                            <MaterialCommunityIcons name="google-classroom" size={24} color="#3b82f6" />
+                            <MaterialCommunityIcons name="google-classroom" size={20} color="#3b82f6" />
 
                           </View>
 
@@ -8175,17 +11006,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                             <Text style={styles.classroomTitle}>{cls.name}</Text>
 
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
 
-                              <MaterialIcons name="school" size={14} color="#64748b" />
+                              <MaterialIcons name="school" size={12} color="#64748b" />
 
                               <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
 
                             </View>
 
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
 
-                              <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+                              <MaterialIcons name="calendar-today" size={12} color="#64748b" />
 
                               <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
 
@@ -8205,7 +11036,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         <View style={styles.classStudentCount}>
 
-                          <MaterialCommunityIcons name="account-group" size={18} color="#64748b" />
+                          <MaterialCommunityIcons name="account-group" size={16} color="#64748b" />
 
                           <Text style={styles.studentCountText}>{studentsByClass[cls.id]?.length ?? 0} Students</Text>
 
@@ -8214,6 +11045,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                         <View style={styles.quickStats}>
 
                           <View style={styles.statItem}>
+
+                            <View style={[styles.statIconBg, { backgroundColor: '#f3e8ff' }]}>
+
+                              <MaterialCommunityIcons name="book-open-outline" size={14} color="#8b5cf6" />
+
+                            </View>
 
                             <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.total ?? 0}</Text>
 
@@ -8225,15 +11062,26 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <View style={styles.statItem}>
 
+                            <View style={[styles.statIconBg, { backgroundColor: '#dcfce7' }]}>
+
+                              <MaterialCommunityIcons name="check-circle-outline" size={14} color="#10b981" />
+
+                            </View>
+
                             <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.completed ?? 0}</Text>
 
                             <Text style={styles.statLabel}>Completed</Text>
-
                           </View>
 
                           <View style={styles.statDivider} />
 
                           <View style={styles.statItem}>
+
+                            <View style={[styles.statIconBg, { backgroundColor: '#fef3c7' }]}>
+
+                              <MaterialCommunityIcons name="clock-outline" size={14} color="#f59e0b" />
+
+                            </View>
 
                             <Text style={styles.statValue}>{assignmentsByClass[cls.id]?.pending ?? 0}</Text>
 
@@ -8283,7 +11131,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <View style={styles.classIconContainerInactive}>
 
-                            <MaterialCommunityIcons name="google-classroom" size={24} color="#94a3b8" />
+                            <MaterialCommunityIcons name="google-classroom" size={20} color="#94a3b8" />
 
                           </View>
 
@@ -8291,17 +11139,17 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                             <Text style={styles.classroomTitle}>{cls.name}</Text>
 
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
 
-                              <MaterialIcons name="school" size={14} color="#64748b" />
+                              <MaterialIcons name="school" size={12} color="#64748b" />
 
                               <Text style={styles.classroomSubtitle}>{cls.schoolName || '—'}</Text>
 
                             </View>
 
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
 
-                              <MaterialIcons name="calendar-today" size={14} color="#64748b" />
+                              <MaterialIcons name="calendar-today" size={12} color="#64748b" />
 
                               <Text style={styles.classroomYear}>SY: {formatSchoolYear(cls.schoolYear)}</Text>
 
@@ -8321,7 +11169,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         <View style={styles.classStudentCount}>
 
-                          <MaterialCommunityIcons name="account-group" size={18} color="#64748b" />
+                          <MaterialCommunityIcons name="account-group" size={16} color="#64748b" />
 
                           <Text style={styles.studentCountText}>{studentsByClass[cls.id]?.length ?? 0} Students</Text>
 
@@ -8381,7 +11229,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         
 
-        <TouchableOpacity style={[styles.navItem, activeTab === 'results' && styles.activeNavItem]} onPress={() => setActiveTab('results')}>
+        <TouchableOpacity style={[styles.navItem, activeTab === 'results' && styles.activeNavItem]} onPress={async () => {
+          setActiveTab('results');
+          // Auto-refresh data when switching to results tab to get latest completion stats
+          if (activeClasses.length > 0) {
+            await loadAssignedExercises(); // Load assigned exercises to get quarter data
+            await loadAssignments(activeClasses.map(c => c.id));
+            await loadClassAnalytics(activeClasses.map(c => c.id));
+          }
+        }}>
 
           <MaterialIcons name="assessment" size={24} color={activeTab === 'results' ? '#000000' : '#9ca3af'} />
 
@@ -8710,7 +11566,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
       {/* Add Class Modal */}
-
       <Modal visible={showAddClassModal} animationType="slide" transparent>
 
         <View style={styles.modalOverlay}>
@@ -8971,36 +11826,42 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     const syValue = schoolYear.replace('-', ''); // store as 2223
 
-                    const section = {
-
+                    // Create class with readable ID (CLASS-SECTION-0001, etc.)
+                    const result = await createClass({
                       name: className.trim(),
+                      section: className.trim(), // Use class name as section identifier
+                      teacherId: currentUserId || '',
+                      gradeLevel: '1', // Default grade level
+                      schoolYear: syValue
+                    });
 
-                      schoolName: resolvedSchool,
+                    if (!result.success || !result.classId) {
 
-                      schoolYear: syValue,
-
-                      teacherId: currentUserId,
-
-                      status: 'active',
-
-                      createdAt: new Date().toISOString(),
-
-                    };
-
-                    const { key, error } = await pushData('/sections', section);
-
-                    if (error || !key) {
-
-                      showAlert('Error', error || 'Failed to create section.', undefined, 'error');
+                      showAlert('Error', result.error || 'Failed to create section.', undefined, 'error');
 
                     } else {
 
-                      await updateData(`/sections/${key}`, { id: key });
+                      const classId = result.classId;
+                      console.log(`[CreateClass] Created class with ID: ${classId}`);
 
+                      // Update with additional fields for sections table
+                      const updateResult = await updateData(`/sections/${classId}`, {
+                        schoolName: resolvedSchool,
+                        status: 'active'
+                      });
+
+                      if (updateResult.error) {
+                        console.error('[CreateClass] Error updating class data:', updateResult.error);
+                      }
+
+                      console.log('[CreateClass] Class data saved, refreshing class list...');
+
+                      // Small delay to ensure Firebase has persisted the data
+                      await new Promise(resolve => setTimeout(resolve, 500));
+
+                      // Refresh the classes list before closing modal
                       if (currentUserId) {
-
                         await loadTeacherClasses(currentUserId);
-
                       }
 
                       setShowAddClassModal(false);
@@ -9141,65 +12002,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                 <View style={styles.announcementField}>
 
-                  <Text style={styles.announcementFieldLabel}>Send To</Text>
+                  <Text style={styles.announcementFieldLabel}>Select Classes</Text>
 
-                  <View style={styles.announcementSegmentWrap}>
-
-                    <TouchableOpacity
-
-                      style={[styles.announcementSegmentButton, annAllClasses && styles.announcementSegmentActive]}
-
-                      onPress={() => {
-
-                        setAnnAllClasses(true);
-
-                        setAnnSelectedClassIds(teacherClasses.map((c) => c.id));
-
-                      }}
-
-                    >
-
-                      <MaterialCommunityIcons 
-
-                        name="school" 
-
-                        size={18} 
-
-                        color={annAllClasses ? "#ffffff" : "#64748b"} 
-
-                      />
-
-                      <Text style={[styles.announcementSegmentText, annAllClasses && styles.announcementSegmentTextActive]}>All Classes</Text>
-
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-
-                      style={[styles.announcementSegmentButton, !annAllClasses && styles.announcementSegmentActive]}
-
-                      onPress={() => setAnnAllClasses(false)}
-
-                    >
-
-                      <MaterialCommunityIcons 
-
-                        name="account-group" 
-
-                        size={18} 
-
-                        color={!annAllClasses ? "#ffffff" : "#64748b"} 
-
-                      />
-
-                      <Text style={[styles.announcementSegmentText, !annAllClasses && styles.announcementSegmentTextActive]}>Specific Classes</Text>
-
-                    </TouchableOpacity>
-
-                  </View>
-
-                  {!annAllClasses && (
-
-                    <View style={styles.announcementClassList}>
+                  <View style={styles.announcementClassList}>
 
                       <Text style={styles.announcementClassListTitle}>Select Classes:</Text>
 
@@ -9253,8 +12058,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     </View>
 
-                  )}
-
                 </View>
 
               </View>
@@ -9277,9 +12080,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
               <TouchableOpacity
 
-                style={[styles.announcementSendButton, (!annTitle.trim() || !annMessage.trim() || (!annAllClasses && annSelectedClassIds.length === 0)) && styles.announcementSendButtonDisabled]}
+                style={[styles.announcementSendButton, (!annTitle.trim() || !annMessage.trim() || annSelectedClassIds.length === 0) && styles.announcementSendButtonDisabled]}
 
-                disabled={sendingAnn || !annTitle.trim() || !annMessage.trim() || (!annAllClasses && annSelectedClassIds.length === 0)}
+                disabled={sendingAnn || !annTitle.trim() || !annMessage.trim() || annSelectedClassIds.length === 0}
 
                 onPress={async () => {
 
@@ -9287,7 +12090,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                   if (!annTitle.trim() || !annMessage.trim()) { showAlert('Error', 'Title and message are required.', undefined, 'error'); return; }
 
-                  const targetIds = annAllClasses ? teacherClasses.map((c) => c.id) : annSelectedClassIds;
+                  const targetIds = annSelectedClassIds;
 
                   if (!targetIds.length) { showAlert('Error', 'Select at least one class.', undefined, 'error'); return; }
 
@@ -9295,41 +12098,27 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     setSendingAnn(true);
 
-                    const now = new Date();
-
-                    const id = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
-
-                    const payload = {
-
-                      id,
-
-                      classIds: targetIds,
-
-                      dateTime: now.toISOString(),
-
-                      message: annMessage.trim(),
-
+                    // Create announcement with readable ID (ANNOUNCEMENT-0001, etc.)
+                    const result = await createAnnouncement({
                       title: annTitle.trim(),
+                      message: annMessage.trim(),
+                      teacherId: currentUserId || '',
+                      classIds: targetIds
+                    });
 
-                      teacherId: currentUserId,
+                    if (!result.success) {
 
-                    };
-
-                    const { success, error } = await writeData(`/announcements/${id}`, payload);
-
-                    if (!success) {
-
-                      showAlert('Error', error || 'Failed to send', undefined, 'error');
+                      showAlert('Error', result.error || 'Failed to send', undefined, 'error');
 
                     } else {
+
+                      console.log(`[CreateAnnouncement] Created announcement: ${result.announcementId}`);
 
                       setShowAnnModal(false);
 
                       setAnnTitle('');
 
                       setAnnMessage('');
-
-                      setAnnAllClasses(false);
 
                       setAnnSelectedClassIds([]);
 
@@ -9403,7 +12192,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             <View style={styles.modalHeader}>
 
-              <Text style={styles.modalTitle}>Add Student{selectedClassForStudent ? ` — ${selectedClassForStudent.name}` : ''}</Text>
+              <Text style={styles.modalTitle}>
+                {selectedStudentForEdit ? 'Edit Student' : 'Add Student'}
+                {selectedClassForStudent ? ` — ${selectedClassForStudent.name}` : ''}
+              </Text>
 
               <TouchableOpacity onPress={() => setShowAddStudentModal(false)} style={styles.closeButton}>
 
@@ -9428,24 +12220,57 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               <View style={styles.infoSection}>
 
                 <View style={styles.field}>
-
-                  <Text style={styles.fieldLabel}>Student Nickname</Text>
-
+                  <Text style={styles.fieldLabel}>Last Name</Text>
                   <TextInput
-
                     style={styles.fieldInput}
-
-                    value={studentNickname}
-
-                    onChangeText={setStudentNickname}
-
-                    placeholder="e.g., Ken"
-
+                    value={studentLastName}
+                    onChangeText={setStudentLastName}
+                    placeholder="e.g., Dela Cruz"
                     placeholderTextColor="#6b7280"
-
                   />
-
                 </View>
+
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>First Name</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={studentFirstName}
+                    onChangeText={setStudentFirstName}
+                    placeholder="e.g., Juan"
+                    placeholderTextColor="#6b7280"
+                  />
+                </View>
+
+                <View style={styles.field}>
+                  <Text style={styles.fieldLabel}>Middle Initial</Text>
+                  <TextInput
+                    style={styles.fieldInput}
+                    value={studentMiddleInitial}
+                    onChangeText={setStudentMiddleInitial}
+                    placeholder="e.g., R"
+                    placeholderTextColor="#6b7280"
+                    maxLength={2}
+                    autoCapitalize="characters"
+                  />
+                </View>
+
+                {(studentLastName.trim() || studentFirstName.trim() || studentMiddleInitial.trim()) && (
+                  <View style={{ 
+                    backgroundColor: '#f1f5f9', 
+                    padding: 12, 
+                    borderRadius: 8, 
+                    marginBottom: 16,
+                    borderWidth: 1,
+                    borderColor: '#e2e8f0'
+                  }}>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: '#475569', marginBottom: 6 }}>
+                      Preview:
+                    </Text>
+                    <Text style={{ fontSize: 14, color: '#1e293b' }}>
+                      {`${studentLastName.trim()}${studentLastName.trim() && studentFirstName.trim() ? ', ' : ''}${studentFirstName.trim()}${studentMiddleInitial.trim() ? ` ${studentMiddleInitial.trim().toUpperCase().replace(/\.$/, '') + '.'}` : ''}` || '—'}
+                    </Text>
+                  </View>
+                )}
 
                 <View style={styles.field}>
 
@@ -9482,9 +12307,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 </View>
 
                 <Text style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
-
-                  Disclaimer: For student privacy, use only a nickname or a unique identifier. Parent details will be collected securely when they first log in.
-
+                  Note: Name will be saved and shown as "Lastname, Firstname MI". Parent details will be collected when they first log in.
                 </Text>
 
               </View>
@@ -9493,15 +12316,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
             <View style={styles.modalActions}>
 
-              <TouchableOpacity style={styles.cancelButton} onPress={() => setShowAddStudentModal(false)} disabled={savingStudent}>
+              <TouchableOpacity style={styles.cancelButton} onPress={() => { setShowAddStudentModal(false); setSelectedStudentForEdit(null); }} disabled={savingStudent}>
 
                 <Text style={styles.cancelButtonText}>Cancel</Text>
 
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.saveButton} onPress={handleCreateStudent} disabled={savingStudent}>
+              <TouchableOpacity style={styles.saveButton} onPress={selectedStudentForEdit ? handleUpdateStudent : handleCreateStudent} disabled={savingStudent}>
 
-                <Text style={styles.saveButtonText}>{savingStudent ? 'Creating...' : 'Create'}</Text>
+                <Text style={styles.saveButtonText}>{savingStudent ? (selectedStudentForEdit ? 'Saving...' : 'Creating...') : (selectedStudentForEdit ? 'Save Changes' : 'Create')}</Text>
 
               </TouchableOpacity>
 
@@ -9516,7 +12339,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
       {/* Class List Modal */}
-
       <Modal visible={showListModal} animationType="slide" transparent>
 
         <View style={styles.modalOverlay}>
@@ -9569,7 +12391,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         <View key={s.studentId} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}>
 
-                          <Text style={{ color: '#111827' }}>{s.nickname}</Text>
+                          <Text style={{ color: '#111827' }}>{formatStudentName(s)}</Text>
 
                           <Text style={{ color: '#2563eb', fontWeight: '600' }}>{p?.loginCode || '—'}</Text>
 
@@ -9603,7 +12425,219 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       </Modal>
 
+      {/* Parents List Modal */}
+      <Modal visible={showParentsListModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.profileModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Parents List</Text>
+              <TouchableOpacity onPress={() => setShowParentsListModal(false)} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView 
+              style={styles.profileContent}
+              contentContainerStyle={{ paddingBottom: 20 }}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {selectedClassForParentsList && studentsByClass[selectedClassForParentsList] && (
+                <>
+                  <Text style={{ fontSize: 16, fontWeight: '700', color: '#1e293b', marginBottom: 16 }}>
+                    {activeClasses.find(c => c.id === selectedClassForParentsList)?.name || 'Class'}
+                  </Text>
+                  {(studentsByClass[selectedClassForParentsList] || []).length === 0 ? (
+                    <Text style={{ color: '#64748b' }}>No students in this class.</Text>
+                  ) : (
+                    (studentsByClass[selectedClassForParentsList] || []).map((s) => {
+                      const p = s.parentId ? parentsById[s.parentId] : undefined;
+                      const parentStatus = getParentStatus(p);
+                      const isRegistered = p && p.infoStatus === 'completed';
+                      const parentName = isRegistered ? `${p.firstName || ''} ${p.lastName || ''}`.trim() : null;
+                      
+                      return (
+                        <View key={s.studentId} style={styles.parentListCard}>
+                          <View style={styles.parentCardLeft}>
+                            {/* Student Avatar/Initials */}
+                            <View style={styles.parentCardAvatar}>
+                              <Text style={styles.parentCardAvatarText}>{getStudentInitials(s)}</Text>
+                            </View>
+                            
+                            <View style={styles.parentCardInfo}>
+                              {/* Student Name */}
+                              <View style={styles.parentCardNameRow}>
+                                <MaterialCommunityIcons name="account" size={16} color="#64748b" style={{ marginRight: 4 }} />
+                                <Text style={styles.parentCardStudentName}>{formatStudentName(s)}</Text>
+                              </View>
+                              
+                              {/* Parent Name (if registered) */}
+                              {parentName && (
+                                <View style={styles.parentCardParentRow}>
+                                  <MaterialCommunityIcons name="account-heart" size={14} color="#8b5cf6" style={{ marginRight: 4 }} />
+                                  <Text style={styles.parentCardParentName}>Parent: {parentName}</Text>
+                                </View>
+                              )}
+                              
+                              {/* Access Code */}
+                              <View style={styles.parentCardCodeRow}>
+                                <MaterialCommunityIcons name="key-variant" size={14} color="#64748b" style={{ marginRight: 4 }} />
+                                {p ? (
+                                  <TouchableOpacity onPress={() => handleShowParentInfo(s, p)}>
+                                    <Text style={styles.parentCardCodeClickable}>Code: {p.loginCode || '—'}</Text>
+                                  </TouchableOpacity>
+                                ) : (
+                                  <Text style={styles.parentCardCode}>Code: —</Text>
+                                )}
+                              </View>
+                            </View>
+                          </View>
+                          
+                          {/* Status Badge */}
+                          <View style={styles.parentCardRight}>
+                            <View style={[styles.parentCardStatusBadge, { backgroundColor: parentStatus.color }]}>
+                              <MaterialCommunityIcons 
+                                name={isRegistered ? "check-circle" : p ? "clock-outline" : "account-off"} 
+                                size={14} 
+                                color="#ffffff" 
+                                style={{ marginRight: 4 }}
+                              />
+                              <Text style={styles.parentCardStatusText}>{parentStatus.text}</Text>
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
+                </>
+              )}
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.saveButton} onPress={() => setShowParentsListModal(false)}>
+                <Text style={styles.saveButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
+      {/* Parent Information Modal */}
+      <Modal visible={showParentInfoModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.profileModal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Parent Information</Text>
+              <TouchableOpacity onPress={() => setShowParentInfoModal(false)} style={styles.closeButton}>
+                <AntDesign name="close" size={24} color="#1e293b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView 
+              style={styles.profileContent}
+              contentContainerStyle={{ paddingBottom: 20 }}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {selectedParentForInfo && (
+                <>
+                  {/* Student Information */}
+                  <View style={styles.parentDetailsSection}>
+                    <Text style={styles.parentDetailsSectionTitle}>Student Information</Text>
+                    <View style={styles.parentDetailsRow}>
+                      <Text style={styles.parentDetailsLabel}>Name:</Text>
+                      <Text style={styles.parentDetailsValue}>{formatStudentName(selectedParentForInfo.student)}</Text>
+                    </View>
+                    <View style={styles.parentDetailsRow}>
+                      <Text style={styles.parentDetailsLabel}>Gender:</Text>
+                      <Text style={styles.parentDetailsValue}>{selectedParentForInfo.student?.gender || 'N/A'}</Text>
+                    </View>
+                    <View style={styles.parentDetailsRow}>
+                      <Text style={styles.parentDetailsLabel}>Student ID:</Text>
+                      <Text style={styles.parentDetailsValue}>{selectedParentForInfo.student?.studentId || 'N/A'}</Text>
+                    </View>
+                  </View>
+
+                  {/* Parent Information */}
+                  <View style={styles.parentDetailsSection}>
+                    <Text style={styles.parentDetailsSectionTitle}>Parent Information</Text>
+                    
+                    {selectedParentForInfo.parent ? (
+                      <>
+                        <View style={styles.parentDetailsRow}>
+                          <Text style={styles.parentDetailsLabel}>Access Code:</Text>
+                          <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.loginCode || 'N/A'}</Text>
+                        </View>
+                        
+                        <View style={styles.parentDetailsRow}>
+                          <Text style={styles.parentDetailsLabel}>Registration Status:</Text>
+                          <View style={styles.parentInfoValueContainer}>
+                            <View style={[styles.parentStatusBadge, { backgroundColor: getParentStatus(selectedParentForInfo.parent).color }]}>
+                              <Text style={styles.parentStatusText}>{getParentStatus(selectedParentForInfo.parent).text}</Text>
+                            </View>
+                          </View>
+                        </View>
+
+                        {selectedParentForInfo.parent?.infoStatus === 'completed' && (
+                          <>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>First Name:</Text>
+                              <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.firstName || 'N/A'}</Text>
+                            </View>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>Last Name:</Text>
+                              <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.lastName || 'N/A'}</Text>
+                            </View>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>Email:</Text>
+                              <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.email || 'N/A'}</Text>
+                            </View>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>Mobile:</Text>
+                              <Text style={styles.parentDetailsValue}>{selectedParentForInfo.parent?.mobile || 'N/A'}</Text>
+                            </View>
+                            <View style={styles.parentDetailsRow}>
+                              <Text style={styles.parentDetailsLabel}>Registration Date:</Text>
+                              <Text style={styles.parentDetailsValue}>
+                                {selectedParentForInfo.parent?.createdAt 
+                                  ? new Date(selectedParentForInfo.parent.createdAt).toLocaleDateString() 
+                                  : 'N/A'}
+                              </Text>
+                            </View>
+                          </>
+                        )}
+
+                        {selectedParentForInfo.parent?.infoStatus === 'pending' && (
+                          <View style={styles.parentDetailsRow}>
+                            <Text style={styles.parentDetailsLabel}>Status:</Text>
+                            <Text style={styles.parentDetailsValue}>Parent registration is pending. They have not completed their registration yet.</Text>
+                          </View>
+                        )}
+
+                        {!selectedParentForInfo.parent?.infoStatus && (
+                          <View style={styles.parentDetailsRow}>
+                            <Text style={styles.parentDetailsLabel}>Status:</Text>
+                            <Text style={styles.parentDetailsValue}>Parent registration is pending. They have not used their access code yet.</Text>
+                          </View>
+                        )}
+                      </>
+                    ) : (
+                      <View style={styles.parentDetailsRow}>
+                        <Text style={styles.parentDetailsLabel}>Status:</Text>
+                        <Text style={styles.parentDetailsValue}>No parent account assigned to this student.</Text>
+                      </View>
+                    )}
+                  </View>
+                </>
+              )}
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.saveButton} onPress={() => setShowParentInfoModal(false)}>
+                <Text style={styles.saveButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Assign Exercise Form */}
 
@@ -10104,7 +13138,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           </View>
 
         </View>
-
       </Modal>
 
 
@@ -10203,13 +13236,24 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
               <View style={styles.studentListContainer}>
 
-                <Text style={styles.studentListTitle}>Students ({studentsByClass[selectedAssignmentForStatus.classId]?.length || 0})</Text>
+                {(() => {
+                  // Filter students based on assignment targets
+                  const allClassStudents = studentsByClass[selectedAssignmentForStatus.classId] || [];
+                  const targetStudentIds = selectedAssignmentForStatus.targetStudentIds;
+                  
+                  // If targetStudentIds is provided and not empty, filter to only those students
+                  // Otherwise, show all students in the class
+                  const assignedStudents = targetStudentIds && targetStudentIds.length > 0 
+                    ? allClassStudents.filter((student: any) => targetStudentIds.includes(student.studentId))
+                    : allClassStudents;
+                  
+                  return (
+                    <>
+                      <Text style={styles.studentListTitle}>Students ({assignedStudents.length})</Text>
 
-                <Text style={styles.studentListSubtitle}>Tap status badges to toggle completion</Text>
+                      <Text style={styles.studentListSubtitle}>Tap status badges to toggle completion</Text>
 
-                
-
-                {(studentsByClass[selectedAssignmentForStatus.classId] || []).map((student: any, index: number) => {
+                      {assignedStudents.map((student: any, index: number) => {
 
                   const status = getStudentStatus(student.studentId, selectedAssignmentForStatus);
 
@@ -10223,7 +13267,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                           <Text style={styles.studentAvatarText}>
 
-                            {student.nickname?.charAt(0)?.toUpperCase() || 'S'}
+                            {getStudentInitials(student)}
 
                           </Text>
 
@@ -10231,7 +13275,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         <View style={styles.studentDetails}>
 
-                          <Text style={styles.studentStatusName}>{student.nickname || 'Unknown Student'}</Text>
+                          <Text style={styles.studentStatusName}>{formatStudentName(student)}</Text>
 
                           <Text style={styles.studentId}>ID: {student.studentId}</Text>
 
@@ -10289,7 +13333,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                   );
 
-                })}
+                      })}
+                    </>
+                  );
+                })()}
 
               </View>
 
@@ -10320,221 +13367,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       </Modal>
 
 
-
-      {/* Parent Info Modal */}
-
-      <Modal visible={showParentInfoModal} animationType="slide" transparent>
-
-        <View style={styles.modalOverlay}>
-
-          <View style={styles.parentInfoModal}>
-
-            <View style={styles.parentInfoHeader}>
-
-              <TouchableOpacity
-
-                onPress={() => setShowParentInfoModal(false)}
-
-                style={styles.parentInfoCloseButton}
-
-              >
-
-                <MaterialIcons name="close" size={24} color="#1e293b" />
-
-              </TouchableOpacity>
-
-              <Text style={styles.parentInfoTitle}>Parent Information</Text>
-
-              <View style={styles.parentInfoPlaceholder} />
-
-            </View>
-
-
-
-            {selectedParentInfo && (
-
-              <ScrollView 
-
-                style={styles.parentInfoContent} 
-
-                showsVerticalScrollIndicator={false}
-
-                nestedScrollEnabled={true}
-
-                keyboardShouldPersistTaps="handled"
-
-              >
-
-                <View style={styles.parentInfoSection}>
-
-                  <Text style={styles.parentInfoSectionTitle}>Student Information</Text>
-
-                  <View style={styles.parentInfoRow}>
-
-                    <Text style={styles.parentInfoLabel}>Student Name:</Text>
-
-                    <Text style={styles.parentInfoValue}>{selectedParentInfo.student?.nickname || 'N/A'}</Text>
-
-                  </View>
-
-                  <View style={styles.parentInfoRow}>
-
-                    <Text style={styles.parentInfoLabel}>Gender:</Text>
-
-                    <Text style={styles.parentInfoValue}>{selectedParentInfo.student?.gender || 'N/A'}</Text>
-
-                  </View>
-
-                </View>
-
-
-
-                <View style={styles.parentInfoSection}>
-
-                  <Text style={styles.parentInfoSectionTitle}>Access Information</Text>
-
-                  <View style={styles.parentInfoRow}>
-
-                    <Text style={styles.parentInfoLabel}>Parent Access Code:</Text>
-
-                    <Text style={[styles.parentInfoValue, styles.parentInfoCodeValue]}>{selectedParentInfo.loginCode}</Text>
-
-                  </View>
-
-                  <View style={styles.parentInfoRow}>
-
-                    <Text style={styles.parentInfoLabel}>Account Status:</Text>
-
-                    <Text style={[styles.parentInfoValue, selectedParentInfo.infoStatus === 'completed' ? styles.parentInfoStatusCompleted : styles.parentInfoStatusPending]}>
-
-                      {selectedParentInfo.infoStatus === 'completed' ? 'Profile Complete' : 'Profile Pending'}
-
-                    </Text>
-
-                  </View>
-
-                </View>
-
-
-
-                {selectedParentInfo.infoStatus === 'completed' && (
-
-                  <View style={styles.parentInfoSection}>
-
-                    <Text style={styles.parentInfoSectionTitle}>Parent Details</Text>
-
-                    <View style={styles.parentInfoRow}>
-
-                      <Text style={styles.parentInfoLabel}>Name:</Text>
-
-                      <Text style={styles.parentInfoValue}>
-
-                        {selectedParentInfo.firstName && selectedParentInfo.lastName 
-
-                          ? `${selectedParentInfo.firstName} ${selectedParentInfo.lastName}`
-
-                          : 'Not provided'}
-
-                      </Text>
-
-                    </View>
-
-                    <View style={styles.parentInfoRow}>
-
-                      <Text style={styles.parentInfoLabel}>Email:</Text>
-
-                      <Text style={styles.parentInfoValue}>{selectedParentInfo.email || 'Not provided'}</Text>
-
-                    </View>
-
-                    <View style={styles.parentInfoRow}>
-
-                      <Text style={styles.parentInfoLabel}>Mobile:</Text>
-
-                      <Text style={styles.parentInfoValue}>{selectedParentInfo.mobile || 'Not provided'}</Text>
-
-                    </View>
-
-                    {selectedParentInfo.profilePictureUrl && (
-
-                      <View style={styles.parentInfoRow}>
-
-                        <Text style={styles.parentInfoLabel}>Profile Picture:</Text>
-
-                        <View style={styles.parentInfoImageContainer}>
-
-                          <Image 
-
-                            source={{ uri: selectedParentInfo.profilePictureUrl }} 
-
-                            style={styles.parentInfoImage}
-
-                            resizeMode="cover"
-
-                          />
-
-                        </View>
-
-                      </View>
-
-                    )}
-
-                  </View>
-
-                )}
-
-
-
-                {selectedParentInfo.infoStatus === 'pending' && (
-
-                  <View style={styles.parentInfoSection}>
-
-                    <View style={styles.parentInfoPendingContainer}>
-
-                      <MaterialIcons name="info" size={24} color="#f59e0b" />
-
-                      <Text style={styles.parentInfoPendingText}>
-
-                        Parent hasn't completed their profile yet. Share the access code with them to get started.
-
-                      </Text>
-
-                    </View>
-
-                  </View>
-
-                )}
-
-              </ScrollView>
-
-            )}
-
-
-
-            <View style={styles.parentInfoActions}>
-
-              <TouchableOpacity
-
-                style={styles.parentInfoCloseActionButton}
-
-                onPress={() => setShowParentInfoModal(false)}
-
-              >
-
-                <Text style={styles.parentInfoCloseActionButtonText}>Close</Text>
-
-              </TouchableOpacity>
-
-            </View>
-
-          </View>
-
-        </View>
-
-      </Modal>
-
-
-
       {/* Student Performance Modal */}
 
       <Modal visible={showStudentPerformanceModal} animationType="slide" transparent={false}>
@@ -10551,7 +13383,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                 <Text style={styles.studentPerformanceStudentName}>
 
-                  {selectedStudentPerformance.nickname || selectedStudentPerformance.firstName}
+                  {formatStudentName(selectedStudentPerformance)}
 
                 </Text>
 
@@ -10607,7 +13439,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                     <Text style={styles.studentPerformanceName}>
 
-                      {selectedStudentPerformance?.nickname || 'Unknown Student'}
+                      {selectedStudentPerformance ? formatStudentName(selectedStudentPerformance) : 'Unknown Student'}
 
                     </Text>
 
@@ -10960,7 +13792,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
                 {/* Question Details */}
-
                 {studentPerformanceData?.studentResult?.questionResults && studentPerformanceData.studentResult.questionResults.length > 0 && (
 
                   <View style={styles.studentPerformanceQuestionDetailsCard}>
@@ -11354,9 +14185,239 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       </Modal>
 
 
+      {/* Exercise Result Modal */}
+
+      <Modal visible={showExerciseResultModal} animationType="slide" transparent={false}>
+
+        <View style={styles.studentPerformanceFullScreenContainer}>
+
+          <View style={styles.exerciseResultHeader}>
+            <View style={styles.exerciseResultHeaderContent}>
+              <Text style={styles.exerciseResultTitle}>Exercise Result</Text>
+              {selectedExerciseResultId && (
+                <View style={styles.exerciseResultIdBadge}>
+                  <MaterialCommunityIcons name="tag" size={12} color="#3b82f6" />
+                  <Text style={styles.exerciseResultIdText}>{selectedExerciseResultId}</Text>
+                </View>
+              )}
+            </View>
+            <TouchableOpacity
+              onPress={() => setShowExerciseResultModal(false)}
+              style={styles.exerciseResultCloseButton}
+            >
+              <MaterialIcons name="close" size={24} color="#1e293b" />
+            </TouchableOpacity>
+          </View>
+
+          {loadingExerciseResult ? (
+            <View style={styles.studentPerformanceFullScreenLoading}>
+              <Text style={styles.studentPerformanceLoadingText}>Loading result...</Text>
+            </View>
+          ) : (
+            <ScrollView 
+              style={styles.studentPerformanceFullScreenContent} 
+              showsVerticalScrollIndicator={true}
+              nestedScrollEnabled={true}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* Student and Exercise Details */}
+              <View style={styles.exerciseResultInfoCard}>
+                <View style={styles.exerciseResultInfoRow}>
+                  <Text style={styles.exerciseResultInfoLabel}>Student Name:</Text>
+                  <Text style={styles.exerciseResultInfoValue}>
+                    {selectedExerciseResultData?.studentInfo?.name || 'Unknown Student'}
+                  </Text>
+                </View>
+                <View style={styles.exerciseResultInfoRow}>
+                  <Text style={styles.exerciseResultInfoLabel}>Exercise:</Text>
+                  <Text style={styles.exerciseResultInfoValue}>
+                    {selectedExerciseResultData?.exerciseInfo?.title || selectedExerciseResultData?.exerciseTitle || 'Unknown Exercise'}
+                  </Text>
+                </View>
+                <View style={styles.exerciseResultInfoRow}>
+                  <Text style={styles.exerciseResultInfoLabel}>Submitted:</Text>
+                  <View style={styles.exerciseResultSubmittedContainer}>
+                    <Text style={styles.exerciseResultInfoValue}>
+                      {selectedExerciseResultData?.submittedAt ? 
+                        new Date(selectedExerciseResultData.submittedAt).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                          hour: 'numeric',
+                          minute: '2-digit',
+                          hour12: true
+                        }) : 
+                        selectedExerciseResultData?.exerciseSession?.completedAt ?
+                        new Date(selectedExerciseResultData.exerciseSession.completedAt).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                          hour: 'numeric',
+                          minute: '2-digit',
+                          hour12: true
+                        }) : 'Not submitted'
+                      }
+                    </Text>
+                    {(selectedExerciseResultData?.submittedAt || selectedExerciseResultData?.exerciseSession?.completedAt) && (
+                      <View style={styles.exerciseResultOnTimeTag}>
+                        <Text style={styles.exerciseResultOnTimeText}>On-Time</Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+                <View style={styles.exerciseResultInfoRow}>
+                  <Text style={styles.exerciseResultInfoLabel}>Student Status:</Text>
+                  <View style={[
+                    styles.exerciseResultStatusTag,
+                    { backgroundColor: (editableSummary?.meanPercentageScore ?? 0) >= 75 ? '#dcfce7' : '#fee2e2' }
+                  ]}>
+                    <Text style={[
+                      styles.exerciseResultStatusText,
+                      { color: (editableSummary?.meanPercentageScore ?? 0) >= 75 ? '#16a34a' : '#dc2626' }
+                    ]}>
+                      {(editableSummary?.meanPercentageScore ?? 0) >= 75 ? 'Passing' : 'For Intervention'}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Summary Statistics Cards */}
+              <View style={styles.exerciseResultSummaryCards}>
+                <View style={styles.exerciseResultSummaryCard}>
+                  <Text style={styles.exerciseResultSummaryValue}>
+                    {editableSummary?.totalTimeSpentSeconds ? 
+                      `${Math.floor(editableSummary.totalTimeSpentSeconds / 60)}:${String(Math.floor(editableSummary.totalTimeSpentSeconds % 60)).padStart(2, '0')}` : 
+                      '0:00'
+                    }
+                  </Text>
+                  <Text style={styles.exerciseResultSummaryLabel}>TIME</Text>
+                  <Text style={styles.exerciseResultSummarySubtext}>
+                    {editableSummary?.meanTimePerItemSeconds ? `${Math.round(editableSummary.meanTimePerItemSeconds)}s per item` : '0s per item'}
+                  </Text>
+                </View>
+                
+                <View style={styles.exerciseResultSummaryCard}>
+                  <Text style={styles.exerciseResultSummaryValue}>{editableSummary?.meanPercentageScore ?? 0}</Text>
+                  <Text style={styles.exerciseResultSummaryLabel}>SCORE</Text>
+                  <Text style={styles.exerciseResultSummarySubtext}>
+                    {editableSummary?.totalCorrect ?? 0}/{editableSummary?.totalItems ?? 0}
+                  </Text>
+                </View>
+                
+                <View style={styles.exerciseResultSummaryCard}>
+                  <Text style={styles.exerciseResultSummaryValue}>{editableSummary?.totalAttempts ?? 0}</Text>
+                  <Text style={styles.exerciseResultSummaryLabel}>ATTEMPTS</Text>
+                  <Text style={styles.exerciseResultSummarySubtext}>
+                    {editableSummary?.meanAttemptsPerItem ? `${editableSummary.meanAttemptsPerItem.toFixed(1)} per item` : '0 per item'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* History Section */}
+              <View style={styles.exerciseResultHistorySection}>
+                <Text style={styles.exerciseResultHistoryTitle}>History</Text>
+                {editableQuestionResults
+                  .filter((qr: any) => filterMode === 'all' ? true : filterMode === 'correct' ? qr.isCorrect : !qr.isCorrect)
+                  .sort((a: any, b: any) => {
+                    if (sortMode === 'attempts') return (b.attempts || 0) - (a.attempts || 0);
+                    if (sortMode === 'time') return (b.timeSpentSeconds || 0) - (a.timeSpentSeconds || 0);
+                    if (sortMode === 'type') return String(a.questionType).localeCompare(String(b.questionType));
+                    return 0;
+                  })
+                  .map((qr: any, index: number) => (
+                  <View key={qr.questionId || index} style={styles.exerciseResultQuestionCard}>
+                    <View style={styles.exerciseResultQuestionHeader}>
+                      <View style={styles.exerciseResultQuestionNumber}>
+                        <Text style={styles.exerciseResultQuestionNumberText}>{index + 1}</Text>
+                      </View>
+                      <Text style={styles.exerciseResultQuestionType}>
+                        {qr.questionType ? qr.questionType.charAt(0).toUpperCase() + qr.questionType.slice(1).replace('-', ' ') + ' Type' : 'Unknown Type'}
+                      </Text>
+                      <View style={styles.exerciseResultQuestionStats}>
+                        <View style={styles.exerciseResultQuestionStat}>
+                          <MaterialCommunityIcons name="eye" size={14} color="#64748b" />
+                          <Text style={styles.exerciseResultQuestionStatText}>{qr.attempts || 0}</Text>
+                        </View>
+                        <View style={styles.exerciseResultQuestionStat}>
+                          <MaterialCommunityIcons name="clock" size={14} color="#64748b" />
+                          <Text style={styles.exerciseResultQuestionStatText}>{qr.timeSpentSeconds || 0}s</Text>
+                        </View>
+                        <View style={styles.exerciseResultQuestionStat}>
+                          {qr.isCorrect ? (
+                            <MaterialCommunityIcons name="check" size={14} color="#16a34a" />
+                          ) : (
+                            <MaterialCommunityIcons name="close" size={14} color="#dc2626" />
+                          )}
+                          <Text style={[
+                            styles.exerciseResultQuestionStatText,
+                            { color: qr.isCorrect ? '#16a34a' : '#dc2626' }
+                          ]}>
+                            {qr.isCorrect ? 'Correct' : 'Wrong'}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                    
+                    <Text style={styles.exerciseResultQuestionText}>
+                      {qr.questionText || 'No question text available'}
+                    </Text>
+                    
+                    {/* Attempt History */}
+                    {(qr.attemptHistory || []).map((attempt: any, attemptIndex: number) => (
+                      <View key={attemptIndex} style={styles.exerciseResultAttemptRow}>
+                        <View style={styles.exerciseResultAttemptIcon}>
+                          {attempt.isCorrect ? (
+                            <MaterialCommunityIcons name="check" size={16} color="#16a34a" />
+                          ) : (
+                            <MaterialCommunityIcons name="close" size={16} color="#dc2626" />
+                          )}
+                        </View>
+                        <Text style={styles.exerciseResultAttemptText}>
+                          {attemptIndex + 1}: {toFriendlyText(attempt.selectedAnswer, 50)}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                ))}
+
+                {/* Delete button */}
+                <View style={styles.exerciseResultBottomActions}>
+                  <TouchableOpacity
+                    style={styles.exerciseResultDeleteButton}
+                    onPress={() => {
+                      if (!selectedExerciseResultId) return;
+                      showAlert('Delete Result?', 'This cannot be undone.', [
+                        { text: 'Cancel', style: 'cancel', onPress: () => {} },
+                        { text: 'Delete', style: 'destructive', onPress: async () => {
+                          const { success, error } = await deleteData(`/ExerciseResults/${selectedExerciseResultId}`);
+                          if (!success) {
+                            showAlert('Delete Failed', error || 'Unable to delete result', undefined, 'error');
+                            return;
+                          }
+                          showAlert('Deleted', 'Exercise result removed.', undefined, 'success');
+                          setShowExerciseResultModal(false);
+                          setSelectedExerciseResultId(null);
+                          setSelectedExerciseResultData(null);
+                          try {
+                            if (activeClasses.length > 0) {
+                              await loadAssignments(activeClasses.map(c => c.id));
+                            }
+                          } catch {}
+                        } }
+                      ], 'warning');
+                    }}
+                  >
+                    <Text style={styles.exerciseResultDeleteButtonText}>Delete</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </ScrollView>
+          )}
+        </View>
+      </Modal>
+
 
       {/* Floating Customer Service Button */}
-
       <Animated.View
         {...panResponder.panHandlers}
         style={[
@@ -11367,19 +14428,16 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           },
         ]}
       >
-      <TouchableOpacity 
-
+        <TouchableOpacity 
           style={styles.floatingReportButtonInner}
-        onPress={() => {
-          resetInactivityTimer();
-          setShowTechReportModal(true);
-        }}
-
-        activeOpacity={0.85}
-
-      >
-
-        <MaterialCommunityIcons name="headset" size={26} color="#ffffff" />
+          onPress={() => {
+            console.log('📞 FAB button pressed - opening tech report modal');
+            resetInactivityTimer();
+            setShowTechReportModal(true);
+          }}
+          activeOpacity={0.85}
+        >
+          <MaterialCommunityIcons name="headset" size={26} color="#ffffff" />
 
       </TouchableOpacity>
 
@@ -11387,7 +14445,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
 
       {/* Technical Report Modal */}
-
       <Modal visible={showTechReportModal} animationType="slide" transparent>
 
         <View style={styles.modalOverlay}>
@@ -11652,7 +14709,619 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       </Modal>
 
+      {/* Detailed Statistics Modal */}
+      <Modal visible={showDetailedStatsModal} animationType="fade" transparent={true}>
+        <TouchableWithoutFeedback onPress={handleCloseDetailedStats}>
+          <View style={styles.detailedStatsModalBackdrop}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <ModalErrorBoundary
+                fallback={(
+                  <View style={styles.detailedStatsErrorContainer}>
+                    <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
+                    <Text style={styles.detailedStatsErrorText}>Unable to load statistics</Text>
+                    <Text style={styles.detailedStatsErrorSubtext}>
+                      Something went wrong while rendering. Try again on this device.
+                    </Text>
+                    <TouchableOpacity 
+                      style={styles.detailedStatsRetryButton}
+                      onPress={handleRetryDetailedStats}
+                    >
+                      <MaterialCommunityIcons name="refresh" size={18} color="#ffffff" />
+                      <Text style={styles.detailedStatsRetryButtonText}>Retry</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              >
+                <View style={[styles.detailedStatsModalPanelContainer]} onStartShouldSetResponder={() => true}>
+                  <View style={[styles.detailedStatsModalPanel]}>
+                  {/* Header */}
+                  <View style={styles.detailedStatsModalHeader}>
+                    <View style={styles.detailedStatsModalTitleContainer}>
+                      <MaterialCommunityIcons name="chart-box" size={24} color="#8b5cf6" />
+                      <Text style={styles.detailedStatsModalTitle}>Class Statistics</Text>
+                    </View>
+                    <TouchableOpacity 
+                      onPress={handleCloseDetailedStats} 
+                      style={styles.detailedStatsCloseButton}
+                    >
+                      <AntDesign name="close" size={24} color="#64748b" />
+                    </TouchableOpacity>
+                  </View>
 
+          {/* Exercise ID Badge and Export Button */}
+          {selectedExerciseForStats && (
+            <View style={styles.detailedStatsTopSection}>
+              <View style={styles.detailedStatsExerciseIdContainer}>
+                <Text style={styles.detailedStatsExerciseIdText}>
+                  {selectedExerciseForStats.exerciseId}
+                </Text>
+              </View>
+              
+              <TouchableOpacity 
+                onPress={handleExportClassStatsToExcel} 
+                style={styles.detailedStatsExportButtonMain}
+              >
+                <MaterialCommunityIcons name="microsoft-excel" size={18} color="#ffffff" />
+                <Text style={styles.detailedStatsExportButtonMainText}>Excel</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          
+          {/* Loading State */}
+          {detailedStatsLoading && (
+            <View style={styles.detailedStatsLoadingContainer}>
+              <ActivityIndicator size="large" color="#3b82f6" />
+              <Text style={styles.detailedStatsLoadingText}>Preparing statistics...</Text>
+            </View>
+          )}
+
+          {/* Content - Only show when not loading */}
+          {!detailedStatsLoading && (
+          <ScrollView
+            style={styles.detailedStatsModalContent}
+            showsVerticalScrollIndicator={false}
+            bounces={true}
+            overScrollMode="always"
+            decelerationRate="fast"
+            scrollEventThrottle={16}
+            contentContainerStyle={{ paddingBottom: 32 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Class Statistics Section */}
+            {detailedStatsData && (() => {
+              try {
+              const stats = detailedStatsData;
+              const total = Math.max(stats?.totalStudents || 0, 0);
+              if (!total) {
+                return (
+                  <View style={styles.detailedStatsErrorContainer}>
+                    <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
+                    <Text style={styles.detailedStatsErrorText}>No data available</Text>
+                    <Text style={styles.detailedStatsErrorSubtext}>There are no submissions for this exercise yet.</Text>
+                  </View>
+                );
+              }
+
+              const {
+                mps,
+                median,
+                mode,
+                stdDev,
+                range,
+                highestScore,
+                lowestScore,
+                passCount,
+                passRate,
+                avgAttemptsPerItem,
+                avgTimePerItem,
+                topStudentName,
+                bottomStudentName,
+                distribution,
+              } = stats;
+
+              const {
+                highlyProficientCount = 0,
+                proficientCount = 0,
+                nearlyProficientCount = 0,
+                lowProficientCount = 0,
+                notProficientCount = 0,
+              } = distribution || {};
+
+              return (
+                <View style={styles.detailedStatsClassStatsSection}>
+                  {/* Top Row - MPS and Pass Rate */}
+                  <View style={styles.detailedStatsTopRow}>
+                    <View style={styles.detailedStatsTopCard}>
+                      <MaterialCommunityIcons name="percent" size={16} color="#64748b" />
+                      <Text style={styles.detailedStatsTopLabel}>MPS</Text>
+                      <Text style={styles.detailedStatsTopValue}>{mps.toFixed(1)}%</Text>
+                    </View>
+                    
+                    <View style={styles.detailedStatsTopCard}>
+                      <MaterialCommunityIcons name="chart-line" size={16} color="#64748b" />
+                      <Text style={styles.detailedStatsTopLabel}>Pass Rate</Text>
+                      <Text style={[styles.detailedStatsTopValue, { color: '#ef4444' }]}>{passRate.toFixed(1)}%</Text>
+                      <Text style={styles.detailedStatsTopSubtext}>{passCount}/{total}</Text>
+                    </View>
+                  </View>
+
+                  {/* Central Tendency */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Central Tendency</Text>
+                    <View style={styles.detailedStatsGrid}>
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="chart-line-variant" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Mean</Text>
+                        <Text style={styles.detailedStatsValue}>{mps.toFixed(1)}%</Text>
+                      </View>
+                      
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="chart-line-variant" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Median</Text>
+                        <Text style={styles.detailedStatsValue}>{median.toFixed(1)}%</Text>
+                      </View>
+                    </View>
+                    
+                    <View style={styles.detailedStatsModeCard}>
+                        <MaterialCommunityIcons name="chart-line" size={16} color="#64748b" />
+                      <Text style={styles.detailedStatsLabel}>Mode</Text>
+                      <Text style={styles.detailedStatsValue}>{mode}%</Text>
+                    </View>
+                  </View>
+                  
+                  {/* Dispersion */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Dispersion</Text>
+                    <View style={styles.detailedStatsGrid}>
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="sigma" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Std Dev</Text>
+                        <Text style={styles.detailedStatsValue}>{stdDev.toFixed(1)}</Text>
+                        <Text style={styles.detailedStatsSubtext}>
+                          {stdDev < 10 ? 'Low' : stdDev < 20 ? 'Moderate' : 'High'}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="arrow-expand-horizontal" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Range</Text>
+                        <Text style={styles.detailedStatsValue}>{range.toFixed(1)}%</Text>
+                        <Text style={styles.detailedStatsSubtext}>{lowestScore.toFixed(0)}-{highestScore.toFixed(0)}%</Text>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  {/* Top & Bottom */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Top & Bottom</Text>
+                    <View style={styles.detailedStatsGrid}>
+                      <View style={[styles.detailedStatsCard, { backgroundColor: '#f0fdf4' }]}>
+                        <MaterialCommunityIcons name="trophy" size={16} color="#10b981" />
+                        <Text style={[styles.detailedStatsLabel, { color: '#10b981' }]}>Highest</Text>
+                        <Text style={[styles.detailedStatsValue, { color: '#10b981' }]}>{highestScore.toFixed(1)}%</Text>
+                        <Text style={[styles.detailedStatsSubtext, { fontSize: 10, color: '#10b981' }]} numberOfLines={1}>
+                          {topStudentName || '—'}
+                        </Text>
+                      </View>
+                      
+                      <View style={[styles.detailedStatsCard, { backgroundColor: '#fef2f2' }]}>
+                        <MaterialCommunityIcons name="trophy" size={16} color="#ef4444" />
+                        <Text style={[styles.detailedStatsLabel, { color: '#ef4444' }]}>Lowest</Text>
+                        <Text style={[styles.detailedStatsValue, { color: '#ef4444' }]}>{lowestScore.toFixed(1)}%</Text>
+                        <Text style={[styles.detailedStatsSubtext, { fontSize: 10, color: '#ef4444' }]} numberOfLines={1}>
+                          {bottomStudentName || '—'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  {/* Efficiency */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Efficiency</Text>
+                    <View style={styles.detailedStatsGrid}>
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="format-list-checks" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Avg Attempts</Text>
+                        <Text style={styles.detailedStatsValue}>{avgAttemptsPerItem.toFixed(1)}</Text>
+                        <Text style={styles.detailedStatsSubtext}>
+                          {avgAttemptsPerItem < 1.5 ? 'Excellent' : avgAttemptsPerItem < 2.5 ? 'Good' : 'Fair'}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.detailedStatsCard}>
+                        <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
+                        <Text style={styles.detailedStatsLabel}>Avg Time</Text>
+                        <Text style={styles.detailedStatsValue}>
+                          {avgTimePerItem > 60000 
+                            ? `${Math.floor(avgTimePerItem / 60000)}m ${Math.floor((avgTimePerItem % 60000) / 1000)}s`
+                            : `${Math.floor(avgTimePerItem / 1000)}s`}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  {/* Performance Distribution */}
+                  <View style={styles.detailedStatsSubsection}>
+                    <Text style={styles.detailedStatsSubtitle}>Performance Distribution</Text>
+                    <View style={styles.detailedStatsDistribution}>
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(highlyProficientCount / total) * 100}%` : '0%', backgroundColor: '#10b981' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#10b981' }]} />
+                            <Text style={styles.detailedStatsDistText}>Highly Proficient (85-100%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{highlyProficientCount} ({total > 0 ? ((highlyProficientCount / total) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(proficientCount / total) * 100}%` : '0%', backgroundColor: '#3b82f6' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#3b82f6' }]} />
+                            <Text style={styles.detailedStatsDistText}>Proficient (75-84%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{proficientCount} ({total > 0 ? ((proficientCount / total) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(nearlyProficientCount / total) * 100}%` : '0%', backgroundColor: '#f59e0b' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#f59e0b' }]} />
+                            <Text style={styles.detailedStatsDistText}>Nearly Proficient (50-74%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{nearlyProficientCount} ({total > 0 ? ((nearlyProficientCount / total) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(lowProficientCount / total) * 100}%` : '0%', backgroundColor: '#f97316' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#f97316' }]} />
+                            <Text style={styles.detailedStatsDistText}>Low Proficient (25-49%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{lowProficientCount} ({total > 0 ? ((lowProficientCount / total) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                      
+                      <View style={styles.detailedStatsDistItem}>
+                        <View style={[styles.detailedStatsDistBar, { width: total > 0 ? `${(notProficientCount / total) * 100}%` : '0%', backgroundColor: '#ef4444' }]} />
+                        <View style={styles.detailedStatsDistLabel}>
+                          <View style={styles.detailedStatsDistLabelRow}>
+                            <View style={[styles.detailedStatsDistDot, { backgroundColor: '#ef4444' }]} />
+                            <Text style={styles.detailedStatsDistText}>Not Proficient (&lt;25%)</Text>
+                          </View>
+                          <Text style={styles.detailedStatsDistCount}>{notProficientCount} ({total > 0 ? ((notProficientCount / total) * 100).toFixed(0) : 0}%)</Text>
+                        </View>
+                      </View>
+                    </View>
+                  </View>
+                  
+                  {/* Time vs Score Per Item Chart removed per request */}
+                </View>
+              );
+              } catch (error: any) {
+                console.error('Error rendering detailed statistics:', error);
+                return (
+                  <View style={styles.detailedStatsErrorContainer}>
+                    <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
+                    <Text style={styles.detailedStatsErrorText}>Error Loading Statistics</Text>
+                    <Text style={styles.detailedStatsErrorSubtext}>
+                      An error occurred while processing the statistics. Please try again.
+                    </Text>
+                    <TouchableOpacity 
+                      style={styles.detailedStatsRetryButton}
+                      onPress={handleRetryDetailedStats}
+                    >
+                      <MaterialCommunityIcons name="refresh" size={18} color="#ffffff" />
+                      <Text style={styles.detailedStatsRetryButtonText}>Retry</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
+            })()}
+            {/* Item Analysis Section */}
+            <View style={styles.detailedStatsItemAnalysisSection}>
+              <Text style={styles.detailedStatsSectionTitle}>Item Analysis</Text>
+              
+              {selectedExerciseForStats && (() => {
+                const { exerciseResults } = selectedExerciseForStats;
+                // Lazy-load Item Analysis to avoid initial heavy computation on mobile
+                if (!showItemAnalysis) {
+                  return (
+                    <TouchableOpacity 
+                      style={[styles.statsToggleButton, { alignSelf: 'flex-start', marginTop: 8 }]}
+                      onPress={() => setShowItemAnalysis(true)}
+                    >
+                      <Text style={styles.statsToggleText}>Show Item Analysis</Text>
+                      <MaterialCommunityIcons name="chevron-right" size={18} color="#3b82f6" />
+                    </TouchableOpacity>
+                  );
+                }
+                const firstResult = exerciseResults[0];
+                
+                if (!firstResult?.questionResults?.length) {
+                  return (
+                    <View style={styles.noDataContainer}>
+                      <Text style={styles.noDataText}>No question data available</Text>
+                    </View>
+                  );
+                }
+
+                // Filter to only show questions that have been answered by students
+                const answeredQuestions = firstResult.questionResults.filter((question: any) => {
+                  const hasAnswers = exerciseResults.some((result: any) => {
+                    const qResult = result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                    return qResult && (qResult.studentAnswer || qResult.answer);
+                  });
+                  return hasAnswers;
+                });
+
+                return answeredQuestions.map((question: any, questionIndex: number) => {
+                  // More accurate question number calculation
+                  const questionNumber = question.questionNumber || questionIndex + 1;
+                  const questionText = question.questionText || `Question ${questionNumber}`;
+                  
+                  // More accurate question type calculation
+                  let questionType = question.questionType || 'Unknown';
+                  if (questionType.includes('multiple-choice')) {
+                    questionType = 'Multiple Choice';
+                  } else if (questionType.includes('identification')) {
+                    questionType = 'Identification';
+                  } else if (questionType.includes('re-order')) {
+                    questionType = 'Re-order';
+                  } else if (questionType.includes('matching')) {
+                    questionType = 'Matching';
+                  }
+                  
+                  // Calculate metrics based on actual student results for this specific question
+                  const questionResults = exerciseResults.map((result: any) => {
+                    return result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                  }).filter(Boolean);
+                  
+                  // Only proceed if we have actual responses for this question
+                  if (questionResults.length === 0) return null;
+                  
+                  // Calculate accurate time metrics based on actual student performance
+                  const timeSpentArray = questionResults
+                    .map((q: any) => q.timeSpentSeconds || 0)
+                    .filter(time => time > 0);
+                  
+                  const avgTimeSpent = timeSpentArray.length > 0 
+                    ? timeSpentArray.reduce((sum, time) => sum + time, 0) / timeSpentArray.length 
+                    : 0;
+                  
+                  // Calculate actual time spent in seconds (already in seconds)
+                  const avgTimeInSeconds = Math.round(avgTimeSpent);
+                  
+                  // Calculate average attempts by students
+                  const attemptsArray = questionResults.map((q: any) => q.attempts || 1);
+                  const avgAttempts = attemptsArray.length > 0 
+                    ? attemptsArray.reduce((sum, attempts) => sum + attempts, 0) / attemptsArray.length 
+                    : 1;
+                  
+                  // Get the correct answer from the question data
+                  const correctAnswer = question.correctAnswer || question.answer;
+                  
+                  // Analyze answer distribution for this question
+                  const answerDistribution: { [key: string]: { count: number, isCorrect: boolean } } = {};
+                  let totalStudentsAnswered = 0;
+                  let correctResponses = 0;
+                  
+                  let noAnswerCount = 0;
+                  
+                  exerciseResults.forEach((result: any) => {
+                    const qResult = result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                    if (qResult && (qResult.studentAnswer || qResult.answer)) {
+                      totalStudentsAnswered++;
+                      const rawAnswer = qResult.studentAnswer || qResult.answer;
+                      const formattedAnswer = formatAnswerForDisplay(rawAnswer, questionType);
+                      
+                      // Determine if this answer is correct
+                      let isCorrect = false;
+                      if (correctAnswer) {
+                        const formattedCorrectAnswer = formatAnswerForDisplay(correctAnswer, questionType);
+                        isCorrect = formattedAnswer === formattedCorrectAnswer;
+                      } else {
+                        // Fallback to the isCorrect flag from the result
+                        isCorrect = qResult.isCorrect || false;
+                      }
+                      
+                      if (isCorrect) {
+                        correctResponses++;
+                      }
+                      
+                      if (!answerDistribution[formattedAnswer]) {
+                        answerDistribution[formattedAnswer] = { count: 0, isCorrect };
+                      }
+                      answerDistribution[formattedAnswer].count++;
+                    } else {
+                      // Student didn't answer this question
+                      noAnswerCount++;
+                    }
+                  });
+                  
+                  // Add "No Answer" entry if there are students who didn't respond
+                  if (noAnswerCount > 0) {
+                    answerDistribution['No Answer'] = { count: noAnswerCount, isCorrect: false };
+                  }
+
+                  // Sort answers by frequency (most common first)
+                  const sortedAnswers = Object.entries(answerDistribution)
+                    .sort(([,a], [,b]) => b.count - a.count);
+
+                  // Calculate difficulty index (percentage who got it correct out of those who answered)
+                  const difficultyIndex = totalStudentsAnswered > 0 ? (correctResponses / totalStudentsAnswered) * 100 : 0;
+                  
+                  // Calculate discrimination index (difference between top and bottom performers)
+                  const topPerformers = exerciseResults
+                    .sort((a: any, b: any) => (b.scorePercentage || 0) - (a.scorePercentage || 0))
+                    .slice(0, Math.ceil(exerciseResults.length * 0.27));
+                  const bottomPerformers = exerciseResults
+                    .sort((a: any, b: any) => (a.scorePercentage || 0) - (b.scorePercentage || 0))
+                    .slice(0, Math.ceil(exerciseResults.length * 0.27));
+                  
+                  const topCorrect = topPerformers.filter((result: any) => {
+                    const qResult = result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                    return qResult?.isCorrect || false;
+                  }).length;
+                  
+                  const bottomCorrect = bottomPerformers.filter((result: any) => {
+                    const qResult = result.questionResults?.find((q: any) => q.questionId === question.questionId);
+                    return qResult?.isCorrect || false;
+                  }).length;
+                  
+                  const discriminationIndex = topPerformers.length > 0 && bottomPerformers.length > 0 
+                    ? ((topCorrect / topPerformers.length) - (bottomCorrect / bottomPerformers.length)) * 100
+                    : 0;
+
+                  return (
+                    <View key={question.questionId || questionIndex} style={styles.itemAnalysisCard}>
+                      <View style={styles.itemAnalysisHeader}>
+                        <View style={styles.itemAnalysisTitleRow}>
+                          <View style={styles.itemAnalysisNumberBadge}>
+                            <Text style={styles.itemAnalysisNumberText}>{questionNumber}</Text>
+                          </View>
+                          <View style={styles.itemAnalysisTypeBadge}>
+                            <Text style={styles.itemAnalysisTypeText}>{questionType}</Text>
+                          </View>
+                          <View style={styles.itemAnalysisAttemptsBadge}>
+                            <MaterialCommunityIcons name="repeat" size={12} color="#64748b" />
+                            <Text style={styles.itemAnalysisAttemptsText}>{avgAttempts.toFixed(1)}</Text>
+                          </View>
+                          <View style={styles.itemAnalysisTimeBadge}>
+                            <MaterialCommunityIcons name="clock" size={12} color="#64748b" />
+                            <Text style={styles.itemAnalysisTimeText}>{avgTimeInSeconds}s</Text>
+                          </View>
+                        </View>
+                        <Text style={styles.itemAnalysisQuestionText}>
+                          {questionText}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.itemAnalysisTable}>
+                        <View style={styles.itemAnalysisTableHeader}>
+                          <View style={styles.itemAnalysisAnswerCell}>
+                            <Text style={styles.itemAnalysisTableHeaderText}>Answer</Text>
+                          </View>
+                          <View style={{
+                            flex: 1,
+                            alignItems: 'center',
+                          }}>
+                            <Text style={styles.itemAnalysisTableHeaderText}>Frequency</Text>
+                          </View>
+                          <View style={{
+                            flex: 1,
+                            alignItems: 'center',
+                          }}>
+                            <Text style={styles.itemAnalysisTableHeaderText}>Percent</Text>
+                          </View>
+                        </View>
+                        
+                        {sortedAnswers.map(([answer, data], answerIndex) => (
+                          <View 
+                            key={answerIndex} 
+                            style={[
+                              styles.itemAnalysisTableRow,
+                              data.isCorrect && styles.itemAnalysisCorrectRow
+                            ]}
+                          >
+                            <View style={styles.itemAnalysisAnswerCell}>
+                              <View style={styles.itemAnalysisAnswerContent}>
+                                {data.isCorrect && (
+                                  <MaterialCommunityIcons name="check" size={16} color="#10b981" style={styles.itemAnalysisCheckIcon} />
+                                )}
+                                <Text 
+                                  style={[
+                                    styles.itemAnalysisAnswerText,
+                                    data.isCorrect && styles.itemAnalysisCorrectText
+                                  ]}
+                                  numberOfLines={3}
+                                  ellipsizeMode="tail"
+                                >
+                                  {answer}
+                                </Text>
+                              </View>
+                            </View>
+                            <View style={{
+                              flex: 1,
+                              alignItems: 'center',
+                            }}>
+                              <Text style={styles.itemAnalysisFrequencyText}>{data.count}</Text>
+                            </View>
+                            <View style={{
+                              flex: 1,
+                              alignItems: 'center',
+                            }}>
+                              <Text style={styles.itemAnalysisPercentageText}>
+                                {exerciseResults.length > 0 ? Math.round((data.count / exerciseResults.length) * 100) : 0}%
+                              </Text>
+                            </View>
+                          </View>
+                        ))}
+                        
+                        {/* Total Row */}
+                        <View style={{
+                          flexDirection: 'row',
+                          paddingVertical: 12,
+                          paddingHorizontal: 12,
+                          backgroundColor: '#f1f5f9',
+                          borderTopWidth: 2,
+                          borderTopColor: '#e2e8f0',
+                          alignItems: 'center',
+                        }}>
+                          <View style={styles.itemAnalysisAnswerCell}>
+                            <Text style={{
+                              fontSize: 13,
+                              color: '#1e293b',
+                              fontWeight: '700',
+                              textAlign: 'center',
+                            }}>Total</Text>
+                          </View>
+                          <View style={{
+                            flex: 1,
+                            alignItems: 'center',
+                          }}>
+                            <Text style={{
+                              fontSize: 13,
+                              color: '#1e293b',
+                              fontWeight: '700',
+                              textAlign: 'center',
+                            }}>
+                              {exerciseResults.length}
+                            </Text>
+                          </View>
+                          <View style={{
+                            flex: 1,
+                            alignItems: 'center',
+                          }}>
+                            <Text style={{
+                              fontSize: 13,
+                              color: '#1e293b',
+                              fontWeight: '700',
+                              textAlign: 'center',
+                            }}>100%</Text>
+                          </View>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                });
+              })()}
+            </View>
+          </ScrollView>
+          )}
+                </View>
+              </View>
+            </ModalErrorBoundary>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
 
       {/* Custom Alert */}
 
@@ -11689,9 +15358,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   );
 
 }
-
-
-
 const styles = StyleSheet.create({
 
   container: {
@@ -12116,7 +15782,7 @@ const styles = StyleSheet.create({
 
   announcementModalTitle: {
 
-    fontSize: 20,
+    fontSize: 18,
 
     fontWeight: '700',
 
@@ -12146,7 +15812,7 @@ const styles = StyleSheet.create({
 
   announcementFieldLabel: {
 
-    fontSize: 16,
+    fontSize: 14,
 
     fontWeight: '600',
 
@@ -12168,7 +15834,7 @@ const styles = StyleSheet.create({
 
     paddingVertical: 12,
 
-    fontSize: 16,
+    fontSize: 14,
 
     color: '#1f2937',
 
@@ -12312,7 +15978,7 @@ const styles = StyleSheet.create({
 
   announcementClassName: {
 
-    fontSize: 16,
+    fontSize: 15,
 
     fontWeight: '600',
 
@@ -12398,7 +16064,7 @@ const styles = StyleSheet.create({
 
   announcementCancelButtonText: {
 
-    fontSize: 16,
+    fontSize: 14,
 
     fontWeight: '600',
 
@@ -12466,7 +16132,7 @@ const styles = StyleSheet.create({
 
   announcementSendButtonText: {
 
-    fontSize: 16,
+    fontSize: 14,
 
     fontWeight: '700',
 
@@ -12481,7 +16147,6 @@ const styles = StyleSheet.create({
   actionButtons: {
 
     marginBottom: Math.min(20, staticHeight * 0.025),
-
   },
 
   actionCard: {
@@ -12556,6 +16221,71 @@ const styles = StyleSheet.create({
 
   },
 
+  classroomsSectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: Math.min(20, staticHeight * 0.025),
+    paddingHorizontal: Math.min(16, staticWidth * 0.04),
+  },
+
+  sectionTitle: {
+    fontSize: Math.min(16, staticWidth * 0.045),
+
+    fontWeight: '800',
+
+    color: '#1e293b',
+
+  },
+
+  sectionSubtitle: {
+    fontSize: Math.min(14, staticWidth * 0.04),
+    color: '#64748b',
+    fontWeight: '500',
+    marginTop: 4,
+  },
+
+  classroomBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 20,
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+
+  classroomBadgeText: {
+    color: '#ffffff',
+    fontSize: Math.min(14, staticWidth * 0.042),
+    fontWeight: '700',
+  },
+
+  emptyStateContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Math.min(60, staticHeight * 0.08),
+    paddingHorizontal: Math.min(32, staticWidth * 0.08),
+  },
+
+  emptyStateTitle: {
+    fontSize: Math.min(16, staticWidth * 0.045),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginTop: Math.min(16, staticHeight * 0.02),
+    marginBottom: Math.min(8, staticHeight * 0.01),
+  },
+
+  emptyStateText: {
+    fontSize: Math.min(14, staticWidth * 0.04),
+    color: '#64748b',
+    textAlign: 'center',
+  },
+
   classHeader: {
 
     flexDirection: 'row',
@@ -12586,85 +16316,112 @@ const styles = StyleSheet.create({
 
   },
 
-  sectionTitle: {
-
-    fontSize: Math.max(16, Math.min(20, staticWidth * 0.05)),
-
-    fontWeight: '700',
-
-    color: '#1e293b',
-
-    marginBottom: Math.min(12, staticHeight * 0.015),
-
-    paddingHorizontal: Math.min(8, staticWidth * 0.02),
-
-  },
-
   classroomCard: {
 
     backgroundColor: '#ffffff',
 
-    borderRadius: Math.min(16, staticWidth * 0.04),
+    borderRadius: Math.min(20, staticWidth * 0.05),
 
-    padding: Math.min(20, staticWidth * 0.05),
+    marginHorizontal: Math.min(12, staticWidth * 0.03),
 
-    marginHorizontal: Math.min(8, staticWidth * 0.02),
-
-    marginBottom: Math.min(16, staticHeight * 0.02),
+    marginBottom: Math.min(50, staticHeight * 0.050),
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 8 },
 
-    shadowOpacity: 0.06,
+    shadowOpacity: 0.12,
 
-    shadowRadius: 8,
+    shadowRadius: 16,
 
-    elevation: 3,
+    elevation: 8,
 
-    borderWidth: 1,
+    overflow: 'hidden',
 
-    borderColor: '#e2e8f0',
-
-    width: staticWidth - Math.min(32, staticWidth * 0.08),
+    width: staticWidth - Math.min(40, staticWidth * 0.1),
 
     alignSelf: 'center',
 
   },
 
-  classroomHeader: {
+  classroomCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: Math.min(20, staticWidth * 0.05),
+    paddingBottom: Math.min(16, staticHeight * 0.02),
+  },
 
-    marginBottom: 12,
+  classroomHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
 
+  classroomIconContainer: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Math.min(16, staticWidth * 0.04),
+  },
+
+  classroomHeaderInfo: {
+    flex: 1,
   },
 
   classroomTitle: {
 
-    fontSize: Math.max(16, Math.min(20, staticWidth * 0.05)),
+    fontSize: Math.max(15, Math.min(16, staticWidth * 0.045)),
 
     fontWeight: '700',
 
     color: '#1e293b',
 
-    marginBottom: Math.min(6, staticHeight * 0.008),
+    marginBottom: Math.min(2, staticHeight * 0.005),
 
   },
 
   classroomSubtitle: {
 
-    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    fontSize: Math.max(12, Math.min(13, staticWidth * 0.032)),
 
-    color: '#64748b',
-
-    marginBottom: Math.min(4, staticHeight * 0.005),
+    color: '#000000',
 
     fontWeight: '500',
 
   },
 
+  classroomCardBody: {
+    padding: Math.min(20, staticWidth * 0.05),
+    paddingTop: Math.min(16, staticHeight * 0.02),
+  },
+
+  schoolYearBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: Math.min(12, staticWidth * 0.03),
+    paddingVertical: Math.min(6, staticHeight * 0.008),
+    borderRadius: Math.min(20, staticWidth * 0.05),
+    marginBottom: Math.min(16, staticHeight * 0.02),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  schoolYearText: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#64748b',
+    fontWeight: '600',
+    marginLeft: Math.min(6, staticWidth * 0.015),
+  },
+
   classroomYear: {
 
-    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
+    fontSize: Math.max(11, Math.min(12, staticWidth * 0.03)),
 
     color: '#64748b',
 
@@ -12808,7 +16565,7 @@ const styles = StyleSheet.create({
 
   exerciseTitle: {
 
-    fontSize: Math.max(14, Math.min(18, staticWidth * 0.045)),
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.045)),
 
     fontWeight: '700',
 
@@ -12994,13 +16751,13 @@ const styles = StyleSheet.create({
 
   },
 
-  metricContent: {
+  oldMetricContent: {
 
     alignItems: 'center',
 
   },
 
-  metricLabel: {
+  oldMetricLabel: {
 
     fontSize: Math.max(8, Math.min(10, staticWidth * 0.02)),
 
@@ -13014,7 +16771,7 @@ const styles = StyleSheet.create({
 
   },
 
-  metricValue: {
+  oldMetricValue: {
 
     fontSize: Math.max(10, Math.min(11, staticWidth * 0.035)),
 
@@ -13164,50 +16921,503 @@ const styles = StyleSheet.create({
 
   moreButton: {
 
-    position: 'absolute',
+    padding: 8,
 
-    top: 0,
+    borderRadius: 20,
 
-    right: 0,
-
-    padding: 6,
-
-    borderRadius: 12,
-
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
   },
 
   moreMenu: {
 
     position: 'absolute',
 
-    top: 28,
+    top: 60,
 
-    right: 0,
+    right: 16,
 
     backgroundColor: '#ffffff',
 
-    borderRadius: 12,
+    borderRadius: 16,
 
-    paddingVertical: 6,
+    paddingVertical: 8,
 
-    paddingHorizontal: 8,
+    paddingHorizontal: 12,
 
     shadowColor: '#000',
 
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 6 },
 
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.15,
 
-    shadowRadius: 8,
+    shadowRadius: 12,
 
-    elevation: 6,
+    elevation: 8,
 
     borderWidth: 1,
 
-    borderColor: '#e5e7eb',
+    borderColor: '#e2e8f0',
 
     zIndex: 10,
 
+    minWidth: 160,
+
+  },
+
+  parentsListButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f9ff',
+    paddingHorizontal: Math.min(12, staticWidth * 0.03),
+    paddingVertical: Math.min(8, staticHeight * 0.01),
+    borderRadius: Math.min(8, staticWidth * 0.02),
+    marginTop: Math.min(8, staticHeight * 0.01),
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: '#3b82f6',
+  },
+
+  parentsListButtonText: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#3b82f6',
+    fontWeight: '600',
+    marginLeft: Math.min(6, staticWidth * 0.015),
+  },
+
+  studentStatsContainer: {
+    marginBottom: Math.min(16, staticHeight * 0.02),
+  },
+
+  studentStatsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Math.min(10, staticHeight * 0.012),
+  },
+
+  studentStatsTitle: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: Math.min(6, staticWidth * 0.015),
+  },
+
+  studentStatsGrid: {
+    flexDirection: 'row',
+    gap: Math.min(8, staticWidth * 0.02),
+  },
+
+  studentStatCard: {
+    flex: 1,
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    padding: Math.min(12, staticWidth * 0.03),
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+  },
+
+  studentStatCardTotal: {
+    borderColor: '#3b82f6',
+    backgroundColor: '#eff6ff',
+  },
+
+  studentStatCardMale: {
+    borderColor: '#10b981',
+    backgroundColor: '#ecfdf5',
+  },
+
+  studentStatCardFemale: {
+    borderColor: '#f59e0b',
+    backgroundColor: '#fef3c7',
+  },
+
+  studentStatIconContainer: {
+    marginBottom: Math.min(6, staticHeight * 0.008),
+  },
+
+  studentStatValue: {
+    fontSize: Math.max(18, Math.min(22, staticWidth * 0.055)),
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+    textAlign: 'center',
+  },
+
+  studentStatLabel: {
+    fontSize: Math.max(10, Math.min(12, staticWidth * 0.03)),
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    lineHeight: Math.max(14, Math.min(16, staticWidth * 0.04)),
+  },
+
+  // Performance Metrics Styles
+  performanceMetricsContainer: {
+    marginBottom: Math.min(20, staticHeight * 0.025),
+  },
+
+  performanceMetricsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Math.min(12, staticHeight * 0.015),
+  },
+
+  performanceMetricsTitle: {
+    fontSize: Math.max(15, Math.min(17, staticWidth * 0.043)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: Math.min(8, staticWidth * 0.02),
+  },
+
+  metricsCardsContainer: {
+    gap: Math.min(12, staticWidth * 0.03),
+  },
+
+  metricCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    padding: Math.min(16, staticWidth * 0.04),
+    borderRadius: Math.min(16, staticWidth * 0.04),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+
+  metricIconWrapper: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Math.min(12, staticWidth * 0.03),
+  },
+
+  metricInfo: {
+    flex: 1,
+  },
+
+  metricLabel: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#64748b',
+    fontWeight: '600',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  metricValue: {
+    fontSize: Math.max(20, Math.min(24, staticWidth * 0.06)),
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: Math.min(2, staticHeight * 0.003),
+  },
+
+  metricSubtext: {
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
+    color: '#94a3b8',
+    fontWeight: '500',
+  },
+
+  // Exercise Statistics Styles
+  exerciseStatsContainer: {
+    marginBottom: Math.min(20, staticHeight * 0.025),
+    backgroundColor: '#f8fafc',
+    borderRadius: Math.min(16, staticWidth * 0.04),
+    padding: Math.min(20, staticWidth * 0.05),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  exerciseStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    justifyContent: 'space-between',
+    gap: Math.min(8, staticWidth * 0.02),
+  },
+
+  exerciseStatItem: {
+    alignItems: 'center',
+    flex: 1,
+    paddingHorizontal: Math.min(4, staticWidth * 0.01),
+  },
+
+  exerciseStatIconBg: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Math.min(8, staticHeight * 0.01),
+  },
+
+  exerciseStatInfo: {
+    alignItems: 'center',
+    width: '100%',
+  },
+
+  exerciseStatValue: {
+    fontSize: Math.max(18, Math.min(22, staticWidth * 0.055)),
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  exerciseStatLabel: {
+    fontSize: Math.max(10, Math.min(12, staticWidth * 0.03)),
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    lineHeight: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    maxWidth: '100%',
+  },
+
+  exerciseStatDivider: {
+    width: 1,
+    height: 50,
+    backgroundColor: '#cbd5e1',
+    marginHorizontal: Math.min(4, staticWidth * 0.01),
+  },
+
+  // View Results Button
+  viewResultsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#3b82f6',
+    paddingVertical: Math.min(14, staticHeight * 0.018),
+    paddingHorizontal: Math.min(24, staticWidth * 0.06),
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+
+  viewResultsButtonText: {
+    color: '#ffffff',
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '700',
+    marginRight: Math.min(8, staticWidth * 0.02),
+  },
+
+  parentListItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: Math.min(12, staticHeight * 0.015),
+    paddingHorizontal: Math.min(16, staticWidth * 0.04),
+    backgroundColor: '#ffffff',
+    borderRadius: Math.min(8, staticWidth * 0.02),
+    marginBottom: Math.min(8, staticHeight * 0.01),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  parentInfo: {
+    flex: 1,
+  },
+
+  parentStudentName: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentCode: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#64748b',
+  },
+
+  clickableParentCode: {
+    fontSize: Math.max(12, Math.min(14, staticWidth * 0.035)),
+    color: '#3b82f6',
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+
+  parentStatusContainer: {
+    marginLeft: Math.min(12, staticWidth * 0.03),
+  },
+
+  parentStatusBadge: {
+    paddingHorizontal: Math.min(8, staticWidth * 0.02),
+    paddingVertical: Math.min(4, staticHeight * 0.005),
+    borderRadius: Math.min(12, staticWidth * 0.03),
+  },
+
+  parentStatusText: {
+    fontSize: Math.max(11, Math.min(13, staticWidth * 0.032)),
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  clickableStudentName: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#3b82f6',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+    textDecorationLine: 'underline',
+  },
+
+  nonClickableStudentName: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  // Enhanced Parent List Card Styles
+  parentListCard: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: Math.min(16, staticWidth * 0.04),
+    backgroundColor: '#ffffff',
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    marginBottom: Math.min(12, staticHeight * 0.015),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+
+  parentCardLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  parentCardAvatar: {
+    width: Math.min(48, staticWidth * 0.12),
+    height: Math.min(48, staticWidth * 0.12),
+    borderRadius: Math.min(24, staticWidth * 0.06),
+    backgroundColor: '#6366f1',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Math.min(12, staticWidth * 0.03),
+  },
+
+  parentCardAvatarText: {
+    fontSize: Math.max(16, Math.min(18, staticWidth * 0.045)),
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  parentCardInfo: {
+    flex: 1,
+  },
+
+  parentCardNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentCardStudentName: {
+    fontSize: Math.max(15, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#1e293b',
+    flex: 1,
+  },
+
+  parentCardParentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentCardParentName: {
+    fontSize: Math.max(13, Math.min(14, staticWidth * 0.035)),
+    fontWeight: '500',
+    color: '#8b5cf6',
+    flex: 1,
+  },
+
+  parentCardCodeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  parentCardCode: {
+    fontSize: Math.max(12, Math.min(13, staticWidth * 0.032)),
+    color: '#64748b',
+  },
+
+  parentCardCodeClickable: {
+    fontSize: Math.max(12, Math.min(13, staticWidth * 0.032)),
+    color: '#3b82f6',
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+
+  parentCardRight: {
+    marginLeft: Math.min(12, staticWidth * 0.03),
+  },
+
+  parentCardStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Math.min(10, staticWidth * 0.025),
+    paddingVertical: Math.min(6, staticHeight * 0.008),
+    borderRadius: Math.min(16, staticWidth * 0.04),
+  },
+
+  parentCardStatusText: {
+    fontSize: Math.max(11, Math.min(12, staticWidth * 0.03)),
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  parentDetailsSection: {
+    marginBottom: Math.min(20, staticHeight * 0.025),
+    padding: Math.min(16, staticWidth * 0.04),
+    backgroundColor: '#f8fafc',
+    borderRadius: Math.min(12, staticWidth * 0.03),
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  parentDetailsSectionTitle: {
+    fontSize: Math.max(16, Math.min(18, staticWidth * 0.045)),
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: Math.min(12, staticHeight * 0.015),
+  },
+
+  parentDetailsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: Math.min(8, staticHeight * 0.01),
+    paddingVertical: Math.min(4, staticHeight * 0.005),
+  },
+
+  parentDetailsLabel: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '600',
+    color: '#64748b',
+    flex: 1,
+  },
+
+  parentDetailsValue: {
+    fontSize: Math.max(14, Math.min(16, staticWidth * 0.04)),
+    fontWeight: '500',
+    color: '#1e293b',
+    flex: 2,
+    textAlign: 'right',
+  },
+
+  parentInfoValueContainer: {
+    flex: 2,
+    alignItems: 'flex-end',
   },
 
   moreMenuItem: {
@@ -13216,11 +17426,15 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    paddingVertical: 8,
+    paddingVertical: 12,
 
-    paddingHorizontal: 8,
+    paddingHorizontal: 12,
 
-    gap: 8,
+    gap: 12,
+
+    borderRadius: 10,
+
+    marginBottom: 4,
 
   },
 
@@ -13228,7 +17442,7 @@ const styles = StyleSheet.create({
 
     color: '#1e293b',
 
-    fontSize: 14,
+    fontSize: Math.max(13, Math.min(15, staticWidth * 0.038)),
 
     fontWeight: '600',
 
@@ -13446,23 +17660,25 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    borderRadius: 16,
+    borderRadius: 10,
 
-    padding: 20,
+    padding: 10,
 
     shadowColor: '#000',
 
     shadowOffset: { width: 0, height: 2 },
 
-    shadowOpacity: 0.05,
+    shadowOpacity: 0.1,
 
-    shadowRadius: 8,
+    shadowRadius: 4,
 
-    elevation: 2,
+    elevation: 3,
 
     borderWidth: 1,
 
     borderColor: '#f1f5f9',
+
+    height: 80,
 
   },
 
@@ -13472,28 +17688,35 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
+    justifyContent: 'center',
+
+    paddingHorizontal: 2,
+
   },
 
   statValue: {
 
-    fontSize: 20,
+    fontSize: 16,
 
     fontWeight: '700',
 
     color: '#1e293b',
 
-    marginBottom: 4,
+    marginBottom: 2,
 
   },
 
   statLabel: {
 
-    fontSize: 12,
+    fontSize: 10,
 
     color: '#64748b',
 
     fontWeight: '500',
 
+    textAlign: 'center',
+
+    lineHeight: 12,
   },
 
   statDivider: {
@@ -13502,7 +17725,23 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#e2e8f0',
 
-    marginHorizontal: 16,
+    marginHorizontal: 4,
+
+  },
+
+  statIconBg: {
+
+    width: 24,
+
+    height: 24,
+
+    borderRadius: 12,
+
+    alignItems: 'center',
+
+    justifyContent: 'center',
+
+    marginBottom: 6,
 
   },
 
@@ -13582,13 +17821,33 @@ const styles = StyleSheet.create({
 
   },
 
+  studentTableWrapper: {
+
+    width: '100%',
+
+    marginTop: 8,
+
+  },
+
+  studentTableScrollContent: {
+
+    paddingBottom: 4,
+
+  },
+
+  studentTableContent: {
+
+    paddingRight: 0,
+
+  },
+
   studentRow: {
 
     flexDirection: 'row',
 
     alignItems: 'center',
 
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
 
     paddingVertical: 8,
 
@@ -13604,7 +17863,7 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
 
     paddingVertical: 8,
 
@@ -13650,7 +17909,23 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
+    justifyContent: 'flex-end',
+
     gap: 10,
+
+    width: 40,
+
+    minWidth: 40,
+
+  },
+
+  studentActionsHeader: {
+
+    width: 40,
+
+    alignItems: 'flex-end',
+
+    justifyContent: 'flex-end',
 
   },
 
@@ -13668,15 +17943,15 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    gap: 6,
+    gap: 4,
 
     backgroundColor: '#dcfce7',
 
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
 
-    paddingVertical: 6,
+    paddingVertical: 4,
 
-    borderRadius: 20,
+    borderRadius: 16,
 
     borderWidth: 1,
 
@@ -13690,15 +17965,15 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    gap: 6,
+    gap: 4,
 
     backgroundColor: '#f1f5f9',
 
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
 
-    paddingVertical: 6,
+    paddingVertical: 4,
 
-    borderRadius: 20,
+    borderRadius: 16,
 
     borderWidth: 1,
 
@@ -13720,7 +17995,7 @@ const styles = StyleSheet.create({
 
     color: '#15803d',
 
-    fontSize: 12,
+    fontSize: 10,
 
     fontWeight: '700',
 
@@ -13730,7 +18005,7 @@ const styles = StyleSheet.create({
 
     color: '#64748b',
 
-    fontSize: 12,
+    fontSize: 10,
 
     fontWeight: '700',
 
@@ -13766,7 +18041,7 @@ const styles = StyleSheet.create({
 
   classTabTitle: {
 
-    fontSize: 24,
+    fontSize: 20,
 
     fontWeight: '800',
 
@@ -13778,38 +18053,85 @@ const styles = StyleSheet.create({
 
   classTabSubtitle: {
 
-    fontSize: 14,
+    fontSize: 10,
 
     color: '#64748b',
 
     fontWeight: '500',
 
   },
-
-  emptyStateContainer: {
-
-    alignItems: 'center',
-
-    justifyContent: 'center',
-
-    paddingVertical: 60,
-
-    paddingHorizontal: 20,
-
+  
+  // Quarter filtering styles
+  quarterFilterContainer: {
+    marginBottom: 16,
+    paddingVertical: 8,
   },
-
-  emptyStateText: {
-
-    fontSize: 18,
-
+  
+  quarterPill: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  
+  quarterPillActive: {
+    backgroundColor: '#8b5cf6',
+    borderColor: '#8b5cf6',
+  },
+  
+  quarterPillText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  
+  quarterPillTextActive: {
+    color: '#ffffff',
+  },
+  
+  quarterHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#faf5ff',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e9d5ff',
+  },
+  
+  quarterTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  
+  quarterTitle: {
+    fontSize: 16,
     fontWeight: '700',
-
-    color: '#94a3b8',
-
-    marginTop: 16,
-
-    marginBottom: 8,
-
+    color: '#6b21a8',
+  },
+  
+  exportQuarterButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#dcfce7',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#86efac',
+  },
+  
+  exportQuarterButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#059669',
   },
 
   emptyStateSubtext: {
@@ -13882,13 +18204,13 @@ const styles = StyleSheet.create({
 
     backgroundColor: '#ffffff',
 
-    borderRadius: 16,
+    borderRadius: 14,
 
-    padding: 18,
+    padding: 12,
 
     marginHorizontal: 8,
 
-    marginBottom: 32,
+    marginBottom: 14,
 
     shadowColor: '#000',
 
@@ -13912,19 +18234,19 @@ const styles = StyleSheet.create({
 
     alignItems: 'flex-start',
 
-    marginBottom: 14,
+    marginBottom: 8,
 
-    gap: 12,
+    gap: 10,
 
   },
 
   classIconContainer: {
 
-    width: 48,
+    width: 42,
 
-    height: 48,
+    height: 42,
 
-    borderRadius: 14,
+    borderRadius: 12,
 
     backgroundColor: '#eff6ff',
 
@@ -13940,11 +18262,11 @@ const styles = StyleSheet.create({
 
   classIconContainerInactive: {
 
-    width: 48,
+    width: 42,
 
-    height: 48,
+    height: 42,
 
-    borderRadius: 14,
+    borderRadius: 12,
 
     backgroundColor: '#f8fafc',
 
@@ -13964,17 +18286,17 @@ const styles = StyleSheet.create({
 
     alignItems: 'center',
 
-    gap: 8,
+    gap: 6,
 
-    paddingVertical: 10,
+    paddingVertical: 6,
 
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
 
     backgroundColor: '#f8fafc',
 
-    borderRadius: 10,
+    borderRadius: 8,
 
-    marginBottom: 12,
+    marginBottom: 8,
 
     borderWidth: 1,
 
@@ -13984,7 +18306,7 @@ const styles = StyleSheet.create({
 
   studentCountText: {
 
-    fontSize: 14,
+    fontSize: 12,
 
     fontWeight: '600',
 
@@ -14045,6 +18367,82 @@ const styles = StyleSheet.create({
     fontSize: 10,
 
     fontWeight: '700',
+
+  },
+
+  // Export Menu Styles
+
+  exportMenuBtn: {
+
+    padding: 8,
+
+    borderRadius: 6,
+
+    backgroundColor: '#f8fafc',
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+  },
+
+  exportMenuDropdown: {
+
+    position: 'absolute',
+
+    top: 40,
+
+    right: 0,
+
+    backgroundColor: '#ffffff',
+
+    borderRadius: 8,
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+    shadowColor: '#000',
+
+    shadowOffset: { width: 0, height: 2 },
+
+    shadowOpacity: 0.1,
+
+    shadowRadius: 8,
+
+    elevation: 5,
+
+    zIndex: 1000,
+
+    minWidth: 140,
+
+  },
+
+  exportMenuItem: {
+
+    flexDirection: 'row',
+
+    alignItems: 'center',
+
+    gap: 8,
+
+    paddingHorizontal: 12,
+
+    paddingVertical: 10,
+
+    borderBottomWidth: 1,
+
+    borderBottomColor: '#f1f5f9',
+
+  },
+
+  exportMenuText: {
+
+    fontSize: 14,
+
+    fontWeight: '500',
+
+    color: '#374151',
 
   },
 
@@ -14153,7 +18551,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
 
     color: '#1e293b',
-
   },
 
   closeButton: {
@@ -14732,9 +19129,25 @@ const styles = StyleSheet.create({
 
   refreshButton: {
 
-    padding: 8,
+    padding: Math.min(8, staticWidth * 0.02),
 
-    borderRadius: 8,
+    borderRadius: Math.min(8, staticWidth * 0.02),
+
+    backgroundColor: '#ffffff',
+
+    borderWidth: 1,
+
+    borderColor: '#e2e8f0',
+
+    shadowColor: '#000',
+
+    shadowOffset: { width: 0, height: 1 },
+
+    shadowOpacity: 0.05,
+
+    shadowRadius: 2,
+
+    elevation: 1,
 
   },
 
@@ -14800,7 +19213,7 @@ const styles = StyleSheet.create({
 
   exercisesTabText: {
 
-    fontSize: 14,
+    fontSize: 12,
 
     color: '#64748b',
 
@@ -14937,7 +19350,6 @@ const styles = StyleSheet.create({
   filterContainer: {
 
     marginBottom: 20,
-
   },
 
   searchContainer: {
@@ -15300,7 +19712,7 @@ const styles = StyleSheet.create({
 
   },
 
-  quarterHeader: {
+  oldQuarterHeader: {
 
     flexDirection: 'row',
 
@@ -15550,6 +19962,40 @@ const styles = StyleSheet.create({
 
   },
 
+  // Assignments Header Styles
+
+  assignmentsHeader: {
+
+    flexDirection: 'row',
+
+    justifyContent: 'space-between',
+
+    alignItems: 'center',
+
+    paddingHorizontal: Math.min(16, staticWidth * 0.04),
+
+    paddingVertical: Math.min(12, staticHeight * 0.015),
+
+    marginBottom: Math.min(16, staticHeight * 0.02),
+
+    backgroundColor: '#f8fafc',
+
+    borderBottomWidth: 1,
+
+    borderBottomColor: '#e2e8f0',
+
+  },
+
+  assignmentsHeaderTitle: {
+
+    fontSize: Math.max(18, Math.min(20, staticWidth * 0.05)),
+
+    fontWeight: '700',
+
+    color: '#1e293b',
+
+  },
+
   completionStats: {
 
     flexDirection: 'row',
@@ -15699,7 +20145,6 @@ const styles = StyleSheet.create({
     flex: 1,
 
     paddingHorizontal: 20,
-
   },
 
   assignmentModalActions: {
@@ -16499,7 +20944,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
 
     color: '#64748b',
-
   },
 
   deleteWarningText: {
@@ -17287,7 +21731,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
 
     borderColor: '#e2e8f0',
-
   },
 
   exerciseTableHeader: {
@@ -17338,7 +21781,7 @@ const styles = StyleSheet.create({
 
     borderBottomColor: '#e2e8f0',
 
-    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 1.6 : 'auto',
 
     borderRadius: 6,
 
@@ -17364,7 +21807,7 @@ const styles = StyleSheet.create({
 
   tableHeaderText: {
 
-    fontSize: Math.max(11, Math.min(13, staticWidth * 0.03)),
+    fontSize: Math.max(10, Math.min(11, staticWidth * 0.027)),
 
     fontWeight: '700',
 
@@ -17385,8 +21828,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
 
     paddingVertical: 4,
-
-    flex: 1.5,
 
   },
 
@@ -17414,7 +21855,7 @@ const styles = StyleSheet.create({
 
     borderBottomColor: '#f1f5f9',
 
-    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 1.6 : 'auto',
 
     backgroundColor: '#ffffff',
 
@@ -17442,7 +21883,7 @@ const styles = StyleSheet.create({
 
   tableRowText: {
 
-    fontSize: Math.max(11, Math.min(13, staticWidth * 0.03)),
+    fontSize: Math.max(10, Math.min(11, staticWidth * 0.027)),
 
     color: '#1e293b',
 
@@ -17471,14 +21912,39 @@ const styles = StyleSheet.create({
   },
 
   tableScrollContainer: {
+    // Removed maxHeight to prevent vertical scrolling
+  },
+  tableScrollContent: {
+    flexGrow: 1,
+  },
 
-    maxHeight: staticHeight * 0.35,
+  resultsTableActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
 
+  resultsViewAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    gap: 4,
+  },
+
+  resultsViewAllBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
   },
 
   tableContainer: {
 
-    minWidth: staticWidth < 400 ? staticWidth * 0.9 : 'auto',
+    minWidth: staticWidth < 400 ? staticWidth * 1.6 : 'auto',
 
   },
 
@@ -18067,7 +22533,6 @@ const styles = StyleSheet.create({
     color: '#374151',
 
     marginBottom: 4,
-
   },
 
   studentPerformanceScoreNote: {
@@ -18863,7 +23328,6 @@ const styles = StyleSheet.create({
     flex: 0,
 
     width: '100%',
-
   },
 
   alertButtonCancel: {
@@ -18957,9 +23421,9 @@ const styles = StyleSheet.create({
 
     width: '100%',
 
-    maxHeight: '85%',
+    maxHeight: '95%',
 
-    minHeight: '60%',
+    minHeight: '80%',
 
     shadowColor: '#000',
 
@@ -19207,7 +23671,7 @@ const styles = StyleSheet.create({
 
     paddingHorizontal: 24,
 
-    paddingBottom: 24,
+    paddingBottom: 48,
 
     paddingTop: 12,
 
@@ -19289,6 +23753,1978 @@ const styles = StyleSheet.create({
 
     fontSize: 15,
 
+  },
+
+  // Class Statistics Styles
+  classStatisticsSection: {
+    marginTop: 16,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  classStatisticsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 2,
+    borderBottomColor: '#8b5cf6',
+  },
+
+  classStatisticsTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+
+  classStatisticsContent: {
+    gap: 16,
+  },
+
+  statsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+
+  statCard: {
+    flex: 1,
+    minWidth: 150,
+    backgroundColor: '#f8fafc',
+    borderRadius: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  statIconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+
+  classStatLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+
+  classStatValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+
+  statSubtext: {
+    fontSize: 11,
+    color: '#94a3b8',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+
+  statsSection: {
+    marginTop: 12,
+  },
+
+  statsSectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 12,
+    paddingLeft: 4,
+  },
+
+  performanceDistribution: {
+    gap: 12,
+  },
+
+  distributionItem: {
+    marginBottom: 8,
+  },
+
+  distributionBar: {
+    height: 8,
+    borderRadius: 4,
+    marginBottom: 6,
+    minWidth: 2,
+  },
+
+  distributionLabel: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  distributionDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+
+  distributionText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '500',
+  },
+
+  distributionCount: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  // Results Tab - Compact Mobile-Friendly Styles
+  resultsClassCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    marginBottom: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+
+  resultsClassHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+
+  resultsClassIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#eff6ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+
+  resultsClassInfo: {
+    flex: 1,
+  },
+
+  resultsClassName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 3,
+  },
+
+  resultsClassMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  resultsClassMetaText: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+
+  resultsClassMetaDivider: {
+    width: 1,
+    height: 10,
+    backgroundColor: '#cbd5e1',
+    marginHorizontal: 4,
+  },
+
+  resultsQuarterHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#faf5ff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#e9d5ff',
+  },
+
+  resultsQuarterTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+
+  resultsQuarterTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#7c3aed',
+  },
+
+  resultsExportBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#d1fae5',
+  },
+
+  resultsExportBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#10b981',
+  },
+
+  resultsExerciseCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    marginBottom: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  resultsExerciseHeader: {
+    marginBottom: 8,
+  },
+
+  resultsExerciseTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+
+  resultsExerciseTitle: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+
+  resultsExerciseStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+
+  resultsExerciseStatusText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#ffffff',
+    textTransform: 'uppercase',
+  },
+
+  resultsExerciseDetails: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+
+  resultsExerciseDetailItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    backgroundColor: '#f8fafc',
+    borderRadius: 4,
+  },
+
+  resultsExerciseDetailText: {
+    fontSize: 10,
+    color: '#475569',
+    fontWeight: '600',
+  },
+
+  resultsStudentTable: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 6,
+    padding: 6,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  resultsTableSectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingHorizontal: 4,
+  },
+
+  resultsTableTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+  },
+
+  resultsStatsSection: {
+    marginTop: 10,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  resultsStatsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 10,
+    paddingBottom: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: '#8b5cf6',
+  },
+
+  resultsStatsTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+
+  resultsStatsContent: {
+    gap: 10,
+  },
+
+  resultsStatsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+
+  statsToggleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    backgroundColor: '#eff6ff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+    marginTop: 8,
+  },
+
+  statsToggleText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3b82f6',
+  },
+
+  resultsStatCard: {
+    flex: 1,
+    minWidth: '47%',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  resultsStatLabel: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+    marginBottom: 2,
+  },
+
+  resultsStatValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+
+  resultsStatSubtext: {
+    fontSize: 9,
+    color: '#94a3b8',
+    textAlign: 'center',
+    marginTop: 2,
+  },
+
+  resultsStatsSubsection: {
+    marginTop: 8,
+  },
+
+  resultsStatsSubtitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 8,
+  },
+
+  resultsDistribution: {
+    gap: 8,
+  },
+
+  resultsDistItem: {
+    marginBottom: 6,
+  },
+
+  resultsDistBar: {
+    height: 6,
+    borderRadius: 3,
+    marginBottom: 4,
+    minWidth: 2,
+  },
+
+  resultsDistLabel: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  resultsDistLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  resultsDistDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+
+  resultsDistText: {
+    fontSize: 11,
+    color: '#475569',
+    fontWeight: '500',
+  },
+
+  resultsDistCount: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  // Exercise Result Modal Styles
+  exerciseResultIdContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#dbeafe',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 4,
+  },
+
+  exerciseResultIdText: {
+    fontSize: 12,
+    color: '#3b82f6',
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+
+  exerciseResultCloseButton: {
+    position: 'absolute',
+    right: 16,
+    top: 16,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  exerciseResultInfoCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+
+  exerciseResultInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+
+  exerciseResultInfoLabel: {
+    fontSize: 14,
+    color: '#64748b',
+    fontWeight: '500',
+    width: 100,
+  },
+
+  exerciseResultInfoValue: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '600',
+    flex: 1,
+  },
+
+  exerciseResultSubmittedContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+
+  exerciseResultOnTimeTag: {
+    backgroundColor: '#dcfce7',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+
+  exerciseResultOnTimeText: {
+    fontSize: 12,
+    color: '#16a34a',
+    fontWeight: '600',
+  },
+
+  exerciseResultStatusTag: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+
+  exerciseResultStatusText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
+  exerciseResultSummaryCards: {
+    flexDirection: 'row',
+    marginBottom: 16,
+    gap: 12,
+  },
+
+  exerciseResultSummaryCard: {
+    flex: 1,
+    backgroundColor: '#dbeafe',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+  },
+
+  exerciseResultSummaryValue: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#3b82f6',
+    marginBottom: 4,
+  },
+
+  exerciseResultSummaryLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+
+  exerciseResultSummarySubtext: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+
+  exerciseResultHistorySection: {
+    marginBottom: 16,
+  },
+
+  exerciseResultHistoryTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+
+  exerciseResultQuestionCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+
+  exerciseResultQuestionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+
+  exerciseResultQuestionNumber: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+
+  exerciseResultQuestionNumberText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  exerciseResultQuestionType: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+    flex: 1,
+  },
+
+  exerciseResultQuestionStats: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+
+  exerciseResultQuestionStat: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  exerciseResultQuestionStatText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+
+  exerciseResultQuestionText: {
+    fontSize: 14,
+    color: '#1e293b',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+
+  exerciseResultAttemptRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+
+  exerciseResultAttemptIcon: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+
+  exerciseResultAttemptText: {
+    fontSize: 13,
+    color: '#475569',
+    flex: 1,
+  },
+
+  exerciseResultHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+
+  exerciseResultHeaderContent: {
+    flex: 1,
+  },
+
+  exerciseResultTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+
+  exerciseResultIdBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#dbeafe',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+  },
+
+  exerciseResultBottomActions: {
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    backgroundColor: '#ffffff',
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  exerciseResultDeleteButton: {
+    backgroundColor: '#dc2626',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    minWidth: 120,
+    alignItems: 'center',
+  },
+
+  exerciseResultDeleteButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+
+  // Item Analysis Styles
+  noDataContainer: {
+    padding: 20,
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    marginVertical: 8,
+  },
+
+  noDataText: {
+    fontSize: 14,
+    color: '#64748b',
+    fontStyle: 'italic',
+  },
+
+  itemAnalysisCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  itemAnalysisHeader: {
+    marginBottom: 12,
+  },
+
+  itemAnalysisTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+
+  // New styles for the updated Item Analysis UI
+  itemAnalysisNumberBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    minWidth: 24,
+    alignItems: 'center',
+  },
+
+  itemAnalysisNumberText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  itemAnalysisTypeBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    alignItems: 'center',
+  },
+
+  itemAnalysisTypeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  itemAnalysisDifficultyBadge: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  itemAnalysisDifficultyText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+
+  itemAnalysisTimeBadge: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  itemAnalysisTimeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+
+  itemAnalysisAttemptsBadge: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  itemAnalysisAttemptsText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+
+  itemAnalysisQuestionText: {
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '500',
+    marginBottom: 12,
+    lineHeight: 20,
+  },
+
+  itemAnalysisAnswerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+
+  itemAnalysisCheckIcon: {
+    marginRight: 4,
+  },
+
+  itemAnalysisNumber: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginRight: 8,
+  },
+
+
+  itemAnalysisTable: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+
+  itemAnalysisTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#e2e8f0',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+
+  itemAnalysisTableHeaderText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    flex: 1,
+  },
+
+  itemAnalysisTableRow: {
+    flexDirection: 'row',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  itemAnalysisCorrectRow: {
+    backgroundColor: '#f0fdf4',
+  },
+
+  itemAnalysisAnswerCell: {
+    flex: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  itemAnalysisAnswerText: {
+    fontSize: 13,
+    color: '#1e293b',
+    flex: 1,
+  },
+
+  itemAnalysisCorrectText: {
+    color: '#059669',
+    fontWeight: '600',
+  },
+
+  itemAnalysisCorrectIcon: {
+    marginLeft: 4,
+  },
+
+  itemAnalysisFrequencyText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    flex: 1,
+    textAlign: 'center',
+  },
+
+  itemAnalysisPercentageText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    flex: 1,
+    textAlign: 'center',
+  },
+
+
+  itemAnalysisInstruction: {
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '500',
+    marginBottom: 12,
+    lineHeight: 20,
+  },
+
+  itemAnalysisMetrics: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+    flexWrap: 'wrap',
+  },
+
+  itemAnalysisMetricCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 8,
+    alignItems: 'center',
+    minWidth: 80,
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  itemAnalysisMetricLabel: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '600',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+
+  itemAnalysisMetricValue: {
+    fontSize: 12,
+    color: '#1e293b',
+    fontWeight: '700',
+    marginTop: 2,
+  },
+
+  itemAnalysisPercentageHeaderCell: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  itemAnalysisPercentageCell: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  itemAnalysisFrequencyCell: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  itemAnalysisTotalRow: {
+    flexDirection: 'row',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: '#f1f5f9',
+    borderTopWidth: 2,
+    borderTopColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  itemAnalysisTotalText: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+
+  // Detailed Statistics Modal Styles
+  detailedStatsModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
+    padding: 0,
+  },
+  
+  detailedStatsModalPanelContainer: {
+    width: '100%',
+    height: '100%',
+    flex: 1,
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
+  },
+  
+  detailedStatsModalPanel: {
+    width: '100%',
+    height: '100%',
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: 0,
+    overflow: 'hidden',
+  },
+
+  detailedStatsModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+  },
+
+  detailedStatsModalTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+
+  detailedStatsModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginLeft: 8,
+  },
+
+
+
+  detailedStatsCloseButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  detailedStatsTopSection: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 16,
+    marginBottom: 4,
+  },
+
+  detailedStatsExerciseIdContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#dbeafe',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  detailedStatsExerciseIdText: {
+    fontSize: 12,
+    color: '#3b82f6',
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+
+  detailedStatsExportButtonMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#10b981',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+    gap: 8,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+
+  detailedStatsExportButtonMainText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  detailedStatsModalContent: {
+    flexGrow: 1,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 0,
+    backgroundColor: '#f8fafc',
+  },
+
+  detailedStatsLoadingContainer: {
+    minHeight: 200,
+    maxHeight: 400,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 60,
+    backgroundColor: '#f8fafc',
+  },
+
+  detailedStatsLoadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+
+  detailedStatsErrorContainer: {
+    minHeight: 200,
+    maxHeight: 400,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 32,
+    backgroundColor: '#f8fafc',
+  },
+
+  detailedStatsErrorText: {
+    marginTop: 16,
+    fontSize: 18,
+    color: '#1e293b',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+
+  detailedStatsErrorSubtext: {
+    marginTop: 8,
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+
+  detailedStatsRetryButton: {
+    marginTop: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+    gap: 8,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+
+  detailedStatsRetryButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+
+  detailedStatsItemAnalysisSection: {
+    marginTop: 12,
+    marginBottom: 24,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+  },
+
+  detailedStatsSectionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 16,
+    paddingBottom: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: '#e2e8f0',
+  },
+
+  detailedStatsItemCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  detailedStatsItemHeader: {
+    marginBottom: 12,
+  },
+
+  detailedStatsItemTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+
+  detailedStatsItemNumber: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginRight: 8,
+  },
+
+  detailedStatsItemTypeBadge: {
+    backgroundColor: '#e0e7ff',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+  },
+
+  detailedStatsItemTypeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  detailedStatsItemTimeRow: {
+    marginTop: 4,
+  },
+
+  detailedStatsItemTimeText: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+
+  detailedStatsItemQuestionText: {
+    fontSize: 14,
+    color: '#1e293b',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+
+  detailedStatsItemTable: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+
+  detailedStatsItemTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#e2e8f0',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+
+  detailedStatsItemTableHeaderText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    textAlign: 'center',
+  },
+
+  detailedStatsItemTableRow: {
+    flexDirection: 'row',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    alignItems: 'flex-start',
+    minHeight: 44,
+  },
+
+  detailedStatsItemCorrectRow: {
+    backgroundColor: '#f0fdf4',
+  },
+
+  detailedStatsItemAnswerCell: {
+    flex: 2,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingRight: 8,
+  },
+
+  detailedStatsItemFrequencyCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  detailedStatsItemPercentageCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  detailedStatsItemAnswerText: {
+    fontSize: 12,
+    color: '#1e293b',
+    flex: 1,
+    lineHeight: 16,
+    fontFamily: 'monospace',
+  },
+
+  detailedStatsItemCorrectText: {
+    color: '#059669',
+    fontWeight: '600',
+  },
+
+  detailedStatsItemCorrectIcon: {
+    marginLeft: 4,
+  },
+
+  detailedStatsItemFrequencyText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+
+  detailedStatsItemPercentageText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+
+  detailedStatsItemTotalRow: {
+    flexDirection: 'row',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: '#f8fafc',
+    borderTopWidth: 2,
+    borderTopColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+
+  detailedStatsItemTotalText: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+
+  // Response Analysis Card Styles (matching the provided design)
+  responseAnalysisCard: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+
+  responseAnalysisHeader: {
+    marginBottom: 16,
+  },
+
+  responseAnalysisTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+  },
+
+  responseAnalysisNumberBadge: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    minWidth: 24,
+    alignItems: 'center',
+  },
+
+  responseAnalysisNumberText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  responseAnalysisTypeBadge: {
+    backgroundColor: '#e0e7ff',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+
+  responseAnalysisTypeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  responseAnalysisDifficultyBadge: {
+    backgroundColor: '#e0e7ff',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  responseAnalysisDifficultyText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  responseAnalysisTimeBadge: {
+    backgroundColor: '#e0e7ff',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  responseAnalysisTimeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  responseAnalysisAttemptsBadge: {
+    backgroundColor: '#e0e7ff',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  responseAnalysisAttemptsText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3730a3',
+  },
+
+  responseAnalysisInstruction: {
+    fontSize: 14,
+    color: '#1e293b',
+    fontWeight: '600',
+    lineHeight: 20,
+  },
+
+  responseAnalysisTable: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+
+  responseAnalysisTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#e2e8f0',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+
+  responseAnalysisTableHeaderText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    textAlign: 'right',
+  },
+
+  responseAnalysisTableRow: {
+    flexDirection: 'row',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+
+  responseAnalysisCorrectRow: {
+    backgroundColor: '#f0fdf4',
+  },
+
+  responseAnalysisAnswerCell: {
+    flex: 2,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+  },
+
+  responseAnalysisFrequencyCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  responseAnalysisPercentageCell: {
+    flex: 1,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+
+  responseAnalysisPercentageHeaderCell: {
+    flex: 1,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+
+  responseAnalysisAnswerText: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '500',
+  },
+
+  responseAnalysisCorrectText: {
+    color: '#059669',
+    fontWeight: '600',
+  },
+
+  responseAnalysisFrequencyText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+  },
+
+  responseAnalysisPercentageText: {
+    fontSize: 13,
+    color: '#475569',
+    fontWeight: '600',
+    textAlign: 'right',
+  },
+
+  responseAnalysisTotalRow: {
+    flexDirection: 'row',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: '#f8fafc',
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+
+  responseAnalysisTotalText: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '700',
+  },
+
+  detailedStatsClassStatsSection: {
+    marginTop: 24,
+    marginBottom: 0,
+  },
+
+  // Top row styles for MPS and Pass Rate
+  detailedStatsTopRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 24,
+  },
+
+  detailedStatsTopCard: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  detailedStatsTopLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+
+  detailedStatsTopValue: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+
+  detailedStatsTopSubtext: {
+    fontSize: 10,
+    color: '#64748b',
+    marginTop: 2,
+  },
+
+  detailedStatsSubsection: {
+    marginBottom: 12,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+  },
+
+  detailedStatsSubtitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 16,
+    paddingBottom: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: '#e2e8f0',
+  },
+
+  detailedStatsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+
+  // Mode card that spans full width
+  detailedStatsModeCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    marginTop: 8,
+    width: '100%',
+  },
+
+  detailedStatsCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 12,
+    alignItems: 'center',
+    minWidth: '30%',
+    flex: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  detailedStatsLabel: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+
+  detailedStatsValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+
+  detailedStatsSubtext: {
+    fontSize: 9,
+    color: '#94a3b8',
+    textAlign: 'center',
+    marginTop: 2,
+  },
+
+  detailedStatsDistribution: {
+    gap: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 12,
+  },
+
+  detailedStatsDistItem: {
+    marginBottom: 8,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  detailedStatsDistBar: {
+    height: 8,
+    borderRadius: 4,
+    marginBottom: 8,
+    minWidth: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+
+  detailedStatsDistLabel: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  detailedStatsDistLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  detailedStatsDistDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+
+  detailedStatsDistText: {
+    fontSize: 11,
+    color: '#475569',
+    fontWeight: '500',
+  },
+
+  detailedStatsDistCount: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  // Line Chart Styles
+  timeChartContainer: {
+    marginTop: 8,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 12,
+  },
+
+  lineChartLegend: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 16,
+    marginBottom: 8,
+  },
+
+  lineChartLegendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+
+  lineChartLegendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+
+  lineChartLegendText: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  lineChartMainContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+  },
+
+  lineChartYAxisContainer: {
+    width: 50,
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+  },
+
+  lineChartAxisLabel: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+
+  lineChartYAxis: {
+    flex: 1,
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+
+  lineChartYAxisValue: {
+    fontSize: 9,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+
+  lineChartContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  lineChartArea: {
+    position: 'relative',
+    borderLeftWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: '#cbd5e1',
+  },
+
+  lineChartGridLine: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: '#e2e8f0',
+  },
+
+  lineChartLineContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+
+  lineChartSegment: {
+    position: 'absolute',
+    height: 3,
+    transformOrigin: 'left center',
+    borderTopLeftRadius: 1.5,
+    borderTopRightRadius: 1.5,
+    borderBottomLeftRadius: 1.5,
+    borderBottomRightRadius: 1.5,
+  },
+
+  lineChartSimpleBar: {
+    position: 'absolute',
+    height: 3,
+    marginTop: -1.5,
+    borderRadius: 1.5,
+  },
+
+  lineChartConnectingLine: {
+    position: 'absolute',
+    transformOrigin: 'left center',
+    borderRadius: 2,
+  },
+
+  lineChartPoint: {
+    position: 'absolute',
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginLeft: -5,
+    marginTop: -5,
+    borderWidth: 2,
+    borderColor: '#ffffff',
+    zIndex: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+
+  lineChartPointLabel: {
+    position: 'absolute',
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#374151',
+    top: -20,
+    left: '50%',
+    transform: [{ translateX: -15 }],
+    minWidth: 30,
+    textAlign: 'center',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 1,
+    elevation: 1,
+  },
+
+  lineChartXLabels: {
+    position: 'absolute',
+    bottom: -20,
+    left: 0,
+    right: 0,
+    height: 20,
+  },
+
+  lineChartXLabel: {
+    position: 'absolute',
+    fontSize: 9,
+    color: '#475569',
+    fontWeight: '600',
+    transform: [{ translateX: -5 }],
+  },
+
+  lineChartXAxisContainer: {
+    alignItems: 'center',
+    marginTop: 24,
+  },
+
+  svgChart: {
+    alignSelf: 'center',
   },
 
 });

@@ -1,14 +1,14 @@
 import { AntDesign, MaterialCommunityIcons } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
 import {
-    Alert,
-    Modal,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Alert,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { readData } from '../lib/firebase-database';
 
@@ -25,7 +25,7 @@ interface Class {
 interface AssignExerciseFormProps {
   visible: boolean;
   onClose: () => void;
-  onAssign: (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4') => void;
+  onAssign: (classIds: string[], deadline: string, acceptLateSubmissions: boolean, quarter: 'Quarter 1' | 'Quarter 2' | 'Quarter 3' | 'Quarter 4', targetStudentIds?: string[]) => void;
   exerciseTitle: string;
   currentUserId: string | null;
 }
@@ -39,6 +39,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
 }) => {
   const [classes, setClasses] = useState<Class[]>([]);
   const [selectedClasses, setSelectedClasses] = useState<string[]>([]);
+  const [targetStudentIdsByClass, setTargetStudentIdsByClass] = useState<Record<string, string[]>>({});
+  const [studentsByClass, setStudentsByClass] = useState<Record<string, Array<{ studentId: string; firstName?: string; surname?: string; fullName?: string; gender?: string }>>>({});
   const [deadline, setDeadline] = useState(new Date());
   const [deadlineDate, setDeadlineDate] = useState('');
   const [deadlineTime, setDeadlineTime] = useState('');
@@ -63,15 +65,41 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
   const loadClasses = async () => {
     try {
       setLoading(true);
-      const { data } = await readData('/sections');
-      const classList = Object.entries(data || {})
-        .map(([id, section]: any) => ({
-          id,
-          ...section,
-        }))
-        .filter((section: any) => section.teacherId === currentUserId);
+      const [{ data: classesData }, { data: sectionsData }, { data: studentsData }] = await Promise.all([
+        readData('/classes'),
+        readData('/sections'),
+        readData('/students')
+      ]);
+
+      const classList = Object.entries(classesData || {})
+        .map(([id, cls]: any) => {
+          const extras = (sectionsData || {})[id] || {};
+          return {
+            id,
+            ...cls,
+            // merge in status/school info from sections if present
+            status: cls.status ?? extras.status ?? 'active',
+            schoolName: cls.schoolName ?? extras.schoolName,
+            schoolYear: cls.schoolYear ?? extras.schoolYear,
+          };
+        })
+        .filter((section: any) => section.teacherId === currentUserId)
+        .filter((section: any) => {
+          const status = String(section.status || '').toLowerCase();
+          return status !== 'closed' && status !== 'inactive';
+        });
       
       setClasses(classList);
+
+      // Group students by class for selection UI
+      const grouped: Record<string, any[]> = {};
+      Object.values(studentsData || {}).forEach((s: any) => {
+        const cid = String(s.classId || '');
+        if (!cid) return;
+        if (!grouped[cid]) grouped[cid] = [];
+        grouped[cid].push(s);
+      });
+      setStudentsByClass(grouped);
     } catch (error) {
       console.error('Error loading classes:', error);
       Alert.alert('Error', 'Failed to load classes');
@@ -81,11 +109,34 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
   };
 
   const toggleClassSelection = (classId: string) => {
-    setSelectedClasses(prev =>
-      prev.includes(classId)
-        ? prev.filter(id => id !== classId)
-        : [...prev, classId]
-    );
+    setSelectedClasses(prev => {
+      const isSelected = prev.includes(classId);
+      const next = isSelected ? prev.filter(id => id !== classId) : [...prev, classId];
+      // When selecting a class, auto-select all its students by default
+      if (!isSelected) {
+        const allStudents = (studentsByClass[classId] || []).map((s: any) => s.studentId || s.id);
+        setTargetStudentIdsByClass(curr => ({ ...curr, [classId]: allStudents }));
+      }
+      return next;
+    });
+  };
+
+  const toggleStudentSelection = (classId: string, studentId: string) => {
+    setTargetStudentIdsByClass(prev => {
+      const current = prev[classId] || [];
+      const next = current.includes(studentId)
+        ? current.filter(id => id !== studentId)
+        : [...current, studentId];
+      return { ...prev, [classId]: next };
+    });
+  };
+
+  const formatStudentName = (s: any) => {
+    const last = (s.surname || '').trim();
+    const first = (s.firstName || '').trim();
+    if (last && first) return `${last}, ${first}`;
+    if (s.fullName) return String(s.fullName);
+    return 'Unknown';
   };
 
   const handleDateChange = (text: string) => {
@@ -137,7 +188,12 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
       return;
     }
 
-    onAssign(selectedClasses, deadline.toISOString(), acceptLateSubmissions, selectedQuarter);
+    // If any class has student selections, pass the union of selected students for that class.
+    // The assign handler applies same target set to all selected classes (UI is simple first pass).
+    const allSelectedTargets = selectedClasses.flatMap(cid => (targetStudentIdsByClass[cid] || []).filter(Boolean));
+    const uniqueTargets = Array.from(new Set(allSelectedTargets)).filter(id => typeof id === 'string' && id.length > 0);
+    
+    onAssign(selectedClasses, deadline.toISOString(), acceptLateSubmissions, selectedQuarter, uniqueTargets.length > 0 ? uniqueTargets : undefined);
     onClose();
   };
 
@@ -163,8 +219,12 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
         <View style={styles.container}>
           <View style={styles.header}>
             <Text style={styles.title}>Assign Exercise</Text>
-            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-              <AntDesign name="close" size={24} color="#64748b" />
+            <TouchableOpacity 
+              onPress={onClose} 
+              style={styles.closeButton}
+              activeOpacity={0.7}
+            >
+              <AntDesign name="close" size={18} color="#64748b" />
             </TouchableOpacity>
           </View>
 
@@ -181,33 +241,89 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                 </View>
               ) : classes.length === 0 ? (
                 <View style={styles.emptyContainer}>
-                  <MaterialCommunityIcons name="school-outline" size={48} color="#9ca3af" />
+                  <MaterialCommunityIcons name="school-outline" size={40} color="#9ca3af" />
                   <Text style={styles.emptyText}>No classes available</Text>
                   <Text style={styles.emptySubtext}>Create a class first to assign exercises</Text>
                 </View>
               ) : (
                 <View style={styles.classesList}>
                   {classes.map((classItem) => (
-                  <TouchableOpacity
-                    key={classItem.id}
-                    style={[
-                      styles.classItem,
-                      selectedClasses.includes(classItem.id) && styles.classItemSelected,
-                    ]}
-                    onPress={() => toggleClassSelection(classItem.id)}
-                  >
-                    <View style={styles.classInfo}>
-                      <Text style={styles.className}>{classItem.name}</Text>
-                      <Text style={styles.classDetails}>
-                        {classItem.schoolName} • {classItem.schoolYear}
-                      </Text>
-                    </View>
-                    <View style={styles.checkbox}>
+                    <View key={classItem.id} style={{ marginBottom: 10 }}>
+                      <TouchableOpacity
+                        style={[
+                          styles.classItem,
+                          selectedClasses.includes(classItem.id) && styles.classItemSelected,
+                        ]}
+                        onPress={() => toggleClassSelection(classItem.id)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.classInfo}>
+                          <Text style={styles.className}>{classItem.name}</Text>
+                          <Text style={styles.classDetails}>
+                            {classItem.schoolName} • {classItem.schoolYear}
+                          </Text>
+                        </View>
+                        <View style={[
+                          styles.checkbox,
+                          selectedClasses.includes(classItem.id) && {
+                            backgroundColor: '#0ea5e9',
+                            borderColor: '#0ea5e9',
+                          }
+                        ]}>
+                          {selectedClasses.includes(classItem.id) && (
+                            <AntDesign name="check" size={14} color="#ffffff" />
+                          )}
+                        </View>
+                      </TouchableOpacity>
+
                       {selectedClasses.includes(classItem.id) && (
-                        <AntDesign name="check" size={20} color="#3b82f6" />
+                        <View style={{ marginTop: 8, backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10 }}>
+                          <View style={{ paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#e2e8f0', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#0f172a' }}>Select Students (optional)</Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                              <TouchableOpacity onPress={() => {
+                                const allIds = (studentsByClass[classItem.id] || []).map((s: any) => s.studentId || s.id);
+                                const selected = targetStudentIdsByClass[classItem.id] || [];
+                                const next = selected.length === 0 ? allIds : [];
+                                setTargetStudentIdsByClass(prev => ({ ...prev, [classItem.id]: next }));
+                              }}>
+                                <Text style={{ fontSize: 12, color: '#0ea5e9', fontWeight: '700' }}>
+                                  {(targetStudentIdsByClass[classItem.id] || []).length === 0 ? 'Select All' : 'Unselect All'}
+                                </Text>
+                              </TouchableOpacity>
+                              <Text style={{ fontSize: 12, color: '#64748b' }}>{(targetStudentIdsByClass[classItem.id] || []).length} selected</Text>
+                            </View>
+                          </View>
+                          <View style={{ paddingHorizontal: 8, paddingVertical: 8 }}>
+                            {[...(studentsByClass[classItem.id] || [])]
+                              .sort((a: any, b: any) => {
+                                const ga = String(a.gender || '').toLowerCase() === 'female' ? 1 : 0;
+                                const gb = String(b.gender || '').toLowerCase() === 'female' ? 1 : 0;
+                                if (ga !== gb) return ga - gb; // male(0) first
+                                const na = `${(a.surname || '').toLowerCase()} ${(a.firstName || '').toLowerCase()}`;
+                                const nb = `${(b.surname || '').toLowerCase()} ${(b.firstName || '').toLowerCase()}`;
+                                return na.localeCompare(nb);
+                              })
+                              .map((s: any) => {
+                                const id = s.studentId || s.id;
+                                const selected = (targetStudentIdsByClass[classItem.id] || []).includes(id);
+                                return (
+                                  <TouchableOpacity key={id} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 6, paddingHorizontal: 6, borderRadius: 8, backgroundColor: selected ? '#eff6ff' : 'transparent' }} onPress={() => toggleStudentSelection(classItem.id, id)}>
+                                    <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: selected ? '#0ea5e9' : '#d1d5db', backgroundColor: selected ? '#0ea5e9' : '#ffffff', alignItems: 'center', justifyContent: 'center', marginRight: 8 }}>
+                                      {selected && <AntDesign name="check" size={12} color="#ffffff" />}
+                                    </View>
+                                    <Text style={{ flex: 1, color: '#0f172a' }}>{formatStudentName(s)}</Text>
+                                    <Text style={{ color: '#64748b', fontSize: 12, width: 60, textAlign: 'right' }}>{String(s.gender || '').toLowerCase() === 'female' ? 'Female' : 'Male'}</Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            {(studentsByClass[classItem.id] || []).length === 0 && (
+                              <Text style={{ color: '#9ca3af', paddingHorizontal: 8, paddingVertical: 6 }}>No students in this class.</Text>
+                            )}
+                          </View>
+                        </View>
                       )}
                     </View>
-                  </TouchableOpacity>
                   ))}
                 </View>
               )}
@@ -224,6 +340,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       selectedQuarter === quarter && styles.quarterButtonSelected,
                     ]}
                     onPress={() => setSelectedQuarter(quarter)}
+                    activeOpacity={0.7}
                   >
                     <Text
                       style={[
@@ -243,7 +360,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               <View style={styles.deadlineContainer}>
                 {/* Date Selection */}
                 <View style={styles.dateTimeButton}>
-                  <MaterialCommunityIcons name="calendar" size={20} color="#3b82f6" />
+                  <MaterialCommunityIcons name="calendar" size={18} color="#0ea5e9" />
                   <TextInput
                     style={styles.dateTimeText}
                     placeholder="MM/DD/YYYY"
@@ -253,8 +370,8 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                 </View>
 
                 {/* Time Selection */}
-                <View style={[styles.dateTimeButton, { marginTop: 8 }]}>
-                  <MaterialCommunityIcons name="clock" size={20} color="#3b82f6" />
+                <View style={[styles.dateTimeButton, { marginTop: 10 }]}>
+                  <MaterialCommunityIcons name="clock" size={18} color="#0ea5e9" />
                   <TextInput
                     style={styles.dateTimeText}
                     placeholder="HH:MM AM/PM"
@@ -283,6 +400,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       setDeadlineDate(tomorrow.toLocaleDateString('en-US'));
                       setDeadlineTime(tomorrow.toLocaleTimeString('en-US', { hour12: true }));
                     }}
+                    activeOpacity={0.7}
                   >
                     <Text style={styles.quickDateText}>Tomorrow</Text>
                   </TouchableOpacity>
@@ -295,6 +413,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                       setDeadlineDate(nextWeek.toLocaleDateString('en-US'));
                       setDeadlineTime(nextWeek.toLocaleTimeString('en-US', { hour12: true }));
                     }}
+                    activeOpacity={0.7}
                   >
                     <Text style={styles.quickDateText}>Next Week</Text>
                   </TouchableOpacity>
@@ -309,6 +428,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               <TouchableOpacity 
                 style={styles.settingItem}
                 onPress={() => setAcceptLateSubmissions(!acceptLateSubmissions)}
+                activeOpacity={0.7}
               >
                 <View style={styles.settingInfo}>
                   <Text style={styles.settingTitle}>Accept Late Submissions</Text>
@@ -332,7 +452,7 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
                 <MaterialCommunityIcons 
                   name="information" 
                   size={16} 
-                  color="#3b82f6" 
+                  color="#0ea5e9" 
                 />
                 <Text style={styles.statusInfoText}>
                   Exercises will be open for submissions by default. You can close or reactivate them later from the Assignments tab.
@@ -342,8 +462,12 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
           </ScrollView>
 
           <View style={styles.footer}>
-            <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
-              <MaterialCommunityIcons name="close" size={20} color="#64748b" />
+            <TouchableOpacity 
+              style={styles.cancelButton} 
+              onPress={onClose}
+              activeOpacity={0.7}
+            >
+              <MaterialCommunityIcons name="close" size={16} color="#64748b" />
               <Text style={styles.cancelButtonText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -353,8 +477,9 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
               ]}
               onPress={handleAssign}
               disabled={selectedClasses.length === 0}
+              activeOpacity={0.8}
             >
-              <MaterialCommunityIcons name="send" size={20} color="#ffffff" />
+              <MaterialCommunityIcons name="send" size={16} color="#ffffff" />
               <Text style={styles.assignButtonText}>
                 Assign to {selectedClasses.length} {selectedClasses.length === 1 ? 'Class' : 'Classes'}
               </Text>
@@ -369,93 +494,121 @@ export const AssignExerciseForm: React.FC<AssignExerciseFormProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 10,
   },
   container: {
     backgroundColor: '#ffffff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: '90%',
-    height: '85%',
+    borderRadius: 16,
+    width: '100%',
+    maxWidth: 560,
+    maxHeight: '96%',
+    minHeight: 500,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
     elevation: 8,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
-    backgroundColor: '#fafbfc',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
   },
   title: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
-    color: '#1e293b',
+    color: '#0f172a',
+    letterSpacing: -0.3,
   },
   closeButton: {
     padding: 8,
     borderRadius: 8,
-    backgroundColor: '#f1f5f9',
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   content: {
     flex: 1,
     paddingHorizontal: 20,
   },
   exerciseInfo: {
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 10,
+    marginTop: 16,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   exerciseTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#374151',
-  },
-  section: {
-    paddingVertical: 16,
-  },
-  sectionTitle: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: '#1e293b',
+    lineHeight: 20,
+  },
+  section: {
+    marginBottom: 20,
+  },
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0f172a',
     marginBottom: 12,
+    letterSpacing: -0.2,
   },
   loadingText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#64748b',
     textAlign: 'center',
-    paddingVertical: 20,
+    paddingVertical: 14,
+    fontWeight: '600',
   },
   emptyText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#64748b',
     textAlign: 'center',
-    paddingVertical: 20,
+    paddingVertical: 14,
+    fontWeight: '600',
   },
   loadingContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 40,
+    paddingVertical: 32,
+    backgroundColor: '#f8fafc',
+    borderRadius: 10,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 40,
+    paddingVertical: 32,
+    backgroundColor: '#f8fafc',
+    borderRadius: 10,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   emptySubtext: {
-    fontSize: 14,
+    fontSize: 12,
     color: '#9ca3af',
     marginTop: 8,
     textAlign: 'center',
+    fontWeight: '500',
+    lineHeight: 18,
   },
   classesList: {
     marginTop: 8,
@@ -466,69 +619,79 @@ const styles = StyleSheet.create({
   quickDateOptions: {
     flexDirection: 'row',
     marginTop: 12,
-    gap: 8,
+    gap: 10,
   },
   quickDateButton: {
     flex: 1,
-    backgroundColor: '#f8fafc',
-    borderWidth: 1,
+    backgroundColor: '#ffffff',
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
-    borderRadius: 8,
-    paddingVertical: 8,
+    borderRadius: 10,
+    paddingVertical: 10,
     paddingHorizontal: 12,
     alignItems: 'center',
-  },
-  quickDateText: {
-    fontSize: 14,
-    color: '#3b82f6',
-    fontWeight: '600',
-  },
-  classItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    marginBottom: 12,
-    borderWidth: 2,
-    borderColor: '#e2e8f0',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
     shadowRadius: 2,
     elevation: 1,
   },
-  classItemSelected: {
-    backgroundColor: '#eff6ff',
-    borderColor: '#3b82f6',
-    shadowColor: '#3b82f6',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+  quickDateText: {
+    fontSize: 13,
+    color: '#0ea5e9',
+    fontWeight: '600',
+    letterSpacing: -0.1,
+  },
+  classItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    marginBottom: 8,
+    borderWidth: 1.5,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
     elevation: 2,
+  },
+  classItemSelected: {
+    backgroundColor: '#f0f9ff',
+    borderColor: '#0ea5e9',
+    borderWidth: 2,
   },
   classInfo: {
     flex: 1,
   },
   className: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
-    color: '#1e293b',
-    marginBottom: 2,
+    color: '#0f172a',
+    marginBottom: 3,
+    letterSpacing: -0.2,
   },
   classDetails: {
-    fontSize: 14,
+    fontSize: 12,
     color: '#64748b',
+    fontWeight: '500',
   },
   checkbox: {
     width: 24,
     height: 24,
     borderRadius: 12,
-    borderWidth: 2,
+    borderWidth: 1.5,
     borderColor: '#d1d5db',
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 1,
   },
   dateInputContainer: {
     flexDirection: 'row',
@@ -557,46 +720,56 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 12,
-    paddingHorizontal: 16,
-    backgroundColor: '#f8fafc',
-    borderRadius: 8,
-    borderWidth: 1,
+    paddingHorizontal: 14,
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
   },
   dateTimeText: {
     flex: 1,
-    fontSize: 16,
-    color: '#1e293b',
-    marginLeft: 12,
+    fontSize: 14,
+    color: '#0f172a',
+    marginLeft: 10,
+    fontWeight: '600',
   },
   currentDeadlineDisplay: {
-    backgroundColor: '#eff6ff',
+    backgroundColor: '#f0f9ff',
     borderRadius: 8,
-    padding: 12,
-    marginTop: 12,
-    borderLeftWidth: 4,
-    borderLeftColor: '#3b82f6',
+    padding: 10,
+    marginTop: 10,
+    borderLeftWidth: 3,
+    borderLeftColor: '#0ea5e9',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
   },
   currentDeadlineLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1e40af',
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0369a1',
     marginBottom: 4,
+    letterSpacing: -0.1,
   },
   currentDeadlineText: {
-    fontSize: 14,
-    color: '#1e40af',
-    fontWeight: '500',
+    fontSize: 13,
+    color: '#0369a1',
+    fontWeight: '600',
+    lineHeight: 18,
   },
   footer: {
     flexDirection: 'row',
-    paddingHorizontal: 24,
-    paddingVertical: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
     borderTopWidth: 1,
     borderTopColor: '#f1f5f9',
-    backgroundColor: '#fafbfc',
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    backgroundColor: '#ffffff',
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
     gap: 12,
   },
   cancelButton: {
@@ -604,42 +777,49 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: 12,
-    borderWidth: 2,
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
     backgroundColor: '#ffffff',
-    gap: 8,
+    gap: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
   cancelButtonText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: '#64748b',
+    letterSpacing: -0.1,
   },
   assignButton: {
     flex: 2,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: 12,
-    backgroundColor: '#3b82f6',
-    gap: 8,
-    shadowColor: '#3b82f6',
-    shadowOffset: { width: 0, height: 2 },
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: '#0ea5e9',
+    gap: 6,
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowRadius: 6,
+    elevation: 4,
   },
   assignButtonDisabled: {
-    backgroundColor: '#9ca3af',
+    backgroundColor: '#94a3b8',
     shadowOpacity: 0,
     elevation: 0,
   },
   assignButtonText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
     color: '#ffffff',
+    letterSpacing: -0.1,
   },
   
   // Submission Settings Styles
@@ -647,28 +827,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    marginBottom: 12,
-    borderWidth: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    marginBottom: 8,
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
   },
   settingInfo: {
     flex: 1,
-    marginRight: 16,
+    marginRight: 14,
   },
   settingTitle: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
-    color: '#1e293b',
+    color: '#0f172a',
     marginBottom: 4,
+    letterSpacing: -0.2,
   },
   settingDescription: {
-    fontSize: 14,
+    fontSize: 12,
     color: '#64748b',
-    lineHeight: 20,
+    lineHeight: 18,
+    fontWeight: '500',
   },
   
   // Toggle Switch Styles
@@ -679,9 +866,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#d1d5db',
     padding: 2,
     justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
   },
   toggleActive: {
-    backgroundColor: '#3b82f6',
+    backgroundColor: '#0ea5e9',
+    shadowColor: '#0ea5e9',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    elevation: 2,
   },
   toggleThumb: {
     width: 24,
@@ -690,7 +887,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.15,
     shadowRadius: 2,
     elevation: 2,
   },
@@ -702,56 +899,62 @@ const styles = StyleSheet.create({
   statusInfo: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    padding: 12,
+    padding: 10,
     borderRadius: 8,
     marginTop: 8,
     gap: 8,
-    backgroundColor: '#eff6ff',
+    backgroundColor: '#f0f9ff',
     borderLeftWidth: 3,
-    borderLeftColor: '#3b82f6',
+    borderLeftColor: '#0ea5e9',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
   },
   statusInfoText: {
     flex: 1,
-    fontSize: 13,
+    fontSize: 12,
     lineHeight: 18,
-    color: '#1e40af',
+    color: '#0369a1',
+    fontWeight: '500',
   },
   
   // Quarter Selection Styles
   quarterContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
+    justifyContent: 'space-between',
     marginTop: 8,
   },
   quarterButton: {
-    flex: 1,
-    minWidth: '45%',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    backgroundColor: '#f8fafc',
-    borderWidth: 2,
+    width: '48%',
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    backgroundColor: '#ffffff',
+    borderWidth: 1.5,
     borderColor: '#e2e8f0',
-    borderRadius: 12,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
+    marginBottom: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
   },
   quarterButtonSelected: {
-    backgroundColor: '#eff6ff',
-    borderColor: '#3b82f6',
-    shadowColor: '#3b82f6',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
+    backgroundColor: '#f0f9ff',
+    borderColor: '#0ea5e9',
+    borderWidth: 2,
   },
   quarterButtonText: {
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: '600',
     color: '#64748b',
+    letterSpacing: -0.1,
+    textAlign: 'center',
   },
   quarterButtonTextSelected: {
-    color: '#3b82f6',
+    color: '#0ea5e9',
     fontWeight: '700',
   },
 });

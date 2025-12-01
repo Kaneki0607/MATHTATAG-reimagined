@@ -2,8 +2,12 @@ import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-i
 import * as ImagePicker from 'expo-image-picker';
 import { Accelerometer } from 'expo-sensors';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Easing, FlatList, Image, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, Easing, FlatList, Image, Modal, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import { useResponsive } from '../hooks/useResponsive';
+import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
+import { collectAppMetadata } from '../lib/app-metadata';
+import { createAnnouncement } from '../lib/entity-helpers';
+import { logError, logErrorWithStack } from '../lib/error-logger';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
 import { deleteData, listenToData, readData, stopListening, updateData, writeData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
@@ -40,11 +44,39 @@ interface TechnicalReport {
   category?: string;
   resolvedAt?: string;
   resolvedBy?: string;
+  // App metadata fields
+  appVersion?: string;
+  updateId?: string | null;
+  runtimeVersion?: string | null;
+  platform?: string;
+  platformVersion?: string;
+  deviceInfo?: string;
+  environment?: string;
+  buildProfile?: string;
+  expoVersion?: string;
+  submittedAt?: string;
 }
 
 export default function AdminDashboard() {
+  const { width, height } = useWindowDimensions();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const responsive = useResponsive();
+  const layout = useResponsiveLayout();
+  
+  // Responsive values
+  const containerPadding = useResponsiveValue({
+    mobile: 16,
+    tablet: 24,
+    desktop: 32,
+    default: 16,
+  });
+  
+  const headerHeight = useResponsiveValue({
+    mobile: 80,
+    tablet: 100,
+    desktop: 120,
+    default: 80,
+  });
   
   const [activeTab, setActiveTab] = useState<TabKey>('home');
   const [teachers, setTeachers] = useState<Teacher[]>([]);
@@ -74,15 +106,33 @@ export default function AdminDashboard() {
   // Technical reports state
   const [technicalReports, setTechnicalReports] = useState<TechnicalReport[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [selectedReport, setSelectedReport] = useState<TechnicalReport | null>(null);
+  const [showReportDetailsModal, setShowReportDetailsModal] = useState(false);
+  const [editingStatus, setEditingStatus] = useState(false);
   
-  // Technical Report Modal state
-  const [showTechReportModal, setShowTechReportModal] = useState(false);
+  // Floating button position state
+  const pan = useRef(new Animated.ValueXY({ x: width - 80, y: height - 170 })).current;
+  const floatingOpacity = useRef(new Animated.Value(1)).current;
+  const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  // Shake detection state
+  const [isShakeEnabled, setIsShakeEnabled] = useState(true);
+  const lastShakeTime = useRef(0);
+  const shakeThreshold = 12; // Lowered for better sensitivity (was 15)
+  
+  // Admin's own technical report state
+  const [showAdminTechReportModal, setShowAdminTechReportModal] = useState(false);
   const [reportDescription, setReportDescription] = useState('');
   const [reportScreenshots, setReportScreenshots] = useState<string[]>([]);
   const [submittingReport, setSubmittingReport] = useState(false);
   
-  // Shake detection state
-  const [shakeSubscription, setShakeSubscription] = useState<any>(null);
+  // Custom alert state
+  const [showCustomAlert, setShowCustomAlert] = useState(false);
+  const [alertConfig, setAlertConfig] = useState({
+    title: '',
+    message: '',
+    icon: 'success' as 'success' | 'error' | 'warning' | 'info',
+  });
 
   // Admin identity for welcome header
   const [adminName, setAdminName] = useState<string>('');
@@ -116,21 +166,32 @@ export default function AdminDashboard() {
   const computeTeacherStats = async (teacherList: Teacher[]) => {
     try {
       setStatsLoading(true);
-      const [{ data: sectionsData }, { data: studentsData }] = await Promise.all([
+      // Source of truth for classes is /classes; still read /sections for legacy mapping
+      const [{ data: classesData }, { data: sectionsData }, { data: studentsData }] = await Promise.all([
+        readData('/classes'),
         readData('/sections'),
         readData('/students'),
       ]);
+      const classesArray: Array<any & { id: string }> = Object.entries(classesData || {}).map(([id, v]: any) => ({ id, ...(v || {}) }));
       const sectionsArray: Array<any & { id: string }> = Object.entries(sectionsData || {}).map(([id, v]: any) => ({ id, ...(v || {}) }));
       const studentsArray: Array<any & { id: string }> = Object.entries(studentsData || {}).map(([id, v]: any) => ({ id, ...(v || {}) }));
 
       const result: Record<string, { sectionCount: number; studentCount: number }> = {};
 
       for (const teacher of teacherList) {
-        const teacherSectionIds = sectionsArray
-          .filter(s => s.teacherId === teacher.uid)
-          .map(s => s.id);
-        const sectionCount = teacherSectionIds.length;
-        const studentCount = studentsArray.filter(stu => teacherSectionIds.includes(stu.classId || stu.sectionId)).length;
+        // Prefer classes for section count; fallback to sections if any exist
+        const teacherClassIds = classesArray
+          .filter(c => c.teacherId === teacher.uid)
+          .map(c => c.id);
+        const sectionCount = teacherClassIds.length > 0
+          ? teacherClassIds.length
+          : sectionsArray.filter(s => s.teacherId === teacher.uid).length;
+
+        const classIdsForCount = teacherClassIds.length > 0
+          ? teacherClassIds
+          : sectionsArray.filter(s => s.teacherId === teacher.uid).map(s => s.id);
+
+        const studentCount = studentsArray.filter(stu => classIdsForCount.includes(stu.classId || stu.sectionId)).length;
         result[teacher.uid] = { sectionCount, studentCount };
       }
 
@@ -384,38 +445,301 @@ export default function AdminDashboard() {
     }
   }, [activeTab]);
 
-  // Shake detection for Reports tab
-  useEffect(() => {
-    if (activeTab === 'reports') {
-      let lastShake = 0;
-      const SHAKE_THRESHOLD = 2.5;
-      const SHAKE_TIMEOUT = 1000; // Prevent multiple triggers
-
-      const subscription = Accelerometer.addListener(({ x, y, z }) => {
-        const acceleration = Math.sqrt(x * x + y * y + z * z);
-        const now = Date.now();
-
-        if (acceleration > SHAKE_THRESHOLD && now - lastShake > SHAKE_TIMEOUT) {
-          lastShake = now;
-          setShowTechReportModal(true);
-        }
-      });
-
-      Accelerometer.setUpdateInterval(100);
-      setShakeSubscription(subscription);
-
-      return () => {
-        subscription?.remove();
+  // Update report status
+  const updateReportStatus = async (reportId: string, newStatus: string, newPriority?: string) => {
+    try {
+      const user = getCurrentUser();
+      const updateData: any = {
+        status: newStatus,
+        ...(newPriority && { priority: newPriority }),
       };
-    } else {
-      // Clean up when leaving Reports tab
-      shakeSubscription?.remove();
-      setShakeSubscription(null);
-    }
-  }, [activeTab]);
 
-  // Pick image from gallery
-  const pickImage = async () => {
+      if (newStatus === 'resolved') {
+        updateData.resolvedAt = new Date().toISOString();
+        updateData.resolvedBy = user?.uid || 'admin';
+      }
+
+      const { success, error } = await updateData(`/technicalReports/${reportId}`, updateData);
+
+      if (success) {
+        // Update local state immediately
+        setTechnicalReports(prev => 
+          prev.map(report => 
+            report.id === reportId ? { 
+              ...report, 
+              ...updateData
+            } : report
+          )
+        );
+        
+        // Update selected report if it's the same one
+        if (selectedReport?.id === reportId) {
+          setSelectedReport(prev => prev ? { ...prev, ...updateData } : null);
+        }
+
+        Alert.alert('Success', `Report status updated to ${newStatus}.`);
+      } else {
+        console.error('Failed to update report status:', error);
+        Alert.alert('Error', 'Failed to update report status.');
+      }
+    } catch (error) {
+      console.error('Error updating report status:', error);
+      Alert.alert('Error', 'Failed to update report status.');
+    }
+  };
+
+  // Mark technical report as done (resolved)
+  const handleMarkReportAsDone = async (reportId: string) => {
+    await updateReportStatus(reportId, 'resolved');
+  };
+
+  // Remove resolved technical report
+  const handleRemoveReport = async (reportId: string) => {
+    Alert.alert(
+      'Remove Report',
+      'Are you sure you want to permanently remove this technical report?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const { success, error } = await deleteData(`/technicalReports/${reportId}`);
+              
+              if (success) {
+                // Update local state immediately
+                setTechnicalReports(prev => prev.filter(report => report.id !== reportId));
+                setShowReportDetailsModal(false);
+                setSelectedReport(null);
+                Alert.alert('Success', 'Technical report removed.');
+              } else {
+                console.error('Failed to remove report:', error);
+                Alert.alert('Error', 'Failed to remove report.');
+              }
+            } catch (error) {
+              console.error('Error removing report:', error);
+              Alert.alert('Error', 'Failed to remove report.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  // Open report details modal
+  const openReportDetails = (report: TechnicalReport) => {
+    setSelectedReport(report);
+    setShowReportDetailsModal(true);
+  };
+
+  // Close report details modal
+  const closeReportDetails = () => {
+    setShowReportDetailsModal(false);
+    setSelectedReport(null);
+    setEditingStatus(false);
+  };
+
+  // Floating button functions
+  const fadeOutFloatingButton = () => {
+    Animated.timing(floatingOpacity, {
+      toValue: 0.3,
+      duration: 300,
+      useNativeDriver: false,
+    }).start();
+  };
+  
+  const fadeInFloatingButton = () => {
+    Animated.timing(floatingOpacity, {
+      toValue: 1,
+      duration: 200,
+      useNativeDriver: false,
+    }).start();
+  };
+  
+  const resetInactivityTimer = () => {
+    // Clear existing timer
+    if (inactivityTimer.current) {
+      clearTimeout(inactivityTimer.current);
+    }
+    
+    // Fade in immediately
+    fadeInFloatingButton();
+    
+    // Set new timer to fade out after 3 seconds
+    inactivityTimer.current = setTimeout(() => {
+      fadeOutFloatingButton();
+    }, 3000);
+  };
+  
+  // Start the initial fade out timer
+  useEffect(() => {
+    const initialTimer = setTimeout(() => {
+      fadeOutFloatingButton();
+    }, 3000);
+    
+    return () => {
+      clearTimeout(initialTimer);
+      if (inactivityTimer.current) {
+        clearTimeout(inactivityTimer.current);
+      }
+    };
+  }, []);
+  
+  // Shake detection with improved compatibility
+  useEffect(() => {
+    if (!isShakeEnabled) return;
+    
+    let subscription: any;
+    let isSubscribed = true;
+    
+    const startShakeDetection = async () => {
+      try {
+        console.log('🚀 Starting shake detection...');
+        
+        // Platform check - only enable on Android/iOS
+        if (Platform.OS !== 'android' && Platform.OS !== 'ios') {
+          console.log('⚠️ Shake detection only available on mobile devices');
+          return;
+        }
+        
+        console.log('✓ Platform check passed:', Platform.OS);
+        
+        // Check if accelerometer is available with timeout
+        const availabilityPromise = Accelerometer.isAvailableAsync();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout checking accelerometer')), 2000)
+        );
+        
+        const isAvailable = await Promise.race([availabilityPromise, timeoutPromise])
+          .catch(() => false) as boolean;
+        
+        if (!isAvailable) {
+          console.log('❌ Accelerometer not available on this device');
+          return;
+        }
+        
+        console.log('✓ Accelerometer available, threshold:', shakeThreshold);
+        
+        // Set update interval (60fps) - works on all Android versions
+        Accelerometer.setUpdateInterval(16);
+        
+        subscription = Accelerometer.addListener(({ x, y, z }) => {
+          if (!isSubscribed) return;
+          
+          // Calculate total acceleration (magnitude of acceleration vector)
+          const acceleration = Math.sqrt(x * x + y * y + z * z);
+          
+          // Check if acceleration exceeds threshold
+          if (acceleration > shakeThreshold) {
+            const currentTime = Date.now();
+            
+            // Prevent multiple triggers within 1 second
+            if (currentTime - lastShakeTime.current > 1000) {
+              console.log('🔔 Shake detected! Acceleration:', acceleration.toFixed(2));
+              lastShakeTime.current = currentTime;
+              
+              // Trigger FAB action
+              handleShakeTrigger();
+            }
+          }
+        });
+      } catch (error) {
+        console.log('Shake detection not available:', error);
+        // Silently fail - shake is optional feature
+      }
+    };
+    
+    const handleShakeTrigger = () => {
+      // Show FAB if hidden
+      fadeInFloatingButton();
+      resetInactivityTimer();
+      
+      // Open tech report modal
+      setShowAdminTechReportModal(true);
+    };
+    
+    startShakeDetection();
+    
+    return () => {
+      isSubscribed = false;
+      if (subscription) {
+        try {
+          subscription.remove();
+        } catch (error) {
+          console.log('Error removing accelerometer subscription:', error);
+        }
+      }
+    };
+  }, [isShakeEnabled]);
+  
+  // PanResponder for dragging with improved tap detection
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        // Only set responder if moved more than 5 pixels (this allows taps to work)
+        return Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5;
+      },
+      onPanResponderGrant: () => {
+        resetInactivityTimer();
+        pan.setOffset({
+          x: (pan.x as any)._value,
+          y: (pan.y as any)._value,
+        });
+        pan.setValue({ x: 0, y: 0 });
+      },
+      onPanResponderMove: Animated.event(
+        [null, { dx: pan.x, dy: pan.y }],
+        { useNativeDriver: false }
+      ),
+      onPanResponderRelease: (_, gesture) => {
+        pan.flattenOffset();
+        
+        // Check if this was a tap (minimal movement)
+        const wasTap = Math.abs(gesture.dx) < 5 && Math.abs(gesture.dy) < 5;
+        
+        if (wasTap) {
+          // This was a tap, let the TouchableOpacity handle it
+          return;
+        }
+        
+        // Get current position
+        const currentX = (pan.x as any)._value;
+        const currentY = (pan.y as any)._value;
+        
+        // Keep button within screen bounds (with padding)
+        const buttonSize = 60;
+        const padding = 10;
+        const maxX = width - buttonSize - padding;
+        const maxY = height - buttonSize - padding;
+        
+        let finalX = currentX;
+        let finalY = currentY;
+        
+        // Constrain X
+        if (currentX < padding) finalX = padding;
+        if (currentX > maxX) finalX = maxX;
+        
+        // Constrain Y
+        if (currentY < padding) finalY = padding;
+        if (currentY > maxY) finalY = maxY;
+        
+        // Animate to final position if needed
+        if (finalX !== currentX || finalY !== currentY) {
+          Animated.spring(pan, {
+            toValue: { x: finalX, y: finalY },
+            useNativeDriver: false,
+            tension: 50,
+            friction: 7,
+          }).start();
+        }
+      },
+    })
+  ).current;
+  
+  // Technical Report functions
+  const pickReportImage = async () => {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
@@ -424,10 +748,10 @@ export default function AdminDashboard() {
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: 'images',
         allowsMultipleSelection: true,
         quality: 0.8,
-        selectionLimit: 5 - reportScreenshots.length, // Max 5 total screenshots
+        selectionLimit: 5 - reportScreenshots.length,
       });
 
       if (!result.canceled && result.assets) {
@@ -440,8 +764,7 @@ export default function AdminDashboard() {
     }
   };
 
-  // Take photo with camera
-  const takePhoto = async () => {
+  const takeReportPhoto = async () => {
     try {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
       if (status !== 'granted') {
@@ -466,12 +789,20 @@ export default function AdminDashboard() {
     }
   };
 
-  // Remove screenshot
-  const removeScreenshot = (uri: string) => {
+  const removeReportScreenshot = (uri: string) => {
     setReportScreenshots(prev => prev.filter(s => s !== uri));
   };
 
-  // Submit technical report
+  // Show custom alert helper function
+  const showCustomAlertMessage = (
+    title: string, 
+    message: string, 
+    icon: 'success' | 'error' | 'warning' | 'info' = 'success'
+  ) => {
+    setAlertConfig({ title, message, icon });
+    setShowCustomAlert(true);
+  };
+
   const submitTechnicalReport = async () => {
     if (!reportDescription.trim()) {
       Alert.alert('Missing Information', 'Please describe the problem.');
@@ -480,13 +811,14 @@ export default function AdminDashboard() {
 
     setSubmittingReport(true);
     try {
-      const user = getCurrentUser();
       const timestamp = new Date().toISOString();
-      // Generate a unique numeric-only ticket number (15 digits)
-      const now = Date.now(); // 13 digits
-      const random = Math.floor(Math.random() * 100); // 2 digits
-      const ticketNumber = `${now}${random.toString().padStart(2, '0')}`;
+      const random = Math.floor(Math.random() * 9000);
+      const ticketNumber = `TICKET${random.toString().padStart(4, '0')}`;
       const reportId = ticketNumber;
+
+      // Collect app and device metadata
+      const metadata = await collectAppMetadata();
+      console.log('Collected app metadata for ticket:', metadata);
 
       // Upload screenshots to Firebase Storage
       const uploadedUrls: string[] = [];
@@ -494,7 +826,6 @@ export default function AdminDashboard() {
         const uri = reportScreenshots[i];
         const fileName = `technical-reports/${reportId}/screenshot_${i + 1}.jpg`;
         
-        // Convert URI to Blob for upload
         const response = await fetch(uri);
         const blob = await response.blob();
         const { downloadURL } = await uploadFile(fileName, blob);
@@ -503,109 +834,59 @@ export default function AdminDashboard() {
         }
       }
 
-      // Determine user role based on current user context
-      const userRole: 'teacher' | 'parent' | 'admin' = 'admin'; // Admin dashboard context
-
-      const report: TechnicalReport = {
+      const report = {
         id: reportId,
-        ticketNumber: ticketNumber,
-        reportedBy: user?.uid || 'unknown',
-        reportedByEmail: user?.email || 'unknown',
-        reportedByName: user?.displayName || user?.email?.split('@')[0] || 'Admin User',
-        userRole: userRole,
-        timestamp: timestamp,
+        ticketNumber: reportId,
+        reportedBy: getCurrentUser()?.uid || 'admin',
+        reportedByEmail: getCurrentUser()?.email || 'admin',
+        reportedByName: adminName || 'Admin',
+        userRole: 'admin' as const,
+        timestamp,
         description: reportDescription.trim(),
         screenshots: uploadedUrls,
-        status: 'pending',
-        priority: 'medium', // Default priority
-        category: 'technical', // Default category
+        status: 'pending' as const,
+        // Add comprehensive metadata
+        appVersion: metadata.appVersion,
+        updateId: metadata.updateId,
+        runtimeVersion: metadata.runtimeVersion,
+        platform: metadata.platform,
+        platformVersion: metadata.platformVersion,
+        deviceInfo: metadata.deviceInfo,
+        environment: metadata.environment,
+        buildProfile: metadata.buildProfile,
+        expoVersion: metadata.expoVersion,
+        submittedAt: metadata.timestamp,
       };
 
       const { success, error } = await writeData(`/technicalReports/${reportId}`, report);
       
       if (success) {
-        Alert.alert(
-          'Success', 
-          `Report submitted successfully!\n\nYour Ticket Number:\n${ticketNumber}\n\nPlease save this number for reference. Your report has been sent to the Super Admin for review.`
-        );
-        setShowTechReportModal(false);
+        setShowAdminTechReportModal(false);
         setReportDescription('');
         setReportScreenshots([]);
-        fetchTechnicalReports(); // Refresh the list
+        showCustomAlertMessage(
+          'Success', 
+          'Your technical report has been submitted. Thank you for helping us improve!',
+          'success'
+        );
       } else {
         throw new Error(error || 'Failed to submit report');
       }
     } catch (error) {
       console.error('Error submitting report:', error);
-      Alert.alert('Error', 'Failed to submit report. Please try again.');
+      if (error instanceof Error) {
+        logErrorWithStack(error, 'error', 'AdminDashboard', 'Failed to submit technical report');
+      } else {
+        logError('Failed to submit technical report: ' + String(error), 'error', 'AdminDashboard');
+      }
+      showCustomAlertMessage(
+        'Error', 
+        'Failed to submit report. Please try again later.',
+        'error'
+      );
     } finally {
       setSubmittingReport(false);
     }
-  };
-
-  // Mark technical report as done (resolved)
-  const handleMarkReportAsDone = async (reportId: string) => {
-    try {
-      const user = getCurrentUser();
-      const { success, error } = await updateData(`/technicalReports/${reportId}`, {
-        status: 'resolved',
-        resolvedAt: new Date().toISOString(),
-        resolvedBy: user?.uid || 'admin',
-      });
-
-      if (success) {
-        // Update local state immediately
-        setTechnicalReports(prev => 
-          prev.map(report => 
-            report.id === reportId ? { 
-              ...report, 
-              status: 'resolved',
-              resolvedAt: new Date().toISOString(),
-              resolvedBy: user?.uid || 'admin'
-            } : report
-          )
-        );
-        Alert.alert('Success', 'Technical report sent to Super Admin successfully.');
-      } else {
-        console.error('Failed to mark report as done:', error);
-        Alert.alert('Error', 'Failed to send report.');
-      }
-    } catch (error) {
-      console.error('Error marking report as done:', error);
-      Alert.alert('Error', 'Failed to update report status.');
-    }
-  };
-
-  // Remove resolved technical report
-  const handleRemoveReport = async (reportId: string) => {
-    Alert.alert(
-      'Remove Report',
-      'Are you sure you want to permanently remove this technical report?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const { success, error } = await deleteData(`/technicalReports/${reportId}`);
-              
-              if (success) {
-                // Update local state immediately
-                setTechnicalReports(prev => prev.filter(report => report.id !== reportId));
-                Alert.alert('Success', 'Technical report removed.');
-              } else {
-                console.error('Failed to remove report:', error);
-                Alert.alert('Error', 'Failed to remove report.');
-              }
-            } catch (error) {
-              console.error('Error removing report:', error);
-              Alert.alert('Error', 'Failed to remove report.');
-            }
-          }
-        }
-      ]
-    );
   };
 
   return (
@@ -1008,20 +1289,6 @@ export default function AdminDashboard() {
             </View>
           </View>
 
-          {/* Shake to report hint */}
-          <View style={styles.shakeHintCard}>
-            <View style={styles.shakeHintIconContainer}>
-              <MaterialCommunityIcons name="cellphone" size={32} color="#0ea5e9" />
-            </View>
-            <View style={styles.shakeHintTextContainer}>
-              <Text style={styles.shakeHintTitle}>Quick Report</Text>
-              <Text style={styles.shakeHintText}>Shake your device anytime to quickly report a technical problem</Text>
-            </View>
-            <View style={styles.shakeHintBadge}>
-              <MaterialCommunityIcons name="lightning-bolt" size={16} color="#ffffff" />
-            </View>
-          </View>
-
           {/* Technical Reports Section */}
           <View style={styles.reportsCard}>
             <View style={styles.reportsHeader}>
@@ -1055,12 +1322,14 @@ export default function AdminDashboard() {
             ) : (
               <View style={styles.reportsList}>
                 {technicalReports.map(report => (
-                  <View 
+                  <TouchableOpacity
                     key={report.id} 
                     style={[
                       styles.reportListItem,
                       report.status === 'resolved' && styles.reportListItemResolved,
                     ]}
+                    onPress={() => openReportDetails(report)}
+                    activeOpacity={0.7}
                   >
                     <View style={styles.reportListItemContent}>
                       <View style={styles.reportListItemLeft}>
@@ -1078,7 +1347,8 @@ export default function AdminDashboard() {
                         {report.status !== 'resolved' ? (
                           <TouchableOpacity 
                             style={styles.sendToSuperAdminButton}
-                            onPress={() => {
+                            onPress={(e) => {
+                              e.stopPropagation();
                               handleMarkReportAsDone(report.id);
                             }}
                           >
@@ -1093,7 +1363,7 @@ export default function AdminDashboard() {
                         )}
                       </View>
                     </View>
-                  </View>
+                  </TouchableOpacity>
                 ))}
               </View>
             )}
@@ -1356,6 +1626,316 @@ export default function AdminDashboard() {
         </View>
       </Modal>
 
+      {/* Report Details Modal */}
+      <Modal
+        visible={showReportDetailsModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={closeReportDetails}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.reportDetailsModal}>
+            <View style={styles.reportDetailsModalHeader}>
+              <View style={styles.reportDetailsModalTitleRow}>
+                <MaterialCommunityIcons name="bug-outline" size={24} color="#ef4444" />
+                <Text style={styles.reportDetailsModalTitle}>Report Details</Text>
+              </View>
+              <TouchableOpacity 
+                style={styles.reportDetailsModalCloseButton}
+                onPress={closeReportDetails}
+              >
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            {selectedReport && (
+              <ScrollView 
+                style={styles.reportDetailsModalContent}
+                showsVerticalScrollIndicator={false}
+                bounces={true}
+                scrollEventThrottle={1}
+                removeClippedSubviews={false}
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled={true}
+                contentInsetAdjustmentBehavior="automatic"
+                decelerationRate="normal"
+              >
+                {/* Header Info Card */}
+                <View style={styles.simpleInfoCard}>
+                  <View style={styles.simpleInfoHeader}>
+                    <View style={styles.simpleInfoLeft}>
+                      <Text style={styles.simpleTicketNumber}>
+                        #{selectedReport.ticketNumber || selectedReport.ticketId || selectedReport.id}
+                      </Text>
+                      <Text style={styles.simpleTicketLabel}>Ticket ID</Text>
+                    </View>
+                    <View style={[
+                      styles.simpleStatusBadge,
+                      selectedReport.status === 'resolved' && styles.simpleStatusResolved,
+                      selectedReport.status === 'in_progress' && styles.simpleStatusInProgress,
+                    ]}>
+                      <MaterialCommunityIcons 
+                        name={selectedReport.status === 'resolved' ? 'check-circle' : selectedReport.status === 'in_progress' ? 'progress-clock' : 'clock-outline'} 
+                        size={16} 
+                        color="#ffffff" 
+                      />
+                      <Text style={styles.simpleStatusText}>
+                        {selectedReport.status === 'resolved' ? 'Resolved' : selectedReport.status === 'in_progress' ? 'In Progress' : 'Pending'}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Reporter Info */}
+                <View style={styles.simpleInfoCard}>
+                  <View style={styles.simpleInfoRow}>
+                    <MaterialCommunityIcons name="account" size={20} color="#64748b" />
+                    <View style={styles.simpleInfoContent}>
+                      <Text style={styles.simpleInfoLabel}>Reported By</Text>
+                      <Text style={styles.simpleInfoValue}>
+                        {selectedReport.reportedByName || selectedReport.reportedByEmail}
+                      </Text>
+                      {selectedReport.userRole && (
+                        <Text style={styles.simpleInfoSubtext}>
+                          {selectedReport.userRole.charAt(0).toUpperCase() + selectedReport.userRole.slice(1)}
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                </View>
+
+                {/* Quick Actions */}
+                <View style={styles.simpleInfoCard}>
+                  <Text style={styles.simpleSectionTitle}>Quick Actions</Text>
+                  <View style={styles.simpleActionButtons}>
+                    <TouchableOpacity 
+                      style={styles.simpleStatusButton}
+                      onPress={() => setEditingStatus(!editingStatus)}
+                    >
+                      <MaterialCommunityIcons name="pencil" size={16} color="#0ea5e9" />
+                      <Text style={styles.simpleStatusButtonText}>Change Status</Text>
+                    </TouchableOpacity>
+                    
+                    {selectedReport.priority && (
+                      <View style={[
+                        styles.simplePriorityBadge,
+                        { backgroundColor: selectedReport.priority === 'critical' ? '#dc2626' : selectedReport.priority === 'high' ? '#ea580c' : selectedReport.priority === 'medium' ? '#f59e0b' : '#84cc16' }
+                      ]}>
+                        <MaterialCommunityIcons name="flag" size={14} color="#ffffff" />
+                        <Text style={styles.simplePriorityText}>
+                          {selectedReport.priority.charAt(0).toUpperCase() + selectedReport.priority.slice(1)}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  
+                  {/* Status Dropdown Options */}
+                  {editingStatus && (
+                    <View style={styles.simpleStatusOptions}>
+                      <TouchableOpacity 
+                        style={[
+                          styles.simpleStatusOption,
+                          selectedReport.status === 'pending' && styles.simpleStatusOptionSelected
+                        ]}
+                        onPress={() => {
+                          updateReportStatus(selectedReport.id, 'pending');
+                          setEditingStatus(false);
+                        }}
+                      >
+                        <MaterialCommunityIcons name="clock-outline" size={16} color="#f59e0b" />
+                        <Text style={styles.simpleStatusOptionText}>Pending</Text>
+                      </TouchableOpacity>
+                      
+                      <TouchableOpacity 
+                        style={[
+                          styles.simpleStatusOption,
+                          selectedReport.status === 'in_progress' && styles.simpleStatusOptionSelected
+                        ]}
+                        onPress={() => {
+                          updateReportStatus(selectedReport.id, 'in_progress');
+                          setEditingStatus(false);
+                        }}
+                      >
+                        <MaterialCommunityIcons name="progress-clock" size={16} color="#3b82f6" />
+                        <Text style={styles.simpleStatusOptionText}>In Progress</Text>
+                      </TouchableOpacity>
+                      
+                      <TouchableOpacity 
+                        style={[
+                          styles.simpleStatusOption,
+                          selectedReport.status === 'resolved' && styles.simpleStatusOptionSelected
+                        ]}
+                        onPress={() => {
+                          updateReportStatus(selectedReport.id, 'resolved');
+                          setEditingStatus(false);
+                        }}
+                      >
+                        <MaterialCommunityIcons name="check-circle" size={16} color="#10b981" />
+                        <Text style={styles.simpleStatusOptionText}>Resolved</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+
+                {/* Date & Time */}
+                <View style={styles.simpleInfoCard}>
+                  <View style={styles.simpleInfoRow}>
+                    <MaterialIcons name="access-time" size={20} color="#64748b" />
+                    <View style={styles.simpleInfoContent}>
+                      <Text style={styles.simpleInfoLabel}>Reported At</Text>
+                      <Text style={styles.simpleInfoValue}>
+                        {new Date(selectedReport.timestamp).toLocaleDateString('en-US', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Issue Description */}
+                <View style={styles.simpleInfoCard}>
+                  <Text style={styles.simpleSectionTitle}>Issue Description</Text>
+                  <View style={styles.simpleDescriptionContainer}>
+                    <Text style={styles.simpleDescription}>
+                      {selectedReport.description || 'No description provided.'}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Category */}
+                {selectedReport.category && (
+                  <View style={styles.simpleInfoCard}>
+                    <View style={styles.simpleInfoRow}>
+                      <MaterialCommunityIcons name="tag" size={20} color="#64748b" />
+                      <View style={styles.simpleInfoContent}>
+                        <Text style={styles.simpleInfoLabel}>Category</Text>
+                        <Text style={styles.simpleInfoValue}>{selectedReport.category}</Text>
+                      </View>
+                    </View>
+                  </View>
+                )}
+
+                {/* Technical Details - Only show if available */}
+                {(selectedReport.appVersion || selectedReport.platform || selectedReport.deviceInfo) && (
+                  <View style={styles.simpleInfoCard}>
+                    <Text style={styles.simpleSectionTitle}>Technical Details</Text>
+                    <View style={styles.simpleTechContainer}>
+                      {selectedReport.appVersion && (
+                        <View style={styles.simpleTechRow}>
+                          <Text style={styles.simpleTechLabel}>App Version</Text>
+                          <Text style={styles.simpleTechValue}>{selectedReport.appVersion}</Text>
+                        </View>
+                      )}
+                      {selectedReport.platform && (
+                        <View style={styles.simpleTechRow}>
+                          <Text style={styles.simpleTechLabel}>Platform</Text>
+                          <Text style={styles.simpleTechValue}>
+                            {selectedReport.platform} {selectedReport.platformVersion || ''}
+                          </Text>
+                        </View>
+                      )}
+                      {selectedReport.deviceInfo && (
+                        <View style={styles.simpleTechRow}>
+                          <Text style={styles.simpleTechLabel}>Device</Text>
+                          <Text style={styles.simpleTechValue}>{selectedReport.deviceInfo}</Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                )}
+
+                {/* Screenshots */}
+                {selectedReport.screenshots && selectedReport.screenshots.length > 0 && (
+                  <View style={styles.simpleInfoCard}>
+                    <Text style={styles.simpleSectionTitle}>
+                      Screenshots ({selectedReport.screenshots.length})
+                    </Text>
+                    <ScrollView 
+                      horizontal 
+                      style={styles.simpleScreenshotsScroll}
+                      showsHorizontalScrollIndicator={false}
+                      bounces={false}
+                    >
+                      {selectedReport.screenshots.map((uri, index) => (
+                        <TouchableOpacity 
+                          key={index} 
+                          style={styles.simpleScreenshotWrapper}
+                          onPress={() => Alert.alert('Screenshot', 'Full image viewer coming soon')}
+                        >
+                          <Image 
+                            source={{ uri }} 
+                            style={styles.simpleScreenshot}
+                            resizeMode="cover"
+                          />
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
+
+                {/* Resolution Info */}
+                {selectedReport.status === 'resolved' && selectedReport.resolvedAt && (
+                  <View style={styles.simpleInfoCard}>
+                    <View style={styles.simpleInfoRow}>
+                      <MaterialCommunityIcons name="check-circle" size={20} color="#10b981" />
+                      <View style={styles.simpleInfoContent}>
+                        <Text style={styles.simpleInfoLabel}>Resolution</Text>
+                        <Text style={styles.simpleInfoValue}>
+                          Resolved on {new Date(selectedReport.resolvedAt).toLocaleDateString('en-US', {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </Text>
+                        {selectedReport.resolvedBy && (
+                          <Text style={styles.simpleInfoSubtext}>By: {selectedReport.resolvedBy}</Text>
+                        )}
+                      </View>
+                    </View>
+                  </View>
+                )}
+
+                <View style={{ height: 40 }} />
+              </ScrollView>
+            )}
+
+            {/* Action Buttons */}
+            {selectedReport && (
+              <View style={styles.reportDetailsModalActions}>
+                {selectedReport.status !== 'resolved' ? (
+                  <TouchableOpacity
+                    style={styles.reportDetailsMarkDoneButton}
+                    onPress={() => {
+                      handleMarkReportAsDone(selectedReport.id);
+                      closeReportDetails();
+                    }}
+                  >
+                    <MaterialCommunityIcons name="send" size={20} color="#ffffff" />
+                    <Text style={styles.reportDetailsMarkDoneButtonText}>Send to Super Admin</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.reportDetailsRemoveButton}
+                    onPress={() => {
+                      handleRemoveReport(selectedReport.id);
+                    }}
+                  >
+                    <MaterialCommunityIcons name="delete-outline" size={20} color="#ffffff" />
+                    <Text style={styles.reportDetailsRemoveButtonText}>Remove Report</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
+
       {/* Admin Announcement Modal */}
       <Modal visible={showAnnModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
@@ -1413,21 +1993,22 @@ export default function AdminDashboard() {
                   if (!annTitle.trim() || !annMessage.trim()) return;
                   try {
                     setSendingAnn(true);
-                    const now = new Date();
-                    const id = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
-                    const payload = {
-                      id,
-                      classIds: ['ALL_PARENTS'],
-                      dateTime: now.toISOString(),
-                      message: annMessage.trim(),
+                    
+                    // Create announcement with readable ID (ANNOUNCEMENT-0001, etc.)
+                    const result = await createAnnouncement({
                       title: annTitle.trim(),
+                      message: annMessage.trim(),
                       teacherId: 'admin',
-                    };
-                    const { success } = await writeData(`/announcements/${id}`, payload);
-                    if (success) {
+                      classIds: ['ALL_PARENTS']
+                    });
+                    
+                    if (result.success) {
+                      console.log(`[CreateAnnouncement] Admin created announcement: ${result.announcementId}`);
                       setShowAnnModal(false);
                       setAnnTitle('');
                       setAnnMessage('');
+                    } else {
+                      Alert.alert('Error', result.error || 'Failed to send announcement');
                     }
                   } finally {
                     setSendingAnn(false);
@@ -1451,9 +2032,33 @@ export default function AdminDashboard() {
         </View>
       </Modal>
 
-      {/* Technical Report Modal */}
-      <Modal visible={showTechReportModal} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
+      {/* Floating Report Button */}
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={[
+          styles.floatingReportButton,
+          {
+            transform: [{ translateX: pan.x }, { translateY: pan.y }],
+            opacity: floatingOpacity,
+          },
+        ]}
+      >
+        <TouchableOpacity 
+          style={styles.floatingReportButtonInner}
+          onPress={() => {
+            console.log('📞 FAB button pressed - opening tech report modal');
+            resetInactivityTimer();
+            setShowAdminTechReportModal(true);
+          }}
+          activeOpacity={0.85}
+        >
+          <MaterialCommunityIcons name="headset" size={28} color="#ffffff" />
+        </TouchableOpacity>
+      </Animated.View>
+
+      {/* Admin Technical Report Modal */}
+      <Modal visible={showAdminTechReportModal} animationType="slide" transparent>
+        <View style={styles.techReportModalOverlay}>
           <View style={styles.techReportModal}>
             <View style={styles.techReportModalHeader}>
               <View style={styles.techReportModalTitleContainer}>
@@ -1462,11 +2067,10 @@ export default function AdminDashboard() {
               </View>
               <TouchableOpacity 
                 onPress={() => {
-                  setShowTechReportModal(false);
+                  setShowAdminTechReportModal(false);
                   setReportDescription('');
                   setReportScreenshots([]);
-                }} 
-                style={styles.closeButton}
+                }}
                 disabled={submittingReport}
               >
                 <AntDesign name="close" size={24} color="#64748b" />
@@ -1480,7 +2084,7 @@ export default function AdminDashboard() {
             >
               <View style={styles.techReportForm}>
                 <Text style={styles.techReportHint}>
-                  Please describe the issue you're experiencing. Be as detailed as possible and attach screenshots if available.
+                  Help us improve! Please describe any bugs or errors you encountered. Be as detailed as possible and attach screenshots if available.
                 </Text>
 
                 <View style={styles.techReportField}>
@@ -1500,7 +2104,7 @@ export default function AdminDashboard() {
                 <View style={styles.techReportField}>
                   <Text style={styles.techReportFieldLabel}>Screenshots (Optional)</Text>
                   <Text style={styles.techReportFieldHint}>
-                    You can attach up to 5 screenshots
+                    You can attach up to 5 screenshots to help us understand the issue
                   </Text>
                   
                   {reportScreenshots.length > 0 && (
@@ -1514,7 +2118,7 @@ export default function AdminDashboard() {
                           <Image source={{ uri }} style={styles.screenshotPreview} />
                           <TouchableOpacity
                             style={styles.removeScreenshotButton}
-                            onPress={() => removeScreenshot(uri)}
+                            onPress={() => removeReportScreenshot(uri)}
                             disabled={submittingReport}
                           >
                             <AntDesign name="close" size={16} color="#ffffff" />
@@ -1527,7 +2131,7 @@ export default function AdminDashboard() {
                   <View style={styles.screenshotButtons}>
                     <TouchableOpacity
                       style={styles.screenshotButton}
-                      onPress={takePhoto}
+                      onPress={takeReportPhoto}
                       disabled={submittingReport || reportScreenshots.length >= 5}
                     >
                       <MaterialIcons name="photo-camera" size={20} color="#0ea5e9" />
@@ -1535,7 +2139,7 @@ export default function AdminDashboard() {
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.screenshotButton}
-                      onPress={pickImage}
+                      onPress={pickReportImage}
                       disabled={submittingReport || reportScreenshots.length >= 5}
                     >
                       <MaterialIcons name="photo-library" size={20} color="#0ea5e9" />
@@ -1550,7 +2154,7 @@ export default function AdminDashboard() {
               <TouchableOpacity 
                 style={styles.techReportCancelButton} 
                 onPress={() => {
-                  setShowTechReportModal(false);
+                  setShowAdminTechReportModal(false);
                   setReportDescription('');
                   setReportScreenshots([]);
                 }} 
@@ -1583,9 +2187,122 @@ export default function AdminDashboard() {
         </View>
       </Modal>
 
+      {/* Custom Alert */}
+      <CustomAlert
+        visible={showCustomAlert}
+        title={alertConfig.title}
+        message={alertConfig.message}
+        icon={alertConfig.icon}
+        onClose={() => setShowCustomAlert(false)}
+      />
+
     </View>
   );
 }
+
+// Custom Alert Component
+interface CustomAlertProps {
+  visible: boolean;
+  title: string;
+  message: string;
+  buttons?: Array<{
+    text: string;
+    onPress?: () => void;
+    style?: 'default' | 'cancel' | 'destructive';
+  }>;
+  onClose: () => void;
+  icon?: 'success' | 'error' | 'warning' | 'info';
+}
+
+const CustomAlert: React.FC<CustomAlertProps> = ({ visible, title, message, buttons = [], onClose, icon }) => {
+  if (!visible) return null;
+
+  const defaultButtons = buttons.length > 0 ? buttons : [{ text: 'OK', onPress: onClose }];
+
+  const renderIcon = () => {
+    if (!icon) return null;
+
+    const iconSize = 48;
+    const iconContainerStyle = {
+      marginBottom: 16,
+      alignItems: 'center' as const,
+    };
+
+    switch (icon) {
+      case 'success':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="check" size={iconSize} color="#10b981" />
+          </View>
+        );
+      case 'error':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="close" size={iconSize} color="#ef4444" />
+          </View>
+        );
+      case 'warning':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="warning" size={iconSize} color="#f59e0b" />
+          </View>
+        );
+      case 'info':
+        return (
+          <View style={iconContainerStyle}>
+            <AntDesign name="info" size={iconSize} color="#3b82f6" />
+          </View>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <Modal
+      transparent
+      visible={visible}
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <View style={styles.alertOverlay}>
+        <View style={styles.alertContainer}>
+          <View style={styles.alertContent}>
+            {renderIcon()}
+            <Text style={styles.alertTitle}>{title}</Text>
+            <Text style={styles.alertMessage}>{message}</Text>
+            <View style={styles.alertButtons}>
+              {defaultButtons.map((button, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={[
+                    styles.alertButton,
+                    button.style === 'destructive' && styles.alertButtonDestructive,
+                    button.style === 'cancel' && styles.alertButtonCancel,
+                  ]}
+                  onPress={() => {
+                    if (button.onPress) {
+                      button.onPress();
+                    }
+                    onClose();
+                  }}
+                >
+                  <Text style={[
+                    styles.alertButtonText,
+                    button.style === 'destructive' && styles.alertButtonTextDestructive,
+                    button.style === 'cancel' && styles.alertButtonTextCancel
+                  ]}>
+                    {button.text}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+};
 
 const styles = StyleSheet.create({
   container: {
@@ -1612,7 +2329,7 @@ const styles = StyleSheet.create({
   },
   placeholderTitle: {
     color: '#1e293b',
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
   },
   placeholderSubtitle: {
@@ -1633,7 +2350,7 @@ const styles = StyleSheet.create({
   },
   welcomeTitle: {
     color: '#1e293b',
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: '800',
     letterSpacing: -0.5,
   },
@@ -1666,7 +2383,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   announcementCardTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -1702,7 +2419,7 @@ const styles = StyleSheet.create({
   announcementPrimaryButtonText: {
     color: '#ffffff',
     fontWeight: '700',
-    fontSize: 15,
+    fontSize: 14,
     letterSpacing: 0.3,
   },
   // Home - Teachers overview styles
@@ -1724,7 +2441,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   homeTeachersTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
   },
@@ -1841,7 +2558,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   teacherPageTitle: {
-    fontSize: 26,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -1860,7 +2577,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   sectionTitle: {
-    fontSize: 28,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -1885,7 +2602,7 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#64748b',
     marginTop: 16,
     fontWeight: '500',
@@ -1921,13 +2638,13 @@ const styles = StyleSheet.create({
     borderColor: '#bbf7d0',
   },
   emptyTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginTop: 8,
   },
   emptySubtitle: {
-    fontSize: 15,
+    fontSize: 14,
     color: '#64748b',
     marginTop: 8,
     textAlign: 'center',
@@ -1970,7 +2687,7 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    fontSize: 15,
+    fontSize: 14,
     color: '#0f172a',
     fontWeight: '500',
   },
@@ -2105,7 +2822,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   teacherName: {
-    fontSize: 19,
+    fontSize: 15,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -2180,7 +2897,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   blocklistPageTitle: {
-    fontSize: 26,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -2251,7 +2968,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#6366f1',
   },
   actionButtonText: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
     color: '#ffffff',
     letterSpacing: 0.3,
@@ -2274,16 +2991,16 @@ const styles = StyleSheet.create({
   modalActionText: {
     color: '#ffffff',
     fontWeight: '700',
-    fontSize: 15,
+    fontSize: 14,
     letterSpacing: 0.3,
   },
   // Modal Styles
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center',
+    justifyContent: 'flex-end',
     alignItems: 'center',
-    padding: 20,
+    padding: 0,
   },
   modalContent: {
     backgroundColor: '#ffffff',
@@ -2291,6 +3008,8 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 32,
     maxHeight: '90%',
     minHeight: '70%',
+    width: '92%',
+    maxWidth: 460,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -8 },
     shadowOpacity: 0.25,
@@ -2307,7 +3026,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#f1f5f9',
   },
   modalTitle: {
-    fontSize: 22,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -2368,7 +3087,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   adminWelcomeTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
   },
@@ -2404,7 +3123,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   announcementModalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -2517,7 +3236,7 @@ const styles = StyleSheet.create({
     elevation: 16,
   },
   confirmModalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 10,
@@ -2596,7 +3315,7 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   profileName: {
-    fontSize: 26,
+    fontSize: 20,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 20,
@@ -2631,7 +3350,7 @@ const styles = StyleSheet.create({
     paddingVertical: 32,
   },
   detailsTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 24,
@@ -2655,7 +3374,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   detailValue: {
-    fontSize: 17,
+    fontSize: 15,
     color: '#1e293b',
     fontWeight: '600',
     lineHeight: 24,
@@ -2725,7 +3444,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   reportsPageTitle: {
-    fontSize: 26,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.5,
@@ -2771,14 +3490,14 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   shakeHintTitle: {
-    fontSize: 17,
+    fontSize: 15,
     fontWeight: '800',
     color: '#1e40af',
     marginBottom: 4,
     letterSpacing: -0.3,
   },
   shakeHintText: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#3b82f6',
     fontWeight: '600',
     lineHeight: 19,
@@ -2847,7 +3566,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   reportsTitle: {
-    fontSize: 19,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -2877,7 +3596,7 @@ const styles = StyleSheet.create({
   },
   reportsBadgeText: {
     color: '#ffffff',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
     letterSpacing: 0.3,
   },
@@ -2889,7 +3608,7 @@ const styles = StyleSheet.create({
     paddingVertical: 40,
   },
   logsLoadingText: {
-    fontSize: 15,
+    fontSize: 13,
     color: '#64748b',
     fontWeight: '600',
   },
@@ -2901,13 +3620,13 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   emptyLogsTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: '#1e293b',
     marginBottom: 6,
   },
   emptyLogsText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#94a3b8',
     fontWeight: '500',
   },
@@ -3264,8 +3983,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderTopLeftRadius: 32,
     borderTopRightRadius: 32,
-    maxHeight: '90%',
-    minHeight: '70%',
+    width: '100%',
+    maxHeight: '95%',
+    minHeight: '80%',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -8 },
     shadowOpacity: 0.25,
@@ -3287,7 +4007,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   techReportModalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: '#1e293b',
     letterSpacing: -0.3,
@@ -3387,10 +4107,11 @@ const styles = StyleSheet.create({
   },
   techReportModalFooter: {
     flexDirection: 'row',
-    gap: 12,
+    justifyContent: 'space-between',
     paddingHorizontal: 24,
-    paddingBottom: 24,
+    paddingBottom: 48,
     paddingTop: 12,
+    gap: 12,
   },
   techReportCancelButton: {
     flex: 1,
@@ -3468,7 +4189,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   reportListItemId: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
     color: '#1e293b',
     letterSpacing: 0.2,
@@ -3553,14 +4274,15 @@ const styles = StyleSheet.create({
   reportDetailsModal: {
     backgroundColor: '#ffffff',
     borderRadius: 20,
-    maxHeight: '85%',
-    minHeight: '60%',
+    maxHeight: '90%',
+    minHeight: '70%',
     width: '100%',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15,
     shadowRadius: 12,
     elevation: 8,
+    overflow: 'hidden',
   },
   reportDetailsModalHeader: {
     flexDirection: 'row',
@@ -3576,7 +4298,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   reportDetailsModalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '700',
     color: '#1e293b',
   },
@@ -3589,6 +4311,7 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 20,
     minHeight: 200,
+    backgroundColor: '#ffffff',
   },
   reportDetailsSection: {
     marginBottom: 24,
@@ -3780,6 +4503,375 @@ const styles = StyleSheet.create({
   reportDetailsRemoveButtonText: {
     fontSize: 16,
     fontWeight: '700',
+    color: '#ffffff',
+  },
+
+  // Status Dropdown Styles
+  statusDropdownContainer: {
+    marginBottom: 20,
+  },
+  statusDropdownButton: {
+    alignSelf: 'flex-start',
+  },
+  statusDropdownBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  statusDropdownOptions: {
+    position: 'absolute',
+    top: 50,
+    left: 0,
+    right: 0,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 8,
+    zIndex: 1000,
+    marginTop: 4,
+    maxHeight: 200,
+    overflow: 'hidden',
+  },
+  statusDropdownOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  statusDropdownOptionSelected: {
+    backgroundColor: '#f0f9ff',
+  },
+  statusDropdownOptionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  statusDropdownLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+    marginBottom: 8,
+  },
+  priorityContainer: {
+    marginTop: 8,
+  },
+
+  // Simplified Report Details Styles
+  simpleInfoCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  simpleInfoHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  simpleInfoLeft: {
+    flex: 1,
+  },
+  simpleTicketNumber: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1e293b',
+    letterSpacing: -0.5,
+  },
+  simpleTicketLabel: {
+    fontSize: 12,
+    color: '#94a3b8',
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  simpleStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#f59e0b',
+  },
+  simpleStatusResolved: {
+    backgroundColor: '#10b981',
+  },
+  simpleStatusInProgress: {
+    backgroundColor: '#3b82f6',
+  },
+  simpleStatusText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+    letterSpacing: 0.3,
+  },
+  simpleInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  simpleInfoContent: {
+    flex: 1,
+  },
+  simpleInfoLabel: {
+    fontSize: 12,
+    color: '#94a3b8',
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  simpleInfoValue: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  simpleInfoSubtext: {
+    fontSize: 12,
+    color: '#64748b',
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  simpleSectionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+    letterSpacing: -0.3,
+  },
+  simpleActionButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  simpleStatusButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  simpleStatusButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0ea5e9',
+  },
+  simplePriorityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  simplePriorityText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
+    letterSpacing: 0.3,
+  },
+  simpleStatusOptions: {
+    marginTop: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    overflow: 'hidden',
+  },
+  simpleStatusOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  simpleStatusOptionSelected: {
+    backgroundColor: '#eff6ff',
+  },
+  simpleStatusOptionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  simpleDescriptionContainer: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  simpleDescription: {
+    fontSize: 15,
+    color: '#1e293b',
+    lineHeight: 22,
+    fontWeight: '500',
+  },
+  simpleTechContainer: {
+    gap: 12,
+  },
+  simpleTechRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  simpleTechLabel: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  simpleTechValue: {
+    fontSize: 13,
+    color: '#1e293b',
+    fontWeight: '600',
+    flex: 1,
+    textAlign: 'right',
+    marginLeft: 12,
+  },
+  simpleScreenshotsScroll: {
+    marginTop: 8,
+  },
+  simpleScreenshotWrapper: {
+    marginRight: 12,
+  },
+  simpleScreenshot: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  
+  // Admin Technical Report Modal Overlay
+  techReportModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  
+  // Floating Report Button Styles
+  floatingReportButton: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 60,
+    height: 60,
+    zIndex: 1000,
+  },
+  floatingReportButtonInner: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#0ea5e9',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    elevation: 10,
+    borderWidth: 3,
+    borderColor: '#ffffff',
+  },
+  
+  // Custom Alert Styles
+  alertOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  alertContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 0,
+    minWidth: 280,
+    maxWidth: 350,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  alertContent: {
+    padding: 20,
+  },
+  alertTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#1f2937',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  alertMessage: {
+    fontSize: 15,
+    color: '#6b7280',
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  alertButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  alertButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: '#0ea5e9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alertButtonDestructive: {
+    backgroundColor: '#ef4444',
+  },
+  alertButtonCancel: {
+    backgroundColor: '#6b7280',
+  },
+  alertButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  alertButtonTextDestructive: {
+    color: '#ffffff',
+  },
+  alertButtonTextCancel: {
     color: '#ffffff',
   },
 });

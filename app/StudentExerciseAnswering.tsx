@@ -1,11 +1,15 @@
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useIsFocused } from '@react-navigation/native';
 import { AudioSource, AudioStatus, createAudioPlayer } from 'expo-audio';
+import * as Haptics from 'expo-haptics';
 import { Image as ExpoImage } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
-import { useEffect, useRef, useState } from 'react';
+// Note: expo-device and expo-network may need to be installed
+// import * as Device from 'expo-device';
+// import * as Network from 'expo-network';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Dimensions,
@@ -21,181 +25,1043 @@ import {
   TouchableOpacity,
   View
 } from 'react-native';
+import { collectAppMetadata } from '../lib/app-metadata';
+import { logErrorWithStack } from '../lib/error-logger';
 import { readData, writeData } from '../lib/firebase-database';
+import { generateResultId } from '../lib/id-generator';
+import {
+  validateAndRepairExerciseResult
+} from '../lib/result-validation-utils';
+
+// Structured logging helpers (toggleable)
+const LOG = {
+  media: true,
+  preload: true,
+  tts: true,
+  reorder: true,
+};
+const log = {
+  media: (...args: any[]) => LOG.media && console.log('[Media]', ...args),
+  mediaWarn: (...args: any[]) => LOG.media && console.warn('[Media]', ...args),
+  preload: (...args: any[]) => LOG.preload && console.log('[Preload]', ...args),
+  preloadWarn: (...args: any[]) => LOG.preload && console.warn('[Preload]', ...args),
+  tts: (...args: any[]) => LOG.tts && console.log('[TTS]', ...args),
+  ttsWarn: (...args: any[]) => LOG.tts && console.warn('[TTS]', ...args),
+  reorder: (...args: any[]) => LOG.reorder && console.log('[Reorder]', ...args),
+};
+
+// Lightweight log gating to reduce noise while keeping useful diagnostics
+// Levels: none < error < warn < info < debug
+const LOG_LEVEL: 'none' | 'error' | 'warn' | 'info' | 'debug' = __DEV__ ? 'info' : 'warn';
+const LEVEL_ORDER: Record<'none' | 'error' | 'warn' | 'info' | 'debug', number> = {
+  none: 0,
+  error: 1,
+  warn: 2,
+  info: 3,
+  debug: 4,
+};
+
+// Tag switches - enable only what we need by default
+const ENABLED_TAGS: Record<string, boolean> = {
+  Submission: true, // keep succinct submission milestones
+  Reorder: false,
+  AttemptHistory: false,
+  ResultCreation: false,
+  ResultsUI: false,
+  LoadExercise: false,
+  Matching: false,
+  Media: false,
+  Preload: false,
+  TTS: false,
+  HandleNext: false,
+  UpdateAnswers: false,
+};
+
+const originalConsole = {
+  log: console.log,
+  warn: console.warn,
+  error: console.error,
+};
+
+function allowedByLevel(level: 'error' | 'warn' | 'info' | 'debug') {
+  return LEVEL_ORDER[LOG_LEVEL] >= LEVEL_ORDER[level];
+}
+
+function shouldAllow(tag: string, level: 'error' | 'warn' | 'info' | 'debug', firstArg: string): boolean {
+  if (!allowedByLevel(level)) return false;
+  // Errors always pass through
+  if (level === 'error') return true;
+  const enabled = ENABLED_TAGS[tag];
+  if (enabled) return true;
+  // Special minimal allowlist for Submission info logs to avoid spam
+  if (tag === 'Submission' && level === 'info') {
+    const keepSnippets = [
+      'SAVE SUCCESSFUL',
+      'Saved Data Summary',
+      'FINAL VERIFICATION (VALIDATED DATA)',
+      'Result ID:',
+      'Database path used:',
+    ];
+    return keepSnippets.some(s => firstArg.includes(s));
+  }
+  return false;
+}
+
+// Intercept console calls and filter bracket-tagged logs like "[Submission] ..."
+console.log = (...args: any[]) => {
+  if (args.length > 0 && typeof args[0] === 'string') {
+    const first = String(args[0]);
+    const m = first.match(/^\[([^\]]+)\]/);
+    if (m) {
+      const tag = m[1];
+      if (!shouldAllow(tag, 'info', first)) return;
+    } else if (!allowedByLevel('info')) {
+      return;
+    }
+  } else if (!allowedByLevel('info')) {
+    return;
+  }
+  originalConsole.log(...args);
+};
+
+console.warn = (...args: any[]) => {
+  if (args.length > 0 && typeof args[0] === 'string') {
+    const first = String(args[0]);
+    const m = first.match(/^\[([^\]]+)\]/);
+    if (m) {
+      const tag = m[1];
+      if (!shouldAllow(tag, 'warn', first)) return;
+    } else if (!allowedByLevel('warn')) {
+      return;
+    }
+  } else if (!allowedByLevel('warn')) {
+    return;
+  }
+  originalConsole.warn(...args);
+};
+
+console.error = (...args: any[]) => {
+  // Always allow errors, but still respect minimal level 'error'
+  if (!allowedByLevel('error')) return;
+  originalConsole.error(...args);
+};
 
 // Standalone component for Re-order interaction to keep hooks valid
-function ReorderQuestion({
+// Validation result types for cleaner communication
+type ReorderValidationResult = 
+  | { type: 'wrong'; attemptSequence: string[] }
+  | { type: 'correct'; finalSequence: string[] }
+  | { type: 'maxAttemptsReached'; finalSequence: string[] };
+
+const ReorderQuestion = React.memo(({
   question,
   initialAnswer,
   onChange,
+  onValidationResult,
+  currentAttempts = 0,
+  maxAttempts = null,
 }: {
   question: Question;
   initialAnswer: ReorderItem[];
   onChange: (ordered: ReorderItem[]) => void;
-}) {
-  const items: ReorderItem[] = (question.reorderItems || []).map((it) => ({ ...it }));
-  const slotsCount = items.length;
+  onValidationResult?: (result: ReorderValidationResult) => void;
+  currentAttempts?: number;
+  maxAttempts?: number | null;
+}) => {
+  /**
+   * ============================================================
+   * RE-ORDER EXERCISE COMPONENT - ROBUST & STREAMLINED
+   * ============================================================
+   * 
+   * SINGLE VALIDATION POINT ARCHITECTURE:
+   * - One validation trigger when all slots are filled
+   * - One callback (onValidationResult) communicates results to parent
+   * - No duplicate checking, no double attempt counting
+   * 
+   * STATE STRUCTURE:
+   * - slots: (ReorderItem | null)[] - items in each slot
+   * - pool: ReorderItem[] - unassigned items
+   * - lockedSlots: Set<number> - indices of correct, locked slots
+   * - correctSequence: string[] - correct order of item IDs
+   * 
+   * VALIDATION FLOW:
+   * 1. All slots filled → Trigger validation (300ms debounce)
+   * 2. Check correctness against correctSequence
+   * 3. Send ONE result via onValidationResult:
+   *    - 'wrong': Some items incorrect → Lock correct, return wrong to pool
+   *    - 'correct': All items correct → Lock all, advance
+   *    - 'maxAttemptsReached': Limit hit → Lock all, mark wrong, advance
+   * 4. Parent handles attempt counting, feedback, and navigation
+   * 
+   * KEY IMPROVEMENTS:
+   * ✅ Single validation point - no double-checking
+   * ✅ Single callback - no attempt/complete separation
+   * ✅ Parent controls all state updates and feedback
+   * ✅ Cleaner, more predictable flow
+   * ✅ No race conditions or duplicate increments
+   * ============================================================
+   */
 
-  const [initialized, setInitialized] = useState(false);
+  const items: ReorderItem[] = useMemo(() => {
+    const originalItems = (question.reorderItems || []).map((it) => ({ ...it }));
+    return originalItems;
+  }, [question.id]);
+  const slotsCount = items.length;
+  // CRITICAL: correctSequence should be based on the original order before validation shuffling
+  // We need to determine the correct order based on the question's intended sequence
+  const correctSequence = useMemo(() => {
+    // For reorder questions, the correct sequence is typically the order they should be arranged
+    // Since we shuffled during validation, we need to reconstruct the original correct order
+    const originalItems = question.reorderItems || [];
+    
+    // If there's an explicit order specified, use that
+    if (question.order && question.order.length > 0) {
+      return question.order as string[];
+    }
+    
+    // Otherwise, use the original order of reorderItems
+    return originalItems.map(item => item.id);
+  }, [question.reorderItems, question.order]);
+  
+  // Store original order for consistent return behavior
+  const originalOrderRef = useRef<ReorderItem[]>([]);
+
+  // Helper function to restore pool to original order
+  const restorePoolToOriginalOrder = useCallback((currentPool: ReorderItem[]) => {
+    if (originalOrderRef.current.length === 0) {
+      return currentPool;
+    }
+    
+    // Create a map of current pool items for quick lookup
+    const poolItemMap = new Map(currentPool.map(item => [item.id, item]));
+    
+    // Reconstruct pool maintaining exact original order
+    const orderedPool = originalOrderRef.current.filter(item => poolItemMap.has(item.id));
+    
+    return orderedPool;
+  }, []);
+
   const [slotLayouts, setSlotLayouts] = useState<{ x: number; y: number; width: number; height: number }[]>(
+    Array(slotsCount).fill(null)
+  );
+  const slotLayoutsRef = useRef<{ x: number; y: number; width: number; height: number }[]>(
     Array(slotsCount).fill(null)
   );
   const [slots, setSlots] = useState<(ReorderItem | null)[]>(Array(slotsCount).fill(null));
   const [pool, setPool] = useState<ReorderItem[]>([]);
+  const [lockedSlots, setLockedSlots] = useState<Set<number>>(new Set());
+  const panRespondersRef = useRef<Map<string, any>>(new Map());
+  const slotRefs = useRef<Record<number, any>>({});
+  const lastNotifiedRef = useRef<string>('');
+  
+  // Simplified state flags - only what we need
+  const [isValidating, setIsValidating] = useState(false);
+  const [isCompleted, setIsCompleted] = useState(false);
+  const isValidatingRef = useRef(false);
+  const isCompletedRef = useRef(false);
+  const isDraggingRef = useRef(false);
+  const currentAttemptsRef = useRef(currentAttempts);
+  const draggedItemRef = useRef<{item: ReorderItem, fromPool: boolean, fromSlot?: number} | null>(null);
+  
+  // Single validation ID to prevent overlapping validations
+  const validationIdRef = useRef(0);
 
+  // Keep currentAttemptsRef in sync with prop
   useEffect(() => {
-    if (initialized) return;
-    if (initialAnswer && initialAnswer.length) {
-      const placed: (ReorderItem | null)[] = Array(slotsCount).fill(null);
-      initialAnswer.forEach((it, idx) => {
-        if (idx < placed.length) placed[idx] = it;
-      });
-      const remaining = items.filter((it) => !initialAnswer.find((e) => e.id === it.id));
-      setSlots(placed);
-      setPool(remaining);
-    } else {
-      const shuffled = [...items].sort(() => Math.random() - 0.5);
-      setPool(shuffled);
+    currentAttemptsRef.current = currentAttempts;
+  }, [currentAttempts]);
+
+  // Reset function to clear all slots and return items to pool
+  const resetToInitialState = useCallback(() => {
+    // Clear all slots
+    setSlots(Array(slotsCount).fill(null));
+    
+    // Return all items to pool
+    setPool([...items]);
+    
+    // Clear locked slots
+    setLockedSlots(new Set());
+    
+    // Reset validation and completion states
+    setIsValidating(false);
+    setIsCompleted(false);
+    isValidatingRef.current = false;
+    isCompletedRef.current = false;
+    
+    // Clear dragged item
+    draggedItemRef.current = null;
+  }, [items, slotsCount]);
+
+  // CRITICAL FIX: Reset component completely when question changes
+  useEffect(() => {
+    
+    // Clear all pan responders
+    panRespondersRef.current.clear();
+    
+    // Reset layouts
+    setSlotLayouts(Array(slotsCount).fill(null));
+    slotLayoutsRef.current = Array(slotsCount).fill(null);
+    
+    // Reset validation and completion states
+    setIsValidating(false);
+    setIsCompleted(false);
+    isValidatingRef.current = false;
+    isCompletedRef.current = false;
+    isDraggingRef.current = false;
+    draggedItemRef.current = null;
+    lastNotifiedRef.current = '';
+    currentAttemptsRef.current = currentAttempts;
+    
+    // Reset validation cycle id
+    validationIdRef.current = 0;
+    
+    // Reset locked slots
+    setLockedSlots(new Set());
+    
+    // Validate that initialAnswer items belong to this question
+    const validItemIds = new Set(items.map(it => it.id));
+    const validInitialAnswer = (initialAnswer && initialAnswer.length > 0)
+      ? initialAnswer.filter(it => validItemIds.has(it.id))
+      : [];
+    
+    // Always start with a clean state for each question
+    const originalOrderItems = [...items];
+    
+    // Store the original order for consistent return behavior
+    originalOrderRef.current = originalOrderItems;
+    
+    // Start with original order, ignore any previous state
+    setSlots(Array(slotsCount).fill(null));
+    setPool(originalOrderItems);
+  }, [question.id, items]); // CRITICAL: Reset when question ID or items change, NOT on attempt changes
+
+  // SINGLE VALIDATION POINT - Clean and robust
+  useEffect(() => {
+    // Skip if completed, validating, or dragging
+    if (isCompletedRef.current || isValidatingRef.current || isDraggingRef.current) {
+      return;
     }
-    setInitialized(true);
-  }, [initialized]);
-
-  useEffect(() => {
-    if (!initialized) return;
+    
     const ordered = slots.filter(Boolean) as ReorderItem[];
-    onChange(ordered);
-  }, [slots]);
+    const serialized = JSON.stringify(ordered.map(s => s.id));
+    
+    // Notify parent of changes
+    if (serialized !== lastNotifiedRef.current) {
+      lastNotifiedRef.current = serialized;
+      onChange(ordered);
+    }
+    
+    // Auto-validate when all slots are filled
+    const allFilled = slots.every(s => s !== null);
+    if (!allFilled || isValidatingRef.current || isCompletedRef.current) {
+      return;
+    }
+    
+    setIsValidating(true);
+    isValidatingRef.current = true;
+    
+    // Start a new validation cycle
+    const thisValidationId = ++validationIdRef.current;
+    
+    setTimeout(() => {
+      // Abort if state changed during timeout
+      if (isCompletedRef.current || !isValidatingRef.current || validationIdRef.current !== thisValidationId) {
+        setIsValidating(false);
+        isValidatingRef.current = false;
+        return;
+      }
+      
+      // SINGLE VALIDATION CHECK
+      const isCorrect = slots.every((slotItem, idx) => slotItem && slotItem.id === correctSequence[idx]);
+      const attemptSequence = ordered.map(item => item.id);
+      
+      if (isCorrect) {
+        // ALL CORRECT
+        setIsCompleted(true);
+        isCompletedRef.current = true;
+        setIsValidating(false);
+        isValidatingRef.current = false;
+        
+        // Lock all slots
+        const allIndices = new Set(Array.from({ length: slotsCount }, (_, i) => i));
+        setLockedSlots(allIndices);
+        
+        // Notify parent
+        if (onValidationResult) {
+          setTimeout(() => {
+            onValidationResult({ type: 'correct', finalSequence: attemptSequence });
+          }, 300);
+        }
+        
+      } else {
+        // WRONG ANSWER
+        const currentCount = currentAttemptsRef.current || 0;
+        const willBeAttempts = currentCount + 1;
+        const hasReachedLimit = maxAttempts !== null && willBeAttempts >= maxAttempts;
+        
+        if (hasReachedLimit) {
+          // MAX ATTEMPTS REACHED
+          setIsCompleted(true);
+          isCompletedRef.current = true;
+          setIsValidating(false);
+          isValidatingRef.current = false;
+          
+          // Lock all slots
+          const allIndices = new Set(Array.from({ length: slotsCount }, (_, i) => i));
+          setLockedSlots(allIndices);
+          
+          // Notify parent of wrong attempt first, then max attempts
+          if (onValidationResult) {
+            onValidationResult({ type: 'wrong', attemptSequence });
+            setTimeout(() => {
+              onValidationResult({ type: 'maxAttemptsReached', finalSequence: attemptSequence });
+            }, 100);
+          }
+          
+        } else {
+          // WRONG BUT CAN TRY AGAIN - return wrong items to pool
+          try {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+          } catch {}
+          
+          const wrongIndices: number[] = [];
+          const wrongItems: ReorderItem[] = [];
+          const correctIndices: number[] = [];
+          
+          // Identify correct and wrong items
+          slots.forEach((slotItem, idx) => {
+            if (!slotItem) return;
+            if (slotItem.id !== correctSequence[idx]) {
+              wrongIndices.push(idx);
+              wrongItems.push(slotItem);
+            } else {
+              correctIndices.push(idx);
+            }
+          });
+          
+          // Lock correct slots
+          if (correctIndices.length > 0) {
+            setLockedSlots((prev) => {
+              const next = new Set(prev);
+              correctIndices.forEach(idx => next.add(idx));
+              return next;
+            });
+          }
+          
+          // Clear wrong slots and return items to pool
+          if (wrongItems.length > 0) {
+            setSlots((prev) => {
+              const next = [...prev];
+              wrongIndices.forEach(idx => {
+                next[idx] = null;
+              });
+              return next;
+            });
+            
+            setPool((prevPool) => {
+              const combinedPool = [...prevPool, ...wrongItems];
+              return restorePoolToOriginalOrder(combinedPool);
+            });
+          }
+          
+          // Notify parent of wrong attempt
+          if (onValidationResult) {
+            onValidationResult({ type: 'wrong', attemptSequence });
+          }
+          
+          // Reset for next attempt
+          setTimeout(() => {
+            setIsValidating(false);
+            isValidatingRef.current = false;
+            lastNotifiedRef.current = '';
+          }, 800);
+        }
+      }
+    }, 300);
+  }, [slots, slotsCount, correctSequence, onChange, onValidationResult, maxAttempts, restorePoolToOriginalOrder]);
 
-  const placeIntoSlot = (item: ReorderItem, slotIndex: number) => {
+  // Place item into slot
+  const placeIntoSlot = useCallback((item: ReorderItem, slotIndex: number) => {
+    // Don't allow placing if validating or completed
+    if (isValidatingRef.current || isCompletedRef.current || lockedSlots.has(slotIndex)) {
+      return false;
+    }
+    
+    // Validate slot index
+    if (slotIndex < 0 || slotIndex >= slotsCount) {
+      return false;
+    }
+    
+    // Get previous item before state updates
+    const currentSlots = slots;
+    const prevAtSlot = currentSlots[slotIndex];
+    
+    // Check if item is already in this slot
+    if (prevAtSlot && prevAtSlot.id === item.id) {
+      return true;
+    }
+    
+    // Animate layout change for smooth placement
+    try {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    } catch {}
+    
+    // Update slots: place new item
     setSlots((prev) => {
       const next = [...prev];
-      const prevAtSlot = next[slotIndex];
-      setPool((p) => p.filter((x) => x.id !== item.id));
       next[slotIndex] = item;
-      if (prevAtSlot) setPool((p) => [...p, prevAtSlot]);
       return next;
     });
-  };
+    
+    // Update pool: remove placed item and optionally add swapped item
+    setPool((p) => {
+      let newPool = p.filter((x) => x.id !== item.id);
+      
+      // Add the previous slot item if it exists and is different
+      if (prevAtSlot && prevAtSlot.id !== item.id) {
+        if (!newPool.some(poolItem => poolItem.id === prevAtSlot.id)) {
+          newPool = [...newPool, prevAtSlot];
+        }
+      }
+      
+      return restorePoolToOriginalOrder(newPool);
+    });
+    
+    return true;
+  }, [slots, lockedSlots, slotsCount, restorePoolToOriginalOrder]);
 
-  const removeFromSlot = (slotIndex: number) => {
+  // Remove item from slot when dragging starts
+  const removeFromSlotForDrag = useCallback((slotIndex: number) => {
+    if (lockedSlots.has(slotIndex)) {
+      return false;
+    }
     setSlots((prev) => {
       const next = [...prev];
-      const item = next[slotIndex];
-      if (item) setPool((p) => [...p, item]);
       next[slotIndex] = null;
       return next;
     });
-  };
+    return true;
+  }, [lockedSlots]);
+  
 
-  const createPanResponder = (item: ReorderItem) => {
+  // Create or get pan responder for an item in the pool - STABLE VERSION WITH FIXED RETURN LOGIC
+  const getPanResponder = useCallback((item: ReorderItem, fromSlotIndex?: number) => {
+    const key = fromSlotIndex !== undefined ? `${item.id}-slot-${fromSlotIndex}` : item.id;
+    
+    if (panRespondersRef.current.has(key)) {
+      return panRespondersRef.current.get(key)!;
+    }
+
     const position = new Animated.ValueXY();
-    const panResponder = {
-      position,
-      responder: undefined as any,
-    } as any;
-
-    const responder = (require('react-native').PanResponder as any).create({
-      onStartShouldSetPanResponder: () => true,
+    const PanResponder = require('react-native').PanResponder;
+    
+    const responder = PanResponder.create({
+      onStartShouldSetPanResponder: () => {
+        // Don't allow dragging if validating or completed
+        return !isValidatingRef.current && !isCompletedRef.current;
+      },
+      onMoveShouldSetPanResponder: () => {
+        // Don't allow dragging if validating or completed
+        return !isValidatingRef.current && !isCompletedRef.current;
+      },
       onPanResponderGrant: () => {
+        // Set dragging flag to prevent validation
+        isDraggingRef.current = true;
+        
+        // Track what item is being dragged and where from
+        draggedItemRef.current = {
+          item,
+          fromPool: fromSlotIndex === undefined,
+          fromSlot: fromSlotIndex
+        };
+        
+        console.log('[Drag] Starting drag:', draggedItemRef.current);
+        
+        // Haptic feedback when starting drag
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        
+        // If dragging from a slot, remove it from that slot first
+        if (fromSlotIndex !== undefined) {
+          console.log('[Drag] Removing from slot', fromSlotIndex, 'for drag');
+          removeFromSlotForDrag(fromSlotIndex);
+        }
+        // If dragging from pool, DON'T remove it - let it stay visible during drag
+        // It will be removed only when successfully placed in a slot
+        
+        position.setOffset({
+          x: (position.x as any)._value,
+          y: (position.y as any)._value,
+        });
         position.setValue({ x: 0, y: 0 });
       },
-      onPanResponderMove: Animated.event([
-        null,
-        { dx: position.x, dy: position.y },
-      ], { useNativeDriver: false }),
+      onPanResponderMove: Animated.event(
+        [null, { dx: position.x, dy: position.y }],
+        { useNativeDriver: false }
+      ),
       onPanResponderRelease: (_: any, gesture: any) => {
         position.flattenOffset();
+        
         const dropX = gesture.moveX;
         const dropY = gesture.moveY;
-        let target = -1;
-        slotLayouts.forEach((r, idx) => {
-          if (!r) return;
-          const within = dropX >= r.x && dropX <= r.x + r.width && dropY >= r.y && dropY <= r.y + r.height;
-          if (within) target = idx;
+        const wasFromPool = draggedItemRef.current?.fromPool || false;
+        const wasFromSlot = draggedItemRef.current?.fromSlot;
+        
+        console.log('[Drag] Release at:', { dropX, dropY, wasFromPool, wasFromSlot });
+        
+        let targetSlot = -1;
+        let bestDistance = Infinity;
+        
+        // Improved drop zone detection with better accuracy
+        slotLayoutsRef.current.forEach((layout, idx) => {
+          if (!layout || lockedSlots.has(idx)) {
+            console.log(`[Drag] Slot ${idx} skipped - no layout or locked`);
+            return;
+          }
+          
+          // Calculate center point of the slot for more accurate detection
+          const centerX = layout.x + layout.width / 2;
+          const centerY = layout.y + layout.height / 2;
+          
+          // Check if drop point is within slot bounds with some tolerance
+          const tolerance = 20; // pixels of tolerance for easier dropping
+          const within = 
+            dropX >= layout.x - tolerance && 
+            dropX <= layout.x + layout.width + tolerance && 
+            dropY >= layout.y - tolerance && 
+            dropY <= layout.y + layout.height + tolerance;
+          
+          if (within) {
+            // Calculate distance to center for better accuracy
+            const distance = Math.sqrt(
+              Math.pow(dropX - centerX, 2) + Math.pow(dropY - centerY, 2)
+            );
+            
+            console.log(`[Drag] Checking slot ${idx}:`, { 
+              layout, 
+              within,
+              dropX, 
+              dropY,
+              centerX,
+              centerY,
+              distance,
+              isLocked: lockedSlots.has(idx)
+            });
+            
+            // Choose the closest slot if multiple are within range
+            if (distance < bestDistance) {
+              targetSlot = idx;
+              bestDistance = distance;
+            }
+          }
         });
-        if (target >= 0) {
-          placeIntoSlot(item, target);
+        
+        console.log('[Drag] Target slot:', targetSlot, 'Distance:', bestDistance);
+        
+        if (targetSlot >= 0) {
+          // Item was dropped in a valid slot
+          console.log('[Drag] ✅ Placing into slot:', targetSlot);
+          
+          // Haptic feedback for successful placement
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          
+          placeIntoSlot(item, targetSlot);
+          
+          // Animate to center of slot for better visual feedback
+          const targetLayout = slotLayoutsRef.current[targetSlot];
+          if (targetLayout) {
+            const centerX = targetLayout.x + targetLayout.width / 2;
+            const centerY = targetLayout.y + targetLayout.height / 2;
+            
+            Animated.spring(position, {
+              toValue: { x: centerX - dropX, y: centerY - dropY },
+              useNativeDriver: false,
+              friction: 8,
+              tension: 100,
+            }).start(() => {
+              // Reset position after animation
+              position.setValue({ x: 0, y: 0 });
+            });
+          }
+        } else {
+          // Item was NOT dropped in any valid slot - return to original position
+          console.log('[Drag] ❌ No valid slot found - returning to original position');
+          
+          // Haptic feedback for failed placement
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          
+          if (wasFromPool) {
+            // Item was from pool and not placed - return to pool maintaining original order
+            console.log('[Drag] ℹ️ Item from pool not placed - returning to pool');
+            
+            setPool((prev) => {
+              // Safety check: only add if not already in pool
+              const alreadyInPool = prev.some(p => p.id === item.id);
+              if (alreadyInPool) {
+                console.log('[Drag] Item already in pool, not adding duplicate');
+                return prev;
+              }
+              console.log('[Drag] Adding item back to pool maintaining original order');
+              
+              // Add item to current pool
+              const newPool = [...prev, item];
+              
+              // Restore to original order using helper function
+              return restorePoolToOriginalOrder(newPool);
+            });
+          } else if (wasFromSlot !== undefined) {
+            // Item was from a slot and not placed - return to pool maintaining original order
+            console.log('[Drag] ⚠️ Item from slot not placed - returning to pool');
+            setPool((prev) => {
+              // Safety check: only add if not already in pool
+              const alreadyInPool = prev.some(p => p.id === item.id);
+              if (alreadyInPool) {
+                console.log('[Drag] Item already in pool, not adding duplicate');
+                return prev;
+              }
+              console.log('[Drag] Adding item back to pool maintaining original order');
+              
+              // Add item to current pool
+              const newPool = [...prev, item];
+              
+              // Restore to original order using helper function
+              return restorePoolToOriginalOrder(newPool);
+            });
+          }
+          
+          // Smooth animation back to original position
+          Animated.spring(position, {
+            toValue: { x: 0, y: 0 },
+            useNativeDriver: false,
+            friction: 6,
+            tension: 120,
+          }).start();
         }
-        Animated.spring(position, { toValue: { x: 0, y: 0 }, useNativeDriver: false }).start();
+        
+        // Clear dragged item ref
+        draggedItemRef.current = null;
+        
+        // Reset dragging flag after a small delay to allow state updates
+        setTimeout(() => {
+          isDraggingRef.current = false;
+        }, 150);
       },
     });
-    panResponder.responder = responder;
-    return panResponder;
-  };
 
-  const Slot = ({ index }: { index: number }) => (
-    <TouchableOpacity
-      activeOpacity={0.9}
-      onLongPress={() => removeFromSlot(index)}
-      onLayout={(e) => {
-        const { x, y, width, height } = e.nativeEvent.layout;
-        setSlotLayouts((prev) => {
-          const next = [...prev];
-          next[index] = { x: x + 20, y: y + 260, width, height };
-          return next;
-        });
-      }}
-      style={styles.reorderSlot}
-    >
-      {slots[index] ? (
-        <View style={styles.slotFilledCard}>
-          {slots[index]?.type === 'image' && slots[index]?.imageUrl ? (
-            <ExpoImage
-              source={{ uri: slots[index]!.imageUrl! }}
-              style={styles.reorderChoiceImage}
-              contentFit="contain"
-              transition={120}
-              cachePolicy="disk"
-              priority="high"
-            />
-          ) : (
-            <Text style={styles.reorderChoiceText}>{slots[index]?.content}</Text>
-          )}
-        </View>
-      ) : (
-        <View style={styles.slotPlaceholder} />
-      )}
-    </TouchableOpacity>
-  );
+    const panResponderData = { position, responder };
+    panRespondersRef.current.set(key, panResponderData);
+    return panResponderData;
+  }, [placeIntoSlot, removeFromSlotForDrag, restorePoolToOriginalOrder]);
 
-  const ChoiceCard = ({ item }: { item: ReorderItem }) => {
-    const pan = createPanResponder(item);
+  const Slot = ({ index }: { index: number }) => {
+    const item = slots[index];
+    const isComplete = slots.filter(Boolean).length === slotsCount;
+    const isCorrect = isComplete && item?.id === correctSequence[index];
+    const isIncorrect = isComplete && item && !isCorrect;
+    const isLocked = lockedSlots.has(index);
+    
+    // Get pan responder for item in slot (if it exists and not completed or validating)
+    // Use state values here so component re-renders when these change
+    const pan = item && !isCompleted && !isValidating && !isLocked ? getPanResponder(item, index) : null;
+    
     return (
-      <Animated.View
-        style={[styles.reorderChoice, { transform: [{ translateX: pan.position.x }, { translateY: pan.position.y }] }]}
-        {...pan.responder.panHandlers}
+      <View
+        ref={(ref) => {
+          if (ref) slotRefs.current[index] = ref;
+        }}
+        onLayout={() => {
+          const ref = slotRefs.current[index];
+          if (ref && typeof ref.measureInWindow === 'function') {
+            ref.measureInWindow((px: number, py: number, width: number, height: number) => {
+              const layout = { x: px, y: py, width, height };
+              slotLayoutsRef.current[index] = layout;
+              setSlotLayouts((prev) => {
+                const next = [...prev];
+                next[index] = layout;
+                return next;
+              });
+            });
+          }
+        }}
+        style={[
+          styles.reorderSlot,
+          // Enhanced visual states for better user feedback
+          isCorrect && { 
+            borderColor: '#22c55e', 
+            shadowColor: '#22c55e', 
+            backgroundColor: 'rgba(240, 253, 244, 0.95)',
+            borderWidth: 3,
+            shadowOffset: { width: 0, height: 3 },
+            shadowOpacity: 0.2,
+            shadowRadius: 4,
+            elevation: 4
+          },
+          isIncorrect && { 
+            borderColor: '#ef4444', 
+            shadowColor: '#ef4444', 
+            backgroundColor: 'rgba(254, 242, 242, 0.95)',
+            borderWidth: 3,
+            shadowOffset: { width: 0, height: 3 },
+            shadowOpacity: 0.2,
+            shadowRadius: 4,
+            elevation: 4
+          },
+          // Visual feedback for locked slots
+          isLocked && { 
+            borderColor: '#10b981', 
+            backgroundColor: 'rgba(236, 253, 245, 0.8)',
+            borderWidth: 2
+          },
+          // Visual feedback for empty slots (drop zones)
+          !item && !isLocked && {
+            borderColor: '#f59e0b',
+            borderStyle: 'dashed',
+            backgroundColor: 'rgba(255, 251, 235, 0.3)'
+          }
+        ]}
       >
-        {item.type === 'image' && item.imageUrl ? (
-          <ExpoImage
-            source={{ uri: item.imageUrl }}
-            style={styles.reorderChoiceImage}
-            contentFit="contain"
-            transition={120}
-            cachePolicy="disk"
-            priority="high"
-          />
+        {item ? (
+          pan ? (
+            <Animated.View
+              key={`slot-content-${item.id}`}
+              style={[
+                styles.slotFilledCard,
+                isCorrect && { borderColor: '#22c55e' },
+                isIncorrect && { borderColor: '#ef4444' },
+                {
+                  transform: [
+                    { translateX: pan.position.x },
+                    { translateY: pan.position.y },
+                  ],
+                },
+              ]}
+              pointerEvents="box-none"
+            >
+              {/* Draggable area - the content */}
+              <View 
+                {...pan.responder.panHandlers}
+                style={{ flex: 1, width: '100%', height: '100%' }}
+              >
+                {item.type === 'image' && item.imageUrl ? (
+                  <View pointerEvents="none" style={{ width: '100%', height: '100%' }}>
+                    <Image
+                      source={{ uri: item.imageUrl }}
+                      style={styles.reorderChoiceImage}
+                      resizeMode="contain"
+                      fadeDuration={0}
+                    />
+                  </View>
+                ) : (
+                  <Text style={[
+                    styles.reorderChoiceText,
+                    isCorrect && { color: '#22c55e' },
+                    isIncorrect && { color: '#ef4444' }
+                  ]}
+                    pointerEvents="none"
+                  >
+                    {item.content}
+                  </Text>
+                )}
+              </View>
+              
+            </Animated.View>
+          ) : (
+            <View 
+              key={`slot-content-${item.id}`}
+              style={[
+                styles.slotFilledCard,
+                isCorrect && { borderColor: '#22c55e' },
+                isIncorrect && { borderColor: '#ef4444' }
+              ]}
+              pointerEvents="box-none"
+            >
+              {item.type === 'image' && item.imageUrl ? (
+                <View pointerEvents="none" style={{ width: '100%', height: '100%' }}>
+                  <Image
+                    source={{ uri: item.imageUrl }}
+                    style={styles.reorderChoiceImage}
+                    resizeMode="contain"
+                    fadeDuration={0}
+                  />
+                </View>
+              ) : (
+                <Text style={[
+                  styles.reorderChoiceText,
+                  isCorrect && { color: '#22c55e' },
+                  isIncorrect && { color: '#ef4444' }
+                ]}
+                  pointerEvents="none"
+                >
+                  {item.content}
+                </Text>
+              )}
+              {isCorrect && (
+                <View style={styles.statusIndicator}>
+                  <MaterialCommunityIcons 
+                    name="check-circle"
+                    size={18} 
+                    color="#22c55e" 
+                  />
+                </View>
+              )}
+              {isIncorrect && (
+                <View style={styles.statusIndicator}>
+                  <MaterialCommunityIcons 
+                    name="close-circle"
+                    size={18} 
+                    color="#ef4444" 
+                  />
+                </View>
+              )}
+            </View>
+          )
         ) : (
-          <Text style={styles.reorderChoiceText}>{item.content}</Text>
+          <View style={[
+            styles.slotPlaceholder,
+            // Enhanced visual feedback for empty drop zones
+            !isLocked && {
+              backgroundColor: 'rgba(255, 251, 235, 0.5)',
+              borderColor: '#f59e0b',
+              borderWidth: 2,
+              borderStyle: 'dashed'
+            }
+          ]}>
+            <MaterialCommunityIcons 
+              name="plus-circle-outline" 
+              size={24} 
+              color={isLocked ? "#cbd5e0" : "#f59e0b"} 
+              style={{ marginBottom: 4 }}
+            />
+            <Text style={[
+              styles.slotPlaceholderText,
+              { color: isLocked ? "#cbd5e0" : "#f59e0b" }
+            ]}>
+              {isLocked ? "Locked" : "Drop here"}
+            </Text>
+          </View>
         )}
-      </Animated.View>
+        {/* Lock indicator for correct items */}
+        {isLocked && (
+          <View style={styles.lockIndicator}>
+            <MaterialCommunityIcons name="lock" size={20} color="#10b981" />
+          </View>
+        )}
+      </View>
     );
   };
 
+  // Memoize ChoiceCard rendering with duplicate prevention and enhanced visual feedback
+  const renderChoiceCards = useMemo(() => {
+    // Remove duplicates from pool before rendering (safety check)
+    const uniquePool = pool.filter((item, index, self) => 
+      index === self.findIndex((t) => t.id === item.id)
+    );
+    
+    return uniquePool.map((choice, index) => {
+      const pan = getPanResponder(choice);
+      
+      return (
+        <Animated.View
+          key={`choice-${question.id}-${choice.id}`}
+          style={[
+            styles.reorderChoice,
+            {
+              transform: [
+                { translateX: pan.position.x },
+                { translateY: pan.position.y }
+              ],
+              // Add subtle shadow and border for better visual feedback
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.1,
+              shadowRadius: 3,
+              elevation: 2,
+            }
+          ]}
+          {...pan.responder.panHandlers}
+        >
+          <View style={{ width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }} pointerEvents="none">
+            {choice.type === 'image' && choice.imageUrl ? (
+              <Image
+                key={`pool-img-${choice.id}`}
+                source={{ uri: choice.imageUrl }}
+                style={styles.reorderChoiceImage}
+                resizeMode="contain"
+                fadeDuration={0}
+              />
+            ) : (
+              <Text style={styles.reorderChoiceText} pointerEvents="none">{choice.content}</Text>
+            )}
+          </View>
+        </Animated.View>
+      );
+    });
+  }, [pool, question.id, getPanResponder]);
+
+  // Reset function to return all items to original position
+  const resetItems = useCallback(() => {
+    console.log('[Reorder] Reset button pressed - returning all items to original position');
+    
+    // Haptic feedback
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    
+    // Animate the reset
+    try {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    } catch {}
+    
+    // Clear all slots
+    setSlots(Array(slotsCount).fill(null));
+    
+    // Reset pool to original order
+    setPool([...items]);
+    
+    // Clear locked slots
+    setLockedSlots(new Set());
+    
+    // Reset validation and completion states
+    setIsValidating(false);
+    setIsCompleted(false);
+    isValidatingRef.current = false;
+    isCompletedRef.current = false;
+    isDraggingRef.current = false;
+    draggedItemRef.current = null;
+    lastNotifiedRef.current = '';
+    
+    console.log('[Reorder] Reset complete - all items returned to original position');
+  }, [items, slotsCount]);
+
   return (
-    <View>
-      <View style={styles.reorderSlotsGrid}>
+    <View style={{ width: '100%', paddingHorizontal: 0 }}>
+      {/* Reset Button */}
+      <View style={styles.resetButtonContainer}>
+        <TouchableOpacity 
+          style={styles.resetButton}
+          onPress={resetItems}
+          disabled={isValidating || isCompleted}
+        >
+          <MaterialCommunityIcons 
+            name="refresh" 
+            size={20} 
+            color="#ffffff" 
+          />
+          <Text style={styles.resetButtonText}>Reset</Text>
+        </TouchableOpacity>
+      </View>
+      
+      {/* Drop Slots - Full Width */}
+      <View style={styles.reorderSlotsRow}>
         {Array.from({ length: slotsCount }).map((_, i) => (
-          <Slot key={`slot-${i}`} index={i} />
+          <Slot key={`slot-${question.id}-${i}`} index={i} />
         ))}
       </View>
-      <View style={styles.reorderChoicesPool}>
-        {pool.map((choice) => (
-          <ChoiceCard key={choice.id} item={choice} />
-        ))}
+      
+      {/* Choice Pool - Full Width */}
+      <View style={styles.reorderChoicesRow}>
+        {renderChoiceCards}
       </View>
     </View>
   );
-}
+});
 
 interface ReorderItem {
   id: string;
@@ -203,7 +1069,6 @@ interface ReorderItem {
   content: string;
   imageUrl?: string;
 }
-
 interface Question {
   id: string;
   type: 'identification' | 'multiple-choice' | 'matching' | 're-order' | 'reading-passage';
@@ -211,7 +1076,6 @@ interface Question {
   answer: string | string[];
   options?: string[];
   optionImages?: (string | null)[];
-  optionMultipleImages?: (string[] | null)[];
   pairs?: { left: string; right: string; leftImage?: string | null; rightImage?: string | null }[];
   order?: string[];
   reorderItems?: ReorderItem[];
@@ -231,8 +1095,8 @@ interface Question {
   };
   // Optional saved TTS audio URL for this question
   ttsAudioUrl?: string;
+  recordedTtsUrl?: string; // Teacher-recorded audio (preferred over ttsAudioUrl)
 }
-
 interface Exercise {
   id: string;
   title: string;
@@ -248,13 +1112,125 @@ interface Exercise {
   originalAuthor?: string;
   originalExerciseId?: string;
   timeLimitPerItem?: number; // Time limit in seconds per question
+  maxAttemptsPerItem?: number | null; // Maximum attempts per question (null = unlimited)
 }
-
 interface StudentAnswer {
   questionId: string;
   answer: string | string[] | {[key: string]: any};
   isCorrect?: boolean;
   timeSpent?: number;
+}
+// New interfaces for the restructured database format
+interface AssignmentMetadata {
+  assignmentId: string;
+  classId: string;
+  assignedAt: string;
+  deadline: string;
+  acceptLateSubmissions: boolean;
+  acceptingStatus: string;
+  isLateSubmission: boolean;
+}
+
+interface ExerciseInfo {
+  exerciseId: string;
+  title: string;
+  category: string;
+  description: string;
+  totalQuestions: number;
+  timeLimitPerItem: number | null;
+}
+
+interface StudentInfo {
+  studentId: string;
+  name: string;
+  gradeSection: string;
+  sex: string;
+}
+interface DeviceInfo {
+  platform: string;
+  appVersion: string;
+  deviceModel: string;
+  networkType: string;
+  // Enhanced metadata fields
+  updateId?: string | null;
+  runtimeVersion?: string | null;
+  platformVersion?: string;
+  deviceInfo?: string;
+  environment?: string;
+  buildProfile?: string;
+  expoVersion?: string;
+}
+
+interface ExerciseSession {
+  startedAt: string;
+  completedAt: string;
+  totalDurationSeconds: number;
+  timestampSubmitted: number;
+}
+
+interface ResultsSummary {
+  totalItems: number;
+  totalAttempts: number;
+  totalCorrect: number;
+  totalIncorrect: number;
+  totalTimeSpentSeconds: number;
+  meanPercentageScore: number;
+  meanAttemptsPerItem: number;
+  meanTimePerItemSeconds: number;
+  score: number;
+  remarks: string;
+}
+
+interface AttemptHistory {
+  attemptNumber: number;
+  selectedAnswer: string;
+  isCorrect: boolean;
+  timeStamp: string;
+}
+
+interface QuestionResult {
+  questionNumber: number;
+  questionId: string;
+  questionType: string;
+  questionText: string;
+  choices?: string[];
+  correctAnswer: string;
+  studentAnswer: string;
+  isCorrect: boolean;
+  attempts: number;
+  timeSpentSeconds: number;
+  ttsPlayed: boolean;
+  ttsPlayCount: number;
+  interactionTypes: string[];
+  attemptHistory: AttemptHistory[];
+}
+
+interface ExerciseResultData {
+  exerciseResultId: string;
+  assignedExerciseId: string;
+  assignmentMetadata: AssignmentMetadata;
+  exerciseInfo: ExerciseInfo;
+  studentInfo: StudentInfo;
+  deviceInfo: DeviceInfo;
+  exerciseSession: ExerciseSession;
+  resultsSummary: ResultsSummary;
+  questionResults: QuestionResult[];
+  submittedAt: string;
+}
+
+// Resource preloading interfaces
+interface ResourceItem {
+  url: string;
+  type: 'image' | 'audio';
+  priority: 'high' | 'medium' | 'low';
+  questionId?: string;
+}
+
+interface PreloadResult {
+  success: boolean;
+  url: string;
+  error?: string;
+  loadTime: number;
 }
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
@@ -280,6 +1256,150 @@ const getResponsivePadding = (basePadding: number) => {
   return Math.max(basePadding * scale, basePadding * 0.8);
 };
 
+// Validation functions to ensure fair question layouts
+const validateMatchingQuestion = (question: Question): boolean => {
+  if (question.type !== 'matching' || !question.pairs) return true;
+  
+  const pairs = question.pairs;
+  // Check if any pair has the same index (left[i] matches right[i])
+  for (let i = 0; i < pairs.length; i++) {
+    if (pairs[i].left === pairs[i].right) {
+      console.warn(`[Validation] Matching question ${question.id} has aligned pair at index ${i}: "${pairs[i].left}"`);
+      return false;
+    }
+  }
+  return true;
+};
+
+const validateReorderQuestion = (question: Question): boolean => {
+  if (question.type !== 're-order' || !question.reorderItems) return true;
+  
+  const items = question.reorderItems;
+  const correctSequence = items.map(item => item.id);
+  
+  // Check if items are already in correct order
+  const isAlreadyCorrect = items.every((item, index) => {
+    // For ascending order (default)
+    if (!question.reorderDirection || question.reorderDirection === 'asc') {
+      return item.id === correctSequence[index];
+    }
+    // For descending order
+    return item.id === correctSequence[correctSequence.length - 1 - index];
+  });
+  
+  if (isAlreadyCorrect) {
+    console.warn(`[Validation] Reorder question ${question.id} has items already in correct order`);
+    return false;
+  }
+  
+  return true;
+};
+
+const shuffleArray = (array: any[]): any[] => {
+  const shuffled = [...array];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+};
+
+const fixMatchingQuestion = (question: Question): Question => {
+  if (question.type !== 'matching' || !question.pairs) return question;
+  
+  const pairs = question.pairs;
+  const leftItems = pairs.map(p => p.left);
+  const rightItems = pairs.map(p => p.right);
+  
+  // Shuffle right items until no alignment occurs
+  let shuffledRight = shuffleArray(rightItems);
+  let attempts = 0;
+  const maxAttempts = 100; // Prevent infinite loop
+  
+  while (attempts < maxAttempts) {
+    let hasAlignment = false;
+    for (let i = 0; i < leftItems.length; i++) {
+      if (leftItems[i] === shuffledRight[i]) {
+        hasAlignment = true;
+        break;
+      }
+    }
+    
+    if (!hasAlignment) break;
+    
+    shuffledRight = shuffleArray(rightItems);
+    attempts++;
+  }
+  
+  if (attempts >= maxAttempts) {
+    console.warn(`[Validation] Could not fix matching question ${question.id} after ${maxAttempts} attempts`);
+    return question;
+  }
+  
+  // Create new pairs with shuffled right items
+  const fixedPairs = pairs.map((pair, index) => ({
+    ...pair,
+    right: shuffledRight[index]
+  }));
+  
+  console.log(`[Validation] Fixed matching question ${question.id}:`, {
+    original: pairs.map(p => `${p.left} → ${p.right}`),
+    fixed: fixedPairs.map(p => `${p.left} → ${p.right}`)
+  });
+  
+  return {
+    ...question,
+    pairs: fixedPairs
+  };
+};
+
+const fixReorderQuestion = (question: Question): Question => {
+  if (question.type !== 're-order' || !question.reorderItems) return question;
+  
+  const items = question.reorderItems;
+  const correctSequence = items.map(item => item.id);
+  
+  // Shuffle items until they're not in correct order
+  let shuffledItems = shuffleArray(items);
+  let attempts = 0;
+  const maxAttempts = 100; // Prevent infinite loop
+  
+  while (attempts < maxAttempts) {
+    const shuffledSequence = shuffledItems.map(item => item.id);
+    
+    // Check if shuffled sequence matches correct order
+    const isCorrectOrder = shuffledSequence.every((id, index) => {
+      if (!question.reorderDirection || question.reorderDirection === 'asc') {
+        return id === correctSequence[index];
+      }
+      return id === correctSequence[correctSequence.length - 1 - index];
+    });
+    
+    if (!isCorrectOrder) break;
+    
+    shuffledItems = shuffleArray(items);
+    attempts++;
+  }
+  
+  if (attempts >= maxAttempts) {
+    console.warn(`[Validation] Could not fix reorder question ${question.id} after ${maxAttempts} attempts`);
+    return question;
+  }
+  
+  console.log(`[Validation] Fixed reorder question ${question.id}:`, {
+    original: correctSequence,
+    shuffled: shuffledItems.map(item => item.id),
+    direction: question.reorderDirection || 'asc'
+  });
+  
+  // Store the original correct order in the question.order field
+  return {
+    ...question,
+    reorderItems: shuffledItems,
+    order: correctSequence // Store the correct order for validation
+  };
+};
+
 // Animated touchable for shake feedback
 const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
 
@@ -293,12 +1413,13 @@ export default function StudentExerciseAnswering() {
   const [assignedExercise, setAssignedExercise] = useState<any>(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<StudentAnswer[]>([]);
+  // CRITICAL FIX: Use ref to track answers synchronously for accurate submission
+  const answersRef = useRef<StudentAnswer[]>([]);
   const [currentAnswer, setCurrentAnswer] = useState<string | string[] | {[key: string]: any}>('');
   const [loading, setLoading] = useState(true);
-  const [loadingProgress, setLoadingProgress] = useState(0);
-  const [loadingMessage, setLoadingMessage] = useState('Get ready for math fun!');
   const [submitting, setSubmitting] = useState(false);
-  const [imagesReady, setImagesReady] = useState(false);
+  const submittingRef = useRef(false); // CRITICAL: Ref to prevent duplicate submissions
+  const isAdvancingRef = useRef(false); // CRITICAL: Ref to prevent duplicate advancement calls
   const [startTime, setStartTime] = useState<number>(Date.now());
   const [elapsedTime, setElapsedTime] = useState<number>(0);
   const [timerInterval, setTimerInterval] = useState<NodeJS.Timeout | null>(null);
@@ -309,11 +1430,12 @@ export default function StudentExerciseAnswering() {
   const rafIdRef = useRef<number | null>(null);
   const questionElapsedRef = useRef<number>(0);
   const frozenElapsedRef = useRef<number | null>(null);
-  const timeoutRefs = useRef<NodeJS.Timeout[]>([]);
-  const ttsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [backgroundImage, setBackgroundImage] = useState<string>('map1.1.png');
   const [showSettings, setShowSettings] = useState(false);
   const [matchingSelections, setMatchingSelections] = useState<{[key: string]: {[key: string]: string}}>({});
+  // FIXED: New state for proper matching - stores which right index each left item is paired with
+  const [matchingPairs, setMatchingPairs] = useState<{[questionId: string]: {[leftIndex: string]: number}}>({});
+  const [matchingSelectedLeft, setMatchingSelectedLeft] = useState<{[questionId: string]: number | null}>({});
   const [reorderAnswers, setReorderAnswers] = useState<{[key: string]: ReorderItem[]}>({});
   const [shuffledPairsCache, setShuffledPairsCache] = useState<{[key: string]: {left: number[]; right: number[]}}>({});
   const prevQuestionIndexRef = useRef<number>(0);
@@ -323,6 +1445,9 @@ export default function StudentExerciseAnswering() {
   // Attempts and correctness tracking for try-again assessment
   const [attemptCounts, setAttemptCounts] = useState<{[questionId: string]: number}>({});
   const [correctQuestions, setCorrectQuestions] = useState<{[questionId: string]: boolean}>({});
+  // CRITICAL FIX: Use refs to track counts synchronously for accurate submission data
+  const attemptCountsRef = useRef<{[questionId: string]: number}>({});
+  const correctQuestionsRef = useRef<{[questionId: string]: boolean}>({});
   
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -336,10 +1461,20 @@ export default function StudentExerciseAnswering() {
   const correctAnim = useRef(new Animated.Value(0)).current;
   const [showWrong, setShowWrong] = useState(false);
   const wrongAnim = useRef(new Animated.Value(0)).current;
+  // Guards to prevent duplicate popups/overlays
+  const correctFeedbackActiveRef = useRef(false);
+  const wrongFeedbackActiveRef = useRef(false);
   const [showAlertModal, setShowAlertModal] = useState(false);
   const [alertConfig, setAlertConfig] = useState({title: '', message: '', type: 'warning', onConfirm: () => {}});
   const alertAnim = useRef(new Animated.Value(0)).current;
   const [attemptLogs, setAttemptLogs] = useState<{[questionId: string]: Array<{answer: string, timeSpent: number, timestamp: number, attemptType: string, hesitationTime: number, isSignificantChange: boolean, questionPhase: string, confidence: string}>}>({});
+  // CRITICAL FIX: Use ref to track attempts synchronously for immediate access during submission
+  const attemptLogsRef = useRef<{[questionId: string]: Array<{answer: string, timeSpent: number, timestamp: number, attemptType: string, hesitationTime: number, isSignificantChange: boolean, questionPhase: string, confidence: string}>}>({});
+  
+  // CRITICAL FIX: Store saved question results for accurate UI display after submission
+  const [savedQuestionResults, setSavedQuestionResults] = useState<QuestionResult[]>([]);
+  // CRITICAL FIX: Store saved results summary for accurate aggregate display
+  const [savedResultsSummary, setSavedResultsSummary] = useState<ResultsSummary | null>(null);
   
   // Enhanced interaction tracking
   const [interactionLogs, setInteractionLogs] = useState<{[questionId: string]: Array<{
@@ -358,31 +1493,243 @@ export default function StudentExerciseAnswering() {
   const [currentAudioUri, setCurrentAudioUri] = useState<string | null>(null);
   const lastAutoPlayedQuestionIdRef = useRef<string | null>(null);
   const currentTTSRef = useRef<any | null>(null);
+  
+  // TTS audio player cache for instant playback (no loading delay)
+  const audioPlayerCacheRef = useRef<Map<string, any>>(new Map());
+  const [ttsPreloadComplete, setTtsPreloadComplete] = useState(false);
+
+  // Session and device tracking for new database format
+  const [sessionStartTime, setSessionStartTime] = useState<string>('');
+  const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null);
+  const [studentInfo, setStudentInfo] = useState<StudentInfo | null>(null);
+
+  // Resource preloading state
+  const [isPreloadingResources, setIsPreloadingResources] = useState(false);
+  const [preloadProgress, setPreloadProgress] = useState(0);
+  const [animatedProgress, setAnimatedProgress] = useState(0);
+  const [preloadStatus, setPreloadStatus] = useState('');
+  const [preloadError, setPreloadError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [loadedResources, setLoadedResources] = useState<Set<string>>(new Set());
+  const [failedResources, setFailedResources] = useState<Set<string>>(new Set());
+  const [resourcesReady, setResourcesReady] = useState(false);
+  const [exerciseStarted, setExerciseStarted] = useState(false);
+  const [officialStartTime, setOfficialStartTime] = useState<number | null>(null);
+
+  // Smooth progress animation effect
+  useEffect(() => {
+    const duration = 300; // Animation duration in ms
+    const startValue = animatedProgress;
+    const endValue = preloadProgress;
+    const startTime = Date.now();
+    
+    const animate = () => {
+      const elapsed = Date.now() - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      
+      // Easing function for smooth animation
+      const easeOutCubic = 1 - Math.pow(1 - progress, 3);
+      const currentValue = startValue + (endValue - startValue) * easeOutCubic;
+      
+      setAnimatedProgress(currentValue);
+      
+      if (progress < 1) {
+        requestAnimationFrame(animate);
+      }
+    };
+    
+    if (preloadProgress !== animatedProgress) {
+      requestAnimationFrame(animate);
+    }
+  }, [preloadProgress]);
+
+  // Animation states for loading screen
+  const [bounceAnim] = useState(new Animated.Value(0));
+  const [pulseAnim] = useState(new Animated.Value(1));
+  const [rotateAnim] = useState(new Animated.Value(0));
+
+  // Start loading screen animations
+  useEffect(() => {
+    // Bouncing animation
+    const bounceAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(bounceAnim, {
+          toValue: 1,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+        Animated.timing(bounceAnim, {
+          toValue: 0,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    // Pulse animation
+    const pulseAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.2,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    // Rotate animation
+    const rotateAnimation = Animated.loop(
+      Animated.timing(rotateAnim, {
+        toValue: 1,
+        duration: 2000,
+        useNativeDriver: true,
+      })
+    );
+
+    // Slide animation
+    const slideAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(slideAnim, {
+          toValue: 1,
+          duration: 1000,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 1000,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    bounceAnimation.start();
+    pulseAnimation.start();
+    rotateAnimation.start();
+    slideAnimation.start();
+
+    return () => {
+      bounceAnimation.stop();
+      pulseAnimation.stop();
+      rotateAnimation.stop();
+      slideAnimation.stop();
+    };
+  }, []);
 
   // Layout transitions will be handled by React Native automatically
   
-  // Helper to track and clean timeouts
-  const addTimeout = (timeout: NodeJS.Timeout) => {
-    timeoutRefs.current.push(timeout);
-  };
-  
-  const clearAllTimeouts = () => {
-    timeoutRefs.current.forEach(timeout => clearTimeout(timeout));
-    timeoutRefs.current = [];
-    if (ttsTimeoutRef.current) {
-      clearTimeout(ttsTimeoutRef.current);
-      ttsTimeoutRef.current = null;
-    }
-  };
-  
+  // Initialize session and device information
+  useEffect(() => {
+    const initializeSessionData = async () => {
+      const now = new Date().toISOString();
+      setSessionStartTime(now);
+      
+      // Collect comprehensive device and app metadata
+      try {
+        const metadata = await collectAppMetadata();
+        console.log('[DeviceInfo] Collected comprehensive metadata:', metadata);
+        
+        const deviceData: DeviceInfo = {
+          platform: metadata.platform,
+          appVersion: metadata.appVersion,
+          deviceModel: metadata.deviceInfo || `${metadata.platform} ${metadata.platformVersion}`,
+          networkType: 'unknown', // Network detection would require additional setup
+          // Enhanced metadata
+          updateId: metadata.updateId,
+          runtimeVersion: metadata.runtimeVersion,
+          platformVersion: metadata.platformVersion,
+          deviceInfo: metadata.deviceInfo,
+          environment: metadata.environment,
+          buildProfile: metadata.buildProfile,
+          expoVersion: metadata.expoVersion,
+        };
+        
+        console.log('[DeviceInfo] Enhanced device data set:', deviceData);
+        setDeviceInfo(deviceData);
+      } catch (error) {
+        console.error('[DeviceInfo] Failed to collect metadata, using fallback:', error);
+        // Fallback to basic device info
+        const deviceData: DeviceInfo = {
+          platform: Platform.OS,
+          appVersion: '1.0.0',
+          deviceModel: Platform.OS === 'android' ? `Android ${Platform.Version}` : `iOS ${Platform.Version}`,
+          networkType: 'unknown'
+        };
+        setDeviceInfo(deviceData);
+      }
+      
+      // Load student information
+      try {
+        const loginCode = await AsyncStorage.getItem('parent_key');
+        console.log('[StudentInfo] Login code from AsyncStorage:', loginCode);
+        
+        if (loginCode) {
+          // CRITICAL FIX: Resolve login code to actual parent ID first
+          const parentIdResult = await readData(`/parentLoginCodes/${loginCode}`);
+          console.log('[StudentInfo] Parent ID resolution result:', parentIdResult);
+          
+          if (parentIdResult.data) {
+            const actualParentId = parentIdResult.data;
+            console.log('[StudentInfo] Resolved actual parent ID:', actualParentId);
+            
+            // Now find the student using the actual parent ID
+            const studentsData = await readData('/students');
+            if (studentsData.data) {
+              // Search for student by parentId (the ACTUAL parent ID, not login code)
+              const student = Object.values(studentsData.data).find((s: any) => s.parentId === actualParentId) as any;
+              console.log('[StudentInfo] Found student:', student);
+              
+              if (student) {
+                const studentData = {
+                  studentId: student.studentId,
+                  name: student.fullName || 'Unknown Student',
+                  gradeSection: student.gradeSection || 'Unknown Grade',
+                  sex: student.gender || 'Unknown'
+                };
+                
+                setStudentInfo(studentData);
+                console.log('[StudentInfo] Student info set successfully:', studentData);
+                
+                // Store student ID for future use
+                if (student.studentId) {
+                  await AsyncStorage.setItem('student_id', student.studentId);
+                  console.log('[StudentInfo] Student ID stored in AsyncStorage:', student.studentId);
+                }
+              } else {
+                console.warn('[StudentInfo] No student found with parentId:', actualParentId);
+              }
+            } else {
+              console.warn('[StudentInfo] No students data available');
+            }
+          } else {
+            console.warn('[StudentInfo] Could not resolve login code to parent ID');
+          }
+        } else {
+          console.warn('[StudentInfo] No login code found in AsyncStorage');
+        }
+      } catch (error) {
+        console.error('[StudentInfo] Failed to load student information:', error);
+        if (error instanceof Error) {
+          logErrorWithStack(error, 'error', 'StudentExerciseAnswering', 'Failed to load student info');
+        }
+      }
+    };
+    
+    initializeSessionData();
+  }, []);
+
   // Load exercise data
   useEffect(() => {
     loadExercise();
-  }, [exerciseId, assignedExerciseId, questionIndex]);
+  }, [exerciseId, assignedExerciseId]);
   
   // Timer effect (requestAnimationFrame for smoother and accurate updates)
   useEffect(() => {
-    if (!exercise || submitting) {
+    if (!exercise || submitting || !exerciseStarted || showResults) { // Don't start timer until exercise is officially started or when results are shown
       if (timerInterval) {
         clearInterval(timerInterval);
         setTimerInterval(null);
@@ -409,18 +1756,36 @@ export default function StudentExerciseAnswering() {
         setTimeRemaining(remaining);
         
         // Auto-submit when time runs out
-        if (remaining === 0 && !submitting) {
+        if (remaining === 0 && !submittingRef.current && !isAdvancingRef.current) {
+          // CRITICAL: Stop the timer immediately to prevent multiple triggers
+          if (rafIdRef.current) {
+            cancelAnimationFrame(rafIdRef.current);
+            rafIdRef.current = null;
+          }
+          
+          // Set flag to prevent multiple timeout triggers
+          isAdvancingRef.current = true;
+          
           // Mark current question as failed due to timeout
           const currentQuestion = exercise.questions[currentQuestionIndex];
           if (currentQuestion) {
+            // CRITICAL: Ensure timeout answer is always marked as incorrect
             const timeoutAnswer: StudentAnswer = {
               questionId: currentQuestion.id,
-              answer: '',
-              isCorrect: false,
+              answer: currentAnswer || '', // Use current answer if any (or empty string)
+              isCorrect: false, // ALWAYS false for timeout
               timeSpent: questionElapsedRef.current,
             };
             
-            setAnswers(prev => {
+            console.log('[Timeout] Creating timeout answer:', {
+              questionId: currentQuestion.id,
+              hasAnswer: !!(currentAnswer && currentAnswer !== ''),
+              isCorrect: timeoutAnswer.isCorrect,
+              timeSpent: timeoutAnswer.timeSpent
+            });
+            
+            // CRITICAL FIX: Use updateAnswers to update both state and ref
+            updateAnswers(prev => {
               const existingIndex = prev.findIndex(a => a.questionId === currentQuestion.id);
               if (existingIndex >= 0) {
                 const updated = [...prev];
@@ -430,13 +1795,42 @@ export default function StudentExerciseAnswering() {
                 return [...prev, timeoutAnswer];
               }
             });
+            
+            // Log the timeout as a final attempt with special marker
+            logAttempt(currentQuestion, currentAnswer || '', 'final');
+            
+            // Mark as incorrect and increment attempt count for timeout
+            setQuestionCorrect(currentQuestion.id, false);
+            incrementAttemptCount(currentQuestion.id);
+            
+            console.log('[Timeout] Time limit reached - marking question as incorrect', {
+              questionId: currentQuestion.id,
+              timeLimit: exercise.timeLimitPerItem,
+              attempts: (attemptCountsRef.current[currentQuestion.id] || 0) + 1
+            });
           }
           
-          // Show "Times Up" briefly before advancing
-          const timeoutId = setTimeout(() => {
-            handleNext();
-          }, 1500) as unknown as NodeJS.Timeout; // Show "Times Up" for 1.5 seconds
-          addTimeout(timeoutId);
+          // Show clear "Times Up" alert before advancing (no visual flash, just alert)
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          
+          showCustomAlert(
+            'Time\'s Up! ⏰',
+            `The time limit has been reached. This question will be marked as incorrect and we'll move to the next one.`,
+            () => {
+              // CRITICAL FIX: Reset the flag and advance with small delay for smooth transition
+              isAdvancingRef.current = false;
+              console.log('[Timeout] User clicked OK, advancing to next question');
+              
+              // Small delay to ensure smooth state transition
+              setTimeout(() => {
+                advanceToNextOrFinish();
+              }, 100);
+            },
+            'warning'
+          );
+          
+          // Exit early to prevent further timer ticks
+          return;
         }
       } else {
         setTimeRemaining(null);
@@ -451,33 +1845,30 @@ export default function StudentExerciseAnswering() {
         rafIdRef.current = null;
       }
     };
-  }, [exercise, startTime, submitting, questionStartTime, currentQuestionIndex]);
+  }, [exercise, startTime, submitting, questionStartTime, exerciseStarted, showResults]);
 
   // Keep a ref of the latest per-question elapsed to avoid race conditions during index changes
   useEffect(() => {
     questionElapsedRef.current = questionElapsed;
   }, [questionElapsed]);
   
-  // Cleanup timer on unmount
+  // Cleanup timer and cached audio on unmount
   useEffect(() => {
     return () => {
       if (timerInterval) {
         clearInterval(timerInterval);
       }
       
-      // Clear all pending timeouts
-      clearAllTimeouts();
-      
       // Stop any TTS audio on unmount - ensure complete cleanup
       try {
         // Stop expo-speech if running
         Speech.stop();
       } catch (error) {
-        console.warn('Error stopping speech on unmount:', error);
+        console.warn('[Cleanup] Error stopping speech on unmount:', error);
       }
       
       try {
-        // Stop and cleanup audio player
+        // Stop current player
         if (currentTTSRef.current) {
           currentTTSRef.current.pause();
           currentTTSRef.current.remove();
@@ -486,7 +1877,23 @@ export default function StudentExerciseAnswering() {
           currentAudioPlayer.remove();
         }
       } catch (error) {
-        console.warn('Error stopping audio player on unmount:', error);
+        console.warn('[Cleanup] Error stopping current audio player:', error);
+      }
+      
+      // CRITICAL: Clean up ALL cached audio players on unmount
+      try {
+        console.log(`[Cleanup] Disposing ${audioPlayerCacheRef.current.size} cached audio players`);
+        audioPlayerCacheRef.current.forEach((player, url) => {
+          try {
+            player.pause();
+            player.remove();
+          } catch (e) {
+            console.warn('[Cleanup] Error disposing cached player:', url, e);
+          }
+        });
+        audioPlayerCacheRef.current.clear();
+      } catch (error) {
+        console.warn('[Cleanup] Error cleaning up audio cache:', error);
       }
     };
   }, [timerInterval]);
@@ -529,28 +1936,32 @@ export default function StudentExerciseAnswering() {
       easing: Easing.out(Easing.cubic),
       useNativeDriver: false,
     }).start();
-    // Prefetch upcoming images (next 3 questions) for instant transitions
-    if (exercise) {
-      const urls: string[] = [];
-      for (let i = 1; i <= 3; i++) {
-        const nextIndex = currentQuestionIndex + i;
-        const nextQ = exercise.questions[nextIndex];
-        if (nextQ) urls.push(...collectImageUrls(nextQ));
-      }
-      if (urls.length) {
-        // Prefetch in background without blocking UI
-        prefetchUrlsWithPriority(urls, 'high');
+    // Note: Resource preloading is now handled comprehensively in loadExercise()
+  }, [currentQuestionIndex, exercise]);
+
+  // Helper function to accumulate current question time
+  const accumulateCurrentQuestionTime = () => {
+    if (exercise && currentQuestionIndex >= 0 && currentQuestionIndex < exercise.questions.length) {
+      const currentQid = exercise.questions[currentQuestionIndex].id;
+      const delta = questionElapsedRef.current;
+      
+      if (delta > 0) {
+        // CRITICAL FIX: Accumulate time and reset the timer
+        updateAnswers(prev => prev.map(a => a.questionId === currentQid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+        
+        // Reset the question timer for next attempt/interaction
+        setQuestionStartTime(Date.now());
+        setQuestionElapsed(0);
+        
+        console.log(`[TimeTracking] Accumulated ${delta}ms for question ${currentQid}`);
       }
     }
-  }, [currentQuestionIndex, exercise]);
+  };
 
   // Reset question timer when index changes
   useEffect(() => {
     // CRITICAL: Stop TTS when question index changes
     stopCurrentTTS();
-    
-    // Clear all pending timeouts when changing questions
-    clearAllTimeouts();
     
     // Accumulate time for the previous question, then reset timer for the new one
     if (exercise) {
@@ -560,7 +1971,8 @@ export default function StudentExerciseAnswering() {
         const prevQid = exercise.questions[prevIndex].id;
         // Use frozen UI timer value captured at correctness if present, else latest UI timer value
         const delta = (frozenElapsedRef.current ?? questionElapsedRef.current);
-        setAnswers(prev => prev.map(a => a.questionId === prevQid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+        // CRITICAL FIX: Use updateAnswers to update both state and ref
+        updateAnswers(prev => prev.map(a => a.questionId === prevQid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
         frozenElapsedRef.current = null;
       }
       prevQuestionIndexRef.current = currentQuestionIndex;
@@ -568,13 +1980,55 @@ export default function StudentExerciseAnswering() {
     setQuestionStartTime(Date.now());
     setQuestionElapsed(0);
     
-    // Log initial attempt when question is displayed
+    // CRITICAL FIX: Reset attempts counter for the new question
+    // This ensures attempts start at 0 for each new question
+    if (exercise && currentQuestionIndex >= 0 && currentQuestionIndex < exercise.questions.length) {
+      const currentQid = exercise.questions[currentQuestionIndex].id;
+      console.log('[QuestionChange] Resetting attempts for question:', currentQid);
+      
+      // CRITICAL FIX: Reset both state and ref immediately to prevent stale values
+      const newAttemptCounts = { ...attemptCounts };
+      newAttemptCounts[currentQid] = 0; // Reset to 0 for the new question
+      attemptCountsRef.current = { ...attemptCountsRef.current, [currentQid]: 0 };
+      setAttemptCounts(newAttemptCounts);
+      
+      // CRITICAL FIX: Clear reorder answers for the new question to prevent duplicate options
+      setReorderAnswers(prev => {
+        const newAnswers = { ...prev };
+        newAnswers[currentQid] = []; // Clear any previous reorder state
+        return newAnswers;
+      });
+      
+      console.log('[QuestionChange] Attempt count reset complete for question:', currentQid, 'attempts:', 0);
+    }
+    
+    // Log initial attempt when question is displayed (only if there's an existing answer)
     if (exercise && exercise.questions[currentQuestionIndex]) {
       const currentQuestion = exercise.questions[currentQuestionIndex];
       const existingAnswer = answers.find(a => a.questionId === currentQuestion.id);
-      // Only log initial attempt if there's an actual answer
-      if (existingAnswer?.answer && existingAnswer.answer !== '' && existingAnswer.answer !== null) {
-        logAttempt(currentQuestion, existingAnswer.answer, 'initial');
+      
+      // FIXED: Initialize matching state for matching questions
+      if (currentQuestion.type === 'matching') {
+        const matchingAnswer = existingAnswer?.answer;
+        if (matchingAnswer && typeof matchingAnswer === 'object' && !Array.isArray(matchingAnswer)) {
+          setMatchingPairs(prev => ({ ...prev, [currentQuestion.id]: matchingAnswer }));
+        }
+        // Reset selected left item when changing questions
+        setMatchingSelectedLeft(prev => ({ ...prev, [currentQuestion.id]: null }));
+      }
+      
+      // Only log if there's an actual answer, not empty
+      if (existingAnswer?.answer && existingAnswer.answer !== '') {
+        // CRITICAL FIX: Don't log empty objects for matching/reorder questions
+        const isEmptyObject = typeof existingAnswer.answer === 'object' && 
+                             !Array.isArray(existingAnswer.answer) && 
+                             Object.keys(existingAnswer.answer).length === 0;
+        const isEmptyArray = Array.isArray(existingAnswer.answer) && 
+                            existingAnswer.answer.length === 0;
+        
+        if (!isEmptyObject && !isEmptyArray) {
+          logAttempt(currentQuestion, existingAnswer.answer, 'initial');
+        }
       }
     }
   }, [currentQuestionIndex]);
@@ -629,186 +2083,318 @@ export default function StudentExerciseAnswering() {
     }
   };
 
-  // Enhanced prefetch helpers with progress tracking
-  const collectImageUrls = (q?: Question | null): string[] => {
-    if (!q) return [];
-    const urls: string[] = [];
-    if (q.questionImage) {
-      if (Array.isArray(q.questionImage)) {
-        urls.push(...q.questionImage.filter(Boolean) as string[]);
-      } else {
-        urls.push(q.questionImage);
-      }
-    }
-    if (q.questionImages && q.questionImages.length) {
-      urls.push(...q.questionImages.filter(Boolean));
-    }
-    if (q.optionImages && q.optionImages.length) q.optionImages.forEach((u) => { if (u) urls.push(u); });
-    if (q.optionMultipleImages && q.optionMultipleImages.length) {
-      q.optionMultipleImages.forEach((imgArray) => {
-        if (imgArray) imgArray.forEach((u) => { if (u) urls.push(u); });
-      });
-    }
-    if (q.reorderItems && q.reorderItems.length) q.reorderItems.forEach((it) => { if (it.imageUrl) urls.push(it.imageUrl); });
-    if (q.pairs && q.pairs.length) q.pairs.forEach((p) => { if (p.leftImage) urls.push(p.leftImage); if (p.rightImage) urls.push(p.rightImage); });
-    if (q.subQuestions && q.subQuestions.length) q.subQuestions.forEach((sq) => {
-      urls.push(...collectImageUrls(sq as any));
-    });
-    return urls;
-  };
-
-  // Fast prefetch with progress tracking
-  const prefetchUrls = async (urls: string[], onProgress?: (progress: number) => void) => {
-    try {
-      const unique = Array.from(new Set(urls.filter(Boolean)));
-      if (unique.length === 0) return;
-      
-      let completed = 0;
-      const promises = unique.map(async (url) => {
-        try {
-          await Image.prefetch(url);
-          completed++;
-          if (onProgress) {
-            onProgress(completed / unique.length);
-          }
-        } catch (error) {
-          console.warn(`Failed to prefetch: ${url}`);
-          completed++;
-          if (onProgress) {
-            onProgress(completed / unique.length);
-          }
-        }
-      });
-      
-      await Promise.all(promises);
-    } catch (error) {
-      console.warn('Prefetch error:', error);
-    }
-  };
-
-  // Enhanced image preloading with priority and progress tracking
-  const prefetchUrlsWithPriority = async (
-    urls: string[], 
-    priority: 'high' | 'normal' | 'low' = 'normal',
-    onProgress?: (progress: number) => void
-  ) => {
-    if (!urls.length) {
-      onProgress?.(1);
-      return;
-    }
+  // Enhanced resource collection and preloading system - OPTIMIZED
+  const collectAllResources = (exercise: Exercise): ResourceItem[] => {
+    const resources: ResourceItem[] = [];
     
-    try {
-      const uniqueUrls = [...new Set(urls.filter(Boolean))];
+    console.log(`[CollectResources] Starting collection for ${exercise.questions.length} questions`);
+    
+    exercise.questions.forEach((question, questionIndex) => {
+      // OPTIMIZATION: Priority system for efficient loading
+      const priority: 'high' | 'medium' | 'low' = 
+        questionIndex < 3 ? 'high' :    // First 3 questions - load first
+        questionIndex < 7 ? 'medium' :  // Next 4 questions - load second
+        'low';                          // Last questions - load last
       
-      // Cache source objects immediately
-      uniqueUrls.forEach(url => {
-        if (!imageCache.has(url)) {
-          imageCache.set(url, { uri: url });
+      console.log(`[CollectResources] Q${questionIndex + 1} (${question.id}): priority=${priority}`);
+      
+      // Collect question images
+      let questionResourceCount = 0;
+      if (question.questionImage) {
+        if (Array.isArray(question.questionImage)) {
+          question.questionImage.filter(Boolean).forEach(url => {
+            resources.push({ url, type: 'image', priority, questionId: question.id });
+            questionResourceCount++;
+          });
+        } else {
+          resources.push({ url: question.questionImage, type: 'image', priority, questionId: question.id });
+          questionResourceCount++;
         }
-      });
+      }
       
-      let completed = 0;
-      const totalImages = uniqueUrls.length;
+      if (question.questionImages && question.questionImages.length) {
+        question.questionImages.filter(Boolean).forEach(url => {
+          resources.push({ url, type: 'image', priority, questionId: question.id });
+          questionResourceCount++;
+        });
+      }
       
-      const updateProgress = () => {
-        completed++;
-        onProgress?.(completed / totalImages);
-      };
+      // Collect option images
+      if (question.optionImages && question.optionImages.length) {
+        question.optionImages.filter(Boolean).forEach(url => {
+          resources.push({ url: url!, type: 'image', priority, questionId: question.id });
+          questionResourceCount++;
+        });
+      }
       
-      // Load all images with high concurrency for better performance
-      const concurrency = priority === 'high' ? 10 : priority === 'normal' ? 6 : 3;
+      console.log(`[CollectResources] Q${questionIndex + 1}: Added ${questionResourceCount} image resources`);
       
-      for (let i = 0; i < uniqueUrls.length; i += concurrency) {
-        const batch = uniqueUrls.slice(i, i + concurrency);
-        const batchPromises = batch.map(async (url) => {
-          try {
-            // Use both ExpoImage prefetch and Image.prefetch for better caching
-            await Promise.all([
-              ExpoImage.prefetch(url, { cachePolicy: 'memory-disk' }),
-              Image.prefetch(url)
-            ]);
-          } catch (error) {
-            console.warn(`Failed to prefetch: ${url}`);
-          } finally {
-            updateProgress();
+      // Collect reorder item images
+      if (question.reorderItems && question.reorderItems.length) {
+        question.reorderItems.forEach(item => {
+          if (item.imageUrl) {
+            resources.push({ url: item.imageUrl, type: 'image', priority, questionId: question.id });
           }
         });
-        
-        await Promise.allSettled(batchPromises);
       }
       
-      onProgress?.(1);
+      // Collect pair images
+      if (question.pairs && question.pairs.length) {
+        question.pairs.forEach(pair => {
+          if (pair.leftImage) {
+            resources.push({ url: pair.leftImage, type: 'image', priority, questionId: question.id });
+          }
+          if (pair.rightImage) {
+            resources.push({ url: pair.rightImage, type: 'image', priority, questionId: question.id });
+          }
+        });
+      }
+      
+      // Collect TTS audio files for preloading
+      const audioUrl = getPreferredAudioUrl(question);
+      if (audioUrl) {
+        resources.push({ url: audioUrl, type: 'audio', priority, questionId: question.id });
+        console.log(`[CollectResources] Q${questionIndex + 1}: Added TTS audio resource`);
+      }
+      
+      // Collect sub-question resources
+      if (question.subQuestions && question.subQuestions.length) {
+        question.subQuestions.forEach(subQ => {
+          const subResources = collectAllResources({ ...exercise, questions: [subQ] });
+          resources.push(...subResources);
+        });
+      }
+    });
+    
+    log.preload(`Collection complete: ${resources.length} total resources`, {
+      byType: {
+        images: resources.filter(r => r.type === 'image').length,
+        audio: resources.filter(r => r.type === 'audio').length
+      },
+      byPriority: {
+        high: resources.filter(r => r.priority === 'high').length,
+        medium: resources.filter(r => r.priority === 'medium').length,
+        low: resources.filter(r => r.priority === 'low').length
+      }
+    });
+    
+    return resources;
+  };
+  const preloadResource = async (resource: ResourceItem): Promise<PreloadResult> => {
+    const startTime = Date.now();
+    
+    try {
+      if (resource.type === 'image') {
+        // CRITICAL FIX: Only preload HTTP/HTTPS URLs
+        // Asset paths and require() references will be handled by ExpoImage on-demand
+        if (!resource.url.startsWith('http://') && !resource.url.startsWith('https://')) {
+          const loadTime = Date.now() - startTime;
+          log.preload(`Skipping non-HTTP image (on-demand): ${resource.url.substring(0, 50)}`);
+          return { 
+            success: true, // Mark as success since ExpoImage will handle it
+            url: resource.url, 
+            loadTime 
+          };
+        }
+        
+        // OPTIMIZATION: Add timeout to prevent hanging on slow images (15 seconds)
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout after 15s')), 15000)
+        );
+        
+        // Prefetch using Expo Image cache (aligns with ExpoImage renderer) with retry
+        const prefetchOnce = async () => {
+          await Promise.race([
+            (ExpoImage as any).prefetch ? (ExpoImage as any).prefetch(resource.url) : Image.prefetch(resource.url),
+            timeoutPromise
+          ]);
+        };
+        try {
+          await prefetchOnce();
+        } catch (e1) {
+          log.preloadWarn('First prefetch attempt failed, retrying once…', resource.url);
+          await new Promise(r => setTimeout(r, 250));
+          await prefetchOnce();
+        }
+        
+        const loadTime = Date.now() - startTime;
+        const filename = resource.url.substring(resource.url.lastIndexOf('/') + 1, resource.url.indexOf('?') > 0 ? resource.url.indexOf('?') : resource.url.length);
+        log.preload(`Image loaded (${loadTime}ms): ${filename}`);
+        return { success: true, url: resource.url, loadTime };
+      } else if (resource.type === 'audio') {
+        // CRITICAL: Preload TTS audio files with proper caching for instant playback
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Audio preload timeout after 10s')), 10000)
+        );
+        
+        // Create and cache audio player for instant reuse
+        const source: AudioSource = { uri: resource.url };
+        const player = createAudioPlayer(source);
+        
+        // Wait for player to be ready (with proper state listener)
+        let isReady = false;
+        const readyPromise = new Promise<void>((resolve) => {
+          player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+            if ('isLoaded' in status && status.isLoaded && !isReady) {
+              isReady = true;
+              log.tts(`Audio player ready: ${resource.url.substring(0, 50)}`);
+              resolve();
+            }
+          });
+          
+          // Fallback: resolve after short delay if listener doesn't fire
+          setTimeout(() => {
+            if (!isReady) {
+              log.tts(`Audio player timeout fallback: ${resource.url.substring(0, 50)}`);
+              resolve();
+            }
+          }, 2000);
+        });
+        
+        await Promise.race([readyPromise, timeoutPromise]);
+        
+        // CRITICAL: Cache the loaded player for instant reuse
+        audioPlayerCacheRef.current.set(resource.url, player);
+        
+        const loadTime = Date.now() - startTime;
+        const filename = resource.url.substring(resource.url.lastIndexOf('/') + 1, resource.url.indexOf('?') > 0 ? resource.url.indexOf('?') : resource.url.length);
+        log.tts(`Audio cached for instant playback (${loadTime}ms): ${filename}`);
+        return { success: true, url: resource.url, loadTime };
+      }
+      
+      const loadTime = Date.now() - startTime;
+      return { success: true, url: resource.url, loadTime };
     } catch (error) {
-      console.warn('Error in prefetchUrlsWithPriority:', error);
-      onProgress?.(1);
+      const loadTime = Date.now() - startTime;
+      // Log but don't fail - images will load on-demand via ExpoImage
+      log.preloadWarn(`Failed to preload (on-demand): ${resource.url.substring(0, 60)} err=${error instanceof Error ? error.message : 'Unknown'}`, loadTime);
+      return { 
+        success: false, 
+        url: resource.url, 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        loadTime 
+      };
+    }
+  };
+  const preloadResourcesWithProgress = async (resources: ResourceItem[]): Promise<PreloadResult[]> => {
+    const results: PreloadResult[] = [];
+    const totalResources = resources.length;
+    
+    // Sort resources by priority
+    const sortedResources = resources.sort((a, b) => {
+      const priorityOrder = { high: 0, medium: 1, low: 2 };
+      return priorityOrder[a.priority] - priorityOrder[b.priority];
+    });
+    
+    // CRITICAL FIX: Smaller batches for smoother progress bar animation
+    const batchSize = 3;
+    const batches = [];
+    for (let i = 0; i < sortedResources.length; i += batchSize) {
+      batches.push(sortedResources.slice(i, i + batchSize));
+    }
+    
+    log.preload(`Processing ${totalResources} resources in ${batches.length} batches (max ${batchSize}/batch)`);
+    
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      const batchStart = results.length + 1;
+      const batchEnd = Math.min(results.length + batch.length, totalResources);
+      
+      setPreloadStatus(`Loading resources ${batchStart}-${batchEnd} of ${totalResources}...`);
+      log.preload(`Batch ${batchIndex + 1}/${batches.length}: Loading ${batch.length} resources`);
+      
+      // CRITICAL FIX: Process resources sequentially for smooth progress animation
+      // Sequential processing ensures progress updates are visible and smooth
+      const batchResults: PreloadResult[] = [];
+      for (let resourceIndex = 0; resourceIndex < batch.length; resourceIndex++) {
+        const resource = batch[resourceIndex];
+        const result = await preloadResource(resource);
+        batchResults.push(result);
+        
+        // Update loaded/failed resources
+        if (result.success) {
+          setLoadedResources(prev => new Set([...prev, resource.url]));
+        } else {
+          setFailedResources(prev => new Set([...prev, resource.url]));
+        }
+        
+        // Update progress after each individual resource for smoother animation
+        const completedResources = results.length + resourceIndex + 1;
+        const currentProgress = Math.round((completedResources / totalResources) * 100);
+        setPreloadProgress(currentProgress);
+        
+        // CRITICAL FIX: Longer delay for smooth progress animation (100-180ms jitter per resource)
+        // This ensures the progress bar animates smoothly and is visible to users
+        // Even skipped resources get this delay for consistent animation
+        const jitter = 100 + Math.floor(Math.random() * 80);
+        await new Promise(resolve => setTimeout(resolve, jitter));
+      }
+      
+      results.push(...batchResults);
+      
+      log.preload(`Batch ${batchIndex + 1} completed: ${results.length}/${totalResources} resources loaded`);
+      
+      // No delay between batches since we already have 150ms delay per resource
+    }
+    
+    return results;
+  };
+  const retryFailedResources = async (): Promise<void> => {
+    if (failedResources.size === 0) return;
+    
+    setRetryCount(prev => prev + 1);
+    setPreloadError(null);
+    setIsPreloadingResources(true);
+    setPreloadStatus(`Retrying failed resources (attempt ${retryCount + 1})...`);
+    
+    try {
+      const failedUrls = Array.from(failedResources);
+      const retryResources: ResourceItem[] = failedUrls.map(url => ({
+        url,
+        type: url.includes('.mp3') || url.includes('.wav') || url.includes('.m4a') ? 'audio' : 'image',
+        priority: 'high'
+      }));
+      
+      const retryResults = await preloadResourcesWithProgress(retryResources);
+      const successCount = retryResults.filter(r => r.success).length;
+      
+      if (successCount > 0) {
+        setPreloadStatus(`Retry successful! ${successCount} resources loaded.`);
+        // Remove successfully retried resources from failed set
+        const successfulUrls = retryResults.filter(r => r.success).map(r => r.url);
+        setFailedResources(prev => {
+          const newSet = new Set(prev);
+          successfulUrls.forEach(url => newSet.delete(url));
+          return newSet;
+        });
+      } else {
+        setPreloadStatus(`Retry failed. ${failedResources.size} resources still unavailable.`);
+      }
+    } catch (error) {
+      console.error('Retry failed:', error);
+      setPreloadError(error instanceof Error ? error.message : 'Retry failed');
+    } finally {
+      setIsPreloadingResources(false);
     }
   };
 
-  // Image caches for optimization
-  const imageCache = new Map<string, any>();
-  const backgroundCache = new Map<string, string>();
-  const getOptimizedBackground = (imageName: string): string => {
-    if (backgroundCache.has(imageName)) {
-      return backgroundCache.get(imageName)!;
-    }
-    const source = getBackgroundSource(imageName);
-    backgroundCache.set(imageName, source);
-    return source;
-  };
-
-  // Optimized Image Component with smooth loading and error handling
-  const OptimizedImage = ({ source, style, contentFit = "contain", priority = "high", ...props }: any) => {
-    const [isLoaded, setIsLoaded] = useState(false);
-    const [hasError, setHasError] = useState(false);
-    const imageOpacity = useRef(new Animated.Value(0)).current;
-
-    // Reset state when source changes
-    useEffect(() => {
-      setIsLoaded(false);
-      setHasError(false);
-      imageOpacity.setValue(0);
-    }, [source?.uri]);
-
-    const handleLoad = () => {
-      setIsLoaded(true);
-      setHasError(false);
-      // Smooth fade-in animation
-      Animated.timing(imageOpacity, {
-        toValue: 1,
-        duration: 200,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }).start();
-    };
-
-    const handleError = (error: any) => {
-      setHasError(true);
-      console.warn('Image load error:', source?.uri, error);
-    };
-
-    if (hasError) {
-      return (
-        <View style={[style, { backgroundColor: '#f8f9fa', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#dee2e6', borderRadius: 8 }]}>
-          <MaterialIcons name="image-not-supported" size={24} color="#9ca3af" />
-        </View>
-      );
-    }
-
-    return (
-      <Animated.View style={[style, { opacity: imageOpacity }]}>
-        <ExpoImage
-          source={source}
-          style={style}
-          contentFit={contentFit}
-          transition={0} // We handle animation manually
-          cachePolicy="memory-disk"
-          priority={priority}
-          onLoad={handleLoad}
-          onError={handleError}
-          {...props}
-        />
-      </Animated.View>
-    );
+  const handleStartExercise = () => {
+    const startTime = Date.now();
+    setOfficialStartTime(startTime);
+    setExerciseStarted(true);
+    setStartTime(startTime); // Update the main start time
+    setSessionStartTime(new Date(startTime).toISOString());
+    
+    // Reset question start time to now
+    setQuestionStartTime(startTime);
+    
+    // Start the timer
+    const interval = setInterval(() => {
+      setElapsedTime(Date.now() - startTime);
+    }, 100);
+    setTimerInterval(interval as any);
+    
+    console.log('Exercise officially started at:', new Date(startTime).toISOString());
   };
 
   // Helpers to present correct answers for all question types
@@ -819,45 +2405,80 @@ export default function StudentExerciseAnswering() {
     return item.content;
   };
 
-  // TTS cache and optimization
-  const ttsCache = new Map<string, any>();
-  const ttsLoadingPromises = new Map<string, Promise<any>>();
-
-  // Preload TTS audio
-  const preloadTTS = async (audioUrl: string) => {
-    if (!audioUrl || ttsCache.has(audioUrl) || ttsLoadingPromises.has(audioUrl)) {
-      return;
+  // Helper to get preferred audio URL (recorded voice > AI TTS)
+  const getPreferredAudioUrl = (question: Question | Omit<Question, 'subQuestions'>): string | null => {
+    // Prefer recorded voice if available
+    if (question.recordedTtsUrl) {
+      return question.recordedTtsUrl;
     }
-
-    try {
-      const loadingPromise = Promise.resolve(createAudioPlayer({ uri: audioUrl }));
-      
-      ttsLoadingPromises.set(audioUrl, loadingPromise);
-      const player = await loadingPromise;
-      
-      // Cache the player object without playing
-      ttsCache.set(audioUrl, player);
-      ttsLoadingPromises.delete(audioUrl);
-      
-    } catch (error) {
-      console.warn('Failed to preload TTS:', audioUrl, error);
-      ttsLoadingPromises.delete(audioUrl);
-    }
+    // Fallback to AI-generated TTS
+    return question.ttsAudioUrl || null;
   };
 
-  // TTS helpers
+  // TTS helpers - OPTIMIZED for instant playback with cached players
   const playTTS = async (audioUrl?: string | null) => {
     try {
       if (!audioUrl) return;
       
-      // Always auto-play TTS for all question types and contexts
-      
       // CRITICAL: Always stop any existing TTS before starting new one
       stopCurrentTTS();
       
-      // Wait for stopping to complete
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // Small delay to ensure previous audio stops cleanly
+      await new Promise(resolve => setTimeout(resolve, 100));
       
+      // OPTIMIZATION: Check if we have a cached player ready (instant playback!)
+      const cachedPlayer = audioPlayerCacheRef.current.get(audioUrl);
+      
+      if (cachedPlayer) {
+        console.log('[TTS-Play] ✓ Using cached player - instant playback!');
+        
+        // Use cached player - NO loading delay!
+        currentTTSRef.current = cachedPlayer;
+        setCurrentAudioPlayer(cachedPlayer);
+        setCurrentAudioUri(audioUrl);
+        setIsPlayingTTS(true);
+        setIsLoadingTTS(false); // Already loaded!
+        
+        // CRITICAL: Remove all existing listeners to prevent accumulation
+        try {
+          cachedPlayer.removeAllListeners('playbackStatusUpdate');
+        } catch (e) {
+          console.warn('[TTS-Play] Failed to remove old listeners:', e);
+        }
+        
+        // Set up fresh listener for playback completion
+        cachedPlayer.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+          if ('isLoaded' in status && status.isLoaded) {
+            if (status.playing) {
+              setIsPlayingTTS(true);
+              setIsLoadingTTS(false);
+            }
+            if (status.didJustFinish) {
+              setIsPlayingTTS(false);
+              setIsLoadingTTS(false);
+              // Reset player to beginning for next play
+              try {
+                cachedPlayer.seekTo(0);
+              } catch (e) {
+                console.warn('[TTS-Play] Failed to reset player:', e);
+              }
+            }
+          } else if ('error' in status) {
+            console.error('[TTS-Play] Cached player error:', status.error);
+            setIsPlayingTTS(false);
+            setIsLoadingTTS(false);
+            // Remove from cache if errored
+            audioPlayerCacheRef.current.delete(audioUrl);
+          }
+        });
+        
+        // Start playback immediately
+        cachedPlayer.play();
+        return;
+      }
+      
+      // Fallback: Create new player if not cached (loading will show)
+      console.log('[TTS-Play] ⚠ No cached player, creating new one (will show loading)');
       setIsLoadingTTS(true);
       const source: AudioSource = { uri: audioUrl };
       const player = createAudioPlayer(source);
@@ -866,6 +2487,9 @@ export default function StudentExerciseAnswering() {
       currentTTSRef.current = player;
       setCurrentAudioPlayer(player);
       setCurrentAudioUri(audioUrl);
+      
+      // Cache this player for future use
+      audioPlayerCacheRef.current.set(audioUrl, player);
       
       player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
         if ('isLoaded' in status && status.isLoaded) {
@@ -876,20 +2500,19 @@ export default function StudentExerciseAnswering() {
           if (status.didJustFinish) {
             setIsPlayingTTS(false);
             setIsLoadingTTS(false);
-            try { 
-              player.remove(); 
-            } catch {}
-            currentTTSRef.current = null;
-            setCurrentAudioPlayer(null);
-            setCurrentAudioUri(null);
+            // Reset player to beginning for next play
+            try {
+              player.seekTo(0);
+            } catch (e) {
+              console.warn('[TTS-Play] Failed to reset player:', e);
+            }
           }
         } else if ('error' in status) {
-          console.error('TTS playback error:', status.error);
+          console.error('[TTS-Play] Playback error:', status.error);
           setIsPlayingTTS(false);
           setIsLoadingTTS(false);
-          try { 
-            player.remove(); 
-          } catch {}
+          // Remove from cache if errored
+          audioPlayerCacheRef.current.delete(audioUrl);
           currentTTSRef.current = null;
           setCurrentAudioPlayer(null);
           setCurrentAudioUri(null);
@@ -898,7 +2521,7 @@ export default function StudentExerciseAnswering() {
       
       player.play();
     } catch (error) {
-      console.error('TTS playback error:', error);
+      console.error('[TTS-Play] Error:', error);
       setIsPlayingTTS(false);
       setIsLoadingTTS(false);
       currentTTSRef.current = null;
@@ -912,21 +2535,24 @@ export default function StudentExerciseAnswering() {
       // Stop expo-speech if it's running
       Speech.stop();
     } catch (error) {
-      console.warn('Error stopping speech:', error);
+      console.warn('[TTS-Stop] Error stopping speech:', error);
     }
 
-    // Stop the expo-audio player if it exists
+    // OPTIMIZATION: Pause cached player instead of removing it
     if (currentTTSRef.current) {
       try {
         currentTTSRef.current.pause();
-        currentTTSRef.current.remove();
+        // Reset to beginning for next play
+        currentTTSRef.current.seekTo(0);
+        // DON'T remove - keep in cache for reuse!
+        console.log('[TTS-Stop] Paused cached player (keeping in cache)');
       } catch (error) {
-        console.warn('Error stopping audio player:', error);
+        console.warn('[TTS-Stop] Error pausing audio player:', error);
       }
       currentTTSRef.current = null;
     }
   
-    // Reset all states
+    // Reset playback states
     setIsPlayingTTS(false);
     setIsLoadingTTS(false);
     setCurrentAudioPlayer(null);
@@ -954,20 +2580,15 @@ export default function StudentExerciseAnswering() {
     );
   };
 
-  // Auto-play TTS on question change when available
+  // Auto-play TTS on question change when available - OPTIMIZED for cached audio
   useEffect(() => {
     if (!exercise) return;
+    if (loading || isPreloadingResources || !exerciseStarted) return; // Don't auto-play during loading or before start
     const q = exercise.questions[currentQuestionIndex];
     if (!q) return;
     
     // CRITICAL: Stop any previous audio IMMEDIATELY
     stopCurrentTTS();
-    
-    // Clear any pending TTS timeout
-    if (ttsTimeoutRef.current) {
-      clearTimeout(ttsTimeoutRef.current);
-      ttsTimeoutRef.current = null;
-    }
     
     if (!isFocused) return; // only auto-play when screen is focused
     if (lastAutoPlayedQuestionIdRef.current === q.id) return;
@@ -975,21 +2596,19 @@ export default function StudentExerciseAnswering() {
     // Always set the last played question ID regardless of whether TTS exists
     lastAutoPlayedQuestionIdRef.current = q.id;
     
-    if (q.ttsAudioUrl) {
-      // Increased delay to ensure smooth transition between questions
-      ttsTimeoutRef.current = setTimeout(() => {
-        playTTS(q.ttsAudioUrl!);
-      }, 800) as unknown as NodeJS.Timeout;
+    const audioUrl = getPreferredAudioUrl(q);
+    if (audioUrl) {
+      // OPTIMIZATION: Check if audio is cached - if so, play instantly!
+      const isCached = audioPlayerCacheRef.current.has(audioUrl);
+      const delay = isCached ? 200 : 600; // Much shorter delay for cached audio
+      
+      console.log(`[TTS-AutoPlay] Audio ${isCached ? 'CACHED' : 'NOT cached'} - delay: ${delay}ms`);
+      
+      setTimeout(() => {
+        playTTS(audioUrl);
+      }, delay);
     }
-    
-    // Cleanup function
-    return () => {
-      if (ttsTimeoutRef.current) {
-        clearTimeout(ttsTimeoutRef.current);
-        ttsTimeoutRef.current = null;
-      }
-    };
-  }, [exercise, currentQuestionIndex, isFocused]);
+  }, [exercise, currentQuestionIndex, isFocused, loading, isPreloadingResources, exerciseStarted]);
 
   // Stop any TTS if screen loses focus
   useEffect(() => {
@@ -1000,49 +2619,68 @@ export default function StudentExerciseAnswering() {
 
   const formatCorrectAnswer = (question: Question): string | string[] => {
     if (question.type === 'multiple-choice') {
+      // CRITICAL: Check if this is an image-based question
+      const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+      const hasEmptyOptions = (question.options || []).every(opt => !opt || opt.trim() === '');
+      
+      // CRITICAL: For image-based questions with empty text, just use the letter directly
+      if (hasOptionImages && hasEmptyOptions) {
+        if (Array.isArray(question.answer)) {
+          return (question.answer as string[]).join(', ');
+        }
+        return String(question.answer ?? '');
+      }
+      
+      // For text-based questions, use the full mapping logic
       if (Array.isArray(question.answer)) {
         const values = (question.answer as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
         const labeled = values.map(v => {
           const letter = getOptionLetterForValue(question, v);
-          return letter ? `${letter}. ${v}` : v;
+          // CRITICAL: Extract filename if v is a URL
+          const displayValue = extractFileName(v);
+          return letter ? `${letter}. ${displayValue}` : displayValue;
         });
         return labeled.join(', ');
       }
       const v = mapAnswerTokenToOptionValue(question, String(question.answer ?? ''));
       const letter = getOptionLetterForValue(question, v);
-      return letter ? `${letter}. ${v}` : v;
+      // CRITICAL: Extract filename if v is a URL
+      const displayValue = extractFileName(v);
+      return letter ? `${letter}. ${displayValue}` : displayValue;
     }
     if (question.type === 'identification') {
-      // Include alternative answers in the formatted display
-      const allAnswers: string[] = [];
-      
-      // Add main answer(s)
       if (Array.isArray(question.answer)) {
-        allAnswers.push(...(question.answer as string[]));
-      } else {
-        allAnswers.push(String(question.answer ?? ''));
+        // For multiple blanks, show numbered answers for clarity
+        const answers = question.answer as string[];
+        if (answers.length > 1) {
+          return answers.map((x, idx) => `[${idx + 1}] ${extractFileName(String(x))}`).join('  ');
+        }
+        return answers.map(x => extractFileName(String(x))).join(', ');
       }
-      
-      // Add alternative answers if they exist
-      if (question.fillSettings?.altAnswers && question.fillSettings.altAnswers.length > 0) {
-        allAnswers.push(...question.fillSettings.altAnswers);
-      }
-      
-      // Remove duplicates and return formatted string
-      const uniqueAnswers = Array.from(new Set(allAnswers.filter(Boolean)));
-      return uniqueAnswers.length > 1 ? uniqueAnswers.join(' OR ') : uniqueAnswers[0] || '';
+      return extractFileName(String(question.answer ?? ''));
     }
     if (question.type === 'matching') {
       const pairs = question.pairs || [];
-      return pairs.map(p => `${p.left} → ${p.right}`).join('; ');
+      return pairs.map(p => {
+        // CRITICAL: Extract filenames if these are URLs
+        const leftDisplay = extractFileName(p.left);
+        const rightDisplay = extractFileName(p.right);
+        return `${leftDisplay} → ${rightDisplay}`;
+      }).join('; ');
     }
     if (question.type === 're-order') {
-      const ids: string[] = (question.order && question.order.length)
+      const baseIds: string[] = (question.order && question.order.length)
         ? (question.order as string[])
         : (question.reorderItems || []).map(it => it.id);
-      if (!ids.length) return '';
+      if (!baseIds.length) return '';
+      // Apply direction if specified
+      const ids = question.reorderDirection === 'desc' ? [...baseIds].reverse() : baseIds;
       const map = new Map((question.reorderItems || []).map(it => [it.id, it] as const));
-      const labels = ids.map(id => getReorderItemLabel(map.get(id) || null));
+      const labels = ids.map(id => {
+        const label = getReorderItemLabel(map.get(id) || null);
+        // CRITICAL: Extract filename if this is a URL
+        return extractFileName(label);
+      });
       return labels.join(' , ');
     }
     if (question.type === 'reading-passage') {
@@ -1060,30 +2698,84 @@ export default function StudentExerciseAnswering() {
   const serializeAnswer = (question: Question, ans: any): string => {
     try {
       if (question.type === 'multiple-choice') {
+        // CRITICAL: Check if this is an image-based question
+        const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+        const hasEmptyOptions = (question.options || []).every(opt => !opt || opt.trim() === '');
+        
+        // CRITICAL: For image-based questions with empty text, just use the letter directly
+        if (hasOptionImages && hasEmptyOptions) {
+          const arr = (Array.isArray(ans) ? ans : [ans]).filter(Boolean).map(x => String(x));
+          if (arr.length === 0) return '';
+          // Just return the letters as-is (e.g., "A", "B", "C")
+          return arr.join(', ');
+        }
+        
+        // For text-based questions, use the full mapping logic
         const arr = (Array.isArray(ans) ? ans : [ans]).filter(Boolean).map(x => String(x));
+        
+        if (arr.length === 0) {
+          console.warn('[SerializeAnswer] Empty answer array after filtering!', {
+            questionId: question.id,
+            originalAnswer: ans
+          });
+          return '';
+        }
+        
         const labeled = arr.map(v => {
           const valueText = mapAnswerTokenToOptionValue(question, v);
           const letter = getOptionLetterForValue(question, valueText) || v.toUpperCase();
-          return `${letter}. ${valueText}`;
+          // CRITICAL: Extract filename if valueText is a URL
+          const displayText = extractFileName(valueText);
+          return `${letter}. ${displayText}`;
         });
         return labeled.join(', ');
       }
       if (question.type === 'identification') {
         if (Array.isArray(ans)) {
-          const nonEmpty = ans.filter(x => x !== '' && x !== null && x !== undefined);
-          return nonEmpty.length > 0 ? nonEmpty.map((x) => String(x)).join(', ') : 'No answer';
+          // For multiple blanks, show numbered answers for clarity
+          if (ans.length > 1) {
+            return ans.map((x, idx) => `[${idx + 1}] ${extractFileName(String(x))}`).join('  ');
+          }
+          return ans.map((x) => extractFileName(String(x))).join(', ');
         }
-        const answer = String(ans ?? '');
-        return answer.trim() === '' ? 'No answer' : answer;
+        return extractFileName(String(ans ?? ''));
       }
       if (question.type === 're-order') {
         const ids = Array.isArray(ans) ? ans as string[] : [];
         const map = new Map((question.reorderItems || []).map(it => [it.id, it] as const));
-        const labels = ids.map(id => getReorderItemLabel(map.get(id) || null));
+        const labels = ids.map(id => {
+          const item = map.get(id);
+          if (!item) return '';
+          const label = getReorderItemLabel(item);
+          // CRITICAL: Extract filename if this is a URL
+          return extractFileName(label);
+        });
         return labels.join(' , ');
       }
       if (question.type === 'matching') {
-        return ans && typeof ans === 'object' ? JSON.stringify(ans) : String(ans ?? '');
+        // FIXED: Format matching pairs in a readable way
+        if (!ans || typeof ans !== 'object') return 'No pairs matched';
+        
+        const pairs = question.pairs || [];
+        const studentPairs = ans as {[leftIndex: string]: number};
+        const pairedItems: string[] = [];
+        
+        // Build list of matched pairs
+        for (let i = 0; i < pairs.length; i++) {
+          const leftKey = `left-${i}`;
+          const rightIndex = studentPairs[leftKey];
+          
+          if (rightIndex !== undefined && rightIndex !== null && pairs[rightIndex]) {
+            const leftText = pairs[i].left || `Item ${i + 1}`;
+            const rightText = pairs[rightIndex].right || `Item ${rightIndex + 1}`;
+            // CRITICAL: Extract filenames if these are URLs
+            const leftDisplay = extractFileName(leftText);
+            const rightDisplay = extractFileName(rightText);
+            pairedItems.push(`${leftDisplay} → ${rightDisplay}`);
+          }
+        }
+        
+        return pairedItems.length > 0 ? pairedItems.join('; ') : 'No pairs matched';
       }
       if (question.type === 'reading-passage') {
         return ans && typeof ans === 'object' ? JSON.stringify(ans) : String(ans ?? '');
@@ -1214,13 +2906,77 @@ export default function StudentExerciseAnswering() {
     logInteraction(questionId, 'help_used', type, 0);
   };
 
+  // CRITICAL FIX: Helper functions to update both state and ref synchronously
+  const updateAnswers = (updater: (prev: StudentAnswer[]) => StudentAnswer[]) => {
+    setAnswers(prev => {
+      const updated = updater(prev);
+      
+      // CRITICAL: Validate and auto-fix questionable answers (e.g., timeout with no answer)
+      const validated = updated.map((ans, idx) => {
+        if (ans.isCorrect === true && (!ans.answer || ans.answer === '')) {
+          console.warn('[UpdateAnswers] Auto-fixing: Question marked correct with empty answer (likely timeout)', {
+            index: idx,
+            questionId: ans.questionId,
+            answer: ans.answer
+          });
+          // Auto-fix: Force to incorrect if no answer
+          return { ...ans, isCorrect: false };
+        }
+        return ans;
+      });
+      
+      answersRef.current = validated; // Update ref synchronously
+      return validated;
+    });
+  };
+  
+  const updateAttemptCount = (questionId: string, count: number) => {
+    attemptCountsRef.current = { ...attemptCountsRef.current, [questionId]: count };
+    setAttemptCounts(prev => ({ ...prev, [questionId]: count }));
+  };
+  
+  const incrementAttemptCount = (questionId: string) => {
+    const newCount = (attemptCountsRef.current[questionId] || 0) + 1;
+    attemptCountsRef.current = { ...attemptCountsRef.current, [questionId]: newCount };
+    setAttemptCounts(prev => ({ ...prev, [questionId]: newCount }));
+    return newCount;
+  };
+  
+  const setQuestionCorrect = (questionId: string, isCorrect: boolean) => {
+    correctQuestionsRef.current = { ...correctQuestionsRef.current, [questionId]: isCorrect };
+    setCorrectQuestions(prev => ({ ...prev, [questionId]: isCorrect }));
+  };
+
+  // CRITICAL FIX: Single source of truth for attempt counting
+  // Always count ALL attempts from attemptHistory - no filtering or deduplication
+  const getQuestionAttemptCount = (questionId: string): number => {
+    const attempts = attemptLogsRef.current[questionId] || [];
+    
+    // Simply return the total count of all attempts
+    // This matches what gets saved to database as attemptHistory.length
+    return attempts.length;
+  };
+
+  const getTotalAttemptCount = (): number => {
+    if (!exercise) return 0;
+    return exercise.questions.reduce((sum, q) => sum + getQuestionAttemptCount(q.id), 0);
+  };
+
   const logAttempt = (question: Question, ans: any, attemptType: 'initial' | 'change' | 'final' = 'change') => {
     const text = serializeAnswer(question, ans);
+    
+    // Don't log empty answers unless it's a final attempt (timeout case)
+    if (!text || text.trim() === '') {
+      if (attemptType !== 'final') {
+        return; // Skip logging empty answers for initial/change attempts
+      }
+    }
+    
     const currentTime = Date.now();
     const timeSpent = currentTime - questionStartTime;
     
-    // Calculate hesitation time (time between attempts)
-    const previousAttempts = attemptLogs[question.id] || [];
+    // CRITICAL FIX: Use ref for synchronous access to previous attempts
+    const previousAttempts = attemptLogsRef.current[question.id] || [];
     const lastAttemptTime = previousAttempts.length > 0 ? previousAttempts[previousAttempts.length - 1].timestamp : questionStartTime;
     const hesitationTime = currentTime - lastAttemptTime;
     
@@ -1228,32 +2984,48 @@ export default function StudentExerciseAnswering() {
     const isSignificantChange = previousAttempts.length === 0 || 
       (previousAttempts.length > 0 && previousAttempts[previousAttempts.length - 1].answer !== text);
     
+    const newAttempt = {
+      answer: text,
+      timeSpent: timeSpent,
+      timestamp: currentTime,
+      attemptType: attemptType,
+      hesitationTime: hesitationTime,
+      isSignificantChange: isSignificantChange,
+      questionPhase: getQuestionPhase(question, ans), // 'reading', 'thinking', 'answering', 'reviewing'
+      confidence: estimateConfidence(question, ans, timeSpent, previousAttempts.length + 1)
+    };
+    
+    // CRITICAL FIX: Update ref synchronously first, then state
+    attemptLogsRef.current = {
+      ...attemptLogsRef.current,
+      [question.id]: [...(attemptLogsRef.current[question.id] || []), newAttempt]
+    };
+    
+    console.log(`[LogAttempt] Logged attempt for ${question.id}:`, {
+      attemptType,
+      answer: text,
+      totalAttempts: attemptLogsRef.current[question.id].length,
+      attemptNumber: attemptLogsRef.current[question.id].length
+    });
+    
+    // Update state for UI (but we'll use ref for submission)
     setAttemptLogs(prev => ({
       ...prev,
-      [question.id]: [...(prev[question.id] || []), {
-        answer: text,
-        timeSpent: timeSpent,
-        timestamp: currentTime,
-        attemptType: attemptType,
-        hesitationTime: hesitationTime,
-        isSignificantChange: isSignificantChange,
-        questionPhase: getQuestionPhase(question, ans), // 'reading', 'thinking', 'answering', 'reviewing'
-        confidence: estimateConfidence(question, ans, timeSpent, previousAttempts.length + 1)
-      }],
+      [question.id]: [...(prev[question.id] || []), newAttempt],
     }));
   };
 
+  // Keep attemptCounts in sync with attemptLogsRef length (authoritative)
+  const syncAttemptCount = (questionId: string) => {
+    const len = (attemptLogsRef.current[questionId] || []).length;
+    updateAttemptCount(questionId, len);
+  };
   const loadExercise = async () => {
     try {
       setLoading(true);
-      setLoadingProgress(0);
-      setLoadingMessage('Starting your math adventure...');
       
       // Set random background
-      const bgImage = getRandomBackground();
-      setBackgroundImage(bgImage);
-      
-      setLoadingProgress(0.05);
+      setBackgroundImage(getRandomBackground());
       
       // Always enable TTS autoplay for all contexts
       
@@ -1262,39 +3034,49 @@ export default function StudentExerciseAnswering() {
       let studentId: string | null = null;
       try {
         const loginCode = await AsyncStorage.getItem('parent_key');
-        console.log('Debug - Login code from AsyncStorage:', loginCode);
+        console.log('[LoadExercise] Login code from AsyncStorage:', loginCode);
         
         if (loginCode) {
-          // Resolve login code to actual parent ID
+          // CRITICAL FIX: Resolve login code to actual parent ID
           const parentIdResult = await readData(`/parentLoginCodes/${loginCode}`);
-          console.log('Debug - Parent ID resolution result:', parentIdResult);
+          console.log('[LoadExercise] Parent ID resolution result:', parentIdResult);
           
           if (parentIdResult.data) {
             parentId = parentIdResult.data;
-            console.log('Debug - Resolved parentId:', parentId);
+            console.log('[LoadExercise] Resolved actual parentId:', parentId);
             
-            // Find the student associated with this parent
+            // Find the student associated with this actual parent ID
             const studentsData = await readData('/students');
             if (studentsData.data) {
               const student = Object.values(studentsData.data).find((s: any) => s.parentId === parentId) as any;
-              console.log('Debug - Found student:', student);
+              console.log('[LoadExercise] Found student:', student);
               
               if (student && student.studentId) {
                 studentId = student.studentId;
-                console.log('Debug - Final studentId:', studentId);
+                console.log('[LoadExercise] Final studentId:', studentId);
                 
                 // Store student ID in AsyncStorage for future use
                 if (studentId) {
                   await AsyncStorage.setItem('student_id', studentId);
+                  console.log('[LoadExercise] Student ID stored in AsyncStorage');
                 }
+              } else {
+                console.warn('[LoadExercise] No student found with parentId:', parentId);
               }
+            } else {
+              console.warn('[LoadExercise] No students data available');
             }
           } else {
-            console.warn('Debug - No parent ID found for login code:', loginCode);
+            console.warn('[LoadExercise] No parent ID found for login code:', loginCode);
           }
+        } else {
+          console.warn('[LoadExercise] No login code found in AsyncStorage');
         }
       } catch (error) {
-        console.warn('Could not get parent key or student ID:', error);
+        console.error('[LoadExercise] Failed to get parent key or student ID:', error);
+        if (error instanceof Error) {
+          logErrorWithStack(error, 'error', 'StudentExerciseAnswering', 'Failed to resolve parent/student IDs');
+        }
       }
       
       // If assignedExerciseId is provided, load assigned exercise data first
@@ -1313,21 +3095,6 @@ export default function StudentExerciseAnswering() {
         // Validate assigned exercise data structure
         if (!assignedData.exerciseId) {
           showCustomAlert('Error', 'Invalid assigned exercise data - missing exercise reference', () => router.back(), 'error');
-          return;
-        }
-        
-        // Validate assigned exercise has required fields
-        // Note: assigned exercises may not have title/teacherId directly - they reference the exercise
-        if (!assignedData.createdAt) {
-          console.error('Invalid assigned exercise data structure:', assignedData);
-          showCustomAlert('Error', 'Invalid assigned exercise data - missing required fields', () => router.back(), 'error');
-          return;
-        }
-        
-        // Validate that the assignment is properly linked to a student or class
-        if (!assignedData.studentId && !assignedData.parentId && !assignedData.classId) {
-          console.error('Assigned exercise not linked to any student or class:', assignedData);
-          showCustomAlert('Error', 'This assignment is not properly linked to a student or class', () => router.back(), 'error');
           return;
         }
         
@@ -1374,124 +3141,139 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
-          // Validate exercise matches assignment metadata
-          // Note: Assigned exercises reference exercises by ID, so we validate the reference exists
-          if (result.data.id !== actualExerciseId) {
-            console.warn('Exercise ID mismatch:', { expectedId: actualExerciseId, actualId: result.data.id });
-          }
-          
-          // Log exercise metadata for debugging
-          console.log('Loaded exercise metadata:', {
-            title: result.data.title,
-            teacherId: result.data.teacherId,
-            questionCount: result.data.questions?.length || 0
-          });
-          
-          // Validate question structure and data integrity
-          const questions: Question[] = result.data.questions;
-          for (let i = 0; i < questions.length; i++) {
-            const q = questions[i];
-            if (!q.id || !q.type || !q.question || q.answer === undefined) {
-              console.error(`Invalid question structure at index ${i}:`, q);
-              showCustomAlert('Error', `Invalid question data found in exercise`, () => router.back(), 'error');
-              return;
-            }
-            
-            // Validate question-specific data
-            if (q.type === 'multiple-choice' && (!q.options || q.options.length === 0)) {
-              console.error(`Multiple choice question missing options at index ${i}:`, q);
-              showCustomAlert('Error', `Multiple choice question missing options`, () => router.back(), 'error');
-              return;
-            }
-            
-            if (q.type === 'matching' && (!q.pairs || q.pairs.length === 0)) {
-              console.error(`Matching question missing pairs at index ${i}:`, q);
-              showCustomAlert('Error', `Matching question missing pairs`, () => router.back(), 'error');
-              return;
-            }
-            
-            if (q.type === 're-order' && (!q.reorderItems || q.reorderItems.length === 0)) {
-              console.error(`Reorder question missing items at index ${i}:`, q);
-              showCustomAlert('Error', `Reorder question missing items`, () => router.back(), 'error');
-              return;
-            }
-            
-            // Validate sub-questions for reading passages
-            if (q.type === 'reading-passage' && q.subQuestions) {
-              for (let j = 0; j < q.subQuestions.length; j++) {
-                const sq = q.subQuestions[j];
-                if (!sq.id || !sq.type || !sq.question || sq.answer === undefined) {
-                  console.error(`Invalid sub-question structure at index ${i}-${j}:`, sq);
-                  showCustomAlert('Error', `Invalid sub-question data found`, () => router.back(), 'error');
-                  return;
+          // CRITICAL: Validate multiple choice questions have valid options
+          const invalidQuestions: string[] = [];
+          result.data.questions.forEach((q: Question, idx: number) => {
+            if (q.type === 'multiple-choice') {
+              // Check if this question uses images as options
+              const hasOptionImages = q.optionImages && q.optionImages.length > 0 && q.optionImages.some(img => img);
+              
+              if (hasOptionImages) {
+                // Image-based options: validate that we have at least some images
+                const validImageCount = q.optionImages?.filter(img => img && typeof img === 'string' && img.trim() !== '').length || 0;
+                if (validImageCount === 0) {
+                  invalidQuestions.push(`Question ${idx + 1}: No valid option images`);
+                  console.error('[LoadExercise] Invalid MC question - no images:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    optionImages: q.optionImages
+                  });
+                }
+              } else {
+                // Text-based options: validate text options
+                const validOptions = (q.options || []).filter(opt => opt && typeof opt === 'string' && opt.trim() !== '');
+                if (validOptions.length === 0) {
+                  invalidQuestions.push(`Question ${idx + 1}: No valid options`);
+                  console.error('[LoadExercise] Invalid MC question - no text options:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    options: q.options
+                  });
+                } else if (validOptions.length < (q.options?.length || 0)) {
+                  console.warn('[LoadExercise] MC question has some invalid options:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    totalOptions: q.options?.length,
+                    validOptions: validOptions.length
+                  });
                 }
               }
             }
+          });
+          
+          if (invalidQuestions.length > 0) {
+            showCustomAlert(
+              'Invalid Exercise Data', 
+              `This exercise has questions with missing or invalid answer options:\n\n${invalidQuestions.join('\n')}\n\nPlease contact your teacher to fix this exercise.`,
+              () => router.back(),
+              'error'
+            );
+            return;
           }
           
-          setLoadingProgress(0.3);
-          setLoadingMessage('Preparing your questions...');
-          
-          // Preload ALL images for the exercise before showing UI
-          const exerciseData = result.data;
-          const allQuestions: Question[] = exerciseData.questions || [];
-          const startIdx = levelMode ? levelIndex : 0;
-          
-          // High priority: Current question and next 2 questions
-          const highPriorityQuestions = allQuestions.slice(startIdx, startIdx + 3);
-          const highPriorityUrls: string[] = [];
-          highPriorityQuestions.forEach(q => {
-            highPriorityUrls.push(...collectImageUrls(q));
-          });
-          
-          // Normal priority: Questions 4-10
-          const normalPriorityQuestions = allQuestions.slice(startIdx + 3, startIdx + 10);
-          const normalPriorityUrls: string[] = [];
-          normalPriorityQuestions.forEach(q => {
-            normalPriorityUrls.push(...collectImageUrls(q));
-          });
-          
-          // Low priority: Remaining questions
-          const lowPriorityQuestions = allQuestions.slice(startIdx + 10);
-          const lowPriorityUrls: string[] = [];
-          lowPriorityQuestions.forEach(q => {
-            lowPriorityUrls.push(...collectImageUrls(q));
-          });
-          
-          setLoadingMessage('Loading pictures and puzzles...');
-          
-          // Load high priority images first (current + next 2 questions)
-          if (highPriorityUrls.length > 0) {
-            await prefetchUrlsWithPriority(highPriorityUrls, 'high', (progress) => {
-              setLoadingProgress(0.3 + (progress * 0.5)); // 30% to 80%
-            });
-          } else {
-            setLoadingProgress(0.8);
-          }
-          
-          // Set exercise data - now ready to display
-          setExercise({
-            ...exerciseData,
+          const exerciseData = {
+            ...result.data,
             id: actualExerciseId,
+          };
+          
+          // Validate and fix question fairness before setting exercise
+          console.log('[Validation] Validating exercise questions for fairness...');
+          const validatedQuestions = exerciseData.questions.map((question: Question) => {
+            if (question.type === 'matching') {
+              if (!validateMatchingQuestion(question)) {
+                console.log(`[Validation] Fixing matching question ${question.id}`);
+                return fixMatchingQuestion(question);
+              }
+            } else if (question.type === 're-order') {
+              if (!validateReorderQuestion(question)) {
+                console.log(`[Validation] Fixing reorder question ${question.id}`);
+                return fixReorderQuestion(question);
+              }
+            }
+            return question;
           });
           
-          setLoadingMessage('Polishing everything up...');
-          setLoadingProgress(0.9);
+          const validatedExerciseData = {
+            ...exerciseData,
+            questions: validatedQuestions
+          };
           
-          // Preload normal and low priority images in background
-          setTimeout(() => {
-            if (normalPriorityUrls.length > 0) {
-              prefetchUrlsWithPriority(normalPriorityUrls, 'normal');
+          setExercise(validatedExerciseData);
+          
+          // Start comprehensive resource preloading
+          setIsPreloadingResources(true);
+          setPreloadProgress(0);
+          setAnimatedProgress(0);
+          setPreloadStatus('Preparing resources...');
+          setPreloadError(null);
+          
+          try {
+            const allResources = collectAllResources(validatedExerciseData);
+            console.log(`[Preload] Found ${allResources.length} resources to preload:`, {
+              images: allResources.filter(r => r.type === 'image').length,
+              audio: allResources.filter(r => r.type === 'audio').length,
+              highPriority: allResources.filter(r => r.priority === 'high').length,
+              mediumPriority: allResources.filter(r => r.priority === 'medium').length,
+              lowPriority: allResources.filter(r => r.priority === 'low').length
+            });
+            
+              if (allResources.length > 0) {
+              const preloadResults = await preloadResourcesWithProgress(allResources);
+              
+              const successCount = preloadResults.filter(r => r.success).length;
+              const failCount = preloadResults.filter(r => !r.success).length;
+              const audioCount = allResources.filter(r => r.type === 'audio').length;
+              const audioSuccessCount = preloadResults.filter((r, i) => r.success && allResources[i].type === 'audio').length;
+              
+              console.log(`[Preload] Completed: ${successCount} successful, ${failCount} failed (will load on-demand)`);
+              console.log(`[Preload] TTS Audio: ${audioSuccessCount}/${audioCount} cached for instant playback`);
+              
+              if (failCount > 0) {
+                console.log(`[Preload] ${failCount} resources will load on-demand (optimized for speed)`);
+              }
+              
+              // Mark TTS preload as complete
+              setTtsPreloadComplete(audioSuccessCount > 0);
+              
+              setPreloadStatus(`Ready! Loaded ${successCount} essential resources (${audioSuccessCount} TTS audio cached). 🚀`);
+              setResourcesReady(true);
+            } else {
+              setPreloadStatus('Ready to start! 🎉');
+              setResourcesReady(true);
             }
-            if (lowPriorityUrls.length > 0) {
-              prefetchUrlsWithPriority(lowPriorityUrls, 'low');
-            }
-          }, 100);
+          } catch (error) {
+            console.error('Resource preloading failed:', error);
+            setPreloadError(error instanceof Error ? error.message : 'Failed to preload resources');
+            setResourcesReady(true); // Still allow starting even if preloading fails
+          } finally {
+            setIsPreloadingResources(false);
+            setPreloadProgress(100);
+          }
           if (levelMode) {
             setCurrentQuestionIndex(levelIndex);
           }
           // Initialize answers array (including nested sub-answers for reading-passage)
-          setAnswers(result.data.questions.map((q: Question) => ({
+          const initialAnswers = result.data.questions.map((q: Question) => ({
             questionId: q.id,
             answer:
               q.type === 'multiple-choice' ? [] :
@@ -1508,7 +3290,10 @@ export default function StudentExerciseAnswering() {
                   }, {})
                 : '',
             timeSpent: 0,
-          })));
+          }));
+          // CRITICAL FIX: Initialize ref and state
+          answersRef.current = initialAnswers;
+          setAnswers(initialAnswers);
           // Initialize attempts and correctness maps
           const initAttempts: {[id: string]: number} = {};
           const initCorrect: {[id: string]: boolean} = {};
@@ -1523,6 +3308,9 @@ export default function StudentExerciseAnswering() {
               });
             }
           });
+          // CRITICAL FIX: Initialize both state and ref
+          attemptCountsRef.current = initAttempts;
+          correctQuestionsRef.current = initCorrect;
           setAttemptCounts(initAttempts);
           setCorrectQuestions(initCorrect);
         } else {
@@ -1543,69 +3331,66 @@ export default function StudentExerciseAnswering() {
             return;
           }
           
-          setLoadingProgress(0.3);
-          setLoadingMessage('Preparing your questions...');
-          
-          // Preload ALL images for the exercise before showing UI
-          const exerciseData = result.data;
-          const exerciseQuestions: Question[] = exerciseData.questions || [];
-          const startIdx = levelMode ? levelIndex : 0;
-          
-          // High priority: Current question and next 2 questions
-          const highPriorityQuestions = exerciseQuestions.slice(startIdx, startIdx + 3);
-          const highPriorityUrls: string[] = [];
-          highPriorityQuestions.forEach(q => {
-            highPriorityUrls.push(...collectImageUrls(q));
+          // CRITICAL: Validate multiple choice questions have valid options
+          const invalidQuestions: string[] = [];
+          result.data.questions.forEach((q: Question, idx: number) => {
+            if (q.type === 'multiple-choice') {
+              // Check if this question uses images as options
+              const hasOptionImages = q.optionImages && q.optionImages.length > 0 && q.optionImages.some(img => img);
+              
+              if (hasOptionImages) {
+                // Image-based options: validate that we have at least some images
+                const validImageCount = q.optionImages?.filter(img => img && typeof img === 'string' && img.trim() !== '').length || 0;
+                if (validImageCount === 0) {
+                  invalidQuestions.push(`Question ${idx + 1}: No valid option images`);
+                  console.error('[LoadExercise] Invalid MC question - no images:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    optionImages: q.optionImages
+                  });
+                }
+              } else {
+                // Text-based options: validate text options
+                const validOptions = (q.options || []).filter(opt => opt && typeof opt === 'string' && opt.trim() !== '');
+                if (validOptions.length === 0) {
+                  invalidQuestions.push(`Question ${idx + 1}: No valid options`);
+                  console.error('[LoadExercise] Invalid MC question - no text options:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    options: q.options
+                  });
+                } else if (validOptions.length < (q.options?.length || 0)) {
+                  console.warn('[LoadExercise] MC question has some invalid options:', {
+                    questionId: q.id,
+                    questionNumber: idx + 1,
+                    totalOptions: q.options?.length,
+                    validOptions: validOptions.length
+                  });
+                }
+              }
+            }
           });
           
-          // Normal priority: Questions 4-10
-          const normalPriorityQuestions = exerciseQuestions.slice(startIdx + 3, startIdx + 10);
-          const normalPriorityUrls: string[] = [];
-          normalPriorityQuestions.forEach(q => {
-            normalPriorityUrls.push(...collectImageUrls(q));
-          });
-          
-          // Low priority: Remaining questions
-          const lowPriorityQuestions = exerciseQuestions.slice(startIdx + 10);
-          const lowPriorityUrls: string[] = [];
-          lowPriorityQuestions.forEach(q => {
-            lowPriorityUrls.push(...collectImageUrls(q));
-          });
-          
-          setLoadingMessage('Loading pictures and puzzles...');
-          
-          // Load high priority images first (current + next 2 questions)
-          if (highPriorityUrls.length > 0) {
-            await prefetchUrlsWithPriority(highPriorityUrls, 'high', (progress) => {
-              setLoadingProgress(0.3 + (progress * 0.5)); // 30% to 80%
-            });
-          } else {
-            setLoadingProgress(0.8);
+          if (invalidQuestions.length > 0) {
+            showCustomAlert(
+              'Invalid Exercise Data', 
+              `This exercise has questions with missing or invalid answer options:\n\n${invalidQuestions.join('\n')}\n\nPlease contact your teacher to fix this exercise.`,
+              () => router.back(),
+              'error'
+            );
+            return;
           }
           
-          // Set exercise data - now ready to display
           setExercise({
-            ...exerciseData,
+            ...result.data,
             id: exerciseId as string,
           });
-          
-          setLoadingMessage('Polishing everything up...');
-          setLoadingProgress(0.9);
-          
-          // Preload normal and low priority images in background
-          setTimeout(() => {
-            if (normalPriorityUrls.length > 0) {
-              prefetchUrlsWithPriority(normalPriorityUrls, 'normal');
-            }
-            if (lowPriorityUrls.length > 0) {
-              prefetchUrlsWithPriority(lowPriorityUrls, 'low');
-            }
-          }, 100);
+          // Warm cache for first questions (current and next two)
           if (levelMode) {
             setCurrentQuestionIndex(levelIndex);
           }
           // Initialize answers array (including nested sub-answers for reading-passage)
-          setAnswers(result.data.questions.map((q: Question) => ({
+          const initialAnswers = result.data.questions.map((q: Question) => ({
             questionId: q.id,
             answer:
               q.type === 'multiple-choice' ? [] :
@@ -1622,7 +3407,10 @@ export default function StudentExerciseAnswering() {
                   }, {})
                 : '',
             timeSpent: 0,
-          })));
+          }));
+          // CRITICAL FIX: Initialize ref and state
+          answersRef.current = initialAnswers;
+          setAnswers(initialAnswers);
           // Initialize attempts and correctness maps
           const initAttempts: {[id: string]: number} = {};
           const initCorrect: {[id: string]: boolean} = {};
@@ -1637,6 +3425,9 @@ export default function StudentExerciseAnswering() {
               });
             }
           });
+          // CRITICAL FIX: Initialize both state and ref
+          attemptCountsRef.current = initAttempts;
+          correctQuestionsRef.current = initCorrect;
           setAttemptCounts(initAttempts);
           setCorrectQuestions(initCorrect);
         } else {
@@ -1647,11 +3438,7 @@ export default function StudentExerciseAnswering() {
       console.error('Failed to load exercise:', error);
       showCustomAlert('Error', 'Failed to load exercise', () => router.back(), 'error');
     } finally {
-      setLoadingProgress(1);
-      setLoadingMessage('Ready to learn!');
-      // Images are fully loaded, show immediately
       setLoading(false);
-      setImagesReady(true);
     }
   };
   
@@ -1662,19 +3449,15 @@ export default function StudentExerciseAnswering() {
     if (exercise && exercise.questions[currentQuestionIndex]) {
       const currentQuestion = exercise.questions[currentQuestionIndex];
       logInteraction(currentQuestion.id, 'answer_change', 'user_input', 0);
-      
-      // Calculate correctness and update answers array
-      const isCorrect = isAnswerCorrect(currentQuestion, answer);
-      
-      setAnswers(prev => prev.map(a => 
-        a.questionId === currentQuestion.id 
-          ? { ...a, answer, isCorrect }
-          : a
-      ));
-      
-      // Update correct questions tracking
-      setCorrectQuestions(prev => ({ ...prev, [currentQuestion.id]: isCorrect }));
     }
+    
+    // CRITICAL FIX: Update answers array using helper that updates both state and ref
+    // PRESERVE isCorrect flag if it exists - don't overwrite it
+    updateAnswers(prev => prev.map(a => 
+      a.questionId === exercise?.questions[currentQuestionIndex].id 
+        ? { ...a, answer, isCorrect: a.isCorrect !== undefined ? a.isCorrect : undefined }
+        : a
+    ));
   };
 
   // Helpers for reading-passage sub-answers
@@ -1689,24 +3472,10 @@ export default function StudentExerciseAnswering() {
   };
 
   const setSubAnswer = (parentId: string, subId: string, value: any) => {
-    setAnswers(prev => prev.map(a => {
+    updateAnswers(prev => prev.map(a => {
       if (a.questionId !== parentId) return a;
       const base = (a.answer && typeof a.answer === 'object' && !Array.isArray(a.answer)) ? { ...(a.answer as {[key: string]: any}) } : {};
       base[subId] = value;
-      
-      // Calculate correctness for sub-questions if we have the exercise data
-      if (exercise) {
-        const parentQuestion = exercise.questions.find(q => q.id === parentId);
-        if (parentQuestion && parentQuestion.type === 'reading-passage' && parentQuestion.subQuestions) {
-          const subQuestion = parentQuestion.subQuestions.find(sq => sq.id === subId);
-          if (subQuestion) {
-            const isSubCorrect = isAnswerCorrect(subQuestion, value);
-            // Update correct questions tracking for sub-questions
-            setCorrectQuestions(prev => ({ ...prev, [subId]: isSubCorrect }));
-          }
-        }
-      }
-      
       return { ...a, answer: base };
     }));
   };
@@ -1714,12 +3483,73 @@ export default function StudentExerciseAnswering() {
   const handleNext = () => {
     if (!exercise) return;
     const q = exercise.questions[currentQuestionIndex];
-    if (!q) return;
     const currentAns = answers.find(a => a.questionId === q.id)?.answer;
     const correct = isAnswerCorrect(q, currentAns);
+    const currentAttempts = attemptCounts[q.id] || 0;
+    const maxAttempts = exercise?.maxAttemptsPerItem;
+    
+    console.log('[HandleNext] Processing answer:', {
+      questionId: q.id,
+      questionType: q.type,
+      currentAnswer: currentAns,
+      isCorrect: correct,
+      currentAttempts,
+      maxAttempts
+    });
+    
+    // CRITICAL FIX: Only increment attempt count on WRONG answers
     if (!correct) {
-      setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+      const newAttemptCount = currentAttempts + 1;
+      updateAttemptCount(q.id, newAttemptCount);
+      console.log('[HandleNext-Wrong] Incorrect answer, attempt:', newAttemptCount);
+    
+      // Save the wrong answer to the answers array
+      updateAnswers(prev => {
+        const updated = prev.map(a => 
+          a.questionId === q.id ? { ...a, answer: currentAns || '', isCorrect: false } : a
+        );
+        console.log('[HandleNext] Updated answers array with wrong answer');
+        return updated;
+      });
+      
+      // Check if attempt limit is reached after wrong answer
+      if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+        console.log('[HandleNext] Max attempts reached, advancing automatically');
+        setQuestionCorrect(q.id, false);
+        logAttempt(q, currentAns, 'final');
+        
+        showCustomAlert(
+          'Attempt Limit Reached', 
+          `You have reached the maximum number of attempts (${maxAttempts}) for this question.`,
+          () => {
+            advanceToNextOrFinish();
+          },
+          'warning'
+        );
+        return;
+      }
+      
+      // Log attempt and show feedback for wrong answer
       logAttempt(q, currentAns, 'change');
+      
+      // CRITICAL FIX: Mark the last attempt as 'final' when manually advancing
+      // This ensures the final answer is properly categorized in attempt history
+      const attempts = attemptLogsRef.current[q.id] || [];
+      if (attempts.length > 0) {
+        const lastAttempt = attempts[attempts.length - 1];
+        if (lastAttempt.attemptType === 'change') {
+          // Update the last attempt to be 'final' instead of creating a duplicate
+          lastAttempt.attemptType = 'final';
+          console.log('[HandleNext] Updated last attempt to final type for manual advancement');
+        }
+      }
+      
+      // Show remaining attempts if limit is set
+      const remainingAttempts = maxAttempts !== null && maxAttempts !== undefined ? maxAttempts - newAttemptCount : null;
+      const attemptMessage = remainingAttempts 
+        ? `That is not correct yet. You have ${remainingAttempts} attempt${remainingAttempts > 1 ? 's' : ''} remaining.`
+        : 'That is not correct yet. Please try again.';
+      
       // Trigger global shake for non-selectable types
       Animated.sequence([
         Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
@@ -1729,80 +3559,198 @@ export default function StudentExerciseAnswering() {
         Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
       ]).start();
       triggerWrongFeedback();
-      showCustomAlert('Try again', 'That is not correct yet. Please try again.', undefined, 'warning');
+      showCustomAlert('Try again', attemptMessage, undefined, 'warning');
       return;
     }
     
+    // CORRECT ANSWER - Don't increment attempts
     // Stop TTS immediately when answer is correct
     stopCurrentTTS();
     
-    setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
-    // Count the final successful attempt
-    setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
-    // Log the successful attempt as well
+    console.log('[HandleNext-Correct] Correct answer, NO attempt increment, advancing');
+    
+    // Save the correct answer to the answers array
+    updateAnswers(prev => {
+      const updated = prev.map(a => 
+        a.questionId === q.id ? { ...a, answer: currentAns || '', isCorrect: true } : a
+      );
+      console.log('[HandleNext] Updated answers array with correct answer');
+      return updated;
+    });
+    
+    setQuestionCorrect(q.id, true);
     logAttempt(q, currentAns, 'final');
     triggerCorrectFeedback(() => advanceToNextOrFinish());
   };
 
-  const advanceToNextOrFinish = () => {
-    if (!exercise) return;
-    // Do not accumulate here; index-change effect handles accumulation centrally
-    // Stop TTS if playing when moving forward
-    stopCurrentTTS();
-    if (currentQuestionIndex < (exercise.questions.length || 0) - 1) {
-      const nextIndex = currentQuestionIndex + 1;
-      setCurrentQuestionIndex(nextIndex);
-      const nextQuestion = exercise.questions[nextIndex];
-      if (nextQuestion) {
-        const existingAnswer = answers.find(a => a.questionId === nextQuestion.id);
-        setCurrentAnswer(existingAnswer?.answer || (nextQuestion.type === 'multiple-choice' ? [] : nextQuestion.type === 'matching' ? {} : nextQuestion.type === 're-order' ? [] : ''));
+  const advanceToNextOrFinish = async () => {
+    if (!exercise) {
+      console.error('[AdvanceToNextOrFinish] No exercise loaded');
+      return;
+    }
+    
+    // CRITICAL: Prevent duplicate calls
+    if (isAdvancingRef.current) {
+      console.log('[AdvanceToNextOrFinish] Already advancing, skipping duplicate call');
+      return;
+    }
+    
+    isAdvancingRef.current = true;
+    
+    try {
+      // Do not accumulate here; index-change effect handles accumulation centrally
+      // Stop TTS if playing when moving forward
+      stopCurrentTTS();
+      
+      // FIXED: Validate currentQuestionIndex is within bounds
+      if (currentQuestionIndex < 0 || currentQuestionIndex >= exercise.questions.length) {
+        console.error('[AdvanceToNextOrFinish] Invalid question index:', currentQuestionIndex);
+        isAdvancingRef.current = false;
+        return;
       }
-    } else {
-      // Finishing: accumulate the current question's elapsed time before stopping
-      const currentQ = exercise.questions[currentQuestionIndex];
-      if (currentQ) {
-        const qid = currentQ.id;
+      
+      if (currentQuestionIndex < exercise.questions.length - 1) {
+        const nextIndex = currentQuestionIndex + 1;
+        setCurrentQuestionIndex(nextIndex);
+        const nextQuestion = exercise.questions[nextIndex];
+        if (nextQuestion) {
+          const existingAnswer = answers.find(a => a.questionId === nextQuestion.id);
+          // FIXED: Initialize currentAnswer with proper structure for each question type
+        const initialAnswer = existingAnswer?.answer || 
+          (nextQuestion.type === 'multiple-choice' ? [] : 
+           nextQuestion.type === 'matching' ? {} : 
+           nextQuestion.type === 're-order' ? [] : '');
+        setCurrentAnswer(initialAnswer);
+        
+        // FIXED: Initialize matchingPairs state for matching questions
+        if (nextQuestion.type === 'matching' && typeof initialAnswer === 'object' && !Array.isArray(initialAnswer)) {
+          setMatchingPairs(prev => ({ ...prev, [nextQuestion.id]: initialAnswer }));
+        }
+        }
+        
+        // Reset time remaining for fresh start on new question
+        if (exercise.timeLimitPerItem) {
+          setTimeRemaining(exercise.timeLimitPerItem * 1000);
+        }
+        
+        // Reset the advancing flag after moving to next question
+        isAdvancingRef.current = false;
+      } else {
+        // FIXED: Last question - ensure proper cleanup and submission
+        console.log('[AdvanceToNextOrFinish] Reached last question, preparing to finish...');
+        
+        // Accumulate the current question's elapsed time before stopping
+        const qid = exercise.questions[currentQuestionIndex].id;
         const delta = (frozenElapsedRef.current ?? questionElapsedRef.current);
-        setAnswers(prev => prev.map(a => a.questionId === qid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
+        
+        // CRITICAL FIX: Use updateAnswers helper to update both state and ref
+        updateAnswers(prev => {
+          const updated = prev.map(a => a.questionId === qid ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a);
+          console.log('[AdvanceToFinish] Final question time accumulated:', {
+            questionId: qid,
+            delta,
+            updatedAnswer: updated.find(a => a.questionId === qid)
+          });
+          return updated;
+        });
+        
+        frozenElapsedRef.current = null;
+        if (timerInterval) {
+          clearInterval(timerInterval);
+          setTimerInterval(null);
+        }
+        
+        // CRITICAL FIX: Wait for React state to commit before submission
+        // This ensures all state updates (especially isCorrect flags and answers) are committed
+        // Increased delay to handle slower devices and ensure all async state updates complete
+        await new Promise(resolve => setTimeout(resolve, 250));
+        
+        // Auto-submit before showing results
+        await autoSubmitResults();
+        // Note: isAdvancingRef will be reset in autoSubmitResults after completion
       }
-      frozenElapsedRef.current = null;
-      if (timerInterval) {
-        clearInterval(timerInterval);
-        setTimerInterval(null);
-      }
+    } catch (error) {
+      console.error('[AdvanceToNextOrFinish] Error:', error);
+      isAdvancingRef.current = false;
+      showCustomAlert('Error', 'An error occurred. Please try again.', undefined, 'error');
+    }
+  };
+  
+  const autoSubmitResults = async () => {
+    // CRITICAL: Prevent duplicate submissions
+    if (submittingRef.current) {
+      console.log('[AutoSubmit] Already submitting, skipping duplicate call');
+      return;
+    }
+    
+    submittingRef.current = true;
+    
+    try {
+      setSubmitting(true);
+      await handleFinalSubmission();
+    } catch (error) {
+      console.error('Auto-submit failed:', error);
+      // Still show results even if submission fails
       setShowResults(true);
+    } finally {
+      setSubmitting(false);
+      submittingRef.current = false;
+      isAdvancingRef.current = false;
     }
   };
 
   const triggerCorrectFeedback = (onComplete?: () => void) => {
+    if (correctFeedbackActiveRef.current) {
+      console.log('[Feedback] Correct feedback already active, skipping');
+      return;
+    }
+    correctFeedbackActiveRef.current = true;
     // CRITICAL: Stop TTS immediately when answer is correct
     stopCurrentTTS();
+    
+    // CRITICAL FIX: Accumulate time for this final attempt before showing feedback
+    accumulateCurrentQuestionTime();
+    
+    // Trigger haptic feedback for correct answer
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     
     // Freeze UI timer at the moment of correctness; used when recording
     frozenElapsedRef.current = questionElapsedRef.current;
     setShowCorrect(true);
     correctAnim.setValue(0);
     Animated.timing(correctAnim, { toValue: 1, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(() => {
-      const timeoutId = setTimeout(() => {
+      setTimeout(() => {
         Animated.timing(correctAnim, { toValue: 0, duration: 180, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => {
           setShowCorrect(false);
+          correctFeedbackActiveRef.current = false;
           onComplete && onComplete();
         });
-      }, 500) as unknown as NodeJS.Timeout;
-      addTimeout(timeoutId);
+      }, 500);
     });
   };
   
   const triggerWrongFeedback = () => {
+    if (wrongFeedbackActiveRef.current) {
+      console.log('[Feedback] Wrong feedback already active, skipping');
+      return;
+    }
+    wrongFeedbackActiveRef.current = true;
+    
+    // CRITICAL FIX: Accumulate time for this attempt before showing feedback
+    accumulateCurrentQuestionTime();
+    
+    // Trigger haptic feedback for wrong answer
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    
     setShowWrong(true);
     wrongAnim.setValue(0);
     Animated.timing(wrongAnim, { toValue: 1, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(() => {
-      const timeoutId = setTimeout(() => {
+      setTimeout(() => {
         Animated.timing(wrongAnim, { toValue: 0, duration: 180, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => {
           setShowWrong(false);
+          wrongFeedbackActiveRef.current = false;
         });
-      }, 500) as unknown as NodeJS.Timeout;
-      addTimeout(timeoutId);
+      }, 500);
     });
   };
 
@@ -1908,11 +3856,49 @@ export default function StudentExerciseAnswering() {
     const str = String(s ?? '').trim();
     return caseSensitive ? str : str.toLowerCase();
   };
-  const stripAccents = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '');
+  const stripAccents = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const normalizeWithSettings = (s: any, settings?: Question['fillSettings']) => {
     let out = normalize(s, !!settings?.caseSensitive);
     if (settings?.ignoreAccents) out = stripAccents(out);
     return out;
+  };
+  
+  // CRITICAL UTILITY: Extract filename from URL for consistent comparison
+  // URLs with different tokens should be treated as the same if they point to the same file
+  const extractFileName = (value: any): string => {
+    if (!value) return '';
+    const str = String(value).trim();
+    
+    // Check if this is a URL
+    if (str.startsWith('http://') || str.startsWith('https://')) {
+      try {
+        // Extract filename from URL: everything after last '/' and before '?'
+        const parts = str.split('/');
+        const lastPart = parts[parts.length - 1];
+        const filename = lastPart.split('?')[0];
+        console.log('[ExtractFileName] URL detected, extracted:', { original: str.substring(0, 80) + '...', filename });
+        return filename;
+      } catch (error) {
+        console.warn('[ExtractFileName] Failed to extract filename from URL:', str);
+        return str;
+      }
+    }
+    
+    // Not a URL, return as-is
+    return str;
+  };
+  
+  // Helper to normalize value (extract filename if URL, then normalize)
+  const normalizeValue = (value: any, caseSensitive = false): string => {
+    const extracted = extractFileName(value);
+    return normalize(extracted, caseSensitive);
+  };
+  // Helper: strip leading option letters like "C. 34" → "34" for robust comparisons
+  const stripLeadingLetterPrefix = (text: string): string => {
+    if (!text) return '';
+    const trimmed = String(text).trim();
+    const match = trimmed.match(/^([A-Z])\s*\.\s*(.*)$/i);
+    return match ? match[2] : trimmed;
   };
   const letterToIndex = (letter: string) => {
     const upper = letter.trim().toUpperCase();
@@ -1922,170 +3908,240 @@ export default function StudentExerciseAnswering() {
   };
   const mapAnswerTokenToOptionValue = (question: Question, token: string) => {
     if (!question.options || !question.options.length) return token;
-    
-    // First, check if the token is already an option value
-    const normalizedToken = normalize(token);
-    const matchingOption = question.options.find(opt => normalize(opt) === normalizedToken);
-    if (matchingOption) {
-      return matchingOption;
-    }
-    
-    // If not found, try to map as a letter (A, B, C, D)
     const idx = letterToIndex(token);
     if (idx >= 0 && idx < question.options.length) return question.options[idx];
-    
-    // Return the original token if no mapping found
     return token;
-  };
-
-  // Robust helper: compute expected correct option indices from saved answer
-  const getExpectedOptionIndices = (question: Question): number[] => {
-    try {
-      const options = question.options || [];
-      const expectedRaw = question.answer;
-      const toIndex = (token: string): number => {
-        // 1) Letter like 'A','B','C','D'
-        const li = letterToIndex(token);
-        if (li >= 0 && li < options.length) return li;
-        // 2) Numeric string index "0".."n" or 1-based "1".."n"
-        const n = Number(token);
-        if (!Number.isNaN(n)) {
-          if (n >= 0 && n < options.length) return n; // zero-based
-          if (n > 0 && n-1 < options.length) return n-1; // one-based
-        }
-        // 3) Match option text directly
-        const norm = normalize(token);
-        const idx = options.findIndex(opt => normalize(opt) === norm);
-        return idx; // -1 if not found
-      };
-      if (Array.isArray(expectedRaw)) {
-        const arr = (expectedRaw as string[]).map(x => toIndex(String(x))).filter(i => i >= 0);
-        return arr;
-      }
-      const single = toIndex(String(expectedRaw));
-      return single >= 0 ? [single] : [];
-    } catch {
-      return [];
-    }
   };
 
   const indexToLetter = (index: number) => String.fromCharCode(65 + index);
   const getOptionLetterForValue = (question: Question, value: string): string => {
     if (!question.options || !question.options.length) return '';
-    const normValue = normalize(value);
-    const idx = question.options.findIndex(opt => normalize(opt) === normValue);
+    // CRITICAL: Extract filename before comparing
+    const normValue = normalizeValue(value);
+    const idx = question.options.findIndex(opt => normalizeValue(opt) === normValue);
     return idx >= 0 ? indexToLetter(idx) : '';
   };
-
-  const isOptionIndexCorrect = (question: Question, optionIndex: number): boolean => {
-    const expected = getExpectedOptionIndices(question);
-    if (!expected.length) return false;
-    return expected.includes(optionIndex);
+  const isOptionCorrect = (question: Question, optionValue: string): boolean => {
+    // CRITICAL: Check if this is an image-based question
+    const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+    const hasEmptyOptions = (question.options || []).every(opt => !opt || opt.trim() === '');
+    
+    // CRITICAL: For image-based questions, compare letters directly
+    if (hasOptionImages && hasEmptyOptions) {
+      const expectedRaw = question.answer;
+      if (Array.isArray(expectedRaw)) {
+        return (expectedRaw as string[]).map(v => normalizeValue(v)).includes(normalizeValue(optionValue));
+      }
+      return normalizeValue(optionValue) === normalizeValue(String(expectedRaw));
+    }
+    
+    // For text-based questions, use the mapping logic
+    const expectedRaw = question.answer;
+    if (Array.isArray(expectedRaw)) {
+      const expectedValues = (expectedRaw as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
+      // CRITICAL: Extract filenames before comparing and strip letter prefixes from optionValue
+      const normExpectedSet = new Set(expectedValues.map(v => normalizeValue(v)));
+      const normalizedCandidate = normalizeValue(stripLeadingLetterPrefix(optionValue));
+      return normExpectedSet.has(normalizedCandidate);
+    }
+    const expectedValue = mapAnswerTokenToOptionValue(question, String(expectedRaw));
+    // CRITICAL: Extract filenames before comparing and strip letter prefix from optionValue
+    return normalizeValue(stripLeadingLetterPrefix(optionValue)) === normalizeValue(expectedValue);
   };
 
   const isAnswerCorrect = (question: Question, ans: any): boolean => {
     try {
       if (question.type === 'multiple-choice') {
-        // Normalize both expected and given; support letter-based keys (A,B,C...)
+        // CRITICAL: Check if this is an image-based question
+        const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+        const hasEmptyOptions = (question.options || []).every(opt => !opt || opt.trim() === '');
+        
+        // CRITICAL: For image-based questions, compare letters directly without mapping
+        if (hasOptionImages && hasEmptyOptions) {
+          const expectedRaw = question.answer;
+          if (Array.isArray(expectedRaw)) {
+            const givenValues = (Array.isArray(ans) ? ans : [ans]).map(v => normalizeValue(v));
+            const normExpected = (expectedRaw as string[]).map(v => normalizeValue(v));
+            normExpected.sort();
+            givenValues.sort();
+            return normExpected.length === givenValues.length && normExpected.every((v, i) => v === givenValues[i]);
+          }
+          return normalizeValue(String(ans)) === normalizeValue(String(expectedRaw));
+        }
+        
+        // For text-based questions, use the mapping logic
         const expectedRaw = question.answer;
+        
         if (Array.isArray(expectedRaw)) {
           const expectedValues = (expectedRaw as string[]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
-          const givenValues = (Array.isArray(ans) ? ans : [ans]).map(t => mapAnswerTokenToOptionValue(question, String(t)));
-          const normExpected = expectedValues.map(v => normalize(v));
-          const normGiven = givenValues.map(v => normalize(v));
+          const givenValues = (Array.isArray(ans) ? ans : [ans])
+            .map(t => stripLeadingLetterPrefix(String(t)))
+            .map(t => mapAnswerTokenToOptionValue(question, String(t)));
+          // CRITICAL: Extract filenames before normalizing for comparison, support letter-prefixed inputs
+          const normExpected = expectedValues.map(v => normalizeValue(v));
+          const normGiven = givenValues.map(v => normalizeValue(v));
           normExpected.sort();
           normGiven.sort();
           return normExpected.length === normGiven.length && normExpected.every((v, i) => v === normGiven[i]);
         }
         const expectedValue = mapAnswerTokenToOptionValue(question, String(expectedRaw));
-        const givenValue = mapAnswerTokenToOptionValue(question, String(ans));
-        return normalize(givenValue) === normalize(expectedValue);
+        const givenValue = mapAnswerTokenToOptionValue(question, String(stripLeadingLetterPrefix(String(ans))));
+        // CRITICAL: Extract filenames before comparing
+        return normalizeValue(givenValue) === normalizeValue(expectedValue);
       }
       if (question.type === 'identification') {
-        const norm = (s: any) => normalizeWithSettings(s, question.fillSettings);
-        
-        // Get all possible correct answers (main answer + alternative answers)
-        const getAllCorrectAnswers = () => {
-          const correctAnswers: string[] = [];
-          
-          // Add main answer
-          if (Array.isArray(question.answer)) {
-            correctAnswers.push(...(question.answer as string[]));
-          } else {
-            correctAnswers.push(String(question.answer || ''));
-          }
-          
-          // Add alternative answers from fillSettings
-          if (question.fillSettings?.altAnswers && question.fillSettings.altAnswers.length > 0) {
-            correctAnswers.push(...question.fillSettings.altAnswers);
-          }
-          
-          return correctAnswers;
+        // CRITICAL: Extract filenames from URLs before normalizing
+        const norm = (s: any) => {
+          const extracted = extractFileName(s);
+          return normalizeWithSettings(extracted, question.fillSettings);
         };
         
         if (Array.isArray(question.answer)) {
           const arr = Array.isArray(ans) ? ans : [];
-          const allCorrectAnswers = getAllCorrectAnswers();
-          
-          // For array answers, check each position
-          return (question.answer as string[]).every((expectedAnswer, i) => {
-            const studentAnswer = String(arr[i] || '');
-            const normalizedStudentAnswer = norm(studentAnswer);
-            
-            // Check against main answer and all alternatives
-            return allCorrectAnswers.some(correctAnswer => {
-              const normalizedCorrectAnswer = norm(String(correctAnswer || ''));
-              return normalizedStudentAnswer === normalizedCorrectAnswer;
-            });
-          });
+          return (question.answer as string[]).every((v, i) => norm(String(arr[i] || '')) === norm(String(v || '')));
         }
         
-        // For single answer, check against main answer and all alternatives
+        // Check against main answer
         const studentAnswer = norm(String(ans || ''));
-        const allCorrectAnswers = getAllCorrectAnswers();
+        const mainAnswer = norm(String(question.answer || ''));
         
-        return allCorrectAnswers.some(correctAnswer => {
-          const normalizedCorrectAnswer = norm(String(correctAnswer || ''));
-          return studentAnswer === normalizedCorrectAnswer;
-        });
+        if (studentAnswer === mainAnswer) {
+          return true;
+        }
+        
+        // Check against alternative answers if they exist
+        if (question.fillSettings?.altAnswers && question.fillSettings.altAnswers.length > 0) {
+          return question.fillSettings.altAnswers.some(altAnswer => 
+            norm(String(altAnswer || '')) === studentAnswer
+          );
+        }
+        
+        return false;
       }
       if (question.type === 're-order') {
-        const expected: string[] = (question.order && question.order.length)
-          ? (question.order as string[])
-          : (question.reorderItems || []).map(it => it.id);
-        const given = Array.isArray(ans) ? ans : [];
-        return expected.length === given.length && expected.every((v, i) => v === given[i]);
+        // CRITICAL FIX: Compare serialized answers instead of raw IDs
+        // This ensures consistency with how answers are displayed and stored
+        
+        // Get the expected order from reorderItems (this is the correct sequence)
+        const expectedItems = question.reorderItems || [];
+        const expected: string[] = expectedItems.map(it => it.id);
+        
+        // Apply direction if specified
+        const finalExpected = question.reorderDirection === 'desc' 
+          ? [...expected].reverse() 
+          : expected;
+        
+        // Handle different answer formats
+        let given: string[] = [];
+        if (Array.isArray(ans)) {
+          // If ans is array of strings (item IDs)
+          given = ans;
+        } else if (Array.isArray(ans) && ans.length > 0 && typeof ans[0] === 'object') {
+          // If ans is array of ReorderItem objects
+          given = ans.map((item: any) => item.id);
+        }
+        
+        console.log('[Re-order] Answer validation details:', {
+          questionId: question.id,
+          expectedItems: expectedItems.map(it => ({ id: it.id, content: it.content })),
+          finalExpected,
+          given,
+          ans,
+          isArray: Array.isArray(ans),
+          ansLength: Array.isArray(ans) ? ans.length : 0
+        });
+        
+        // Return false if not all items are placed
+        if (given.length === 0 || given.length < finalExpected.length) {
+          console.log('[Re-order] Incomplete answer:', {
+            questionId: question.id,
+            expectedLength: finalExpected.length,
+            givenLength: given.length,
+            finalExpected,
+            given
+          });
+          return false;
+        }
+        
+        // CRITICAL FIX: Compare serialized answers for consistency
+        const expectedSerialized = serializeAnswer(question, finalExpected);
+        const givenSerialized = serializeAnswer(question, given);
+        
+        // Normalize both answers for comparison (case-insensitive, trimmed)
+        const normalizedExpected = normalizeValue(expectedSerialized);
+        const normalizedGiven = normalizeValue(givenSerialized);
+        
+        const isCorrect = normalizedExpected === normalizedGiven;
+        
+        console.log('[Re-order] Final validation result:', {
+          questionId: question.id,
+          expected: finalExpected,
+          given,
+          expectedSerialized,
+          givenSerialized,
+          normalizedExpected,
+          normalizedGiven,
+          isCorrect,
+          direction: question.reorderDirection || 'asc'
+        });
+        
+        return isCorrect;
       }
       if (question.type === 'matching') {
-        // For now, consider matching correct if student's mapping pairs left->right matches the saved pairs order.
-        // Expected is an array of pairs; student's ans should be an object mapping keys; this implementation may need alignment with UI answer format.
-        // If no answer object, treat as incorrect.
+        // CRITICAL FIX: Handle both object format (during quiz) and serialized string format (in attempt history)
         const pairs = question.pairs || [];
-        const selections = ans && typeof ans === 'object' ? ans as {[k: string]: any} : {};
-        // Expect selections in the form { 'left-<i>': 'left-<i>', 'right-<j>': 'right-<j>' } pairs are not yet linked in UI
-        // For correctness, require all left and right have been chosen and that their indices match by position
-        const leftChosen = Object.keys(selections).filter(k => k.startsWith('left-')).map(k => parseInt(k.split('-')[1], 10)).sort((a,b)=>a-b);
-        const rightChosen = Object.keys(selections).filter(k => k.startsWith('right-')).map(k => parseInt(k.split('-')[1], 10)).sort((a,b)=>a-b);
-        const complete = leftChosen.length === pairs.length && rightChosen.length === pairs.length;
-        // With current UI, we cannot map which left matches which right; treat completion as correctness for now
-        return complete && pairs.length > 0;
-      }
-      // Multiple-choice explicit check using indices (single or multi answer)
-      if ((question as any).type === 'multiple-choice') {
-        const expected = getExpectedOptionIndices(question);
-        if (!expected.length) return false;
-        if (Array.isArray(ans)) {
-          const givenIdxs = (ans as string[]).map(v => {
-            const idx = (question.options || []).findIndex(opt => normalize(opt) === normalize(String(v)));
-            return idx;
-          }).filter(i => i >= 0).sort();
-          const expectedSorted = [...expected].sort();
-          return givenIdxs.length === expectedSorted.length && expectedSorted.every((v,i)=>v===givenIdxs[i]);
+        if (pairs.length === 0) return false;
+        
+        // If ans is a string (serialized format from attempt history), compare directly
+        if (typeof ans === 'string') {
+          const correctAnswerSerialized = formatCorrectAnswer(question);
+          console.log('[Matching] String comparison:', {
+            studentAnswer: ans,
+            correctAnswer: correctAnswerSerialized,
+            exactMatch: ans === correctAnswerSerialized
+          });
+          
+          // Direct string comparison first
+          if (ans === correctAnswerSerialized) {
+            return true;
+          }
+          
+          // Try normalizing whitespace
+          const normalizedStudent = String(ans).replace(/\s+/g, ' ').trim();
+          const normalizedCorrect = String(correctAnswerSerialized).replace(/\s+/g, ' ').trim();
+          const normalizedMatch = normalizedStudent === normalizedCorrect;
+          
+          console.log('[Matching] After normalization:', {
+            normalizedStudent,
+            normalizedCorrect,
+            normalizedMatch
+          });
+          
+          return normalizedMatch;
         }
-        const singleIdx = (question.options || []).findIndex(opt => normalize(opt) === normalize(String(ans)));
-        return expected.includes(singleIdx);
+        
+        // If ans is an object (during quiz), validate the pairing logic
+        const studentPairs = ans && typeof ans === 'object' ? ans as {[leftIndex: string]: number} : {};
+        
+        // Check if all pairs are matched
+        if (Object.keys(studentPairs).length !== pairs.length) {
+          return false;
+        }
+        
+        // Validate each pair - student must match left[i] to right[i]
+        for (let i = 0; i < pairs.length; i++) {
+          const leftKey = `left-${i}`;
+          const matchedRightIndex = studentPairs[leftKey];
+          
+          // Check if this left item is paired with the correct right item
+          if (matchedRightIndex !== i) {
+            return false;
+          }
+        }
+        
+        return true;
       }
-      return false;
+      return true;
     } catch {
       return false;
     }
@@ -2101,229 +4157,794 @@ export default function StudentExerciseAnswering() {
     
     try {
       setSubmitting(true);
+      
       // Get parent ID and student ID from storage
       let parentId: string | null = null;
       let studentId: string | null = null;
+      let actualParentId: string | null = null;
+      
       try {
-        parentId = await AsyncStorage.getItem('parent_key');
-        studentId = await AsyncStorage.getItem('student_id');
+        const loginCode = await AsyncStorage.getItem('parent_key');
+        console.log('[Submission] Login code from AsyncStorage:', loginCode);
         
-        // If student ID is not found, try to find it again
-        if (!studentId && parentId) {
+        if (loginCode) {
+          // CRITICAL FIX: Resolve login code to actual parent ID
+          const parentIdResult = await readData(`/parentLoginCodes/${loginCode}`);
+          if (parentIdResult.data) {
+            actualParentId = parentIdResult.data;
+            parentId = loginCode; // Keep login code for backward compatibility
+            console.log('[Submission] Resolved actual parent ID:', actualParentId);
+          }
+        }
+        
+        studentId = await AsyncStorage.getItem('student_id');
+        console.log('[Submission] Student ID from AsyncStorage:', studentId);
+        
+        // If student ID is not found, try to find it using actual parent ID
+        if (!studentId && actualParentId) {
           const studentsData = await readData('/students');
           if (studentsData.data) {
-            const student = Object.values(studentsData.data).find((s: any) => s.parentId === parentId) as any;
+            const student = Object.values(studentsData.data).find((s: any) => s.parentId === actualParentId) as any;
             if (student && student.studentId) {
               studentId = student.studentId;
+              console.log('[Submission] Found student ID from database:', studentId);
               if (studentId) {
                 await AsyncStorage.setItem('student_id', studentId);
               }
             }
           }
         }
+        
+        if (!studentId) {
+          console.error('[Submission] CRITICAL: No student ID available for result submission');
+        }
       } catch (error) {
-        console.warn('Could not get parent key or student ID from storage:', error);
+        console.error('[Submission] Failed to get parent key or student ID from storage:', error);
       }
 
-      // Calculate final answers with time spent
-      let finalAnswers = answers;
+      // CRITICAL FIX: Ensure all questions have attempts logged before final submission
+      // Log any missing attempts for quick submissions
       if (exercise) {
-        const currentQ = exercise.questions[currentQuestionIndex];
-        if (currentQ) {
-          const currentQid = currentQ.id;
-          const currentDelta = Date.now() - questionStartTime;
-          finalAnswers = answers.map(a => ({
-            ...a,
-            timeSpent: a.questionId === currentQid ? (a.timeSpent || 0) + currentDelta : (a.timeSpent || 0),
-          }));
-        }
+        exercise.questions.forEach((q) => {
+          const questionAttempts = attemptLogsRef.current[q.id] || [];
+          const answerData = answersRef.current.find(a => a.questionId === q.id);
+          
+          // If no attempts logged but there's an answer, log it now as a final attempt
+          if (questionAttempts.length === 0 && answerData?.answer) {
+            logAttempt(q, answerData.answer, 'final');
+          }
+        });
+        
+        // Wait for attempt logs to write
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+
+      // Use answersRef.current for most up-to-date data
+      let finalAnswers = answersRef.current;
+      
+      if (exercise) {
+        const currentQid = exercise.questions[currentQuestionIndex].id;
+        const currentDelta = Date.now() - questionStartTime;
+        
+        // Update the ref directly with final time
+        finalAnswers = answersRef.current.map(a => ({
+          ...a,
+          timeSpent: a.questionId === currentQid ? (a.timeSpent || 0) + currentDelta : (a.timeSpent || 0),
+        }));
+        
+        // Update ref with final time data
+        answersRef.current = finalAnswers;
       }
 
       // Calculate results
-      const correctAnswers = finalAnswers.filter(answer => answer.isCorrect).length;
+      const correctAnswers = finalAnswers.filter(answer => answer.isCorrect === true).length;
+      const incorrectAnswers = finalAnswers.filter(answer => answer.isCorrect === false).length;
       const totalQuestions = exercise?.questions.length || 0;
       const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
-      const totalAttempts = Object.values(attemptCounts).reduce((sum, v) => sum + (v || 0), 0);
       
-      // Create normalized result record with unique ID
-      const resultId = `${exercise?.id || exerciseId}_${parentId || 'anonymous'}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      // Calculate total attempts from attemptHistory (source of truth)
+      const totalAttempts = exercise?.questions.reduce((sum, q) => {
+        const questionAttempts = attemptLogsRef.current[q.id]?.length || 0;
+        return sum + questionAttempts;
+      }, 0) || 0;
       
-      // Debug logging
-      console.log('Recording exercise result with:', {
-        parentId,
-        studentId,
-        resultId,
-        exerciseId
-      });
+      // Calculate total time from individual question times
+      const totalTimeSpentSeconds = finalAnswers.reduce((total, answer) => {
+        const questionTime = Math.floor((answer.timeSpent || 0) / 1000);
+        return total + questionTime;
+      }, 0);
       
-      if (!parentId) {
-        console.warn('No parentId found - exercise result may not be properly tracked');
+      // Get current timestamp for submission
+      const completedAt = new Date().toISOString();
+      const timestampSubmitted = Date.now();
+      
+      // Generate hierarchical result ID linked to exercise
+      const currentExerciseId = exercise?.id || exerciseId as string;
+      
+      let exerciseResultId: string;
+      try {
+        exerciseResultId = await generateResultId(currentExerciseId, '/ExerciseResults');
+      } catch (error) {
+        console.error('[Submission] Failed to generate result ID:', error);
+        exerciseResultId = `${currentExerciseId}-R-${Date.now()}`;
       }
       
-      const resultData = {
-        // Core identifiers
-        resultId,
-        exerciseId: exercise?.id || exerciseId as string, // Use the actual loaded exercise ID
-        assignedExerciseId: assignedExerciseId as string || null, // Reference to assigned exercise if applicable
-        parentId, // Parent ID for linking to parent account
-        studentId, // Student ID for tracking individual student performance
-        
-        // Exercise metadata
-        exerciseTitle: exercise?.title || 'Unknown Exercise',
-        classId: assignedExercise?.classId || (exercise as any)?.classId || null,
-        teacherId: assignedExercise?.assignedBy || (exercise as any)?.teacherId || null,
-        
-        // Performance metrics
-        scorePercentage,
-        totalQuestions,
-        totalTimeSpent: elapsedTime,
-        
-        // Submission info
-        submittedAt: new Date().toISOString(),
-        deviceInfo: {
-          platform: Platform.OS,
-          timestamp: Date.now()
-        },
-        
-        // Assignment-specific metadata (if applicable)
-        assignmentMetadata: assignedExercise ? {
-          assignedAt: assignedExercise.createdAt,
-          deadline: assignedExercise.deadline,
-          isLateSubmission: assignedExercise.deadline ? (() => {
-            try {
-              const deadlineDate = new Date(assignedExercise.deadline);
-              return !isNaN(deadlineDate.getTime()) && new Date() > deadlineDate;
-            } catch {
-              return false;
+      console.log('[Submission] Submitting:', {
+        resultId: exerciseResultId,
+        exerciseId: currentExerciseId,
+        questions: totalQuestions,
+        correct: correctAnswers,
+        score: scorePercentage + '%'
+      });
+      
+      // CRITICAL FIX: Check for existing result to prevent duplicates
+      if (assignedExerciseId && studentId) {
+        try {
+          const existingResults = await readData('/ExerciseResults');
+          if (existingResults.data) {
+            const duplicate = Object.values(existingResults.data).find((result: any) => {
+              const resultStudentId = result.studentInfo?.studentId || result.studentId;
+              const resultAssignmentId = result.assignmentMetadata?.assignmentId || result.assignedExerciseId;
+              return resultStudentId === studentId && resultAssignmentId === assignedExerciseId;
+            });
+            
+            if (duplicate) {
+              console.warn('[Submission] Duplicate result detected - student already submitted this assignment');
+              showCustomAlert(
+                'Already Submitted',
+                'You have already submitted this exercise. Your previous submission will be kept.',
+                () => {
+                  setShowResults(true);
+                },
+                'warning'
+              );
+              return;
             }
-          })() : false,
-          acceptingStatus: assignedExercise.acceptingStatus,
-          acceptLateSubmissions: assignedExercise.acceptLateSubmissions || false,
-          assignmentId: assignedExerciseId
-        } : null,
-        
-        // Student context and exercise metadata
-        studentContext: {
-          gradeLevel: 'Grade 1', // Could be dynamic based on student data
-          exerciseSequence: currentQuestionIndex + 1, // Current position in exercise
-          totalQuestions: exercise?.questions.length || 0,
-          completionRate: ((currentQuestionIndex + 1) / (exercise?.questions.length || 1)) * 100,
-          sessionStartTime: startTime,
-          sessionDuration: elapsedTime
-        },
-        
-        // Exercise metadata
-        exerciseMetadata: {
-          title: exercise?.title || '',
-          description: exercise?.description || '',
-          subject: 'Mathematics', // Default subject
-          difficulty: 'medium', // Default difficulty
-          totalQuestions: exercise?.questions.length || 0,
-          questionTypes: exercise?.questions.map(q => q.type) || [],
-          estimatedDuration: 0, // Default duration
-          learningObjectives: [] // Default empty array
-        },
-        
-        // Detailed question data (normalized)
-        questionResults: exercise?.questions.map((q, idx) => {
-          const metadata = getQuestionMetadata(q);
-          const questionAttempts = attemptLogs[q.id] || [];
-          const totalHesitationTime = questionAttempts.reduce((sum, attempt) => sum + (attempt.hesitationTime || 0), 0);
-          const averageConfidence = questionAttempts.length > 0 ? 
-            questionAttempts.reduce((sum, attempt) => {
-              const confValue = attempt.confidence === 'high' ? 3 : attempt.confidence === 'medium' ? 2 : 1;
-              return sum + confValue;
-            }, 0) / questionAttempts.length : 2;
-          
-          return {
-            questionId: q.id,
-            questionNumber: idx + 1,
-            questionType: q.type,
-            questionText: q.question || '',
-            questionImage: q.questionImage || null,
-            options: q.options || [],
-            isCorrect: finalAnswers.find(a => a.questionId === q.id)?.isCorrect || false,
-            timeSpent: getTimeMsForQuestion(q),
-            attempts: attemptCounts[q.id] || 1,
-            studentAnswer: finalAnswers.find(a => a.questionId === q.id)?.answer || '',
-            correctAnswer: formatCorrectAnswer(q),
-            attemptHistory: questionAttempts.map(attempt => ({
-              ...attempt,
-              hesitationTime: attempt.hesitationTime || 0,
-              isSignificantChange: attempt.isSignificantChange || false
-            })),
-            
-            // Enhanced metadata for better analysis
-            metadata: metadata,
-            totalHesitationTime: totalHesitationTime,
-            averageConfidence: averageConfidence,
-            significantChanges: questionAttempts.filter(attempt => attempt.isSignificantChange).length,
-            phaseDistribution: {
-              reading: questionAttempts.filter(attempt => attempt.questionPhase === 'reading').length,
-              thinking: questionAttempts.filter(attempt => attempt.questionPhase === 'thinking').length,
-              answering: questionAttempts.filter(attempt => attempt.questionPhase === 'answering').length,
-              reviewing: questionAttempts.filter(attempt => attempt.questionPhase === 'reviewing').length
-            },
-            
-            // Interaction tracking data
-            interactions: (interactionLogs[q.id] || []).map(interaction => ({
-              ...interaction,
-              duration: interaction.duration || 0 // Ensure no undefined values
-            })),
-            helpUsage: helpUsage[q.id] || {ttsCount: 0, helpButtonClicks: 0},
-            optionHoverTimes: optionHoverTimes[q.id] || {},
-            totalInteractions: (interactionLogs[q.id] || []).length,
-            interactionTypes: {
-              optionClicks: (interactionLogs[q.id] || []).filter(i => i.type === 'option_click').length,
-              helpUsed: (interactionLogs[q.id] || []).filter(i => i.type === 'help_used').length,
-              answerChanges: (interactionLogs[q.id] || []).filter(i => i.type === 'answer_change').length
-            },
-            
-            // Granular time tracking
-            timeBreakdown: {
-              totalTime: getTimeMsForQuestion(q),
-              readingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'reading').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
-              thinkingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'thinking').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
-              answeringTime: questionAttempts.filter(attempt => attempt.questionPhase === 'answering').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
-              reviewingTime: questionAttempts.filter(attempt => attempt.questionPhase === 'reviewing').reduce((sum, attempt) => sum + (attempt.timeSpent || 0), 0),
-              averageTimePerAttempt: questionAttempts.length > 0 ? getTimeMsForQuestion(q) / questionAttempts.length : 0,
-              timeToFirstAnswer: questionAttempts.length > 0 ? (questionAttempts[0].timeSpent || 0) : 0,
-              timeToFinalAnswer: questionAttempts.length > 0 ? (questionAttempts[questionAttempts.length - 1].timeSpent || 0) : 0
-            }
-          };
-        }) || []
+          }
+        } catch (error) {
+          console.warn('[Submission] Could not check for duplicate results:', error);
+          // Continue with submission even if check fails
+        }
+      }
+      
+      // Calculate session duration
+      const sessionDurationSeconds = sessionStartTime ? 
+        Math.floor((new Date(completedAt).getTime() - new Date(sessionStartTime).getTime()) / 1000) : 
+        totalTimeSpentSeconds;
+      
+      // Determine remarks based on score
+      const getRemarks = (score: number): string => {
+        if (score >= 90) return 'Excellent';
+        if (score >= 80) return 'Good';
+        if (score >= 70) return 'Satisfactory';
+        if (score >= 60) return 'Needs Improvement';
+        return 'Needs Improvement';
       };
       
-      // Save to normalized ExerciseResults table
-      const exerciseResult = await writeData(`/ExerciseResults/${resultId}`, resultData);
+      // Create assignment metadata with actual parent ID
+      const assignmentMetadata: AssignmentMetadata = assignedExercise ? {
+        assignmentId: assignedExerciseId as string,
+        classId: assignedExercise.classId || '',
+        assignedAt: assignedExercise.createdAt || '',
+        deadline: assignedExercise.deadline || '',
+        acceptLateSubmissions: assignedExercise.acceptLateSubmissions || false,
+        acceptingStatus: assignedExercise.acceptingStatus || 'open',
+        isLateSubmission: assignedExercise.deadline ? (() => {
+          try {
+            const deadlineDate = new Date(assignedExercise.deadline);
+            return !isNaN(deadlineDate.getTime()) && new Date() > deadlineDate;
+          } catch {
+            return false;
+          }
+        })() : false
+      } : {
+        assignmentId: '',
+        classId: '',
+        assignedAt: '',
+        deadline: '',
+        acceptLateSubmissions: false,
+        acceptingStatus: 'open',
+        isLateSubmission: false
+      };
+      
+      // CRITICAL FIX: Store both assignmentId and assignedExerciseId for compatibility
+      // Also store actual parent ID in metadata for proper result tracking
+      if (assignedExerciseId) {
+        (assignmentMetadata as any).assignedExerciseId = assignedExerciseId as string;
+        console.log('[Submission] Storing assignedExerciseId for backward compatibility:', assignedExerciseId);
+      }
+      if (actualParentId) {
+        (assignmentMetadata as any).parentId = actualParentId;
+        console.log('[Submission] Storing actual parent ID in metadata:', actualParentId);
+      }
+      
+      // Fetch exercise data to get category information
+      let exerciseData: any = null;
+      try {
+        const exerciseResult = await readData(`/exercises/${exercise?.id || exerciseId}`);
+        if (exerciseResult.data) {
+          exerciseData = exerciseResult.data;
+        }
+      } catch (error) {
+        console.warn('Could not fetch exercise data for category:', error);
+      }
+      
+      // Create exercise info
+      const exerciseInfo: ExerciseInfo = {
+        exerciseId: exercise?.id || exerciseId as string,
+        title: exercise?.title || exerciseData?.title || 'Unknown Exercise',
+        category: exerciseData?.category || 'Unknown Category',
+        description: exercise?.description || exerciseData?.description || '',
+        totalQuestions: totalQuestions,
+        timeLimitPerItem: exercise?.timeLimitPerItem ?? exerciseData?.timeLimitPerItem ?? null
+      };
+      
+      // Create student info (use state or fallback)
+      const studentInfoData: StudentInfo = studentInfo || {
+        studentId: studentId || 'unknown',
+        name: 'Unknown Student',
+        gradeSection: 'Unknown Grade',
+        sex: 'Unknown'
+      };
+      
+      // Create device info (use state or collect fresh if not available)
+      let deviceInfoData: DeviceInfo;
+      if (deviceInfo) {
+        deviceInfoData = deviceInfo;
+      } else {
+        // Collect metadata if not already available
+        try {
+          const metadata = await collectAppMetadata();
+          deviceInfoData = {
+            platform: metadata.platform,
+            appVersion: metadata.appVersion,
+            deviceModel: metadata.deviceInfo || `${metadata.platform} ${metadata.platformVersion}`,
+            networkType: 'unknown',
+            updateId: metadata.updateId,
+            runtimeVersion: metadata.runtimeVersion,
+            platformVersion: metadata.platformVersion,
+            deviceInfo: metadata.deviceInfo,
+            environment: metadata.environment,
+            buildProfile: metadata.buildProfile,
+            expoVersion: metadata.expoVersion,
+          };
+        } catch (error) {
+          console.warn('[Submission] Failed to collect device metadata, using fallback');
+          deviceInfoData = {
+            platform: Platform.OS,
+            appVersion: '1.0.0',
+            deviceModel: `${Platform.OS} ${Platform.Version}`,
+            networkType: 'unknown'
+          };
+        }
+      }
+      
+      // Create exercise session
+      const exerciseSession: ExerciseSession = {
+        startedAt: officialStartTime ? new Date(officialStartTime).toISOString() : sessionStartTime || completedAt,
+        completedAt: completedAt,
+        totalDurationSeconds: officialStartTime ? Math.floor((Date.now() - officialStartTime) / 1000) : sessionDurationSeconds,
+        timestampSubmitted: timestampSubmitted
+      };
+      
+      // Create results summary
+      const resultsSummary: ResultsSummary = {
+        totalItems: totalQuestions,
+        totalAttempts: totalAttempts,
+        totalCorrect: correctAnswers,
+        totalIncorrect: totalQuestions - correctAnswers,
+        totalTimeSpentSeconds: totalTimeSpentSeconds,
+        meanPercentageScore: scorePercentage,
+        meanAttemptsPerItem: totalQuestions > 0 ? totalAttempts / totalQuestions : 0,
+        meanTimePerItemSeconds: totalQuestions > 0 ? totalTimeSpentSeconds / totalQuestions : 0,
+        score: correctAnswers,
+        remarks: getRemarks(scorePercentage)
+      };
+      
+      // CRITICAL: Log the final state from refs before creating results
+      console.log('[Submission] Creating questionResults from refs...');
+      console.log('[Submission] answersRef.current:', answersRef.current.map(a => ({
+        qId: a.questionId,
+        answer: a.answer,
+        answerType: typeof a.answer,
+        hasAnswer: !!(a.answer && a.answer !== ''),
+        isCorrect: a.isCorrect,
+        timeSpent: Math.floor((a.timeSpent || 0) / 1000)
+      })));
+      
+      // CRITICAL: Verify all questions have answers (even if wrong)
+      const questionsWithoutAnswers = answersRef.current.filter(a => {
+        const hasNoAnswer = !a.answer || a.answer === '' || (Array.isArray(a.answer) && a.answer.length === 0);
+        return hasNoAnswer && a.isCorrect; // Questions marked correct but no answer - suspicious!
+      });
+      
+      if (questionsWithoutAnswers.length > 0) {
+        console.error('[Submission] CRITICAL ERROR: Questions marked correct but have no answer!', 
+          questionsWithoutAnswers.map(a => a.questionId));
+      }
+      
+      // CRITICAL FIX: Create question results with accurate attempt tracking
+      const questionResults: QuestionResult[] = exercise?.questions.map((q, idx) => {
+        console.log(`[ResultCreation] Processing Q${idx + 1}/${exercise.questions.length} - ${q.id}`);
+        
+        // CRITICAL FIX: Use attemptLogsRef.current for synchronous access to latest attempts
+        const questionAttempts = attemptLogsRef.current[q.id] || [];
+        console.log(`[ResultCreation] Q${idx + 1} - Found ${questionAttempts.length} attempts in ref`);
+        
+        // CRITICAL FIX: Get student answer and correctness from finalAnswers (which is from answersRef.current)
+        // Don't recalculate correctness - use the already validated isCorrect flag
+        const answerData = finalAnswers.find(a => a.questionId === q.id);
+        console.log(`[ResultCreation] Q${idx + 1} - Answer data from finalAnswers:`, {
+          found: !!answerData,
+          hasAnswer: answerData?.answer !== undefined,
+          answerValue: answerData?.answer,
+          isCorrect: answerData?.isCorrect
+        });
+        
+        // CRITICAL FIX: Serialize the student answer properly (don't use raw value)
+        // Use serializeAnswer() to format it correctly just like we do for logging
+        // Handle both correct AND incorrect answers
+        const studentAnswer = answerData?.answer ? serializeAnswer(q, answerData.answer) : '';
+        console.log(`[ResultCreation] Q${idx + 1} - Serialized answer: "${studentAnswer}"`);
+        
+        // CRITICAL: Use the isCorrect flag from answers state, NOT recalculated
+        // The answer was already validated in handleNext when it was marked correct
+        // Default to false if not explicitly set to true
+        const isCorrect = answerData?.isCorrect === true;
+        
+        // VALIDATION: Log warning if answer exists but isCorrect is undefined
+        if (studentAnswer && answerData?.isCorrect === undefined) {
+          console.warn(`[ResultCreation] Q${idx + 1} has answer but isCorrect is undefined - defaulting to false`, {
+            studentAnswer,
+            answerData
+          });
+        }
+        
+        const correctAnswer = formatCorrectAnswer(q);
+        // CRITICAL FIX: Use attemptHistory.length as source of truth, not attemptCounts
+        // attemptHistory is the actual record of what happened
+        let attempts = 0; // Will be set from attemptHistory after it's created
+        // IMPROVED: Use Math.ceil for more accurate time (rounds up to nearest second)
+        let timeSpentSeconds = Math.ceil(getTimeMsForQuestion(q) / 1000);
+        const ttsPlayed = helpUsage[q.id]?.ttsCount > 0;
+        const ttsPlayCount = helpUsage[q.id]?.ttsCount || 0;
+        
+        console.log(`[ResultCreation] Question ${idx + 1} (${q.id}) - Summary:`, {
+          rawAnswer: answerData?.answer,
+          serializedAnswer: studentAnswer,
+          isCorrect,
+          fromAnswersState: !!answerData,
+          answerDataIsCorrect: answerData?.isCorrect,
+          hasAttemptLogs: questionAttempts.length > 0,
+          attemptCountFromRef: attemptCountsRef.current[q.id],
+          attemptCountUsed: attempts,
+          timeSpentMs: getTimeMsForQuestion(q),
+          timeSpentSeconds: timeSpentSeconds
+        });
+        
+        // Get interaction types
+        const interactions = interactionLogs[q.id] || [];
+        const interactionTypes = interactions.map(i => i.type).filter((value, index, self) => self.indexOf(value) === index);
+        
+        // Create attempt history
+        // CRITICAL FIX: Cap attempts at maxAttemptsPerItem to prevent overflow display
+        const maxAttemptsForThisQuestion = exercise?.maxAttemptsPerItem || null;
+        const cappedAttempts = maxAttemptsForThisQuestion !== null && maxAttemptsForThisQuestion !== undefined
+          ? questionAttempts.slice(0, maxAttemptsForThisQuestion)
+          : questionAttempts;
+        
+        // CRITICAL FIX: Build attempt history with proper correctness validation
+        let attemptHistory: AttemptHistory[] = cappedAttempts.map((attempt, attemptIdx) => {
+          // CRITICAL FIX: For attempt history, deserialize display format answers properly
+          let rawAnswer = attempt.answer;
+          let attemptIsCorrect = false;
+          
+          console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1} Processing:`, {
+            questionType: q.type,
+            attemptType: attempt.attemptType,
+            rawAnswer: attempt.answer
+          });
+          
+          // Parse display format answers (e.g., "C. 5") back to raw format for validation
+          if (typeof rawAnswer === 'string' && rawAnswer.includes('. ')) {
+            const parts = rawAnswer.split('. ');
+            if (parts.length >= 2) {
+              // Extract the letter and convert back to raw format
+              const letter = parts[0];
+              const value = parts.slice(1).join('. ');
+              // Convert letter back to raw answer format if it's a multiple choice
+              if (q.type === 'multiple-choice') {
+                const letterIndex = letterToIndex(letter);
+                if (letterIndex >= 0 && q.options && q.options[letterIndex]) {
+                  rawAnswer = q.options[letterIndex];
+                  console.log(`[AttemptHistory] Converted MC display format "${attempt.answer}" to raw "${rawAnswer}"`);
+                }
+              }
+            }
+          }
+          
+          // CRITICAL FIX: For all question types, use the centralized isAnswerCorrect function
+          // This ensures consistent validation logic across all contexts
+          try {
+            attemptIsCorrect = isAnswerCorrect(q, rawAnswer);
+            console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1} Validation result:`, {
+              questionType: q.type,
+              rawAnswer,
+              isCorrect: attemptIsCorrect
+            });
+          } catch (error) {
+            console.warn(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1}: Failed to validate:`, error);
+            attemptIsCorrect = false;
+          }
+          
+          // All validation is now handled by the centralized isAnswerCorrect function above
+          
+        console.log(`[AttemptHistory] Q${idx + 1} Attempt ${attemptIdx + 1} RESULT:`, {
+          rawAnswer,
+          displayAnswer: attempt.answer,
+          isCorrect: attemptIsCorrect,
+          attemptType: attempt.attemptType,
+          validationMethod: q.type,
+          questionId: q.id,
+          correctAnswer: q.type === 'matching' ? formatCorrectAnswer(q) : q.answer
+        });
+          
+          return {
+            attemptNumber: attemptIdx + 1,
+            selectedAnswer: attempt.answer || '',
+            isCorrect: attemptIsCorrect,
+            timeStamp: new Date(attempt.timestamp).toISOString()
+          };
+        });
+        
+        // CRITICAL FIX: If no attempts were logged but we have an answer, create a fallback attempt entry
+        // This ensures every question has at least one attempt record for proper tracking
+        if (attemptHistory.length === 0 && studentAnswer && studentAnswer.trim() !== '') {
+          console.log(`[ResultCreation] Creating fallback attempt for Question ${idx + 1} - no attempts logged but has answer`, {
+            studentAnswer,
+            isCorrect,
+            hasAnswerData: !!answerData
+          });
+          
+          // Use the already serialized studentAnswer (not raw answer)
+          attemptHistory = [{
+            attemptNumber: 1,
+            selectedAnswer: studentAnswer, // Already serialized above
+            isCorrect: isCorrect, // Use validated isCorrect value
+            timeStamp: new Date().toISOString()
+          }];
+        } else if (attemptHistory.length === 0) {
+          // Question was never answered (no attempts, no answer)
+          console.log(`[ResultCreation] Q${idx + 1} has NO attempts and NO answer - marking as unanswered`);
+        }
+
+        // CRITICAL FIX: Determine final correctness from LAST attempt in history
+        // The last attempt is the final answer that determines correctness
+        const lastAttempt = attemptHistory.length > 0 ? attemptHistory[attemptHistory.length - 1] : undefined;
+        const derivedStudentAnswer = studentAnswer || (lastAttempt?.selectedAnswer ?? '');
+        
+        // CRITICAL FIX: Use LAST attempt's correctness as the final result
+        // If we have attempt history, the last attempt determines correctness
+        // Otherwise, use the isCorrect flag from answerData
+        let derivedIsCorrect = lastAttempt ? lastAttempt.isCorrect : isCorrect;
+        
+        console.log(`[ResultCreation] Q${idx + 1} Final Derivation:`, {
+          originalIsCorrect: isCorrect,
+          derivedIsCorrect,
+          lastAttemptIsCorrect: lastAttempt?.isCorrect,
+          studentAnswer: derivedStudentAnswer,
+          attemptHistoryLength: attemptHistory.length
+        });
+        
+        // CRITICAL FIX: Use attemptHistory.length as the ONLY source of truth for attempts
+        // This ensures the "attempts" field always matches the actual recorded history
+        attempts = attemptHistory.length;
+        
+        // CRITICAL FIX: Final isCorrect is determined ONLY by the last attempt in history
+        // This ensures consistency: the last thing the student did determines the result
+        if (attemptHistory.length > 0) {
+          const lastAttemptInHistory = attemptHistory[attemptHistory.length - 1];
+          derivedIsCorrect = lastAttemptInHistory.isCorrect;
+          console.log(`[ResultCreation] Q${idx + 1} - isCorrect from LAST attempt:`, {
+            lastAttemptNumber: lastAttemptInHistory.attemptNumber,
+            lastAttemptAnswer: lastAttemptInHistory.selectedAnswer,
+            lastAttemptIsCorrect: lastAttemptInHistory.isCorrect,
+            overridingPrevious: derivedIsCorrect !== isCorrect
+          });
+        }
+        
+        console.log(`[ResultCreation] Q${idx + 1} - Attempts set from history:`, {
+          attemptHistoryLength: attemptHistory.length,
+          attemptCountsValue: attemptCountsRef.current[q.id],
+          finalAttempts: attempts,
+          finalIsCorrect: derivedIsCorrect
+        });
+        
+        // CRITICAL FIX: Ensure timeSpent is at least 1 second if question was answered
+        if (derivedStudentAnswer && timeSpentSeconds === 0) {
+          timeSpentSeconds = 1; // Minimum 1 second if answered
+          console.log(`[ResultCreation] Q${idx + 1}: Set minimum timeSpent to 1 second (was 0)`);
+        }
+        
+        // Format choices for multiple choice and matching questions - ensure no undefined values
+        let choices: string[] | undefined = undefined;
+        if (q.type === 'multiple-choice' && q.options && Array.isArray(q.options)) {
+          // Filter out null, undefined, and empty string options, then map to formatted choices
+          const validOptions = q.options.filter(option => 
+            option != null && 
+            option !== undefined && 
+            option !== '' && 
+            typeof option === 'string'
+          );
+          
+          if (validOptions.length > 0) {
+            choices = validOptions.map((option, optIdx) => `${String.fromCharCode(65 + optIdx)}. ${option}`);
+          }
+          
+          // Debug logging for choices
+          console.log(`[ResultCreation] Q${idx + 1} Choices processing:`, {
+            originalOptions: q.options,
+            validOptions,
+            finalChoices: choices
+          });
+        } else if (q.type === 'matching' && q.pairs && Array.isArray(q.pairs)) {
+          // Format matching pairs as choices
+          const validPairs = q.pairs.filter(pair => 
+            pair && 
+            pair.left && 
+            pair.right && 
+            typeof pair.left === 'string' && 
+            typeof pair.right === 'string' &&
+            pair.left.trim() !== '' &&
+            pair.right.trim() !== ''
+          );
+          
+          if (validPairs.length > 0) {
+            choices = validPairs.map((pair, pairIdx) => `${String.fromCharCode(65 + pairIdx)}. ${pair.left} → ${pair.right}`);
+          }
+          
+          // Debug logging for matching choices
+          console.log(`[ResultCreation] Q${idx + 1} Matching Choices processing:`, {
+            originalPairs: q.pairs,
+            validPairs,
+            finalChoices: choices
+          });
+        } else if (q.type === 're-order' && q.reorderItems && Array.isArray(q.reorderItems)) {
+          // Format reorder items as choices
+          const validItems = q.reorderItems.filter(item => 
+            item && 
+            item.content && 
+            typeof item.content === 'string' &&
+            item.content.trim() !== ''
+          );
+          
+          if (validItems.length > 0) {
+            choices = validItems.map((item, itemIdx) => `${itemIdx + 1}. ${item.content}`);
+          }
+          
+          // Debug logging for reorder choices
+          console.log(`[ResultCreation] Q${idx + 1} Reorder Choices processing:`, {
+            originalItems: q.reorderItems,
+            validItems,
+            finalChoices: choices
+          });
+        }
+        
+        // FINAL VALIDATION: Ensure studentAnswer is never empty string if we have a real answer
+        const finalStudentAnswer = Array.isArray(derivedStudentAnswer) ? 
+          derivedStudentAnswer.join(', ') : 
+          String(derivedStudentAnswer || '');
+        
+        // CRITICAL FIX: Final isCorrect is ALWAYS based on the last attempt in history
+        // No need to recompute - attemptHistory already contains validated attempts
+        let finalIsCorrect = derivedIsCorrect;
+        
+        // Safety check: If no answer provided, force to incorrect
+        if (!finalStudentAnswer || finalStudentAnswer.trim() === '') {
+          if (finalIsCorrect) {
+            console.warn(`[ResultCreation] Q${idx + 1}: No answer provided but marked correct - forcing to incorrect`);
+            finalIsCorrect = false;
+          }
+        }
+        
+        console.log(`[ResultCreation] Q${idx + 1} Final Result:`, {
+          studentAnswer: finalStudentAnswer,
+          isCorrect: finalIsCorrect,
+          hasAnswer: !!(finalStudentAnswer && finalStudentAnswer.trim() !== ''),
+          attemptCount: attempts,
+          attemptHistoryCount: attemptHistory.length,
+          lastAttemptCorrect: attemptHistory.length > 0 ? attemptHistory[attemptHistory.length - 1].isCorrect : 'N/A'
+        });
+        
+        return {
+          questionNumber: idx + 1,
+          questionId: q.id,
+          questionType: q.type || 'unknown', // Add question type for validation
+          questionText: q.question || '',
+          choices: choices || [],
+          correctAnswer: Array.isArray(correctAnswer) ? correctAnswer.join(', ') : String(correctAnswer),
+          studentAnswer: finalStudentAnswer,
+          isCorrect: finalIsCorrect,
+          attempts: attempts,
+          timeSpentSeconds: timeSpentSeconds,
+          ttsPlayed: ttsPlayed,
+          ttsPlayCount: ttsPlayCount,
+          interactionTypes: interactionTypes,
+          attemptHistory: attemptHistory,
+          // Include fillSettings for identification questions to support altAnswers validation
+          ...(q.type === 'identification' && q.fillSettings && {
+            altAnswers: q.fillSettings.altAnswers || [],
+            caseSensitive: q.fillSettings.caseSensitive || false
+          })
+        };
+      }) || [];
+      
+      // CRITICAL: Verify ALL questions from exercise are in results
+      console.log('[Submission] Final questionResults count check:', {
+        exerciseQuestions: exercise?.questions.length || 0,
+        questionResults: questionResults.length,
+        match: questionResults.length === (exercise?.questions.length || 0)
+      });
+      // CRITICAL: Final validation - ensure no undefined values in choices arrays
+      questionResults.forEach((result, idx) => {
+        if (result.choices && Array.isArray(result.choices)) {
+          const hasUndefinedChoices = result.choices.some(choice => choice === undefined || choice === null);
+          if (hasUndefinedChoices) {
+            console.error(`[Submission] CRITICAL: Question ${idx + 1} has undefined choices!`, {
+              questionId: result.questionId,
+              choices: result.choices,
+              hasUndefined: result.choices.map((choice, i) => ({ index: i, value: choice, isUndefined: choice === undefined }))
+            });
+            
+            // Clean the choices array by filtering out undefined values
+            result.choices = result.choices.filter(choice => choice !== undefined && choice !== null);
+            console.log(`[Submission] Cleaned choices for Question ${idx + 1}:`, result.choices);
+          }
+        }
+      });
+      
+      // Create the complete result data
+      const resultData: ExerciseResultData = {
+        exerciseResultId,
+        assignedExerciseId: assignedExerciseId as string || '',
+        assignmentMetadata,
+        exerciseInfo,
+        studentInfo: studentInfoData,
+        deviceInfo: deviceInfoData,
+        exerciseSession,
+        resultsSummary,
+        questionResults,
+        submittedAt: completedAt
+      };
+      
+      // Validate data completeness
+      if (questionResults.length !== totalQuestions) {
+        console.error('[Submission] Question count mismatch:', {
+          expected: totalQuestions,
+          actual: questionResults.length
+        });
+      }
+      
+      if (!studentId) {
+        console.error('[Submission] CRITICAL: No studentId available!');
+      }
+      
+      // Validate questions have data
+      const invalidQuestions = questionResults.filter((qr, idx) => {
+        const hasNoAnswer = !qr.studentAnswer || qr.studentAnswer.trim() === '';
+        const hasNoAttempts = !qr.attemptHistory || qr.attemptHistory.length === 0;
+        
+        if (hasNoAnswer || hasNoAttempts) {
+          console.warn(`[Submission] Q${idx + 1} missing data: hasAnswer=${!hasNoAnswer}, hasAttempts=${!hasNoAttempts}`);
+        }
+        
+        return hasNoAnswer && hasNoAttempts;
+      });
+      
+      if (invalidQuestions.length > 0) {
+        console.error('[Submission] Invalid questions:', invalidQuestions.length);
+      }
+      
+      // Check for questions marked correct without answers
+      const suspiciousQuestions = questionResults.filter(qr => {
+        const hasNoAnswer = !qr.studentAnswer || qr.studentAnswer.trim() === '';
+        return qr.isCorrect && hasNoAnswer;
+      });
+      
+      if (suspiciousQuestions.length > 0) {
+        console.error('[Submission] Questions marked correct with no answer:', suspiciousQuestions.length);
+        
+        // FIX: Force these questions to be marked incorrect
+        suspiciousQuestions.forEach(qr => {
+          qr.isCorrect = false;
+          console.log(`[Submission] Fixed Q${qr.questionNumber}: set isCorrect=false (no answer)`);
+        });
+      }
+      
+      // CRITICAL FIX: Recalculate ALL summary fields from finalized questionResults
+      const finalCorrectCount = questionResults.filter(qr => qr.isCorrect === true).length;
+      const finalIncorrectCount = questionResults.filter(qr => qr.isCorrect === false).length;
+      const finalScorePercentage = totalQuestions > 0 ? Math.round((finalCorrectCount / totalQuestions) * 100) : 0;
+      const finalTotalAttempts = questionResults.reduce((sum, qr) => sum + qr.attemptHistory.length, 0);
+      
+      // Update resultsSummary with final validated counts
+      resultsSummary.totalCorrect = finalCorrectCount;
+      resultsSummary.totalIncorrect = finalIncorrectCount;
+      resultsSummary.meanPercentageScore = finalScorePercentage;
+      resultsSummary.score = finalCorrectCount;
+      resultsSummary.remarks = getRemarks(finalScorePercentage);
+      resultsSummary.totalAttempts = finalTotalAttempts;
+      resultsSummary.meanAttemptsPerItem = totalQuestions > 0 ? finalTotalAttempts / totalQuestions : 0;
+      
+      // Save to ExerciseResults table
+      console.log('[Submission] Saving result:', exerciseResultId);
+      
+      // CRITICAL VALIDATION: Verify attempts match history (only log mismatches)
+      let calculatedTotalAttempts = 0;
+      let hasMismatches = false;
+      questionResults.forEach((qr, idx) => {
+        calculatedTotalAttempts += qr.attemptHistory.length;
+        
+        // Warn if attempts field doesn't match history length
+        if (qr.attempts !== qr.attemptHistory.length) {
+          console.warn(`[Submission] Q${idx + 1} attempt mismatch: attempts=${qr.attempts} but history=${qr.attemptHistory.length}`);
+          hasMismatches = true;
+        }
+      });
+      
+      if (calculatedTotalAttempts !== resultsSummary.totalAttempts) {
+        console.warn(`[Submission] Total attempts mismatch: calculated=${calculatedTotalAttempts}, summary=${resultsSummary.totalAttempts}`);
+        hasMismatches = true;
+      }
+      
+      // CRITICAL FIX: Apply unified validation and repair before saving
+      const { result: validatedResultData, validation: validationReport } = validateAndRepairExerciseResult(
+        resultData as any,
+        { verbose: false } // Reduce verbosity
+      );
+      
+      // Only log validation details if there are corrections or errors
+      if (validationReport.correctedFields.length > 0) {
+        console.warn('[Submission] Auto-corrected', validationReport.correctedFields.length, 'field(s)');
+      }
+      
+      // Only log errors if they're not summary-only (which are auto-corrected)
+      if (validationReport.errors.length > 0) {
+        const summaryOnly = validationReport.errors.every(e => String(e).startsWith('Summary:'));
+        if (!summaryOnly) {
+          console.error('[Submission] Validation errors:', validationReport.errors);
+        }
+      }
+      
+      // Only log warnings if there are actual issues
+      if (validationReport.warnings.length > 0 && !validationReport.warnings.every(w => String(w).includes('mismatch: was false, should be true'))) {
+        console.warn('[Submission] Validation warnings:', validationReport.warnings.length);
+      }
+      
+      // Use the validated data for saving
+      const finalResultData = validatedResultData;
+      
+      // Store VALIDATED questionResults and summary in state for accurate UI display
+      setSavedQuestionResults(validatedResultData.questionResults);
+      setSavedResultsSummary(validatedResultData.resultsSummary);
+      
+      const exerciseResult = await writeData(`/ExerciseResults/${exerciseResultId}`, finalResultData);
       if (!exerciseResult.success) {
         throw new Error(`Failed to save exercise result: ${exerciseResult.error}`);
       }
       
-      // Mark assigned exercise as completed if it exists
-      if (assignedExerciseId && parentId) {
-        try {
-          const assignedExerciseData = await readData(`/assignedExercises/${assignedExerciseId}`);
-          if (assignedExerciseData.data) {
-            const updatedAssignedExercise = {
-              ...assignedExerciseData.data,
-              completedAt: new Date().toISOString(),
-              status: 'completed',
-              resultId: resultId,
-              scorePercentage: scorePercentage,
-              totalTimeSpent: elapsedTime
-            };
-            await writeData(`/assignedExercises/${assignedExerciseId}`, updatedAssignedExercise);
-            console.log('Marked assigned exercise as completed:', assignedExerciseId);
-          }
-        } catch (error) {
-          console.warn('Could not update assigned exercise completion status:', error);
-        }
-      }
+      // Success summary - keep it concise
+      console.log('[Submission] ✅ Success:', {
+        resultId: exerciseResultId,
+        student: studentInfoData.name,
+        exercise: exerciseInfo.title,
+        score: `${validatedResultData.resultsSummary.totalCorrect}/${validatedResultData.resultsSummary.totalItems} (${validatedResultData.resultsSummary.meanPercentageScore}%)`,
+        attempts: validatedResultData.resultsSummary.totalAttempts,
+        remarks: validatedResultData.resultsSummary.remarks
+      });
       
-      // Close results panel and navigate back
-      setShowResults(false);
-      router.back();
+      // Show results panel instead of navigating back
+      setShowResults(true);
       
     } catch (error: any) {
       console.error('Failed to submit final answers:', error);
@@ -2334,6 +4955,14 @@ export default function StudentExerciseAnswering() {
   };
 
   const handleSubmit = async () => {
+    // CRITICAL: Prevent duplicate submissions
+    if (submittingRef.current) {
+      console.log('[HandleSubmit] Already submitting, skipping duplicate call');
+      return;
+    }
+    
+    submittingRef.current = true;
+    
     try {
       setSubmitting(true);
       
@@ -2345,20 +4974,75 @@ export default function StudentExerciseAnswering() {
       // Stop any TTS during submit
       stopCurrentTTS();
       
-      // Validate last question on submit and show feedback
+      // Validate last question on submit (try-again basis)
       if (exercise) {
         const q = exercise.questions[currentQuestionIndex];
-        if (!q) {
-          setSubmitting(false);
-          return;
-        }
         const currentAns = answers.find(a => a.questionId === q.id)?.answer;
         const correct = isAnswerCorrect(q, currentAns);
+        const currentAttempts = attemptCounts[q.id] || 0;
+        const maxAttempts = exercise?.maxAttemptsPerItem;
+        
+        // FIXED: Safeguard to prevent exceeding max attempts on submit
+        if (maxAttempts !== null && maxAttempts !== undefined && currentAttempts >= maxAttempts) {
+          console.warn('[HandleSubmit] Already at max attempts, forcing finish');
+          setQuestionCorrect(q.id, false);
+          setShowResults(true);
+          setSubmitting(false);
+          submittingRef.current = false;
+          return;
+        }
         
         if (!correct) {
-          setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
-          // Log the incorrect attempt for the last question
+          // WRONG ANSWER - Increment attempts
+          const newAttemptCount = currentAttempts + 1;
+          
+          // CRITICAL FIX: Save the wrong answer to the answers array
+          console.log('[HandleSubmit-Wrong] Saving wrong answer:', {
+            questionId: q.id,
+            answer: currentAns,
+            attemptCount: newAttemptCount
+          });
+          
+          updateAnswers(prev => {
+            const updated = prev.map(a => 
+              a.questionId === q.id ? { ...a, answer: currentAns || '', isCorrect: false } : a
+            );
+            console.log('[HandleSubmit-Wrong] Updated answers array');
+            return updated;
+          });
+          
+          // Increment attempt counter for wrong answer
+          // Check if attempt limit is reached
+          if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+            logAttempt(q, currentAns, 'final'); // Log as final attempt
+            syncAttemptCount(q.id);
+            
+            // Mark question as completed (with wrong answer)
+            setQuestionCorrect(q.id, false);
+            
+            // Show attempt limit reached message
+            showCustomAlert(
+              'Attempt Limit Reached', 
+              `You have reached the maximum number of attempts (${maxAttempts}) for this question. The correct answer will be shown.`,
+              () => {
+                setShowResults(true);
+              },
+              'warning'
+            );
+            setSubmitting(false);
+            submittingRef.current = false;
+            return;
+          }
+          
           logAttempt(q, currentAns, 'change');
+          syncAttemptCount(q.id);
+          
+          // Show remaining attempts if limit is set
+          const remainingAttempts = maxAttempts !== null && maxAttempts !== undefined ? maxAttempts - newAttemptCount : null;
+          const attemptMessage = remainingAttempts 
+            ? `Your current answer is not correct yet. You have ${remainingAttempts} attempt${remainingAttempts > 1 ? 's' : ''} remaining.`
+            : 'Your current answer is not correct yet. Please try again.';
+          
           // Shake on submit when wrong
           Animated.sequence([
             Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
@@ -2368,39 +5052,24 @@ export default function StudentExerciseAnswering() {
             Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
           ]).start();
           triggerWrongFeedback();
-          showCustomAlert('Incorrect Answer', 'Your current answer is not correct yet. Please try again.', undefined, 'warning');
+          showCustomAlert('Try again', attemptMessage, undefined, 'warning');
           setSubmitting(false);
+          submittingRef.current = false;
           return;
         } else {
-          // Count the final successful attempt
-          setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
-          setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
+          // CORRECT ANSWER - Don't increment attempts
+          console.log('[HandleSubmit-Correct] Correct answer - NO attempt increment');
           
-          // Update the answer in the answers array to mark it as correct
-          setAnswers(prev => prev.map(a => 
-            a.questionId === q.id 
-              ? { ...a, answer: currentAns || '', isCorrect: true }
-              : a
+          // Update the answer with isCorrect: true
+          updateAnswers(prev => prev.map(a => 
+            a.questionId === q.id ? { ...a, answer: currentAns || a.answer, isCorrect: true } : a
           ));
-          
-          // Log the final successful attempt for the last question
+          // FIXED: Don't increment attempts on correct answer
+          // Log a final correct attempt for history consistency
           logAttempt(q, currentAns, 'final');
-          
-          // Show success feedback for last question before proceeding to results
-          triggerCorrectFeedback(() => {
-            showCustomAlert(
-              'Correct!', 
-              'Great job! Your answer is correct. Proceeding to assessment summary...', 
-              () => {
-                // Show results panel after user acknowledges correct answer
-                setShowResults(true);
-              }, 
-              'success'
-            );
-          });
-          setSubmitting(false);
-          return;
+          syncAttemptCount(q.id);
         }
+        setQuestionCorrect(q.id, true);
       }
 
       // No need to update assignedExercises - completion status is determined by ExerciseResults existence
@@ -2412,6 +5081,7 @@ export default function StudentExerciseAnswering() {
       showCustomAlert('Error', `Failed to submit answers: ${error.message || error}. Please try again.`, undefined, 'error');
     } finally {
       setSubmitting(false);
+      submittingRef.current = false;
     }
   };
 
@@ -2420,26 +5090,85 @@ export default function StudentExerciseAnswering() {
     // Stop TTS when finishing a level
     stopCurrentTTS();
     const q = exercise.questions[currentQuestionIndex];
-    if (!q) return;
     const currentAns = answers.find(a => a.questionId === q.id)?.answer;
     const correct = isAnswerCorrect(q, currentAns);
     if (correct) {
+      // CORRECT ANSWER - Don't increment attempts
+      console.log('[LevelComplete-Correct] Correct answer - NO attempt increment');
+      
       // Accumulate time for the level question
       const delta = Date.now() - questionStartTime;
-      setAnswers(prev => prev.map(a => a.questionId === q.id ? { ...a, timeSpent: (a.timeSpent || 0) + delta } : a));
-      setCorrectQuestions(prev => ({ ...prev, [q.id]: true }));
-      // Count the final successful attempt
-      setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+      updateAnswers(prev => prev.map(a => a.questionId === q.id ? { ...a, timeSpent: (a.timeSpent || 0) + delta, isCorrect: true } : a));
+      setQuestionCorrect(q.id, true);
+      // FIXED: Don't increment attempts on correct answer
       await unlockNextLevel();
       showCustomAlert('Great job!', 'Level cleared!', () => router.replace({ pathname: '/Homepage', params: { exerciseId: exercise.id, session: String(Date.now()) } } as any), 'success');
     } else {
-      setAttemptCounts(prev => ({ ...prev, [q.id]: (prev[q.id] || 0) + 1 }));
+      // WRONG ANSWER - Increment attempts
+      incrementAttemptCount(q.id);
+      console.log('[LevelComplete-Wrong] Wrong answer - attempt incremented');
       showCustomAlert('Not yet correct', 'Try again!', undefined, 'warning');
     }
   };
-  
   const renderMultipleChoice = (question: Question) => {
     const selectedAnswers = Array.isArray(currentAnswer) ? currentAnswer : [];
+    
+    // Check if this question uses images as options
+    const hasOptionImages = question.optionImages && question.optionImages.length > 0 && question.optionImages.some(img => img);
+    
+    if (hasOptionImages) {
+      // Image-based options: validate images
+      const validImageCount = question.optionImages?.filter(img => img && typeof img === 'string' && img.trim() !== '').length || 0;
+      
+      if (validImageCount === 0) {
+        console.error('[MC-Render] Question has NO valid option images!', {
+          questionId: question.id,
+          optionImages: question.optionImages
+        });
+        return (
+          <View style={styles.questionContainer}>
+            <View style={styles.questionTextContainer}>
+              <Text style={styles.questionText}>{question.question}</Text>
+            </View>
+            <View style={[styles.questionTextContainer, { backgroundColor: '#fee2e2', borderColor: '#ef4444' }]}>
+              <Text style={[styles.questionText, { color: '#dc2626', fontSize: 16 }]}>
+                ⚠️ Error: This question has no valid answer option images. Please contact your teacher.
+              </Text>
+            </View>
+          </View>
+        );
+      }
+    } else {
+      // Text-based options: validate text
+      const validOptions = (question.options || []).filter(opt => opt && typeof opt === 'string' && opt.trim() !== '');
+      
+      if (validOptions.length === 0) {
+        console.error('[MC-Render] Question has NO valid text options!', {
+          questionId: question.id,
+          originalOptions: question.options
+        });
+        return (
+          <View style={styles.questionContainer}>
+            <View style={styles.questionTextContainer}>
+              <Text style={styles.questionText}>{question.question}</Text>
+            </View>
+            <View style={[styles.questionTextContainer, { backgroundColor: '#fee2e2', borderColor: '#ef4444' }]}>
+              <Text style={[styles.questionText, { color: '#dc2626', fontSize: 16 }]}>
+                ⚠️ Error: This question has no valid answer options. Please contact your teacher.
+              </Text>
+            </View>
+          </View>
+        );
+      }
+      
+      if (validOptions.length < (question.options?.length || 0)) {
+        console.warn('[MC-Render] Some options were invalid and filtered out', {
+          questionId: question.id,
+          originalCount: question.options?.length,
+          validCount: validOptions.length
+        });
+      }
+    }
     
     // Check if all options have images
     const hasAllImages = question.options?.every((_, index) => question.optionImages?.[index]);
@@ -2450,118 +5179,122 @@ export default function StudentExerciseAnswering() {
         {/* Question Image */}
         {(question.questionImage || (question.questionImages && question.questionImages.length)) && (
           <View style={styles.questionImageContainer}>
-              {Array.isArray(question.questionImage) ? (
-              question.questionImage.map((img, idx) => (
-                <ExpoImage key={`qi-${idx}`} source={{ uri: img }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
+            {Array.isArray(question.questionImage) ? (
+              (question.questionImage.length <= 3 ? (
+                <View style={[
+                  styles.questionImagesRow,
+                  question.questionImage.length === 1 ? styles.imageRowCenter : styles.imageRowLeft,
+                ]}> 
+                  {question.questionImage.map((img, idx) => (
+                  <ExpoImage 
+                      key={`qi-${idx}`} 
+                      source={{ uri: img }} 
+                      style={styles.questionImageAuto} 
+                      contentFit="contain" 
+                      transition={150} 
+                      cachePolicy="memory-disk" 
+                      priority="high"
+                    onError={(e) => log.mediaWarn('questionImage array item failed', { url: img, error: String(e) })}
+                      recyclingKey={`qi-${question.id}-${idx}`}
+                    />
+                  ))}
+                </View>
+              ) : (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ width: '100%' }} contentContainerStyle={styles.questionImagesRow}>
+                  {question.questionImage.map((img, idx) => (
+                    <ExpoImage 
+                      key={`qi-${idx}`} 
+                      source={{ uri: img }} 
+                      style={styles.questionImageSmall} 
+                      contentFit="contain" 
+                      transition={150} 
+                      cachePolicy="memory-disk" 
+                      priority="high"
+                      recyclingKey={`qi-${question.id}-${idx}`}
+                    />
+                  ))}
+                </ScrollView>
               ))
             ) : question.questionImage ? (
-              <ExpoImage source={{ uri: question.questionImage }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
+              <ExpoImage 
+                source={{ uri: question.questionImage }} 
+                style={[styles.questionImage, styles.singleImageCentered]} 
+                contentFit="contain" 
+                transition={150} 
+                cachePolicy="memory-disk" 
+                priority="high"
+                onError={(e) => log.mediaWarn('questionImage single failed', { url: question.questionImage, error: String(e) })}
+                recyclingKey={`qi-${question.id}`}
+              />
             ) : null}
             {question.questionImages && question.questionImages.length ? (
-              (() => {
-                const layout = getQuestionImageLayout(question);
-                
-                // Special layout for pattern recognition
-                if (layout.layout === 'pattern-blocks') {
-                  return (
-                    <View style={[styles.patternBlocksContainer, { 
-                      maxHeight: layout.maxHeight, 
-                      maxWidth: layout.maxWidth
-                    }]}>
-                      {/* Top row - 4 items in blue container */}
-                      <View style={styles.patternTopRow}>
-                        {question.questionImages.slice(0, 4).map((img, idx) => (
-                          <View key={`top-${idx}`} style={styles.patternTopItem}>
-                            <ExpoImage 
-                              source={{ uri: img }} 
-                              style={styles.patternTopImage}
-                              contentFit={layout.contentFit} 
-                              transition={120} 
-                              cachePolicy="disk" 
-                            />
-                          </View>
-                        ))}
-                      </View>
-                      
-                      {/* Middle section - single large item */}
-                      {question.questionImages[4] && (
-                        <View style={styles.patternMiddleRow}>
-                          <ExpoImage 
-                            source={{ uri: question.questionImages[4] }} 
-                            style={styles.patternMiddleImage}
-                            contentFit={layout.contentFit} 
-                            transition={120} 
-                            cachePolicy="disk" 
-                          />
-                        </View>
-                      )}
-                      
-                      {/* Bottom section - 2x2 grid */}
-                      <View style={styles.patternBottomGrid}>
-                        {question.questionImages.slice(5, 9).map((img, idx) => (
-                          <View key={`bottom-${idx}`} style={styles.patternBottomItem}>
-                            <ExpoImage 
-                              source={{ uri: img }} 
-                              style={styles.patternBottomImage}
-                              contentFit={layout.contentFit} 
-                              transition={120} 
-                              cachePolicy="disk" 
-                            />
-                          </View>
-                        ))}
-                      </View>
-                    </View>
-                  );
-                }
-                
-                // Default layout for other question types
-                return (
-                  <View style={[styles.questionImagesContainer, { 
-                    maxHeight: layout.maxHeight, 
-                    maxWidth: layout.maxWidth,
-                    justifyContent: layout.alignment
-                  }]}>
-                    <View style={[styles.questionImagesGrid, { 
-                      flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
-                      flexWrap: 'wrap',
-                      justifyContent: layout.alignment
-                    }]}>
-                      {question.questionImages.map((img, idx) => (
-                        <ExpoImage 
-                          key={`qis-${idx}`} 
-                          source={{ uri: img }} 
-                          style={[styles.questionImageThumb, { 
-                            width: layout.imageSize, 
-                            height: layout.imageSize,
-                            margin: 4
-                          }]} 
-                          contentFit={layout.contentFit} 
-                          transition={120} 
-                          cachePolicy="disk" 
-                        />
-                      ))}
-                    </View>
-                  </View>
-                );
-              })()
+              question.questionImages.length <= 3 ? (
+                <View style={[
+                  styles.questionImagesRow,
+                  question.questionImages.length === 1 ? styles.imageRowCenter : styles.imageRowLeft,
+                  { marginTop: 8 },
+                ]}> 
+                  {question.questionImages.map((img, idx) => (
+                  <ExpoImage 
+                      key={`qis-${idx}`} 
+                      source={{ uri: img }} 
+                      style={styles.questionImageAuto} 
+                      contentFit="cover" 
+                      transition={120} 
+                      cachePolicy="memory-disk"
+                    priority="high"
+                    onError={(e) => log.mediaWarn('questionImages small failed', { url: img, error: String(e) })}
+                      recyclingKey={`qis-${question.id}-${idx}`}
+                    />
+                  ))}
+                </View>
+              ) : (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ width: '100%', marginTop: 8 }} contentContainerStyle={styles.questionImagesRow}>
+                  {question.questionImages.map((img, idx) => (
+                    <ExpoImage 
+                      key={`qis-${idx}`} 
+                      source={{ uri: img }} 
+                      style={styles.questionImageThumb} 
+                      contentFit="cover" 
+                      transition={120} 
+                      cachePolicy="memory-disk"
+                      priority="high"
+                      onError={(e) => log.mediaWarn('questionImages thumb failed', { url: img, error: String(e) })}
+                      recyclingKey={`qis-${question.id}-${idx}`}
+                    />
+                  ))}
+                </ScrollView>
+              )
             ) : null}
           </View>
         )}
         
-        <View style={styles.questionTextContainer}>
-          <Text style={styles.questionText}>{question.question}</Text>
-          {renderTTSButton(question.ttsAudioUrl)}
-        </View>
+        {typeof question.question === 'string' && question.question.trim().length > 0 && (
+          <View style={styles.questionTextContainer}>
+            <Text style={styles.questionText}>{question.question}</Text>
+            {renderTTSButton(getPreferredAudioUrl(question))}
+          </View>
+        )}
         
         {useGridLayout ? (
           <View style={styles.optionsGridContainer}>
             {question.options?.map((option, index) => {
-              const isSelected = selectedAnswers.includes(option);
+              // CRITICAL: For image-based questions, use image index as option value if text is empty
               const hasImage = question.optionImages?.[index];
+              const optionValue = (hasImage && (!option || option.trim() === '')) 
+                ? String.fromCharCode(65 + index) // Use "A", "B", "C", "D" for image options
+                : option;
+              
+              // Skip if both option text and image are invalid
+              if (!hasImage && (!optionValue || typeof optionValue !== 'string' || optionValue.trim() === '')) {
+                console.error('[MC-Grid] Invalid option at index', index, '- no text or image');
+                return null;
+              }
+              
+              const isSelected = selectedAnswers.includes(optionValue);
               const optionLabel = String.fromCharCode(65 + index); // A, B, C, D
               
               const optionKey = `mc-${question.id}-${index}`;
-              const isCorrect = isOptionIndexCorrect(question, index);
               const shakeStyle = lastShakeKey === optionKey ? { transform: [{ translateX: shakeAnim }] } : undefined;
               return (
                 <AnimatedTouchable
@@ -2572,21 +5305,57 @@ export default function StudentExerciseAnswering() {
                   , shakeStyle as any
                   ]}
                   onPress={() => {
+                    // CRITICAL: Check correctness at press time, not render time
+                    const isCorrect = isOptionCorrect(question, optionValue);
+                    console.log('[MC-Grid] Option pressed:', {
+                      option: optionValue,
+                      isCorrect,
+                      questionId: question.id,
+                      hasImage: !!hasImage
+                    });
+                    
                     // Single answer immediate validation and feedback
                     if (!question.multiAnswer) {
-                      // Debug logging
-                      console.log('Multiple Choice Click Debug:', {
-                        questionId: question.id,
-                        selectedOption: option,
-                        questionAnswer: question.answer,
-                        isCorrect,
-                        options: question.options
-                      });
-                      
                       if (!isCorrect) {
+                        const newAttemptCount = (attemptCounts[question.id] || 0) + 1;
+                        const maxAttempts = exercise?.maxAttemptsPerItem;
+                        
+                        // CRITICAL FIX: Save the wrong answer to the answers array
+                        console.log('[MC-Grid-Wrong] Saving wrong answer:', {
+                          questionId: question.id,
+                          selectedOption: optionValue,
+                          attemptCount: newAttemptCount
+                        });
+                        
+                        updateAnswers(prev => {
+                          const updated = prev.map(a => 
+                            a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: false } : a
+                          );
+                          console.log('[MC-Grid-Wrong] Answer saved to array');
+                          return updated;
+                        });
+                        
+                        // Check if attempt limit is reached
+                        if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+                          updateAttemptCount(question.id, newAttemptCount);
+                          logAttempt(question, optionValue, 'final');
+                          
+                          // Mark as failed and advance
+                          setQuestionCorrect(question.id, false);
+                          
+                          // Show attempt limit reached message briefly
+                          showCustomAlert(
+                            'Attempt Limit Reached', 
+                            `You have reached the maximum number of attempts (${maxAttempts}) for this question.`,
+                            () => advanceToNextOrFinish(),
+                            'warning'
+                          );
+                          return;
+                        }
+                        
                         setLastShakeKey(optionKey);
-                        setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
-                        logAttempt(question, option, 'change');
+                        logAttempt(question, optionValue, 'change');
+                        syncAttemptCount(question.id);
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
                           Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
@@ -2597,23 +5366,40 @@ export default function StudentExerciseAnswering() {
                         triggerWrongFeedback();
                         return;
                       }
-                      // Correct -> set answer and move next
+                      // Correct -> set answer and move next (NO attempt increment on correct)
                       // Stop TTS immediately when correct answer is selected
                       stopCurrentTTS();
-                      logInteraction(question.id, 'option_click', option, 0);
-                      handleAnswerChange(option);
-                      setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
-                      // Count the final successful attempt
-                      setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
-                      logAttempt(question, option, 'final');
+                      logInteraction(question.id, 'option_click', optionValue, 0);
+                      handleAnswerChange(optionValue);
+                      
+                      // CRITICAL FIX: Update the answer with isCorrect: true and log for debugging
+                      updateAnswers(prev => {
+                        const updated = prev.map(a => 
+                          a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: true } : a
+                        );
+                        console.log('[MC-Grid-Correct] Updated answers state - NO attempt increment:', updated.map(a => ({
+                          qId: a.questionId,
+                          hasAnswer: !!a.answer,
+                          isCorrect: a.isCorrect
+                        })));
+                        return updated;
+                      });
+                      
+                      // Use helper functions to update both state and ref
+                      setQuestionCorrect(question.id, true);
+                      // Log a final correct attempt for history consistency
+                      logAttempt(question, optionValue, 'final');
+                      syncAttemptCount(question.id);
+                      // FIXED: Don't increment attempts on correct answer
+                      console.log('[MC-Grid-Correct] Answer correct on first try - single final attempt recorded');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
                     }
                     // Multi-answer behaves as selection accumulation
                     const newAnswers = isSelected 
-                      ? selectedAnswers.filter(a => a !== option)
-                      : [...selectedAnswers, option];
-                    logInteraction(question.id, 'option_click', option, 0);
+                      ? selectedAnswers.filter(a => a !== optionValue)
+                      : [...selectedAnswers, optionValue];
+                    logInteraction(question.id, 'option_click', optionValue, 0);
                     handleAnswerChange(newAnswers);
                   }}
                    activeOpacity={0.7}
@@ -2624,7 +5410,9 @@ export default function StudentExerciseAnswering() {
                               style={styles.gridOptionImage}
                               contentFit="contain"
                               transition={120}
-                              cachePolicy="disk"
+                              cachePolicy="memory-disk"
+                              priority="high"
+                              recyclingKey={`opt-${question.id}-${index}`}
                             />
                           )}
                   
@@ -2646,13 +5434,22 @@ export default function StudentExerciseAnswering() {
         ) : (
           <View style={styles.optionsContainer}>
             {question.options?.map((option, index) => {
-              const isSelected = selectedAnswers.includes(option);
+              // CRITICAL: For image-based questions, use image index as option value if text is empty
               const hasImage = question.optionImages?.[index];
-              const hasMultipleImages = question.optionMultipleImages?.[index]?.length;
+              const optionValue = (hasImage && (!option || option.trim() === '')) 
+                ? String.fromCharCode(65 + index) // Use "A", "B", "C", "D" for image options
+                : option;
+              
+              // Skip if both option text and image are invalid
+              if (!hasImage && (!optionValue || typeof optionValue !== 'string' || optionValue.trim() === '')) {
+                console.error('[MC-List] Invalid option at index', index, '- no text or image');
+                return null;
+              }
+              
+              const isSelected = selectedAnswers.includes(optionValue);
               const optionLabel = String.fromCharCode(65 + index); // A, B, C, D
               
               const optionKey = `mc-${question.id}-${index}`;
-              const isCorrect = isOptionIndexCorrect(question, index);
               const shakeStyle = lastShakeKey === optionKey ? { transform: [{ translateX: shakeAnim }] } : undefined;
               return (
                 <AnimatedTouchable
@@ -2663,20 +5460,56 @@ export default function StudentExerciseAnswering() {
                     shakeStyle as any
                   ]}
                   onPress={() => {
+                    // CRITICAL: Check correctness at press time, not render time
+                    const isCorrect = isOptionCorrect(question, optionValue);
+                    console.log('[MC-List] Option pressed:', {
+                      option: optionValue,
+                      isCorrect,
+                      questionId: question.id,
+                      hasImage: !!hasImage
+                    });
+                    
                     if (!question.multiAnswer) {
-                      // Debug logging
-                      console.log('Multiple Choice Click Debug (Non-Grid):', {
-                        questionId: question.id,
-                        selectedOption: option,
-                        questionAnswer: question.answer,
-                        isCorrect,
-                        options: question.options
-                      });
-                      
                       if (!isCorrect) {
+                        const newAttemptCount = (attemptCounts[question.id] || 0) + 1;
+                        const maxAttempts = exercise?.maxAttemptsPerItem;
+                        
+                        // CRITICAL FIX: Save the wrong answer to the answers array
+                        console.log('[MC-List-Wrong] Saving wrong answer:', {
+                          questionId: question.id,
+                          selectedOption: optionValue,
+                          attemptCount: newAttemptCount
+                        });
+                        
+                        updateAnswers(prev => {
+                          const updated = prev.map(a => 
+                            a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: false } : a
+                          );
+                          console.log('[MC-List-Wrong] Answer saved to array');
+                          return updated;
+                        });
+                        
+                        // Check if attempt limit is reached
+                        if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+                          updateAttemptCount(question.id, newAttemptCount);
+                          logAttempt(question, optionValue, 'final');
+                          
+                          // Mark as failed and advance
+                          setQuestionCorrect(question.id, false);
+                          
+                          // Show attempt limit reached message briefly
+                          showCustomAlert(
+                            'Attempt Limit Reached', 
+                            `You have reached the maximum number of attempts (${maxAttempts}) for this question.`,
+                            () => advanceToNextOrFinish(),
+                            'warning'
+                          );
+                          return;
+                        }
+                        
                         setLastShakeKey(optionKey);
-                        setAttemptCounts(prev => ({ ...prev, [question.id]: (prev[question.id] || 0) + 1 }));
-                        logAttempt(question, option, 'change');
+                        updateAttemptCount(question.id, newAttemptCount);
+                        logAttempt(question, optionValue, 'change');
                         Animated.sequence([
                           Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
                           Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
@@ -2687,17 +5520,35 @@ export default function StudentExerciseAnswering() {
                         triggerWrongFeedback();
                         return;
                       }
+                      // CORRECT ANSWER - Don't increment attempts
                       // Stop TTS immediately when correct answer is selected
                       stopCurrentTTS();
-                      handleAnswerChange(option);
-                      setCorrectQuestions(prev => ({ ...prev, [question.id]: true }));
-                      logAttempt(question, option, 'change');
+                      handleAnswerChange(optionValue);
+                      
+                      // CRITICAL FIX: Update the answer with isCorrect: true and ensure answer is set
+                      updateAnswers(prev => {
+                        const updated = prev.map(a => 
+                          a.questionId === question.id ? { ...a, answer: optionValue, isCorrect: true } : a
+                        );
+                        console.log('[MC-List-Correct] Updated answers state - NO attempt increment:', updated.map(a => ({
+                          qId: a.questionId,
+                          hasAnswer: !!a.answer,
+                          isCorrect: a.isCorrect
+                        })));
+                        return updated;
+                      });
+                      
+                      // Use helper functions to update both state and ref
+                      setQuestionCorrect(question.id, true);
+                      // FIXED: Don't increment attempts on correct answer
+                      console.log('[MC-List-Correct] Answer correct on first try - no attempt logged');
+                      logAttempt(question, optionValue, 'final');
                       triggerCorrectFeedback(() => advanceToNextOrFinish());
                       return;
                     }
                     const newAnswers = isSelected 
-                      ? selectedAnswers.filter(a => a !== option)
-                      : [...selectedAnswers, option];
+                      ? selectedAnswers.filter(a => a !== optionValue)
+                      : [...selectedAnswers, optionValue];
                     handleAnswerChange(newAnswers);
                   }}
                    activeOpacity={0.7}
@@ -2712,32 +5563,17 @@ export default function StudentExerciseAnswering() {
                       </Text>
                     </View>
                     
-                      {/* Single Image Display (Legacy) */}
                       {hasImage && (
-                        <ExpoImage 
-                          source={{ uri: hasImage }} 
-                          style={styles.optionImage}
-                          contentFit="contain"
-                          transition={120}
-                          cachePolicy="disk"
-                        />
-                      )}
-                      
-                      {/* Multiple Images Display */}
-                      {hasMultipleImages && (
-                        <View style={styles.multipleImagesContainer}>
-                          {question.optionMultipleImages?.[index]?.map((imageUrl, imgIndex) => (
-                            <ExpoImage 
-                              key={imgIndex}
-                              source={{ uri: imageUrl }} 
-                              style={styles.optionImage}
-                              contentFit="contain"
-                              transition={120}
-                              cachePolicy="disk"
-                            />
-                          ))}
-                        </View>
-                      )}
+                      <ExpoImage 
+                        source={{ uri: hasImage }} 
+                        style={styles.optionImage}
+                        contentFit="contain"
+                        transition={120}
+                        cachePolicy="memory-disk"
+                        priority="high"
+                        recyclingKey={`opt-${question.id}-${index}`}
+                      />
+                    )}
                     
                     <Text style={[
                       styles.optionText,
@@ -2774,87 +5610,6 @@ export default function StudentExerciseAnswering() {
     return 14;                             // Extremely long questions - small font
   };
 
-  // Question type detection for image layout
-  const getQuestionImageLayout = (question: Question) => {
-    const questionText = question.question.toLowerCase();
-    const title = exercise?.title.toLowerCase() || '';
-    
-    // Pattern recognition detection
-    const isPatternRecognition = questionText.includes('pattern') || 
-                                questionText.includes('kasunod') || 
-                                questionText.includes('susunod') ||
-                                title.includes('pattern');
-    
-    // Multiple choice with images
-    const isMultipleChoice = question.type === 'multiple-choice';
-    
-    // Identification questions
-    const isIdentification = question.type === 'identification';
-    
-    // Matching questions
-    const isMatching = question.type === 'matching';
-    
-    if (isPatternRecognition) {
-      return {
-        type: 'pattern',
-        gridColumns: 2,
-        maxHeight: 280,
-        maxWidth: 400,
-        imageSize: 60,
-        contentFit: 'contain' as const,
-        alignment: 'center' as const,
-        layout: 'pattern-blocks' as const
-      };
-    }
-    
-    if (isMultipleChoice && question.questionImages?.length) {
-      return {
-        type: 'multiple-choice',
-        gridColumns: Math.min(3, question.questionImages.length),
-        maxHeight: 150,
-        maxWidth: 350,
-        imageSize: 70,
-        contentFit: 'contain' as const,
-        alignment: 'center' as const
-      };
-    }
-    
-    if (isIdentification && question.questionImages?.length) {
-      return {
-        type: 'identification',
-        gridColumns: Math.min(4, question.questionImages.length),
-        maxHeight: 120,
-        maxWidth: 400,
-        imageSize: 60,
-        contentFit: 'contain' as const,
-        alignment: 'flex-start' as const
-      };
-    }
-    
-    if (isMatching && question.questionImages?.length) {
-      return {
-        type: 'matching',
-        gridColumns: Math.min(2, question.questionImages.length),
-        maxHeight: 180,
-        maxWidth: 300,
-        imageSize: 90,
-        contentFit: 'contain' as const,
-        alignment: 'center' as const
-      };
-    }
-    
-    // Default layout
-    return {
-      type: 'default',
-      gridColumns: Math.min(3, question.questionImages?.length || 3),
-      maxHeight: 150,
-      maxWidth: 350,
-      imageSize: 80,
-      contentFit: 'contain' as const,
-      alignment: 'center' as const
-    };
-  };
-
   const renderIdentification = (question: Question) => {
     // Check if question has separate boxes (blanks) or single input field
     const hasBlanks = question.fillSettings?.showBoxes;
@@ -2866,53 +5621,65 @@ export default function StudentExerciseAnswering() {
         <View style={styles.identificationContainer}>
           {/* Question Image */}
           {(question.questionImage || (question.questionImages && question.questionImages.length)) && (
-            <View style={styles.questionImageContainer}>
+            <View style={[
+              styles.questionImageContainer,
+              // Center single images, auto-adjust for multiple
+              Array.isArray(question.questionImage) || (question.questionImages && question.questionImages.length > 1) 
+                ? styles.questionImageContainerMultiple 
+                : styles.questionImageContainerSingle
+            ]}>
               {Array.isArray(question.questionImage) ? (
                 question.questionImage.map((img, idx) => (
-                  <ExpoImage key={`qi-${idx}`} source={{ uri: img }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
+                  <ExpoImage 
+                    key={`qi-${idx}`} 
+                    source={{ uri: img }} 
+                    style={styles.questionImage} 
+                    contentFit="contain" 
+                    transition={150} 
+                    cachePolicy="memory-disk" 
+                    priority="high"
+                    onLoad={() => console.log('[ImageLoad] ident questionImage array item loaded:', img)}
+                    onError={(e) => log.mediaWarn('ident questionImage array item failed', { url: img, error: String(e) })}
+                    recyclingKey={`qi-ident-${question.id}-${idx}`}
+                  />
                 ))
               ) : question.questionImage ? (
-                <ExpoImage source={{ uri: question.questionImage }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
+                <ExpoImage 
+                  source={{ uri: question.questionImage }} 
+                  style={styles.questionImage} 
+                  contentFit="contain" 
+                  transition={150} 
+                  cachePolicy="memory-disk" 
+                  priority="high"
+                  onLoad={() => console.log('[ImageLoad] ident questionImage single loaded:', question.questionImage)}
+                  onError={(e) => log.mediaWarn('ident questionImage single failed', { url: question.questionImage, error: String(e) })}
+                  recyclingKey={`qi-ident-${question.id}`}
+                />
               ) : null}
             {question.questionImages && question.questionImages.length ? (
-              (() => {
-                const layout = getQuestionImageLayout(question);
-                return (
-                  <View style={[styles.questionImagesContainer, { 
-                    maxHeight: layout.maxHeight, 
-                    maxWidth: layout.maxWidth,
-                    justifyContent: layout.alignment
-                  }]}>
-                    <View style={[styles.questionImagesGrid, { 
-                      flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
-                      flexWrap: 'wrap',
-                      justifyContent: layout.alignment
-                    }]}>
-                      {question.questionImages.map((img, idx) => (
-                        <ExpoImage 
-                          key={`qis-${idx}`} 
-                          source={{ uri: img }} 
-                          style={[styles.questionImageThumb, { 
-                            width: layout.imageSize, 
-                            height: layout.imageSize,
-                            margin: 4
-                          }]} 
-                          contentFit={layout.contentFit} 
-                          transition={120} 
-                          cachePolicy="disk" 
-                        />
-                      ))}
-                    </View>
-                  </View>
-                );
-              })()
+              <View style={styles.questionImagesGrid}>
+                {question.questionImages.map((img, idx) => (
+                  <ExpoImage 
+                    key={`qis-${idx}`} 
+                    source={{ uri: img }} 
+                    style={styles.questionImageThumb} 
+                    contentFit="cover" 
+                    transition={120} 
+                    cachePolicy="memory-disk"
+                    priority="high"
+                    onLoad={() => console.log('[ImageLoad] ident questionImages thumb loaded:', img)}
+                    onError={(e) => log.mediaWarn('ident questionImages thumb failed', { url: img, error: String(e) })}
+                    recyclingKey={`qis-ident-${question.id}-${idx}`}
+                  />
+                ))}
+              </View>
             ) : null}
             </View>
           )}
           
           <View style={styles.questionTextContainer}>
             <Text style={[styles.fillBlankQuestionText, { fontSize: dynamicFontSize }]}>{question.question}</Text>
-          {renderTTSButton(question.ttsAudioUrl)}
+          {renderTTSButton(getPreferredAudioUrl(question))}
           </View>
           <View style={styles.adaptiveBoxesRow}>
             {Array.isArray(question.answer) ? question.answer.map((expected, index) => {
@@ -2965,53 +5732,59 @@ export default function StudentExerciseAnswering() {
         <View style={styles.identificationContainer}>
           {/* Question Images */}
           {(question.questionImage || (question.questionImages && question.questionImages.length)) && (
-            <View style={styles.questionImageContainer}>
+            <View style={[
+              styles.questionImageContainer,
+              // Center single images, auto-adjust for multiple
+              Array.isArray(question.questionImage) || (question.questionImages && question.questionImages.length > 1) 
+                ? styles.questionImageContainerMultiple 
+                : styles.questionImageContainerSingle
+            ]}>
               {Array.isArray(question.questionImage) ? (
                 question.questionImage.map((img, idx) => (
-                  <Image key={`qi-${idx}`} source={{ uri: img }} style={styles.questionImage} resizeMode="contain" />
+                  <ExpoImage 
+                    key={`qi-${idx}`} 
+                    source={{ uri: img }} 
+                    style={styles.questionImage} 
+                    contentFit="contain" 
+                    transition={150} 
+                    cachePolicy="memory-disk" 
+                    priority="high"
+                    recyclingKey={`qi-ident2-${question.id}-${idx}`}
+                  />
                 ))
               ) : question.questionImage ? (
-                <Image source={{ uri: question.questionImage }} style={styles.questionImage} resizeMode="contain" />
+                <ExpoImage 
+                  source={{ uri: question.questionImage }} 
+                  style={styles.questionImage} 
+                  contentFit="contain" 
+                  transition={150} 
+                  cachePolicy="memory-disk" 
+                  priority="high"
+                  recyclingKey={`qi-ident2-${question.id}`}
+                />
               ) : null}
               {question.questionImages && question.questionImages.length ? (
-                (() => {
-                  const layout = getQuestionImageLayout(question);
-                  return (
-                    <View style={[styles.questionImagesContainer, { 
-                      maxHeight: layout.maxHeight, 
-                      maxWidth: layout.maxWidth,
-                      justifyContent: layout.alignment
-                    }]}>
-                      <View style={[styles.questionImagesGrid, { 
-                        flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
-                        flexWrap: 'wrap',
-                        justifyContent: layout.alignment
-                      }]}>
-                        {question.questionImages.map((img, idx) => (
-                          <ExpoImage 
-                            key={`qis-${idx}`} 
-                            source={{ uri: img }} 
-                            style={[styles.questionImageThumb, { 
-                              width: layout.imageSize, 
-                              height: layout.imageSize,
-                              margin: 4
-                            }]} 
-                            contentFit={layout.contentFit} 
-                            transition={120} 
-                            cachePolicy="disk" 
-                          />
-                        ))}
-                      </View>
-                    </View>
-                  );
-                })()
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                  {question.questionImages.map((img, idx) => (
+                    <ExpoImage 
+                      key={`qis-${idx}`} 
+                      source={{ uri: img }} 
+                      style={{ width: 100, height: 100, borderRadius: 8, marginRight: 8 }} 
+                      contentFit="cover" 
+                      transition={120} 
+                      cachePolicy="memory-disk"
+                      priority="high"
+                      recyclingKey={`qis-ident2-${question.id}-${idx}`}
+                    />
+                  ))}
+                </ScrollView>
               ) : null}
             </View>
           )}
           
           <View style={styles.questionTextContainer}>
             <Text style={[styles.fillBlankQuestionText, { fontSize: dynamicFontSize }]}>{question.question}</Text>
-            {renderTTSButton(question.ttsAudioUrl)}
+            {renderTTSButton(getPreferredAudioUrl(question))}
           </View>
           <TextInput
             style={styles.identificationInput}
@@ -3030,11 +5803,12 @@ export default function StudentExerciseAnswering() {
       );
     }
   };
-  
-
   const renderMatching = (question: Question) => {
-    const currentSelections = matchingSelections[question.id] || {};
-    // Create persistent shuffled orders per question to auto "rumble" selections
+    // FIXED: Use new pairing state instead of old selections
+    const currentPairs = matchingPairs[question.id] || {};
+    const selectedLeft = matchingSelectedLeft[question.id] ?? null;
+    
+    // Create persistent shuffled orders per question
     const pairCount = question.pairs?.length || 0;
     const cached = shuffledPairsCache[question.id];
     const makeOrder = (n: number) => Array.from({ length: n }, (_, i) => i).sort(() => Math.random() - 0.5);
@@ -3044,6 +5818,47 @@ export default function StudentExerciseAnswering() {
       setShuffledPairsCache(prev => ({ ...prev, [question.id]: { left: leftOrder, right: rightOrder } }));
     }
     
+    // Color palette for pairs - 12 distinct colors
+    const pairColors = [
+      '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', 
+      '#06b6d4', '#ec4899', '#14b8a6', '#f97316', '#6366f1',
+      '#84cc16', '#f43f5e'
+    ];
+    
+    // Helper to get color for a specific paired index
+    const getPairColor = (leftIndex: number, rightIndex: number | null | undefined): string | null => {
+      if (rightIndex === null || rightIndex === undefined) return null;
+      
+      // Find which pair this belongs to
+      for (let i = 0; i < pairCount; i++) {
+        const key = `left-${i}`;
+        if (currentPairs[key] === rightIndex && i === leftIndex) {
+          return pairColors[i % pairColors.length];
+        }
+      }
+      return null;
+    };
+    
+    // Helper to check if a match is correct (left[i] should match with right[i])
+    const isMatchCorrect = (leftIndex: number, rightIndex: number): boolean => {
+      return leftIndex === rightIndex;
+    };
+    
+    // Helper to check if a right item is already paired
+    const isRightItemPaired = (rightIndex: number): boolean => {
+      return Object.values(currentPairs).includes(rightIndex);
+    };
+    
+    // Helper to find which left item a right item is paired with
+    const getLeftIndexForRight = (rightIndex: number): number | null => {
+      for (const [leftKey, pairedRightIndex] of Object.entries(currentPairs)) {
+        if (pairedRightIndex === rightIndex) {
+          return parseInt(leftKey.split('-')[1]);
+        }
+      }
+      return null;
+    };
+    
     return (
       <View style={styles.questionContainer}>
         {/* Question Image */}
@@ -3051,55 +5866,63 @@ export default function StudentExerciseAnswering() {
           <View style={styles.questionImageContainer}>
             {Array.isArray(question.questionImage) ? (
               question.questionImage.map((img, idx) => (
-                <Image key={`qi-${idx}`} source={{ uri: img }} style={styles.questionImage} resizeMode="contain" />
+                <ExpoImage 
+                  key={`qi-${idx}`} 
+                  source={{ uri: img }} 
+                  style={styles.questionImage} 
+                  contentFit="contain" 
+                  transition={150} 
+                  cachePolicy="memory-disk" 
+                  priority="high"
+                  recyclingKey={`qi-matching-${question.id}-${idx}`}
+                />
               ))
             ) : question.questionImage ? (
-              <Image source={{ uri: question.questionImage }} style={styles.questionImage} resizeMode="contain" />
+              <ExpoImage 
+                source={{ uri: question.questionImage }} 
+                style={styles.questionImage} 
+                contentFit="contain" 
+                transition={150} 
+                cachePolicy="memory-disk" 
+                priority="high"
+                recyclingKey={`qi-matching-${question.id}`}
+              />
             ) : null}
             {question.questionImages && question.questionImages.length ? (
-              (() => {
-                const layout = getQuestionImageLayout(question);
-                return (
-                  <View style={[styles.questionImagesContainer, { 
-                    maxHeight: layout.maxHeight, 
-                    maxWidth: layout.maxWidth,
-                    justifyContent: layout.alignment
-                  }]}>
-                    <View style={[styles.questionImagesGrid, { 
-                      flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
-                      flexWrap: 'wrap',
-                      justifyContent: layout.alignment
-                    }]}>
-                      {question.questionImages.map((img, idx) => (
-                        <ExpoImage 
-                          key={`qis-${idx}`} 
-                          source={{ uri: img }} 
-                          style={[styles.questionImageThumb, { 
-                            width: layout.imageSize, 
-                            height: layout.imageSize,
-                            margin: 4
-                          }]} 
-                          contentFit={layout.contentFit} 
-                          transition={120} 
-                          cachePolicy="disk" 
-                        />
-                      ))}
-                    </View>
-                  </View>
-                );
-              })()
+              <View style={styles.questionImagesGrid}>
+                {question.questionImages.map((img, idx) => (
+                  <ExpoImage 
+                    key={`qis-${idx}`} 
+                    source={{ uri: img }} 
+                    style={styles.questionImageThumb} 
+                    contentFit="cover" 
+                    transition={120} 
+                    cachePolicy="memory-disk"
+                    priority="high"
+                    recyclingKey={`qis-matching-${question.id}-${idx}`}
+                  />
+                ))}
+              </View>
             ) : null}
           </View>
         )}
         
         <View style={styles.questionTextContainer}>
           <Text style={styles.questionText}>{question.question}</Text>
-          {renderTTSButton(question.ttsAudioUrl)}
+          {renderTTSButton(getPreferredAudioUrl(question))}
         </View>
         
-        {/* Progress removed per new design */}
+        {/* Instructions */}
+        <View style={styles.matchingInstructions}>
+          <Text style={styles.matchingInstructionsText}>
+            {selectedLeft === null 
+              ? '👆 Tap an item from Column A first'
+              : '👉 Now tap an item from Column B to create a pair'}
+          </Text>
+        </View>
         
         <View style={styles.matchingGameContainer}>
+          {/* Left Column */}
           <View style={styles.matchingColumn}>
             <View style={styles.columnHeaderSimple}>
               <Text style={styles.matchingColumnTitle}>Column A</Text>
@@ -3107,40 +5930,77 @@ export default function StudentExerciseAnswering() {
             {leftOrder.map((mappedIndex) => {
               const pair = question.pairs![mappedIndex];
               const idx = mappedIndex;
+              const pairedRightIndex = currentPairs[`left-${idx}`];
+              const pairColor = getPairColor(idx, pairedRightIndex);
+              const isSelected = selectedLeft === idx;
+              const isPaired = pairedRightIndex !== undefined && pairedRightIndex !== null;
+              
               return (
-              <TouchableOpacity
-                key={`left-${idx}`}
-                style={[
-                  styles.gameMatchingItem,
-                  styles.matchingLeft,
-                  currentSelections[`left-${idx}`] && styles.selectedMatchingItem
-                ]}
-                onPress={() => {
-                  const newSelections = { ...currentSelections };
-                  const key = `left-${idx}`;
-                  if (newSelections[key]) {
-                    delete newSelections[key];
-                  } else {
-                    newSelections[key] = key;
-                  }
-                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                  setMatchingSelections(prev => ({ ...prev, [question.id]: newSelections }));
-                  handleAnswerChange(newSelections);
-                }}
-                activeOpacity={0.7}
-              >
-                {pair.leftImage ? (
-                  <ExpoImage source={{ uri: pair.leftImage }} style={styles.gameMatchingImage} contentFit="contain" transition={120} cachePolicy="disk" />
-                ) : (
-                  <View style={styles.gameItemContent}>
-                    <Text style={styles.gameMatchingText}>{pair.left}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
+                <TouchableOpacity
+                  key={`left-${idx}`}
+                  style={[
+                    styles.gameMatchingItem,
+                    styles.matchingLeft,
+                    isSelected && styles.matchingLeftSelected,
+                    // Show solid color when correctly paired
+                    isPaired && pairColor && { 
+                      backgroundColor: pairColor,
+                      borderColor: pairColor,
+                      borderWidth: 3
+                    }
+                  ]}
+                  onPress={() => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    
+                    if (isPaired) {
+                      // Unpair - remove the connection
+                      const newPairs = { ...currentPairs };
+                      delete newPairs[`left-${idx}`];
+                      setMatchingPairs(prev => ({ ...prev, [question.id]: newPairs }));
+                      setMatchingSelectedLeft(prev => ({ ...prev, [question.id]: null }));
+                      handleAnswerChange(newPairs);
+                    } else {
+                      // Select this left item
+                      setMatchingSelectedLeft(prev => ({ ...prev, [question.id]: idx }));
+                    }
+                  }}
+                  activeOpacity={0.7}
+                >
+                  {pair.leftImage ? (
+                    <ExpoImage 
+                      source={{ uri: pair.leftImage }} 
+                      style={styles.gameMatchingImage} 
+                      contentFit="contain" 
+                      transition={120} 
+                      cachePolicy="memory-disk"
+                      priority="high"
+                      recyclingKey={`left-${question.id}-${idx}`}
+                    />
+                  ) : (
+                    <View style={styles.gameItemContent}>
+                      <Text 
+                        style={[
+                          styles.gameMatchingText,
+                          isPaired && { color: '#ffffff', fontWeight: '700' }
+                        ]}
+                        numberOfLines={3}
+                        ellipsizeMode="tail"
+                      >
+                        {pair.left}
+                      </Text>
+                    </View>
+                  )}
+                  {isPaired && (
+                    <View style={styles.matchingPairBadge}>
+                      <MaterialCommunityIcons name="check" size={16} color="#ffffff" />
+                    </View>
+                  )}
+                </TouchableOpacity>
               );
             })}
           </View>
           
+          {/* Right Column */}
           <View style={styles.matchingColumn}>
             <View style={styles.columnHeaderSimple}>
               <Text style={styles.matchingColumnTitle}>Column B</Text>
@@ -3148,75 +6008,327 @@ export default function StudentExerciseAnswering() {
             {rightOrder.map((mappedIndex) => {
               const pair = question.pairs![mappedIndex];
               const idx = mappedIndex;
+              const leftIndexForThis = getLeftIndexForRight(idx);
+              const pairColor = leftIndexForThis !== null ? getPairColor(leftIndexForThis, idx) : null;
+              const isPaired = isRightItemPaired(idx);
+              
               return (
-              <TouchableOpacity
-                key={`right-${idx}`}
-                style={[
-                  styles.gameMatchingItem,
-                  styles.matchingRight,
-                  currentSelections[`right-${idx}`] && styles.selectedMatchingItem
-                ]}
-                onPress={() => {
-                  const newSelections = { ...currentSelections };
-                  const key = `right-${idx}`;
-                  if (newSelections[key]) {
-                    delete newSelections[key];
-                  } else {
-                    newSelections[key] = key;
-                  }
-                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                  setMatchingSelections(prev => ({ ...prev, [question.id]: newSelections }));
-                  handleAnswerChange(newSelections);
-                }}
-                activeOpacity={0.7}
-              >
-                {pair.rightImage ? (
-                  <ExpoImage source={{ uri: pair.rightImage }} style={styles.gameMatchingImage} contentFit="contain" transition={120} cachePolicy="disk" />
-                ) : (
-                  <View style={styles.gameItemContent}>
-                    <Text style={styles.gameMatchingText}>{pair.right}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
+                <TouchableOpacity
+                  key={`right-${idx}`}
+                  style={[
+                    styles.gameMatchingItem,
+                    styles.matchingRight,
+                    // Show solid color when correctly paired
+                    isPaired && pairColor && { 
+                      backgroundColor: pairColor,
+                      borderColor: pairColor,
+                      borderWidth: 3
+                    }
+                  ]}
+                  onPress={() => {
+                    if (selectedLeft === null) {
+                      // No left item selected, show hint
+                      showCustomAlert('Select from Column A', 'Please select an item from Column A first, then select from Column B to create a pair.', undefined, 'warning');
+                      return;
+                    }
+                    
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    
+                    if (isPaired && leftIndexForThis === selectedLeft) {
+                      // Unpair if clicking on the paired item
+                      const newPairs = { ...currentPairs };
+                      delete newPairs[`left-${selectedLeft}`];
+                      setMatchingPairs(prev => ({ ...prev, [question.id]: newPairs }));
+                      setMatchingSelectedLeft(prev => ({ ...prev, [question.id]: null }));
+                      handleAnswerChange(newPairs);
+                    } else if (!isPaired) {
+                      // Create new pair
+                      const newPairs = { ...currentPairs, [`left-${selectedLeft}`]: idx };
+                      
+                      // Check if the match is correct
+                      if (isMatchCorrect(selectedLeft, idx)) {
+                        // Correct match - keep the pair
+                        setMatchingPairs(prev => ({ ...prev, [question.id]: newPairs }));
+                        setMatchingSelectedLeft(prev => ({ ...prev, [question.id]: null }));
+                        handleAnswerChange(newPairs);
+                        
+                        // Haptic feedback for successful pairing
+                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                        
+                        // Check if all pairs are now correctly matched
+                        const allPairsMatched = Object.keys(newPairs).length === pairCount;
+                        if (allPairsMatched) {
+                          // All pairs matched correctly - show green flash and auto advance
+                          console.log('[Matching] All pairs matched correctly, showing success feedback...');
+                          console.log('[Matching] Final pairs state:', newPairs);
+                          
+                          // CRITICAL FIX: Log the final CORRECT attempt
+                          // Only log when ALL pairs are complete, not for individual pairs
+                          console.log('[Matching] Logging final CORRECT attempt for all pairs');
+                          logAttempt(question, newPairs, 'final');
+                          
+                          // Mark the question as correct and save the answer
+                          setQuestionCorrect(question.id, true);
+                          updateAnswers(prev => prev.map(a => 
+                            a.questionId === question.id ? { ...a, answer: newPairs, isCorrect: true } : a
+                          ));
+                          
+                          // FIXED: Don't increment attempts on correct completion
+                          const currentAttempts = attemptCounts[question.id] || 0;
+                          console.log('[Matching] All pairs correct - NO attempt increment, current attempts:', currentAttempts);
+                          
+                          // Trigger correct feedback with green flash animation
+                          triggerCorrectFeedback(() => {
+                            if (levelMode) {
+                              handleLevelComplete();
+                            } else {
+                              advanceToNextOrFinish();
+                            }
+                          });
+                        } else {
+                          // Not all pairs matched yet - just show success feedback for this pair
+                          console.log('[Matching] Correct pair made (' + Object.keys(newPairs).length + '/' + pairCount + '), no attempt logged');
+                          // No feedback needed for partial progress
+                        }
+                      } else {
+                        // Incorrect match - track attempt
+                        const currentAttemptCount = attemptCounts[question.id] || 0;
+                        const maxAttempts = exercise?.maxAttemptsPerItem;
+                        
+                        console.log('[Matching] Wrong pair detected:', {
+                          questionId: question.id,
+                          selectedLeft,
+                          selectedRight: idx,
+                          currentPairs: Object.keys(currentPairs).length,
+                          totalPairs: pairCount,
+                          currentAttempts: currentAttemptCount
+                        });
+                        
+                        // Trigger shake animation and red flash
+                        Animated.sequence([
+                          Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
+                          Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
+                          Animated.timing(shakeAnim, { toValue: 6, duration: 50, useNativeDriver: true }),
+                          Animated.timing(shakeAnim, { toValue: -6, duration: 50, useNativeDriver: true }),
+                          Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
+                        ]).start();
+                        triggerWrongFeedback();
+                        
+                        // Error haptic feedback
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                        
+                        // CRITICAL FIX: Increment attempt count AFTER feedback
+                        const newAttemptCount = currentAttemptCount + 1;
+                        // CRITICAL: We do not trust local counter; sync after logging from attemptLogsRef
+                        
+                        // CRITICAL FIX: Log attempt with current correct pairs (before wrong pair is added)
+                        // This ensures we track the attempt without polluting the answer with wrong data
+                        console.log('[Matching] Logging incorrect attempt #' + newAttemptCount + ':', {
+                          questionId: question.id,
+                          attemptCount: newAttemptCount,
+                          wrongPairAttempted: `left-${selectedLeft} → right-${idx}`,
+                          currentCorrectPairs: Object.keys(currentPairs).length
+                        });
+                        
+                        // Log the attempt with just current pairs (excluding the wrong one)
+                        logAttempt(question, currentPairs, 'change');
+                        syncAttemptCount(question.id);
+                        
+                        // Check if attempt limit is reached
+                        if (maxAttempts !== null && maxAttempts !== undefined && newAttemptCount >= maxAttempts) {
+                          // Mark as failed with current progress
+                          handleAnswerChange(currentPairs);
+                          
+                          console.log('[Matching] Max attempts reached, logging final state:', {
+                            questionId: question.id,
+                            attemptCount: newAttemptCount,
+                            finalPairs: currentPairs,
+                            pairsMatched: Object.keys(currentPairs).length + '/' + pairCount
+                          });
+                          
+                          logAttempt(question, currentPairs, 'final');
+                          syncAttemptCount(question.id);
+                          setQuestionCorrect(question.id, false);
+                          
+                          // Show attempt limit reached message briefly
+                          showCustomAlert(
+                            'Attempt Limit Reached', 
+                            `You have reached the maximum number of attempts (${maxAttempts}) for this question.`,
+                            () => advanceToNextOrFinish(),
+                            'warning'
+                          );
+                        } else {
+                          // Continue allowing more attempts
+                          console.log('[Matching] Wrong pair rejected, attempts remaining:', maxAttempts ? (maxAttempts - newAttemptCount) : 'unlimited');
+                        }
+                      }
+                    } else {
+                      // Right item already paired with a different left item
+                      showCustomAlert('Already Paired', 'This item is already paired. Tap the paired item in Column A to unpair it first.', undefined, 'warning');
+                    }
+                  }}
+                  activeOpacity={0.7}
+                >
+                  {pair.rightImage ? (
+                    <ExpoImage 
+                      source={{ uri: pair.rightImage }} 
+                      style={styles.gameMatchingImage} 
+                      contentFit="contain" 
+                      transition={120} 
+                      cachePolicy="memory-disk"
+                      priority="high"
+                      recyclingKey={`right-${question.id}-${idx}`}
+                    />
+                  ) : (
+                    <View style={styles.gameItemContent}>
+                      <Text 
+                        style={[
+                          styles.gameMatchingText,
+                          isPaired && { color: '#ffffff', fontWeight: '700' }
+                        ]}
+                        numberOfLines={3}
+                        ellipsizeMode="tail"
+                      >
+                        {pair.right}
+                      </Text>
+                    </View>
+                  )}
+                  {isPaired && (
+                    <View style={styles.matchingPairBadge}>
+                      <MaterialCommunityIcons name="link" size={16} color="#ffffff" />
+                    </View>
+                  )}
+                </TouchableOpacity>
               );
             })}
           </View>
+        </View>
+        
+        {/* Pair progress indicator */}
+        <View style={styles.matchingProgressContainer}>
+          <Text style={styles.matchingProgressText}>
+            Pairs matched: {Object.keys(currentPairs).length} / {pairCount}
+          </Text>
+          {Object.keys(currentPairs).length === pairCount && (
+            <View style={styles.matchingCompleteContainer}>
+              <MaterialCommunityIcons name="check-circle" size={24} color="#10b981" />
+              <Text style={styles.matchingCompleteText}>All pairs matched! 🎉</Text>
+            </View>
+          )}
         </View>
       </View>
     );
   };
 
   const renderReorder = (question: Question) => {
-    const initial = (reorderAnswers[question.id] as any) as ReorderItem[] | undefined;
+    // CRITICAL FIX: Always start with empty initial answer for each question
+    // Don't carry over previous question's reorder answers
+    const initial: ReorderItem[] | undefined = [];
+    
     return (
       <View style={styles.questionContainer}>
-        {question.questionImage && (
+        {/* Question Images - Support both single and multiple images */}
+        {(question.questionImage || (question.questionImages && question.questionImages.length)) && (
           <View style={styles.questionImageContainer}>
             {Array.isArray(question.questionImage) ? (
               question.questionImage.map((img, idx) => (
-                <ExpoImage key={idx} source={{ uri: img }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
+                <ExpoImage 
+                  key={`qi-${idx}`} 
+                  source={{ uri: img }} 
+                  style={styles.questionImage} 
+                  contentFit="contain" 
+                  transition={150} 
+                  cachePolicy="memory-disk" 
+                  priority="high"
+                  recyclingKey={`qi-reorder-${question.id}-${idx}`}
+                />
               ))
-            ) : (
-              <ExpoImage source={{ uri: question.questionImage }} style={styles.questionImage} contentFit="contain" transition={150} cachePolicy="disk" priority="high" />
-            )}
+            ) : question.questionImage ? (
+              <ExpoImage 
+                source={{ uri: question.questionImage }} 
+                style={styles.questionImage} 
+                contentFit="contain" 
+                transition={150} 
+                cachePolicy="memory-disk" 
+                priority="high"
+                recyclingKey={`qi-reorder-${question.id}`}
+              />
+            ) : null}
+            {question.questionImages && question.questionImages.length ? (
+              <View style={styles.questionImagesGrid}>
+                {question.questionImages.map((img, idx) => (
+                  <ExpoImage 
+                    key={`qis-${idx}`} 
+                    source={{ uri: img }} 
+                    style={styles.questionImageThumb} 
+                    contentFit="cover" 
+                    transition={120} 
+                    cachePolicy="memory-disk"
+                    priority="high"
+                    recyclingKey={`qis-reorder-${question.id}-${idx}`}
+                  />
+                ))}
+              </View>
+            ) : null}
           </View>
         )}
+        
         <View style={styles.questionTextContainer}>
           <Text style={styles.questionText}>{question.question}</Text>
-          {renderTTSButton(question.ttsAudioUrl)}
+          {renderTTSButton(getPreferredAudioUrl(question))}
         </View>
         <ReorderQuestion
+          key={question.id}
           question={question}
           initialAnswer={initial || []}
+          currentAttempts={attemptCounts[question.id] || 0}
+          maxAttempts={exercise?.maxAttemptsPerItem || null}
           onChange={(ordered) => {
             setReorderAnswers((prev) => ({ ...prev, [question.id]: ordered }));
             handleAnswerChange(ordered.map((o) => o.id));
+          }}
+          onValidationResult={(result) => {
+            if (result.type === 'wrong') {
+              // Wrong attempt: Record it and show feedback
+              incrementAttemptCount(question.id);
+              logAttempt(question, result.attemptSequence, 'change');
+              triggerWrongFeedback();
+            } else if (result.type === 'correct') {
+              // Correct: Mark complete and advance
+              setQuestionCorrect(question.id, true);
+              const finalIds = result.finalSequence;
+              updateAnswers(prev => prev.map(a => 
+                a.questionId === question.id ? { ...a, answer: finalIds, isCorrect: true } : a
+              ));
+              logAttempt(question, finalIds, 'final');
+              
+              triggerCorrectFeedback(() => {
+                advanceToNextOrFinish();
+              });
+            } else if (result.type === 'maxAttemptsReached') {
+              // Max attempts: Mark incorrect and advance after delay
+              const attempts = attemptLogsRef.current[question.id] || [];
+              if (attempts.length > 0) {
+                const lastAttempt = attempts[attempts.length - 1];
+                if (lastAttempt.attemptType === 'change') {
+                  lastAttempt.attemptType = 'final';
+                }
+              }
+              
+              setQuestionCorrect(question.id, false);
+              updateAnswers(prev => prev.map(a => 
+                a.questionId === question.id ? { ...a, isCorrect: false } : a
+              ));
+              
+              setTimeout(() => {
+                advanceToNextOrFinish();
+              }, 1500);
+            }
           }}
         />
       </View>
     );
   };
-
   const renderReadingPassage = (question: Question) => {
     return (
       <View style={styles.questionContainer}>
@@ -3225,43 +6337,43 @@ export default function StudentExerciseAnswering() {
             <View style={styles.questionImageContainer}>
               {Array.isArray(question.questionImage) ? (
                 question.questionImage.map((img, idx) => (
-                  <Image key={`qi-${idx}`} source={{ uri: img }} style={styles.questionImage} resizeMode="contain" />
+                  <ExpoImage 
+                    key={`qi-${idx}`} 
+                    source={{ uri: img }} 
+                    style={styles.questionImage} 
+                    contentFit="contain" 
+                    transition={150} 
+                    cachePolicy="memory-disk" 
+                    priority="high"
+                    recyclingKey={`qi-passage-${question.id}-${idx}`}
+                  />
                 ))
               ) : question.questionImage ? (
-                <Image source={{ uri: question.questionImage }} style={styles.questionImage} resizeMode="contain" />
+                <ExpoImage 
+                  source={{ uri: question.questionImage }} 
+                  style={styles.questionImage} 
+                  contentFit="contain" 
+                  transition={150} 
+                  cachePolicy="memory-disk" 
+                  priority="high"
+                  recyclingKey={`qi-passage-${question.id}`}
+                />
               ) : null}
               {question.questionImages && question.questionImages.length ? (
-                (() => {
-                  const layout = getQuestionImageLayout(question);
-                  return (
-                    <View style={[styles.questionImagesContainer, { 
-                      maxHeight: layout.maxHeight, 
-                      maxWidth: layout.maxWidth,
-                      justifyContent: layout.alignment
-                    }]}>
-                      <View style={[styles.questionImagesGrid, { 
-                        flexDirection: layout.gridColumns === 1 ? 'column' : 'row',
-                        flexWrap: 'wrap',
-                        justifyContent: layout.alignment
-                      }]}>
-                        {question.questionImages.map((img, idx) => (
-                          <ExpoImage 
-                            key={`qis-${idx}`} 
-                            source={{ uri: img }} 
-                            style={[styles.questionImageThumb, { 
-                              width: layout.imageSize, 
-                              height: layout.imageSize,
-                              margin: 4
-                            }]} 
-                            contentFit={layout.contentFit} 
-                            transition={120} 
-                            cachePolicy="disk" 
-                          />
-                        ))}
-                      </View>
-                    </View>
-                  );
-                })()
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                  {question.questionImages.map((img, idx) => (
+                    <ExpoImage 
+                      key={`qis-${idx}`} 
+                      source={{ uri: img }} 
+                      style={{ width: 100, height: 100, borderRadius: 8, marginRight: 8 }} 
+                      contentFit="cover" 
+                      transition={120} 
+                      cachePolicy="memory-disk"
+                      priority="high"
+                      recyclingKey={`qis-passage-${question.id}-${idx}`}
+                    />
+                  ))}
+                </ScrollView>
               ) : null}
             </View>
           )}
@@ -3281,10 +6393,27 @@ export default function StudentExerciseAnswering() {
                 <View style={index === 0 ? styles.subQuestionImageContainer : styles.questionImageContainer}>
                   {Array.isArray(subQuestion.questionImage) ? (
                     subQuestion.questionImage.map((img, idx2) => (
-                      <Image key={idx2} source={{ uri: img }} style={styles.questionImage} resizeMode="contain" />
+                      <ExpoImage 
+                        key={idx2} 
+                        source={{ uri: img }} 
+                        style={styles.questionImage} 
+                        contentFit="contain" 
+                        transition={150} 
+                        cachePolicy="memory-disk" 
+                        priority="high"
+                        recyclingKey={`sub-${question.id}-${subQuestion.id}-${idx2}`}
+                      />
                     ))
                   ) : (
-                    <Image source={{ uri: subQuestion.questionImage }} style={styles.questionImage} resizeMode="contain" />
+                    <ExpoImage 
+                      source={{ uri: subQuestion.questionImage }} 
+                      style={styles.questionImage} 
+                      contentFit="contain" 
+                      transition={150} 
+                      cachePolicy="memory-disk" 
+                      priority="high"
+                      recyclingKey={`sub-${question.id}-${subQuestion.id}`}
+                    />
                   )}
                 </View>
               )}
@@ -3292,7 +6421,7 @@ export default function StudentExerciseAnswering() {
               {/* Sub-question Text container */}
               <View style={index === 0 ? styles.subQuestionTextContainer : styles.questionTextContainer}>
                 <Text style={styles.questionText}>{subQuestion.question}</Text>
-                {renderTTSButton((subQuestion as any).ttsAudioUrl)}
+                {renderTTSButton(getPreferredAudioUrl(subQuestion))}
               </View>
 
               {subQuestion.type === 'multiple-choice' && (() => {
@@ -3335,7 +6464,9 @@ export default function StudentExerciseAnswering() {
                                 style={styles.gridOptionImage}
                                 contentFit="contain"
                                 transition={120}
-                                cachePolicy="disk"
+                                cachePolicy="memory-disk"
+                                priority="high"
+                                recyclingKey={`sub-opt-${question.id}-${subQuestion.id}-${optionIndex}`}
                               />
                             )}
                             {isSelected && (
@@ -3387,7 +6518,15 @@ export default function StudentExerciseAnswering() {
                             </Text>
                           </View>
                           {hasImage && (
-                            <ExpoImage source={{ uri: hasImage }} style={styles.optionImage} contentFit="contain" transition={120} cachePolicy="disk" />
+                            <ExpoImage 
+                              source={{ uri: hasImage }} 
+                              style={styles.optionImage} 
+                              contentFit="contain" 
+                              transition={120} 
+                              cachePolicy="memory-disk"
+                              priority="high"
+                              recyclingKey={`sub-opt2-${question.id}-${subQuestion.id}-${optionIndex}`}
+                            />
                           )}
                           <Text style={[styles.optionText, isSelected && styles.selectedOptionText]}>
                             {option}
@@ -3476,7 +6615,11 @@ export default function StudentExerciseAnswering() {
                 const subId = subQuestion.id;
                 const pairCount = subQuestion.pairs?.length || 0;
                 const selectionsKey = subId;
-                const currentSelections = matchingSelections[selectionsKey] || {};
+                
+                // FIXED: Use new pairing state for sub-questions
+                const currentPairs = matchingPairs[selectionsKey] || {};
+                const selectedLeft = matchingSelectedLeft[selectionsKey] ?? null;
+                
                 const makeOrder = (n: number) => Array.from({ length: n }, (_, i) => i).sort(() => Math.random() - 0.5);
                 const cached = shuffledPairsCache[selectionsKey];
                 const leftOrder = cached?.left || makeOrder(pairCount);
@@ -3484,81 +6627,194 @@ export default function StudentExerciseAnswering() {
                 if (!cached && pairCount > 0) {
                   setShuffledPairsCache(prev => ({ ...prev, [selectionsKey]: { left: leftOrder, right: rightOrder } }));
                 }
+                
+                // Color palette for pairs
+                const pairColors = [
+                  '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', 
+                  '#06b6d4', '#ec4899', '#14b8a6', '#f97316', '#6366f1',
+                  '#84cc16', '#f43f5e'
+                ];
+                
+                const getPairColor = (leftIndex: number, rightIndex: number | null | undefined): string | null => {
+                  if (rightIndex === null || rightIndex === undefined) return null;
+                  for (let i = 0; i < pairCount; i++) {
+                    const key = `left-${i}`;
+                    if (currentPairs[key] === rightIndex && i === leftIndex) {
+                      return pairColors[i % pairColors.length];
+                    }
+                  }
+                  return null;
+                };
+                
+                const isRightItemPaired = (rightIndex: number): boolean => {
+                  return Object.values(currentPairs).includes(rightIndex);
+                };
+                
+                const getLeftIndexForRight = (rightIndex: number): number | null => {
+                  for (const [leftKey, pairedRightIndex] of Object.entries(currentPairs)) {
+                    if (pairedRightIndex === rightIndex) {
+                      return parseInt(leftKey.split('-')[1]);
+                    }
+                  }
+                  return null;
+                };
+                
                 return (
-                  <View style={styles.matchingGameContainer}>
-                    <View style={styles.matchingColumn}>
-                      <View style={styles.columnHeaderSimple}>
-                        <Text style={styles.matchingColumnTitle}>Column A</Text>
-                      </View>
-                      {leftOrder.map((mappedIndex) => {
-                        const pair = subQuestion.pairs![mappedIndex];
-                        const idx = mappedIndex;
-                        return (
-                          <TouchableOpacity
-                            key={`left-${idx}`}
-                            style={[
-                              styles.gameMatchingItem,
-                              styles.matchingLeft,
-                              currentSelections[`left-${idx}`] && styles.selectedMatchingItem
-                            ]}
-                            onPress={() => {
-                              const newSelections: {[key: string]: string} = { ...currentSelections };
-                              const key = `left-${idx}`;
-                              if (newSelections[key]) delete newSelections[key]; else newSelections[key] = key;
-                              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                              setMatchingSelections(prev => ({ ...prev, [selectionsKey]: newSelections }));
-                              setSubAnswer(parentId, subId, newSelections);
-                            }}
-                            activeOpacity={0.7}
-                          >
-                        {pair.leftImage ? (
-                              <ExpoImage source={{ uri: pair.leftImage }} style={styles.gameMatchingImage} contentFit="contain" transition={120} cachePolicy="disk" />
-                            ) : (
-                              <View style={styles.gameItemContent}>
-                                <Text style={styles.gameMatchingText}>{pair.left}</Text>
-                              </View>
-                            )}
-                          </TouchableOpacity>
-                        );
-                      })}
+                  <>
+                    <View style={styles.matchingInstructions}>
+                      <Text style={styles.matchingInstructionsText}>
+                        {selectedLeft === null 
+                          ? '👆 Tap an item from Column A first'
+                          : '👉 Now tap an item from Column B to create a pair'}
+                      </Text>
                     </View>
-                    <View style={styles.matchingColumn}>
-                      <View style={styles.columnHeaderSimple}>
-                        <Text style={styles.matchingColumnTitle}>Column B</Text>
+                    <View style={styles.matchingGameContainer}>
+                      <View style={styles.matchingColumn}>
+                        <View style={styles.columnHeaderSimple}>
+                          <Text style={styles.matchingColumnTitle}>Column A</Text>
+                        </View>
+                        {leftOrder.map((mappedIndex) => {
+                          const pair = subQuestion.pairs![mappedIndex];
+                          const idx = mappedIndex;
+                          const pairedRightIndex = currentPairs[`left-${idx}`];
+                          const pairColor = getPairColor(idx, pairedRightIndex);
+                          const isSelected = selectedLeft === idx;
+                          const isPaired = pairedRightIndex !== undefined && pairedRightIndex !== null;
+                          
+                          return (
+                            <TouchableOpacity
+                              key={`left-${idx}`}
+                              style={[
+                                styles.gameMatchingItem,
+                                styles.matchingLeft,
+                                isSelected && styles.matchingLeftSelected,
+                                isPaired && pairColor && { 
+                                  backgroundColor: pairColor,
+                                  borderColor: pairColor,
+                                  borderWidth: 3
+                                }
+                              ]}
+                              onPress={() => {
+                                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                                
+                                if (isPaired) {
+                                  const newPairs = { ...currentPairs };
+                                  delete newPairs[`left-${idx}`];
+                                  setMatchingPairs(prev => ({ ...prev, [selectionsKey]: newPairs }));
+                                  setMatchingSelectedLeft(prev => ({ ...prev, [selectionsKey]: null }));
+                                  setSubAnswer(parentId, subId, newPairs);
+                                } else {
+                                  setMatchingSelectedLeft(prev => ({ ...prev, [selectionsKey]: idx }));
+                                }
+                              }}
+                              activeOpacity={0.7}
+                            >
+                              {pair.leftImage ? (
+                                <ExpoImage source={{ uri: pair.leftImage }} style={styles.gameMatchingImage} contentFit="contain" transition={120} cachePolicy="disk" />
+                              ) : (
+                                <View style={styles.gameItemContent}>
+                                  <Text 
+                                    style={[
+                                      styles.gameMatchingText,
+                                      isPaired && { color: '#ffffff', fontWeight: '700' }
+                                    ]}
+                                    numberOfLines={3}
+                                    ellipsizeMode="tail"
+                                  >
+                                    {pair.left}
+                                  </Text>
+                                </View>
+                              )}
+                              {isPaired && (
+                                <View style={styles.matchingPairBadge}>
+                                  <MaterialCommunityIcons name="check" size={16} color="#ffffff" />
+                                </View>
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
                       </View>
-                      {rightOrder.map((mappedIndex) => {
-                        const pair = subQuestion.pairs![mappedIndex];
-                        const idx = mappedIndex;
-                        return (
-                          <TouchableOpacity
-                            key={`right-${idx}`}
-                            style={[
-                              styles.gameMatchingItem,
-                              styles.matchingRight,
-                              currentSelections[`right-${idx}`] && styles.selectedMatchingItem
-                            ]}
-                            onPress={() => {
-                              const newSelections: {[key: string]: string} = { ...currentSelections };
-                              const key = `right-${idx}`;
-                              if (newSelections[key]) delete newSelections[key]; else newSelections[key] = key;
-                              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                              setMatchingSelections(prev => ({ ...prev, [selectionsKey]: newSelections }));
-                              setSubAnswer(parentId, subId, newSelections);
-                            }}
-                            activeOpacity={0.7}
-                          >
-                            {pair.rightImage ? (
-                              <ExpoImage source={{ uri: pair.rightImage }} style={styles.gameMatchingImage} contentFit="contain" transition={120} cachePolicy="disk" />
-                            ) : (
-                              <View style={styles.gameItemContent}>
-                                <Text style={styles.gameMatchingText}>{pair.right}</Text>
-                              </View>
-                            )}
-                          </TouchableOpacity>
-                        );
-                      })}
+                      <View style={styles.matchingColumn}>
+                        <View style={styles.columnHeaderSimple}>
+                          <Text style={styles.matchingColumnTitle}>Column B</Text>
+                        </View>
+                        {rightOrder.map((mappedIndex) => {
+                          const pair = subQuestion.pairs![mappedIndex];
+                          const idx = mappedIndex;
+                          const leftIndexForThis = getLeftIndexForRight(idx);
+                          const pairColor = leftIndexForThis !== null ? getPairColor(leftIndexForThis, idx) : null;
+                          const isPaired = isRightItemPaired(idx);
+                          
+                          return (
+                            <TouchableOpacity
+                              key={`right-${idx}`}
+                              style={[
+                                styles.gameMatchingItem,
+                                styles.matchingRight,
+                                isPaired && pairColor && { 
+                                  backgroundColor: pairColor,
+                                  borderColor: pairColor,
+                                  borderWidth: 3
+                                }
+                              ]}
+                              onPress={() => {
+                                if (selectedLeft === null) {
+                                  showCustomAlert('Select from Column A', 'Please select an item from Column A first.', undefined, 'warning');
+                                  return;
+                                }
+                                
+                                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                                
+                                if (isPaired && leftIndexForThis === selectedLeft) {
+                                  const newPairs = { ...currentPairs };
+                                  delete newPairs[`left-${selectedLeft}`];
+                                  setMatchingPairs(prev => ({ ...prev, [selectionsKey]: newPairs }));
+                                  setMatchingSelectedLeft(prev => ({ ...prev, [selectionsKey]: null }));
+                                  setSubAnswer(parentId, subId, newPairs);
+                                } else if (!isPaired) {
+                                  const newPairs = { ...currentPairs, [`left-${selectedLeft}`]: idx };
+                                  setMatchingPairs(prev => ({ ...prev, [selectionsKey]: newPairs }));
+                                  setMatchingSelectedLeft(prev => ({ ...prev, [selectionsKey]: null }));
+                                  setSubAnswer(parentId, subId, newPairs);
+                                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                                } else {
+                                  showCustomAlert('Already Paired', 'This item is already paired. Tap the paired item in Column A to unpair it first.', undefined, 'warning');
+                                }
+                              }}
+                              activeOpacity={0.7}
+                            >
+                              {pair.rightImage ? (
+                                <ExpoImage source={{ uri: pair.rightImage }} style={styles.gameMatchingImage} contentFit="contain" transition={120} cachePolicy="disk" />
+                              ) : (
+                                <View style={styles.gameItemContent}>
+                                  <Text 
+                                    style={[
+                                      styles.gameMatchingText,
+                                      isPaired && { color: '#ffffff', fontWeight: '700' }
+                                    ]}
+                                    numberOfLines={3}
+                                    ellipsizeMode="tail"
+                                  >
+                                    {pair.right}
+                                  </Text>
+                                </View>
+                              )}
+                              {isPaired && (
+                                <View style={styles.matchingPairBadge}>
+                                  <MaterialCommunityIcons name="link" size={16} color="#ffffff" />
+                                </View>
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
                     </View>
-                  </View>
+                    <View style={styles.matchingProgressContainer}>
+                      <Text style={styles.matchingProgressText}>
+                        Pairs matched: {Object.keys(currentPairs).length} / {pairCount}
+                      </Text>
+                    </View>
+                  </>
                 );
               })()}
 
@@ -3597,11 +6853,271 @@ export default function StudentExerciseAnswering() {
     );
   };
   
+  const renderLoadingScreen = () => {
+    const bounceTranslateY = bounceAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0, -20],
+    });
+
+    const rotateInterpolate = rotateAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: ['0deg', '360deg'],
+    });
+
+    const slideTranslateX = slideAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [-50, 50],
+    });
+
+    return (
+      <View style={styles.container}>
+        {/* Background Image with Blur Overlay */}
+        <ImageBackground
+          source={getBackgroundSource(backgroundImage)}
+          style={styles.backgroundImage}
+          blurRadius={0.5}
+        >
+          {/* Dark Overlay */}
+          <View style={styles.overlay} />
+          
+          {/* Interactive Loading Content */}
+          <View style={styles.interactiveLoadingContainer}>
+            {/* Floating Math Elements */}
+            <View style={styles.floatingMathElements}>
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement1,
+                  { 
+                    transform: [
+                      { translateY: bounceTranslateY },
+                      { scale: pulseAnim }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>🔢</Text>
+              </Animated.View>
+              
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement2,
+                  { 
+                    transform: [
+                      { rotate: rotateInterpolate },
+                      { scale: pulseAnim }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>📚</Text>
+              </Animated.View>
+              
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement3,
+                  { 
+                    transform: [
+                      { translateX: slideTranslateX },
+                      { scale: pulseAnim }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>✨</Text>
+              </Animated.View>
+
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement4,
+                  { 
+                    transform: [
+                      { translateY: bounceTranslateY },
+                      { rotate: rotateInterpolate }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>🎯</Text>
+              </Animated.View>
+
+              <Animated.View 
+                style={[
+                  styles.mathElement,
+                  styles.mathElement5,
+                  { 
+                    transform: [
+                      { translateX: slideTranslateX },
+                      { scale: pulseAnim }
+                    ]
+                  }
+                ]}
+              >
+                <Text style={styles.mathElementText}>🧮</Text>
+              </Animated.View>
+            </View>
+
+            {/* Main Loading Card */}
+            <View style={styles.loadingCard}>
+              {/* Header */}
+              <View style={styles.loadingHeader}>
+                <Animated.View 
+                  style={[
+                    styles.loadingIcon,
+                    { 
+                      transform: [
+                        { scale: pulseAnim },
+                        { rotate: rotateInterpolate }
+                      ]
+                    }
+                  ]}
+                >
+                  <Text style={styles.loadingIconEmoji}>🚀</Text>
+                </Animated.View>
+                
+                <View style={styles.loadingTitleContainer}>
+                  <Text style={styles.loadingTitle}>
+                    {loading ? 'Loading Exercise...' : 'Getting Ready!'}
+                  </Text>
+                  <Text style={styles.loadingSubtitle}>
+                    {loading ? 'Preparing your math adventure...' : 'Loading your math adventure...'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Progress Section */}
+              <View style={styles.progressSection}>
+                <View style={styles.progressHeader}>
+                  <Text style={styles.progressTitle}>Progress</Text>
+                  <Text style={styles.progressPercentage}>
+                    {loading ? '...' : `${Math.round(animatedProgress)}%`}
+                  </Text>
+                </View>
+                
+                <View style={styles.loadingProgressBarContainer}>
+                  <View style={styles.loadingProgressBarBackground}>
+                    <Animated.View 
+                      style={[
+                        styles.loadingProgressBarFill, 
+                        { width: `${loading ? 0 : Math.round(animatedProgress)}%` }
+                      ]} 
+                    />
+                  </View>
+                </View>
+                
+                <Text style={styles.progressStatus}>
+                  {loading ? 'Please wait while we prepare everything...' : preloadStatus}
+                </Text>
+              </View>
+
+              {/* Interactive Elements */}
+              <View style={styles.interactiveElements}>
+                {/* Loading Dots */}
+                <View style={styles.loadingDotsContainer}>
+                  <Animated.View style={[styles.loadingDot, { opacity: pulseAnim }]} />
+                  <Animated.View style={[styles.loadingDot, { opacity: pulseAnim }]} />
+                  <Animated.View style={[styles.loadingDot, { opacity: pulseAnim }]} />
+                </View>
+
+                {/* TTS Cache Status Indicator */}
+                {ttsPreloadComplete && (
+                  <View style={styles.ttsCacheStatusContainer}>
+                    <MaterialIcons name="volume-up" size={16} color="#10b981" />
+                    <Text style={styles.ttsCacheStatusText}>
+                      🎤 Audio cached - instant playback ready!
+                    </Text>
+                  </View>
+                )}
+
+                {/* Fun Math Facts */}
+                <View style={styles.mathFactsContainer}>
+                  <Text style={styles.mathFactText}>
+                    💡 Did you know? Math is everywhere around us!
+                  </Text>
+                </View>
+              </View>
+
+              {/* START NOW Button - Only show when resources are ready */}
+              {resourcesReady && !exerciseStarted && (
+                <TouchableOpacity 
+                  style={styles.startNowButton}
+                  onPress={handleStartExercise}
+                  activeOpacity={0.8}
+                >
+                  <Animated.View 
+                    style={[
+                      styles.startNowButtonContent,
+                      { 
+                        transform: [
+                          { scale: pulseAnim }
+                        ]
+                      }
+                    ]}
+                  >
+                    <Text style={styles.startNowEmoji}>🚀</Text>
+                    <Text style={styles.startNowText}>START NOW!</Text>
+                    <Text style={styles.startNowSubtext}>Ready to begin your math adventure!</Text>
+                  </Animated.View>
+                </TouchableOpacity>
+              )}
+
+              {/* Error Display */}
+              {preloadError && (
+                <View style={styles.loadingErrorContainer}>
+                  <Text style={styles.loadingErrorText}>😟 Oops! Something went wrong</Text>
+                  <Text style={styles.errorSubtext}>{preloadError}</Text>
+                  {failedResources.size > 0 && (
+                    <TouchableOpacity 
+                      style={styles.retryButton}
+                      onPress={retryFailedResources}
+                      disabled={isPreloadingResources}
+                    >
+                      <Text style={styles.retryButtonText}>
+                        🔄 Try Again ({failedResources.size} items)
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+              
+            </View>
+          </View>
+        </ImageBackground>
+      </View>
+    );
+  };
+  // Media readiness gate: require current question's primary images and TTS (if present) to be ready
+  const isQuestionMediaReady = (q: Question): boolean => {
+    const urls: string[] = [];
+    if (q.questionImage) {
+      if (Array.isArray(q.questionImage)) urls.push(...q.questionImage.filter(Boolean));
+      else urls.push(q.questionImage);
+    }
+    if (q.questionImages && q.questionImages.length) urls.push(...q.questionImages.filter(Boolean));
+    if (q.type === 'multiple-choice' && q.optionImages && q.optionImages.length) urls.push(...q.optionImages.filter(Boolean) as string[]);
+    if (q.type === 'matching' && q.pairs && q.pairs.length) {
+      q.pairs.forEach(p => {
+        if (p.leftImage) urls.push(p.leftImage);
+        if (p.rightImage) urls.push(p.rightImage);
+      });
+    }
+    // TTS readiness is required when present: require cached audio for instant playback
+    const audioUrl = getPreferredAudioUrl(q);
+    const ttsOk = !audioUrl || audioPlayerCacheRef.current.has(audioUrl);
+    // Images considered ready if each URL either loaded or already attempted (loadedResources or failedResources)
+    const allImagesKnown = urls.every(u => loadedResources.has(u) || failedResources.has(u));
+    return allImagesKnown && ttsOk;
+  };
+
   const renderQuestion = () => {
     if (!exercise) return null;
     
     const question = exercise.questions[currentQuestionIndex];
     const isLastQuestion = currentQuestionIndex === exercise.questions.length - 1;
+    const mediaReady = isQuestionMediaReady(question);
     
     return (
       <Animated.View 
@@ -3625,42 +7141,33 @@ export default function StudentExerciseAnswering() {
         </View>
         
         {/* Question Type Specific Rendering */}
-        {question.type === 'multiple-choice' && renderMultipleChoice(question)}
-        {question.type === 'identification' && renderIdentification(question)}
-        {question.type === 'matching' && renderMatching(question)}
-        {question.type === 're-order' && renderReorder(question)}
-        {question.type === 'reading-passage' && renderReadingPassage(question)}
-        
-        {/* Navigation Buttons (map level vs full exercise) */}
-        {levelMode ? (
-          <View style={styles.navigationContainer}>
-            <TouchableOpacity style={[styles.navButton, styles.submitButton]} onPress={handleLevelComplete} activeOpacity={0.85}>
-              <MaterialIcons name="flag" size={20} color="#ffffff" />
-              <Text style={[styles.navButtonText, styles.submitButtonText]}>Finish Level</Text>
-            </TouchableOpacity>
+        {!mediaReady ? (
+          <View style={{ padding: 16, alignItems: 'center' }}>
+            <Text style={{ color: '#64748b' }}>Preparing media…</Text>
           </View>
         ) : (
+          <>
+            {question.type === 'multiple-choice' && renderMultipleChoice(question)}
+            {question.type === 'identification' && renderIdentification(question)}
+            {question.type === 'matching' && renderMatching(question)}
+            {question.type === 're-order' && renderReorder(question)}
+            {question.type === 'reading-passage' && renderReadingPassage(question)}
+          </>
+        )}
+        
+        {/* Check Answer Button for non-auto-advancing question types */}
+        {question.type !== 'multiple-choice' && question.type !== 'matching' && question.type !== 're-order' && (
           <View style={styles.navigationContainer}>
-            <TouchableOpacity
-              style={[styles.navButton, currentQuestionIndex === 0 && styles.disabledNavButton]}
-              onPress={handlePrevious}
-              disabled={currentQuestionIndex === 0}
-              activeOpacity={0.7}
+            <TouchableOpacity 
+              style={[styles.checkAnswerButton]} 
+              onPress={levelMode ? handleLevelComplete : handleNext} 
+              activeOpacity={0.85}
             >
-              <MaterialIcons name="arrow-back" size={20} color="#ffa500" />
-              <Text style={styles.navButtonText}>Previous</Text>
+              <MaterialIcons name="check-circle" size={24} color="#ffffff" />
+              <Text style={styles.checkAnswerButtonText}>
+                {levelMode ? 'Finish Level' : 'Check Answer'}
+              </Text>
             </TouchableOpacity>
-            {isLastQuestion ? (
-              <TouchableOpacity style={[styles.navButton, styles.submitButton]} onPress={handleSubmit} disabled={submitting} activeOpacity={0.8}>
-                <MaterialIcons name="send" size={20} color="#ffffff" />
-                <Text style={[styles.navButtonText, styles.submitButtonText]}>{submitting ? 'Submitting...' : 'Submit'}</Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity style={styles.navButton} onPress={handleNext} activeOpacity={0.7}>
-                <Text style={styles.navButtonText}>Next</Text>
-                <MaterialIcons name="arrow-forward" size={20} color="#ffa500" />
-              </TouchableOpacity>
-            )}
           </View>
         )}
       </Animated.View>
@@ -3671,60 +7178,22 @@ export default function StudentExerciseAnswering() {
 
   if (loading) {
     return (
-      <ImageBackground
-        source={getBackgroundSource(backgroundImage)}
-        style={styles.backgroundImage}
-        blurRadius={2}
-      >
-        <View style={styles.overlay} />
-        <View style={styles.loadingContainer}>
-          <Animated.View style={[
-            styles.loadingCard,
-            {
-              opacity: fadeAnim,
-              transform: [{
-                scale: fadeAnim.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [0.98, 1]
-                })
-              }]
-            }
-          ]}>
-            <MaterialIcons name="school" size={80} color="#ffa500" />
-            <Text style={styles.loadingTitle}>MathTatag</Text>
-            <Text style={styles.loadingSubtitle}>Loading your adventure...</Text>
-            <Text style={styles.loadingText}>{loadingMessage}</Text>
-            
-            {/* Progress Bar */}
-            <View style={styles.loadingProgressContainer}>
-              <View style={styles.loadingProgressBar}>
-                <Animated.View 
-                  style={[
-                    styles.loadingProgressFill,
-                    { width: `${loadingProgress * 100}%` }
-                  ]} 
-                />
-              </View>
-              <Text style={styles.loadingPercentText}>{Math.round(loadingProgress * 100)}%</Text>
-            </View>
-            
-            {/* Loading spinner for visual feedback */}
-            <Animated.View style={[
-              styles.loadingSpinnerContainer,
-              {
-                transform: [{
-                  rotate: fadeAnim.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: ['0deg', '360deg']
-                  })
-                }]
-              }
-            ]}>
-              <MaterialIcons name="autorenew" size={32} color="#ffa500" />
-            </Animated.View>
-          </Animated.View>
-        </View>
-      </ImageBackground>
+      <View style={styles.container}>
+        <ImageBackground source={getBackgroundSource(backgroundImage)} style={styles.backgroundImage}>
+          {renderLoadingScreen()}
+        </ImageBackground>
+      </View>
+    );
+  }
+
+  // Show resource preloading screen
+  if (isPreloadingResources || (resourcesReady && !exerciseStarted)) {
+    return (
+      <View style={styles.container}>
+        <ImageBackground source={getBackgroundSource(backgroundImage)} style={styles.backgroundImage}>
+          {renderLoadingScreen()}
+        </ImageBackground>
+      </View>
     );
   }
   
@@ -3747,58 +7216,59 @@ export default function StudentExerciseAnswering() {
         {/* Dark Overlay */}
         <View style={styles.overlay} />
         
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            style={styles.headerButton}
-            onPress={() => router.back()}
-            activeOpacity={0.7}
-          >
-            <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
-          </TouchableOpacity>
-          
-          <View style={styles.headerCenter}>
-            {/* Simple Time Limit Badge */}
-            {exercise.timeLimitPerItem && (
-              <View style={[
-                styles.timeLimitBadge,
-                timeRemaining !== null && timeRemaining < 10000 && styles.timeLimitBadgeWarning,
-                timeRemaining === 0 && styles.timeLimitBadgeExpired
-              ]}>
-                <MaterialIcons 
-                  name={timeRemaining === 0 ? "timer-off" : "timer"} 
-                  size={20} 
-                  color="#ffffff" 
-                />
-                <Text style={[
-                  styles.timeLimitBadgeText,
-                  timeRemaining !== null && timeRemaining < 10000 && styles.timeLimitBadgeTextWarning
-                ]}>
-                  {timeRemaining === 0 ? "Times Up!" : 
-                   timeRemaining !== null ? formatTime(timeRemaining) : `${exercise.timeLimitPerItem}s`}
-                </Text>
-              </View>
-            )}
+        {/* Header - Hide when showing results */}
+        {!showResults && (
+          <View style={styles.header}>
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={() => router.back()}
+              activeOpacity={0.7}
+            >
+              <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
+            </TouchableOpacity>
             
-            <Text style={styles.exerciseTitle}>{exercise.title}</Text>
-            <Text style={styles.progressText}>
-              Question {currentQuestionIndex + 1} of {exercise.questions.length}
-            </Text>
+            <View style={styles.headerCenter}>
+              {/* Simple Time Limit Badge */}
+              {exercise.timeLimitPerItem && exerciseStarted && (
+                <View style={[
+                  styles.timeLimitBadge,
+                  timeRemaining !== null && timeRemaining < 10000 && styles.timeLimitBadgeWarning,
+                  timeRemaining === 0 && styles.timeLimitBadgeExpired
+                ]}>
+                  <MaterialIcons 
+                    name={timeRemaining === 0 ? "timer-off" : "timer"} 
+                    size={20} 
+                    color="#ffffff" 
+                  />
+                  <Text style={[
+                    styles.timeLimitBadgeText,
+                    timeRemaining !== null && timeRemaining < 10000 && styles.timeLimitBadgeTextWarning
+                  ]}>
+                    {timeRemaining === 0 ? "Times Up!" : 
+                     timeRemaining !== null ? formatTime(timeRemaining) : `${exercise.timeLimitPerItem}s`}
+                  </Text>
+                </View>
+              )}
+              <Text style={styles.progressText}>
+                Question {currentQuestionIndex + 1} of {exercise.questions.length}
+              </Text>
+            </View>
+            
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={() => {
+                // Toggle settings, but also provide quick TTS play of current question if available on long press
+                setShowSettings(!showSettings);
+              }}
+              activeOpacity={0.7}
+            >
+              <MaterialIcons name="settings" size={24} color="#ffffff" />
+            </TouchableOpacity>
           </View>
-          
-          <TouchableOpacity
-            style={styles.headerButton}
-            onPress={() => {
-              // Toggle settings, but also provide quick TTS play of current question if available on long press
-              setShowSettings(!showSettings);
-            }}
-            activeOpacity={0.7}
-          >
-            <MaterialIcons name="settings" size={24} color="#ffffff" />
-          </TouchableOpacity>
-        </View>
+        )}
         
-        {/* Progress Bar */}
+        {/* Progress Bar - Hide when showing results */}
+        {!showResults && (
         <View style={styles.progressContainer}>
           <View style={styles.progressBarContainer}>
             <Animated.View 
@@ -3817,6 +7287,17 @@ export default function StudentExerciseAnswering() {
             </View>
           </View>
         </View>
+        )}
+        
+        {/* Attempt Limit Indicator - Hide when showing results */}
+        {!showResults && exercise.maxAttemptsPerItem !== null && (
+          <View style={styles.attemptLimitContainer}>
+            <MaterialCommunityIcons name="repeat" size={16} color="#64748b" />
+            <Text style={styles.attemptLimitText}>
+              Attempts: {attemptLogsRef.current[exercise.questions[currentQuestionIndex]?.id]?.length || 0} / {exercise.maxAttemptsPerItem}
+            </Text>
+          </View>
+        )}
         
         {/* Question Content */}
         <ScrollView 
@@ -3860,7 +7341,7 @@ export default function StudentExerciseAnswering() {
             }}
           >
             <View style={{ backgroundColor: '#10b981', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 16, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 8, elevation: 5 }}>
-              <Text style={{ color: '#ffffff', fontSize: 20, fontWeight: '800' }}>Correct!</Text>
+              <Text style={{ color: '#ffffff', fontSize: 18, fontWeight: '800' }}>Correct!</Text>
             </View>
           </Animated.View>
         )}
@@ -3884,192 +7365,321 @@ export default function StudentExerciseAnswering() {
             }}
           >
             <View style={{ backgroundColor: '#ef4444', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 16, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 8, elevation: 5 }}>
-              <Text style={{ color: '#ffffff', fontSize: 20, fontWeight: '800' }}>Wrong!</Text>
+              <Text style={{ color: '#ffffff', fontSize: 18, fontWeight: '800' }}>Wrong!</Text>
             </View>
           </Animated.View>
         )}
 
-        {/* Results Panel */}
+        {/* Kid-Friendly Results Panel */}
         {showResults && (
-          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
-            <View style={{ backgroundColor: '#ffffff', width: '100%', maxWidth: 500, borderRadius: 16, padding: 20 }}>
-              <Text style={{ fontSize: 20, fontWeight: '800', color: '#1e293b', marginBottom: 12 }}>Assessment Summary</Text>
-              {(() => {
-                const totalMs = (answers || []).reduce((sum, a) => sum + (a.timeSpent || 0), 0);
+          <View style={styles.resultsOverlay}>
+            <ScrollView 
+              style={styles.resultsScrollContainer}
+              contentContainerStyle={styles.resultsScrollContent}
+              showsVerticalScrollIndicator={false}
+              bounces={true}
+            >
+              <View style={styles.resultsContainer}>
+                {/* Decorative Top Border */}
+                <View style={styles.resultsTopBorder} />
                 
-                // Calculate total questions including sub-questions
-                let totalQuestions = 0;
-                let correctAnswers = 0;
-                
-                if (exercise?.questions) {
-                  exercise.questions.forEach(q => {
-                    if (q.type === 'reading-passage' && q.subQuestions) {
-                      // For reading passages, count each sub-question
-                      totalQuestions += q.subQuestions.length;
-                      q.subQuestions.forEach(sq => {
-                        if (correctQuestions[sq.id]) {
-                          correctAnswers++;
+                {/* Header with Celebration */}
+                <View style={styles.resultsHeader}>
+                  <View style={styles.celebrationContainer}>
+                    <Text style={styles.resultsTitleEmoji}>🎉</Text>
+                    <Text style={styles.resultsTitleEmoji}>🌟</Text>
+                    <Text style={styles.resultsTitleEmoji}>🎊</Text>
+                  </View>
+                  <Text style={styles.resultsTitle}>Amazing Work!</Text>
+                  <Text style={styles.resultsSubtitle}>You've completed your math adventure!</Text>
+                  <View style={styles.scoreBadge}>
+                    <Text style={styles.scoreBadgeText}>
+                      {(() => {
+                        // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                        if (savedResultsSummary) {
+                          return `${savedResultsSummary.meanPercentageScore}% Complete`;
                         }
-                      });
-                    } else {
-                      // For regular questions
-                      totalQuestions++;
-                      const questionAnswer = answers.find(a => a.questionId === q.id);
-                      if (questionAnswer?.isCorrect) {
-                        correctAnswers++;
-                      }
-                    }
-                  });
-                }
-                
-                const scorePercentage = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
-                
-                return (
-                  <>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
-                      <Text style={{ fontSize: 16, color: '#334155' }}>Score: {correctAnswers}/{totalQuestions}</Text>
-                      <Text style={{ fontSize: 16, fontWeight: '700', color: scorePercentage >= 80 ? '#10b981' : scorePercentage >= 60 ? '#f59e0b' : '#ef4444' }}>
-                        {scorePercentage}%
-                      </Text>
-                    </View>
-                    <Text style={{ fontSize: 16, color: '#334155', marginBottom: 8 }}>Total time: {formatTime(totalMs)}</Text>
-                    <Text style={{ fontSize: 14, color: '#64748b', marginBottom: 8 }}>
-                      Questions: {exercise?.questions.length || 0} • Total items: {totalQuestions}
+                        // Fallback to savedQuestionResults
+                        if (savedQuestionResults.length > 0) {
+                          const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                          const total = exercise?.questions.length || 0;
+                          const percentage = total > 0 ? Math.round((correct / total) * 100) : 0;
+                          return `${percentage}% Complete`;
+                        }
+                        // Final fallback to local state
+                        const correct = answers.filter(a => a.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        const percentage = total > 0 ? Math.round((correct / total) * 100) : 0;
+                        return `${percentage}% Complete`;
+                      })()}
                     </Text>
-                  </>
-                );
-              })()}
-              <View style={{ maxHeight: 320 }}>
-                <ScrollView>
-                  {exercise?.questions.map((q, idx) => {
-                    if (q.type === 'reading-passage' && q.subQuestions && q.subQuestions.length) {
+                  </View>
+                </View>
+
+              {/* Summary Stats Cards */}
+              <View style={styles.statsContainer}>
+                {/* Score Card */}
+                <View style={[styles.statCard, styles.scoreCard]}>
+                  <View style={styles.statCardHeader}>
+                    <Text style={styles.statEmoji}>⭐</Text>
+                    <View style={styles.statCardAccent} />
+                  </View>
+                  <Text style={styles.statNumber}>
+                    {(() => {
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      if (savedResultsSummary) {
+                        return `${savedResultsSummary.totalCorrect}/${savedResultsSummary.totalItems}`;
+                      }
+                      // Fallback to savedQuestionResults
+                      if (savedQuestionResults.length > 0) {
+                        const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        return `${correct}/${total}`;
+                      }
+                      // Final fallback to local state
+                      const correct = answers.filter(a => a.isCorrect).length;
+                      const total = exercise?.questions.length || 0;
+                      return `${correct}/${total}`;
+                    })()}
+                  </Text>
+                  <Text style={styles.statLabel}>Correct Answers</Text>
+                </View>
+
+                {/* Time Card */}
+                <View style={[styles.statCard, styles.timeCard]}>
+                  <View style={styles.statCardHeader}>
+                    <Text style={styles.statEmoji}>⏱️</Text>
+                    <View style={styles.statCardAccent} />
+                  </View>
+                  <Text style={styles.statNumber}>
+                    {(() => {
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      if (savedResultsSummary) {
+                        return formatTime(savedResultsSummary.totalTimeSpentSeconds * 1000);
+                      }
+                      // Fallback to savedQuestionResults
+                      if (savedQuestionResults.length > 0) {
+                        const totalMs = savedQuestionResults.reduce((sum, sr) => sum + (sr.timeSpentSeconds * 1000), 0);
+                        return formatTime(totalMs);
+                      }
+                      // Final fallback to local state
+                      const totalMs = (answers || []).reduce((sum, a) => sum + (a.timeSpent || 0), 0);
+                      return formatTime(totalMs);
+                    })()}
+                  </Text>
+                  <Text style={styles.statLabel}>Time Taken</Text>
+                </View>
+
+                {/* Attempts Card */}
+                <View style={[styles.statCard, styles.attemptsCard]}>
+                  <View style={styles.statCardHeader}>
+                    <Text style={styles.statEmoji}>🎯</Text>
+                    <View style={styles.statCardAccent} />
+                  </View>
+                  <Text style={styles.statNumber}>
+                    {(() => {
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      if (savedResultsSummary) {
+                        return savedResultsSummary.totalAttempts;
+                      }
+                      // Fallback to savedQuestionResults
+                      if (savedQuestionResults.length > 0) {
+                        return savedQuestionResults.reduce((sum, sr) => sum + sr.attempts, 0);
+                      }
+                      // Final fallback to local state
+                      return getTotalAttemptCount();
+                    })()}
+                  </Text>
+                  <Text style={styles.statLabel}>Total Attempts</Text>
+                </View>
+              </View>
+
+              {/* Performance Message */}
+              <View style={styles.performanceContainer}>
+                <View style={styles.performanceHeader}>
+                  <Text style={styles.performanceEmoji}>
+                    {(() => {
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      let percentage = 0;
+                      if (savedResultsSummary) {
+                        percentage = savedResultsSummary.meanPercentageScore;
+                      } else if (savedQuestionResults.length > 0) {
+                        const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        percentage = total > 0 ? (correct / total) * 100 : 0;
+                      } else {
+                        const correct = answers.filter(a => a.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        percentage = total > 0 ? (correct / total) * 100 : 0;
+                      }
+                      
+                      if (percentage >= 80) return '🌟';
+                      if (percentage >= 60) return '👍';
+                      if (percentage >= 40) return '💪';
+                      return '🌱';
+                    })()}
+                  </Text>
+                  <View style={styles.performanceStars}>
+                    {(() => {
+                      // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                      let percentage = 0;
+                      if (savedResultsSummary) {
+                        percentage = savedResultsSummary.meanPercentageScore;
+                      } else if (savedQuestionResults.length > 0) {
+                        const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        percentage = total > 0 ? (correct / total) * 100 : 0;
+                      } else {
+                        const correct = answers.filter(a => a.isCorrect).length;
+                        const total = exercise?.questions.length || 0;
+                        percentage = total > 0 ? (correct / total) * 100 : 0;
+                      }
+                      const stars = Math.floor(percentage / 20);
+                      return Array.from({ length: 5 }, (_, i) => (
+                        <Text key={i} style={[styles.star, { opacity: i < stars ? 1 : 0.3 }]}>⭐</Text>
+                      ));
+                    })()}
+                  </View>
+                </View>
+                <Text style={styles.performanceMessage}>
+                  {(() => {
+                    // CRITICAL FIX: Use savedResultsSummary if available (most accurate)
+                    let percentage = 0;
+                    if (savedResultsSummary) {
+                      percentage = savedResultsSummary.meanPercentageScore;
+                    } else if (savedQuestionResults.length > 0) {
+                      const correct = savedQuestionResults.filter(sr => sr.isCorrect).length;
+                      const total = exercise?.questions.length || 0;
+                      percentage = total > 0 ? (correct / total) * 100 : 0;
+                    } else {
+                      const correct = answers.filter(a => a.isCorrect).length;
+                      const total = exercise?.questions.length || 0;
+                      percentage = total > 0 ? (correct / total) * 100 : 0;
+                    }
+                    
+                    if (percentage >= 80) return 'Outstanding! You\'re a math champion! 🏆';
+                    if (percentage >= 60) return 'Excellent work! You\'re doing great! 🌟';
+                    if (percentage >= 40) return 'Good job! Keep up the practice! 💪';
+                    return 'Nice effort! Every step counts! 🌱';
+                  })()}
+                </Text>
+              </View>
+
+                {/* Question Details */}
+                <View style={styles.questionDetailsContainer}>
+                  <Text style={styles.questionDetailsTitle}>Question Summary</Text>
+                  <ScrollView 
+                    style={styles.questionDetailsScroll} 
+                    showsVerticalScrollIndicator={false}
+                    nestedScrollEnabled={true}
+                  >
+                    {exercise?.questions.map((q, idx) => {
+                      // CRITICAL FIX: Read from savedQuestionResults if available (after submission)
+                      // Otherwise fallback to local state (during quiz)
+                      const savedResult = savedQuestionResults.find(sr => sr.questionId === q.id);
+                      const answer = answers.find(a => a.questionId === q.id);
+                      
+                      // Use saved data if available, otherwise use local state
+                      const isCorrect = savedResult ? savedResult.isCorrect : (answer?.isCorrect || false);
+                      const attempts = savedResult ? savedResult.attempts : getQuestionAttemptCount(q.id);
+                      const timeMs = savedResult ? (savedResult.timeSpentSeconds * 1000) : getTimeMsForQuestion(q);
+                      const hasAnswer = savedResult ? (savedResult.studentAnswer && savedResult.studentAnswer.trim() !== '') : (answer && answer.answer !== undefined && answer.answer !== '');
+                      
+                      console.log(`[ResultsUI] Q${idx + 1} Display:`, {
+                        hasSavedResult: !!savedResult,
+                        attempts,
+                        isCorrect,
+                        timeMs,
+                        hasAnswer
+                      });
+                      
                       return (
-                        <View key={q.id} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                            <Text style={{ fontSize: 15, fontWeight: '700', color: '#0f172a' }}>Question {idx + 1} (Reading Passage)</Text>
-                            {(() => {
-                              // Calculate overall status for reading passage (all sub-questions correct = green, some correct = orange, none correct = red)
-                              const subQuestionCount = q.subQuestions?.length || 0;
-                              const correctSubQuestions = q.subQuestions?.filter(sq => correctQuestions[sq.id]).length || 0;
-                              let statusColor = '#ef4444'; // red
-                              if (correctSubQuestions === subQuestionCount && subQuestionCount > 0) {
-                                statusColor = '#10b981'; // green
-                              } else if (correctSubQuestions > 0) {
-                                statusColor = '#f59e0b'; // orange
+                        <View key={q.id} style={styles.questionDetailCard}>
+                          <View style={styles.questionDetailHeader}>
+                            <Text style={styles.questionDetailNumber}>Q{idx + 1}</Text>
+                            <View style={[
+                              styles.questionDetailStatus,
+                              { 
+                                backgroundColor: isCorrect ? '#10b981' : hasAnswer ? '#ef4444' : '#94a3b8'
                               }
-                              return (
-                                <View style={{ marginLeft: 8, width: 12, height: 12, borderRadius: 6, backgroundColor: statusColor }} />
-                              );
-                            })()}
+                            ]}>
+                              <Text style={styles.questionDetailStatusText}>
+                                {isCorrect ? '✓' : hasAnswer ? '✗' : '?'}
+                              </Text>
+                            </View>
                           </View>
-                          {q.subQuestions.map((sq, sidx) => {
-                            // Get the parent answer and extract sub-question data
-                            const parentAnswer = answers.find(a => a.questionId === q.id);
-                            const subAnswerData = parentAnswer?.answer && typeof parentAnswer.answer === 'object' ? (parentAnswer.answer as {[key: string]: any})[sq.id] : '';
-                            const isSubCorrect = correctQuestions[sq.id] || false;
-                            const subAttempts = attemptCounts[sq.id] || 0;
-                            
-                            return (
-                            <View key={sq.id} style={{ marginTop: 6 }}>
-                              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                <Text style={{ fontSize: 14, fontWeight: '700', color: '#0f172a' }}>Q{subQuestionsLabel(sidx)}</Text>
-                                <View style={{ 
-                                  marginLeft: 8, 
-                                  width: 10, 
-                                  height: 10, 
-                                  borderRadius: 5, 
-                                  backgroundColor: isSubCorrect ? '#10b981' : '#ef4444' 
-                                }} />
-                              </View>
-                              <Text style={{ fontSize: 13, color: '#64748b', marginBottom: 2 }}>Type: {sq.type}</Text>
-                              <Text style={{ fontSize: 14, color: '#334155' }}>Tries: {attemptLogs[sq.id]?.length || 0}</Text>
-                              <Text style={{ fontSize: 13, color: '#64748b' }}>Your answer: {serializeAnswer(sq, subAnswerData)}</Text>
-                              <Text style={{ fontSize: 14, color: '#475569' }}>Correct answer: {Array.isArray(formatCorrectAnswer(sq)) ? (formatCorrectAnswer(sq) as string[]).join(', ') : (formatCorrectAnswer(sq) as string)}</Text>
-                              {(() => {
-                                const ms = getTimeMsForSubQuestion(q, sq);
-                                const limitMs = exercise?.timeLimitPerItem ? exercise.timeLimitPerItem * 1000 : null;
-                                return (
-                                  <>
-                                    <Text style={{ fontSize: 13, color: '#64748b' }}>Time Limit: {limitMs ? formatTime(limitMs) : '—'}</Text>
-                                    <Text style={{ fontSize: 13, color: '#64748b' }}>Time Taken: {formatTime(ms)}</Text>
-                                  </>
-                                );
-                              })()}
-                              {(attemptLogs[sq.id] && attemptLogs[sq.id].length > 0) && (
-                                <View style={{ marginTop: 4 }}>
-                                  {attemptLogs[sq.id].map((log, li) => (
-                                    <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || 'No answer'} ({Math.round(log.timeSpent / 1000)}s)</Text>
-                                  ))}
-                                </View>
+                          
+                          {/* Question Type Badge */}
+                          <View style={styles.questionTypeBadge}>
+                            <Text style={styles.questionTypeBadgeText}>
+                              {q.type === 'multiple-choice' ? '📝 Multiple Choice' :
+                               q.type === 'identification' ? '✏️ Fill in the Blank' :
+                               q.type === 'matching' ? '🔗 Matching' :
+                               q.type === 're-order' ? '🔢 Re-order' :
+                               q.type === 'reading-passage' ? '📖 Reading' : '❓ Question'}
+                            </Text>
+                          </View>
+                          
+                          {/* Show question text for identification type */}
+                          {q.type === 'identification' && (
+                            <View style={styles.questionTextPreview}>
+                              <Text style={styles.questionTextPreviewLabel}>Question:</Text>
+                              <Text style={styles.questionTextPreviewContent} numberOfLines={3}>
+                                {q.question}
+                              </Text>
+                            </View>
+                          )}
+                          
+                          <View style={styles.questionDetailStats}>
+                            <Text style={styles.questionDetailStat}>
+                              🎯 {attempts} attempt{attempts !== 1 ? 's' : ''}
+                            </Text>
+                            <Text style={styles.questionDetailStat}>
+                              ⏱️ {formatTime(timeMs)}
+                            </Text>
+                          </View>
+                          {hasAnswer && (
+                            <View style={styles.questionAnswerPreview}>
+                              <Text style={styles.questionAnswerText}>
+                                <Text style={{ fontWeight: '700' }}>Your answer: </Text>
+                                {(() => {
+                                  if (savedResult) return savedResult.studentAnswer;
+                                  if (answer) return serializeAnswer(q, answer.answer);
+                                  return 'No answer';
+                                })()}
+                              </Text>
+                              {!isCorrect && (
+                                <Text style={[styles.questionAnswerText, { color: '#10b981', marginTop: 4 }]}>
+                                  <Text style={{ fontWeight: '700' }}>Correct answer: </Text>
+                                  {savedResult ? savedResult.correctAnswer : formatCorrectAnswer(q)}
+                                </Text>
                               )}
                             </View>
-                            );
-                          })}
+                          )}
                         </View>
                       );
-                    }
-                    return (
-                      <View key={q.id} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                          <Text style={{ fontSize: 15, fontWeight: '700', color: '#0f172a' }}>Question {idx + 1}</Text>
-                          {(() => {
-                            const questionAnswer = answers.find(a => a.questionId === q.id);
-                            const isCorrect = questionAnswer?.isCorrect || false;
-                            return (
-                              <View style={{ 
-                                marginLeft: 8, 
-                                width: 12, 
-                                height: 24, 
-                                borderRadius: 6, 
-                                backgroundColor: isCorrect ? '#10b981' : '#ef4444' 
-                              }} />
-                            );
-                          })()}
-                        </View>
-                        <Text style={{ fontSize: 13, color: '#64748b', marginBottom: 2 }}>Type: {q.type}</Text>
-                        <Text style={{ fontSize: 14, color: '#334155' }}>Tries: {attemptLogs[q.id]?.length || 0}</Text>
-                        <Text style={{ fontSize: 13, color: '#64748b' }}>Your answer: {serializeAnswer(q, answers.find(a => a.questionId === q.id)?.answer || '')}</Text>
-                        <Text style={{ fontSize: 14, color: '#475569' }}>Correct answer: {Array.isArray(formatCorrectAnswer(q)) ? (formatCorrectAnswer(q) as string[]).join(', ') : (formatCorrectAnswer(q) as string)}</Text>
-                        {(() => {
-                          const ms = getTimeMsForQuestion(q);
-                          const limitMs = exercise?.timeLimitPerItem ? exercise.timeLimitPerItem * 1000 : null;
-                          return (
-                            <>
-                              <Text style={{ fontSize: 13, color: '#64748b' }}>Time Limit: {limitMs ? formatTime(limitMs) : '—'}</Text>
-                              <Text style={{ fontSize: 13, color: '#64748b' }}>Time Taken: {formatTime(ms)}</Text>
-                            </>
-                          );
-                        })()}
-                        {(attemptLogs[q.id] && attemptLogs[q.id].length > 0) && (
-                          <View style={{ marginTop: 4 }}>
-                            {attemptLogs[q.id].map((log, li) => (
-                              <Text key={li} style={{ fontSize: 13, color: '#64748b' }}>Try {li + 1}: {log.answer || 'No answer'} ({Math.round(log.timeSpent / 1000)}s)</Text>
-                            ))}
-                          </View>
-                        )}
-                      </View>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 16 }}>
-                <TouchableOpacity 
-                  onPress={handleFinalSubmission} 
-                  disabled={submitting}
-                  style={{ 
-                    backgroundColor: submitting ? '#ccc' : '#ffa500', 
-                    paddingHorizontal: 16, 
-                    paddingVertical: 10, 
-                    borderRadius: 10 
-                  }} 
-                  activeOpacity={0.8}
-                >
-                  <Text style={{ color: '#fff', fontWeight: '700' }}>
-                    {submitting ? 'Submitting...' : 'Done'}
+                    })}
+                  </ScrollView>
+                </View>
+
+                {/* Close Button */}
+                <View style={styles.buttonContainer}>
+                  <TouchableOpacity 
+                    onPress={() => router.back()} 
+                    style={styles.closeResultsButton}
+                    activeOpacity={0.8}
+                  >
+                    <MaterialIcons name="home" size={20} color="#ffffff" />
+                    <Text style={styles.closeResultsButtonText}>Back to Home</Text>
+                  </TouchableOpacity>
+                  
+                  {/* Additional Info */}
+                  <Text style={styles.submitInfoText}>
+                    Your results have been saved and shared with your teacher
                   </Text>
-                </TouchableOpacity>
+                </View>
               </View>
-            </View>
+            </ScrollView>
           </View>
         )}
 
@@ -4199,7 +7809,6 @@ export default function StudentExerciseAnswering() {
     </View>
   );
 }
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -4221,71 +7830,12 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
-  },
-  loadingCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    borderRadius: 20,
-    padding: 40,
-    alignItems: 'center',
-    minWidth: 300,
-    maxWidth: 400,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.3,
-    shadowRadius: 20,
-    elevation: 10,
-  },
-  loadingTitle: {
-    fontSize: 28,
-    fontWeight: '800',
-    color: '#1e293b',
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  loadingSubtitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#475569',
-    marginBottom: 12,
-    textAlign: 'center',
+    backgroundColor: '#f8fafc',
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: 18,
     color: '#64748b',
-    fontWeight: '600',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  loadingProgressContainer: {
-    width: '100%',
-    marginTop: 10,
-  },
-  loadingProgressBar: {
-    width: '100%',
-    height: 24,
-    backgroundColor: '#e2e8f0',
-    borderRadius: 6,
-    overflow: 'hidden',
-    marginBottom: 8,
-  },
-  loadingProgressFill: {
-    height: '100%',
-    backgroundColor: '#ffa500',
-    borderRadius: 6,
-    shadowColor: '#ffa500',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.5,
-    shadowRadius: 4,
-  },
-  loadingPercentText: {
-    fontSize: 14,
-    color: '#64748b',
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  loadingSpinnerContainer: {
-    marginTop: 20,
+    fontWeight: '500',
   },
   errorContainer: {
     flex: 1,
@@ -4329,10 +7879,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(255, 165, 0, 0.9)',
-    borderRadius: 20,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    marginBottom: 12,
+    borderRadius: 18,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 16,
     shadowColor: '#ffa500',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
@@ -4340,7 +7890,9 @@ const styles = StyleSheet.create({
     elevation: 4,
     borderWidth: 1,
     borderColor: '#ffa500',
-    gap: 8,
+    gap: 6,
+    maxWidth: 100,
+    alignSelf: 'center',
   },
   timeLimitBadgeWarning: {
     backgroundColor: 'rgba(239, 68, 68, 0.9)',
@@ -4353,7 +7905,7 @@ const styles = StyleSheet.create({
     shadowColor: '#6b7280',
   },
   timeLimitBadgeText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
     color: '#ffffff',
     fontFamily: 'monospace',
@@ -4429,13 +7981,822 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   progressText: {
-    fontSize: 16,
+    fontSize: 12,
     fontWeight: '700',
     color: '#ffffff',
     textShadowColor: 'rgba(0, 0, 0, 0.3)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
     letterSpacing: 0.3,
+  },
+  attemptLimitContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    marginHorizontal: 20,
+    marginTop: 0,
+    marginBottom: 8, // CRITICAL FIX: Add bottom margin to prevent overlap with question type
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+    alignSelf: 'center',
+    maxWidth: 200,
+  },
+  attemptLimitText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748b',
+    marginLeft: 4,
+  },
+  
+  // Interactive loading screen styles
+  interactiveLoadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: getResponsivePadding(20),
+  },
+  floatingMathElements: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  mathElement: {
+    position: 'absolute',
+    width: 80,
+    height: 80,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 40,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  mathElement1: {
+    top: '10%',
+    left: '5%',
+  },
+  mathElement2: {
+    top: '15%',
+    right: '8%',
+  },
+  mathElement3: {
+    bottom: '20%',
+    left: '10%',
+  },
+  mathElement4: {
+    top: '60%',
+    right: '5%',
+  },
+  mathElement5: {
+    bottom: '10%',
+    right: '15%',
+  },
+  mathElementText: {
+    fontSize: 24,
+  },
+  loadingCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 25,
+    padding: 30,
+    minWidth: 350,
+    maxWidth: 450,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 10,
+    borderWidth: 2,
+    borderColor: '#ffa500',
+  },
+  loadingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 25,
+  },
+  loadingIcon: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: '#ff6b6b',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 20,
+    shadowColor: '#ff6b6b',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  loadingIconEmoji: {
+    fontSize: 28,
+  },
+  loadingTitleContainer: {
+    flex: 1,
+  },
+  loadingTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#2d3748',
+    marginBottom: 5,
+    fontFamily: Platform.OS === 'ios' ? 'LuckiestGuy-Regular' : 'LuckiestGuy-Regular',
+  },
+  loadingSubtitle: {
+    fontSize: 14,
+    color: '#4a5568',
+    lineHeight: 20,
+  },
+  progressSection: {
+    marginBottom: 25,
+  },
+  progressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  progressTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#2d3748',
+  },
+  progressPercentage: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#ffa500',
+  },
+  loadingProgressBarContainer: {
+    width: '100%',
+    marginBottom: 10,
+  },
+  loadingProgressBarBackground: {
+    height: 12,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 6,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#cbd5e0',
+  },
+  loadingProgressBarFill: {
+    height: '100%',
+    backgroundColor: '#ffa500',
+    borderRadius: 4,
+  },
+  progressStatus: {
+    fontSize: 12,
+    color: '#718096',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  interactiveElements: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  loadingDotsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+  loadingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#ffa500',
+    marginHorizontal: 5,
+  },
+  ttsCacheStatusContainer: {
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  ttsCacheStatusText: {
+    fontSize: 12,
+    color: '#10b981',
+    textAlign: 'center',
+    fontWeight: '600',
+  },
+  mathFactsContainer: {
+    backgroundColor: 'rgba(255, 165, 0, 0.1)',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 165, 0, 0.3)',
+  },
+  mathFactText: {
+    fontSize: 12,
+    color: '#4a5568',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  loadingErrorContainer: {
+    backgroundColor: '#fed7d7',
+    borderWidth: 2,
+    borderColor: '#feb2b2',
+    borderRadius: 15,
+    padding: 20,
+    marginTop: 20,
+    width: '100%',
+  },
+  loadingErrorText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#c53030',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  errorSubtext: {
+    fontSize: 14,
+    color: '#9b2c2c',
+    textAlign: 'center',
+    marginBottom: 15,
+  },
+  retryButton: {
+    backgroundColor: '#4299e1',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  retryButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  skipButton: {
+    backgroundColor: '#ed8936',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    marginTop: 15,
+    alignItems: 'center',
+  },
+  skipButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  // Kid-Friendly Results Styles
+  resultsOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+    zIndex: 1000,
+  },
+  resultsScrollContainer: {
+    width: '100%',
+    maxWidth: 400,
+    maxHeight: '95%',
+  },
+  resultsScrollContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingVertical: 20,
+  },
+  resultsContainer: {
+    backgroundColor: '#ffffff',
+    width: '100%',
+    borderRadius: 24,
+    padding: 0,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 16 },
+    shadowOpacity: 0.5,
+    shadowRadius: 24,
+    elevation: 16,
+    overflow: 'hidden',
+  },
+  resultsTopBorder: {
+    height: 6,
+    backgroundColor: '#4ecdc4',
+  },
+  resultsHeader: {
+    alignItems: 'center',
+    marginBottom: 20,
+    paddingTop: 24,
+    paddingHorizontal: 24,
+  },
+  celebrationContainer: {
+    flexDirection: 'row',
+    marginBottom: 16,
+    gap: 8,
+  },
+  scoreBadge: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    marginTop: 12,
+    borderWidth: 2,
+    borderColor: '#0ea5e9',
+  },
+  scoreBadgeText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0ea5e9',
+  },
+  resultsTitleEmoji: {
+    fontSize: 28,
+    marginBottom: 0,
+  },
+  resultsTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 8,
+    textAlign: 'center',
+    lineHeight: 32,
+  },
+  resultsSubtitle: {
+    fontSize: 15,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 22,
+    paddingHorizontal: 8,
+    marginBottom: 0,
+  },
+  statsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+    gap: 12,
+    paddingHorizontal: 24,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    minHeight: 100,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+    position: 'relative',
+  },
+  statCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    position: 'relative',
+  },
+  statCardAccent: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#10b981',
+  },
+  scoreCard: {
+    borderColor: '#fbbf24',
+    backgroundColor: '#fffbeb',
+  },
+  timeCard: {
+    borderColor: '#3b82f6',
+    backgroundColor: '#eff6ff',
+  },
+  attemptsCard: {
+    borderColor: '#ef4444',
+    backgroundColor: '#fef2f2',
+  },
+  statEmoji: {
+    fontSize: 20,
+    marginBottom: 0,
+  },
+  statNumber: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+    fontWeight: '600',
+    lineHeight: 16,
+  },
+  performanceContainer: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    marginHorizontal: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  performanceHeader: {
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  performanceEmoji: {
+    fontSize: 28,
+    marginBottom: 8,
+  },
+  performanceStars: {
+    flexDirection: 'row',
+    gap: 2,
+  },
+  star: {
+    fontSize: 14,
+  },
+  performanceMessage: {
+    fontSize: 14,
+    color: '#1e293b',
+    textAlign: 'center',
+    fontWeight: '700',
+    lineHeight: 24,
+    paddingHorizontal: 8,
+  },
+  questionDetailsContainer: {
+    marginBottom: 24,
+    marginHorizontal: 24,
+  },
+  questionDetailsTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  questionDetailsScroll: {
+    maxHeight: 200,
+  },
+  buttonContainer: {
+    paddingHorizontal: 24,
+    paddingBottom: 24,
+    alignItems: 'center',
+  },
+  submitButton: {
+    backgroundColor: '#10b981',
+    borderRadius: 20,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+    borderWidth: 2,
+    borderColor: '#059669',
+    width: '100%',
+    marginBottom: 12,
+  },
+  submitButtonDisabled: {
+    backgroundColor: '#9ca3af',
+    borderColor: '#6b7280',
+    shadowColor: '#9ca3af',
+  },
+  submitButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  submitButtonEmoji: {
+    fontSize: 16,
+  },
+  submitButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  submitInfoText: {
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+    fontStyle: 'italic',
+    paddingHorizontal: 16,
+  },
+  // Check Answer Button
+  checkAnswerButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#10b981',
+    borderRadius: 20,
+    paddingVertical: 18,
+    paddingHorizontal: 24,
+    gap: 10,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+    borderWidth: 2,
+    borderColor: '#059669',
+  },
+  checkAnswerButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
+    textShadowColor: 'rgba(0, 0, 0, 0.2)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Compact Results Styles
+  compactResultsContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    padding: 24,
+    width: '90%',
+    maxWidth: 400,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.4,
+    shadowRadius: 20,
+    elevation: 12,
+  },
+  compactResultsHeader: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  resultsCelebrationEmoji: {
+    fontSize: 36,
+    marginBottom: 8,
+  },
+  compactResultsTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 12,
+  },
+  performanceStarsCompact: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  starCompact: {
+    fontSize: 16,
+  },
+  compactStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 20,
+    paddingVertical: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 16,
+  },
+  compactStatItem: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  compactStatEmoji: {
+    fontSize: 20,
+    marginBottom: 8,
+  },
+  compactStatNumber: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  compactStatLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  compactPerformanceMessage: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 20,
+    borderWidth: 2,
+    borderColor: '#bfdbfe',
+  },
+  compactPerformanceText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+    textAlign: 'center',
+  },
+  compactQuestionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 24,
+    paddingVertical: 12,
+  },
+  compactQuestionBadge: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#f8fafc',
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  compactQuestionNumber: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+    position: 'absolute',
+    top: 4,
+    left: 0,
+    right: 0,
+    textAlign: 'center',
+  },
+  compactQuestionIcon: {
+    fontSize: 16,
+    position: 'absolute',
+    bottom: 6,
+    left: 0,
+    right: 0,
+    textAlign: 'center',
+  },
+  closeResultsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#4a90e2',
+    borderRadius: 16,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    gap: 8,
+    shadowColor: '#4a90e2',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  closeResultsButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  questionDetailCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 2,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  questionDetailHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  questionDetailNumber: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  questionDetailStatus: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  questionDetailStatusText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  questionDetailStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  questionDetailStat: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  questionAnswerPreview: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+  questionAnswerText: {
+    fontSize: 12,
+    color: '#64748b',
+    fontStyle: 'italic',
+  },
+  questionTypeBadge: {
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+    marginBottom: 8,
+  },
+  questionTypeBadgeText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  questionTextPreview: {
+    backgroundColor: '#f8fafc',
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 8,
+    borderLeftWidth: 3,
+    borderLeftColor: '#3b82f6',
+  },
+  questionTextPreviewLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#3b82f6',
+    marginBottom: 4,
+  },
+  questionTextPreviewContent: {
+    fontSize: 12,
+    color: '#475569',
+    lineHeight: 18,
+  },
+  startNowButton: {
+    marginTop: 25,
+    borderRadius: 20,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  startNowButtonContent: {
+    backgroundColor: '#48bb78',
+    paddingVertical: 20,
+    paddingHorizontal: 40,
+    alignItems: 'center',
+    borderRadius: 20,
+    borderWidth: 3,
+    borderColor: '#38a169',
+  },
+  startNowEmoji: {
+    fontSize: 32,
+    marginBottom: 8,
+  },
+  startNowText: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#ffffff',
+    marginBottom: 4,
+    textShadowColor: 'rgba(0, 0, 0, 0.3)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
+  },
+  startNowSubtext: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#f0fff4',
+    textAlign: 'center',
   },
   contentContainer: {
     flex: 1,
@@ -4448,117 +8809,119 @@ const styles = StyleSheet.create({
   },
   questionWrapper: {
     flex: 1,
-    paddingHorizontal: getResponsivePadding(20),
-    paddingVertical: getResponsiveSize(20),
-  },
-  questionImagesContainer: {
-    alignItems: 'center',
-    marginTop: 8,
-    overflow: 'hidden',
+    paddingHorizontal: 8,
+    paddingVertical: 12,
   },
   questionImagesGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 8,
+    gap: 8,
+    paddingHorizontal: 4,
+  },
+  questionImagesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-evenly',
+    marginTop: 8,
+    paddingHorizontal: 4,
+    flexWrap: 'wrap',
+  },
+  imageRowCenter: {
+    justifyContent: 'center',
+  },
+  imageRowLeft: {
+    justifyContent: 'flex-start',
   },
   questionImageThumb: {
-    borderRadius: 8,
-    borderWidth: 2,
-    borderColor: '#ffa500',
-    backgroundColor: '#ffffff',
-  },
-  // Pattern blocks layout styles
-  patternBlocksContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-  },
-  patternTopRow: {
-    flexDirection: 'row',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    marginBottom: 16,
-    justifyContent: 'space-evenly',
-    alignItems: 'center',
-    minHeight: 70,
-  },
-  patternTopItem: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-    backgroundColor: '#f8fafc',
-    borderWidth: 2,
-    borderColor: '#e2e8f0',
-  },
-  patternTopImage: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-  },
-  patternMiddleRow: {
-    marginBottom: 16,
-    padding: 16,
-    minHeight: 80,
-    justifyContent: 'center',
-    alignItems: 'center',
-    width: '100%',
-    backgroundColor: '#f8fafc',
-    borderRadius: 16,
-    borderWidth: 2,
-    borderColor: '#e2e8f0',
-  },
-  patternMiddleImage: {
-    width: '100%',
-    height: 60,
-    borderRadius: 12,
-  },
-  patternBottomGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    width: '100%',
-  },
-  patternBottomItem: {
-    width: '48%',
+    flex: 1,
+    minWidth: 140,
+    maxWidth: 200,
     aspectRatio: 1,
-    borderRadius: 16,
-    marginBottom: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    marginHorizontal: 4,
+    marginVertical: 4,
     borderWidth: 2,
-    borderColor: '#e2e8f0',
-  },
-  patternBottomImage: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 16,
+    borderColor: 'rgba(124, 58, 237, 0.3)',
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   questionContainer: {
+    width: '100%',
     marginBottom: 20,
+    paddingHorizontal: 0,
   },
   questionImageContainer: {
-    alignItems: 'center',
-    marginBottom: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    borderRadius: 15,
-    padding: 15,
+    alignItems: 'stretch',
+    marginBottom: 12,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 3,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    marginHorizontal: 4,
+  },
+  questionImageContainerSingle: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  questionImageContainerMultiple: {
+    alignItems: 'stretch',
+    justifyContent: 'flex-start',
   },
   questionImage: {
     width: '100%',
-    height: 200,
-    borderRadius: 12,
+    height: 500,
+    borderRadius: 8,
+    backgroundColor: '#f8fafc',
+  },
+  singleImageCentered: {
+    alignSelf: 'center',
+  },
+  questionImageSmall: {
+    flex: 1,
+    minWidth: 160,
+    maxWidth: 240,
+    aspectRatio: 1,
+    borderRadius: 8,
+    marginHorizontal: 4,
+    borderWidth: 2,
+    borderColor: 'rgba(124, 58, 237, 0.3)',
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  // Auto-sized square that fills available row when 1-3 images
+  questionImageAuto: {
+    flex: 1,
+    aspectRatio: 1,
+    maxWidth: 280,
+    minWidth: 180,
+    borderRadius: 8,
+    marginHorizontal: 4,
+    borderWidth: 2,
+    borderColor: 'rgba(124, 58, 237, 0.3)',
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   questionText: {
     fontSize: getResponsiveFontSize(15),
@@ -4595,14 +8958,14 @@ const styles = StyleSheet.create({
   questionTypeLabel: {
     backgroundColor: '#4a90e2',
     borderRadius: 15,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
     marginBottom: 10,
-    marginTop: -50,
+    marginTop: 0, // CRITICAL FIX: Reduced negative margin to prevent overlap with attempts card
     alignSelf: 'center',
   },
   questionTypeText: {
-    fontSize: 14,
+    fontSize: 11,
     fontWeight: '700',
     color: '#ffffff',
     textTransform: 'uppercase',
@@ -4661,16 +9024,13 @@ const styles = StyleSheet.create({
     top: 12,
   },
   optionImage: {
-    width: 32,
-    height: 32,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  multipleImagesContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 4,
-    marginRight: 8,
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    marginRight: 12,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: 'rgba(124, 58, 237, 0.2)',
   },
   optionText: {
     flex: 1,
@@ -4713,9 +9073,10 @@ const styles = StyleSheet.create({
     transform: [{ scale: 1.05 }],
   },
   gridOptionImage: {
-    width: '80%',
-    height: '80%',
-    borderRadius: 8,
+    width: '75%',
+    height: '75%',
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
   },
   gridCheckIconContainer: {
     position: 'absolute',
@@ -4929,25 +9290,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0,
     elevation: 0,
   },
-  submitButton: {
-    backgroundColor: '#ffa500',
-    borderColor: '#ff8c00',
-    shadowColor: '#ffa500',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 8,
-    transform: [{ scale: 1.02 }],
-  },
   navButtonText: {
     fontSize: 16,
     fontWeight: '600',
     color: '#1e293b',
-  },
-  submitButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
   },
   // TTS button
   ttsButton: {
@@ -5017,7 +9363,7 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   progressBarBackground: {
-    height: 24,
+    height: 12,
     backgroundColor: 'rgba(0, 0, 0, 0.1)',
     borderRadius: 6,
     overflow: 'hidden',
@@ -5038,6 +9384,23 @@ const styles = StyleSheet.create({
     color: '#1e293b',
     textAlign: 'center',
   },
+  matchingCompleteContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8,
+    padding: 8,
+    backgroundColor: '#f0fdf4',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#10b981',
+  },
+  matchingCompleteText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#10b981',
+    marginLeft: 8,
+  },
   matchingItem: {
     backgroundColor: 'rgba(255, 255, 255, 0.9)',
     borderRadius: 12,
@@ -5057,8 +9420,8 @@ const styles = StyleSheet.create({
   gameMatchingItem: {
     backgroundColor: '#ffffff',
     borderRadius: 16,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
     marginBottom: 12,
     borderWidth: 3,
     shadowColor: '#ffa500',
@@ -5066,8 +9429,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 6,
     elevation: 4,
-    minHeight: 72,
-    height: 72,
+    height: 80, // Fixed height for all boxes
     width: '100%',
     alignSelf: 'stretch',
     justifyContent: 'center',
@@ -5089,17 +9451,59 @@ const styles = StyleSheet.create({
     elevation: 6,
     transform: [{ scale: 1.02 }],
   },
+  matchingLeftSelected: {
+    backgroundColor: '#fff7ed',
+    borderColor: '#fb923c',
+    borderWidth: 4,
+    shadowColor: '#fb923c',
+    shadowOpacity: 0.4,
+    elevation: 8,
+    transform: [{ scale: 1.05 }],
+  },
+  matchingInstructions: {
+    backgroundColor: 'rgba(251, 146, 60, 0.1)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 16,
+    borderWidth: 2,
+    borderColor: '#fb923c',
+    borderStyle: 'dashed',
+  },
+  matchingInstructionsText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ea580c',
+    textAlign: 'center',
+  },
+  matchingPairBadge: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 12,
+    padding: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 3,
+  },
   matchingImage: {
     width: 40,
     height: 40,
     borderRadius: 8,
   },
   gameMatchingImage: {
-    width: 60,
-    height: 60,
+    width: 64,
+    height: 64,
     borderRadius: 12,
     marginRight: 0,
     alignSelf: 'center',
+    flexShrink: 0,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: 'rgba(124, 58, 237, 0.2)',
   },
   matchingText: {
     fontSize: 14,
@@ -5108,17 +9512,23 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   gameMatchingText: {
-    fontSize: 16,
-    fontWeight: '700',
+    fontSize: 13,
+    fontWeight: '600',
     color: '#1e293b',
     textAlign: 'center',
     flex: 1,
+    lineHeight: 17,
+    flexWrap: 'wrap',
+    maxHeight: 56, // Ensure text fits within the 80px box height minus padding
   },
   gameItemContent: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     flexDirection: 'row',
+    paddingHorizontal: 4,
+    height: '100%', // Take full height of the parent box
+    minHeight: 56, // Ensure minimum height for content
   },
   matchBadge: {
     backgroundColor: '#4a90e2',
@@ -5134,76 +9544,268 @@ const styles = StyleSheet.create({
   reorderContainer: {
     gap: 12,
   },
+  resetButtonContainer: {
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 24,
+  },
+  resetButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  resetButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 6,
+  },
+  reorderSlotsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexWrap: 'nowrap',
+    width: '100%',
+    paddingHorizontal: getResponsiveSize(4),
+    paddingVertical: getResponsiveSize(8),
+    marginBottom: getResponsiveSize(8),
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: getResponsiveSize(12),
+    gap: getResponsiveSize(4),
+  },
+  reorderChoicesRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexWrap: 'nowrap',
+    width: '100%',
+    paddingHorizontal: getResponsiveSize(4),
+    paddingVertical: getResponsiveSize(8),
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: getResponsiveSize(12),
+    gap: getResponsiveSize(4),
+  },
   reorderSlotsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
-    gap: 12,
+    gap: 8,
+    marginBottom: 20,
+    paddingHorizontal: 8,
+    width: '100%',
+  },
+  reorderInstructions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
     marginBottom: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(124, 58, 237, 0.3)',
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  reorderInstructionsText: {
+    fontSize: 14,
+    color: '#64748b',
+    marginLeft: 10,
+    flex: 1,
+    fontWeight: '500',
+    lineHeight: 20,
   },
   reorderSlot: {
-    width: '47%',
-    height: 88,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.6)',
-    borderWidth: 2,
-    borderColor: '#ffffff',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 6,
+    flex: 1,
+    minWidth: getResponsiveSize(60),
+    maxWidth: getResponsiveSize(90),
+    height: getResponsiveSize(70),
+    marginHorizontal: getResponsiveSize(2),
+    borderRadius: getResponsiveSize(12),
+    backgroundColor: 'rgba(255, 247, 237, 0.95)',
+    borderWidth: getResponsiveSize(2),
+    borderStyle: 'dashed',
+    borderColor: '#f59e0b',
+    shadowColor: '#f59e0b',
+    shadowOffset: { width: 0, height: getResponsiveSize(3) },
+    shadowOpacity: 0.25,
+    shadowRadius: getResponsiveSize(3),
     elevation: 3,
     justifyContent: 'center',
     alignItems: 'center',
+    position: 'relative',
   },
   slotPlaceholder: {
-    width: '92%',
-    height: '76%',
+    width: '100%',
+    height: '100%',
     borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.7)',
-    borderWidth: 2,
-    borderColor: '#ffa500',
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  slotPlaceholderText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#f59e0b',
+    textAlign: 'center',
   },
   slotFilledCard: {
-    width: '92%',
-    height: '76%',
+    width: '100%',
+    height: '100%',
     borderRadius: 14,
     backgroundColor: '#ffffff',
     borderWidth: 2,
     borderColor: '#ffa500',
     justifyContent: 'center',
     alignItems: 'center',
+    position: 'relative',
+    shadowColor: '#ffa500',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  removeSlotButton: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+    zIndex: 10,
+    padding: 2,
+  },
+  removeSlotButtonFixed: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 10,
+    width: 28,
+    height: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 4,
+    zIndex: 999,
+  },
+  lockIndicator: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 10,
+    width: 28,
+    height: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#64748b',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 2,
+    elevation: 3,
+    zIndex: 999,
+  },
+  statusIndicator: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 10,
+    width: 28,
+    height: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 2,
+    elevation: 3,
+    zIndex: 10,
   },
   reorderChoicesPool: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    justifyContent: 'space-between',
+    // kept for compatibility if referenced elsewhere
+  },
+  reorderResetContainer: {
+    alignItems: 'center',
+    marginBottom: getResponsiveSize(12),
+  },
+  reorderResetButton: {
+    backgroundColor: '#f59e0b',
+    paddingHorizontal: getResponsiveSize(16),
+    paddingVertical: getResponsiveSize(8),
+    borderRadius: getResponsiveSize(20),
+    shadowColor: '#f59e0b',
+    shadowOffset: { width: 0, height: getResponsiveSize(2) },
+    shadowOpacity: 0.3,
+    shadowRadius: getResponsiveSize(4),
+    elevation: 3,
+  },
+  reorderResetButtonText: {
+    color: '#ffffff',
+    fontSize: getResponsiveFontSize(14),
+    fontWeight: '600',
   },
   reorderChoice: {
-    width: '47%',
-    height: 88,
-    borderRadius: 18,
+    flex: 1,
+    minWidth: getResponsiveSize(60),
+    maxWidth: getResponsiveSize(90),
+    height: getResponsiveSize(70),
+    marginHorizontal: getResponsiveSize(2),
+    borderRadius: getResponsiveSize(12),
     backgroundColor: '#ffffff',
-    borderWidth: 2,
+    borderWidth: getResponsiveSize(2),
     borderColor: '#ffa500',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
+    shadowColor: '#ffa500',
+    shadowOffset: { width: 0, height: getResponsiveSize(3) },
     shadowOpacity: 0.25,
-    shadowRadius: 6,
+    shadowRadius: getResponsiveSize(3),
     elevation: 4,
     justifyContent: 'center',
     alignItems: 'center',
+    position: 'relative',
+  },
+  dragIndicator: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    backgroundColor: 'rgba(124, 58, 237, 0.8)',
+    borderRadius: 8,
+    padding: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
   },
   reorderChoiceImage: {
-    width: 56,
-    height: 56,
-    borderRadius: 12,
+    width: '90%',
+    height: '90%',
+    borderRadius: getResponsiveSize(12),
   },
   reorderChoiceText: {
-    fontSize: 16,
+    fontSize: getResponsiveFontSize(24),
     fontWeight: '700',
-    color: '#1e293b',
+    color: '#3b82f6',
+    textAlign: 'center',
+    flexShrink: 1,
   },
   reorderInstruction: {
     fontSize: 16,

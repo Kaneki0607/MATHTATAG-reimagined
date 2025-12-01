@@ -1,12 +1,14 @@
 import { AntDesign, MaterialCommunityIcons } from '@expo/vector-icons';
 import { AudioSource, AudioStatus, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import { Audio, AVPlaybackStatus } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   Image,
   Modal,
   ScrollView,
@@ -18,10 +20,17 @@ import {
   View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
-import { getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
+import { getActiveApiKeys, getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
+import { createExercise } from '../lib/entity-helpers';
 import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
+import {
+  callGeminiWithFallback,
+  extractGeminiText,
+  parseGeminiJson
+} from '../lib/gemini-utils';
+import { convertNumbersToTagalogEnhanced } from '../lib/tagalog-number-utils';
 
 // Import ElevenLabs API key management
 
@@ -857,11 +866,79 @@ interface Question {
     allowShowWork?: boolean;
   };
   // TTS fields
-  ttsAudioUrl?: string;
+  ttsAudioUrl?: string; // AI-generated TTS audio
+  recordedTtsUrl?: string; // Teacher-recorded audio (takes priority over ttsAudioUrl)
+  ttsStatus?: 'idle' | 'generating' | 'ready' | 'failed'; // TTS generation status
 }
-
 export default function CreateExercise() {
   const router = useRouter();
+  
+  // Scroll references for scroll-to-top functionality
+  const mainScrollRef = useRef<ScrollView>(null);
+  const questionEditorScrollRef = useRef<ScrollView>(null);
+  const stockImagesScrollRef = useRef<ScrollView>(null);
+  
+  // Scroll to top functionality
+  const scrollToTop = useCallback((scrollRef: React.RefObject<ScrollView | null>) => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({ y: 0, animated: true });
+    }
+  }, []);
+  
+  // Image preloading for better performance
+  const preloadImages = useCallback(async () => {
+    try {
+      // Preload common stock images
+      const commonImages = [
+        require('../assets/images/icon.png'),
+        ...stockImages['Alphabet'].slice(0, 5).map(img => img.uri),
+        ...stockImages['Numbers'].slice(0, 5).map(img => img.uri),
+        ...stockImages['Shapes'].slice(0, 5).map(img => img.uri),
+      ];
+      
+      await Promise.all(
+        commonImages.map(imageSource => 
+          Image.prefetch(Image.resolveAssetSource(imageSource).uri)
+        )
+      );
+    } catch (error) {
+      console.log('Image preloading failed:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    preloadImages();
+  }, [preloadImages]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const checkTtsApiKeys = async () => {
+      try {
+        const activeKeys = await getActiveApiKeys();
+        if (!isMounted) return;
+
+        const hasKeys = Array.isArray(activeKeys) && activeKeys.length > 0;
+        setHasActiveTTSKeys(hasKeys);
+        if (!hasKeys) {
+          setGenerateAITTS(false);
+        }
+      } catch (error) {
+        console.warn('Failed to check ElevenLabs API keys:', error);
+        if (isMounted) {
+          setHasActiveTTSKeys(false);
+          setGenerateAITTS(false);
+        }
+      }
+    };
+
+    checkTtsApiKeys();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const { edit } = useLocalSearchParams();
   const [exerciseTitle, setExerciseTitle] = useState('');
   const [exerciseDescription, setExerciseDescription] = useState('');
@@ -869,6 +946,7 @@ export default function CreateExercise() {
   const [exerciseCode, setExerciseCode] = useState('');
   const [exerciseCategory, setExerciseCategory] = useState('');
   const [timeLimitPerItem, setTimeLimitPerItem] = useState<number | null>(120); // Default 2 minutes (120 seconds)
+  const [maxAttemptsPerItem, setMaxAttemptsPerItem] = useState<number | null>(1); // null = unlimited attempts
   const [questions, setQuestions] = useState<Question[]>([]);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [showCustomCategoryModal, setShowCustomCategoryModal] = useState(false);
@@ -1039,7 +1117,7 @@ export default function CreateExercise() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
   const [modalStack, setModalStack] = useState<string[]>([]);
-
+  
   // Custom Alert state
   const [customAlert, setCustomAlert] = useState<{
     visible: boolean;
@@ -1074,6 +1152,22 @@ export default function CreateExercise() {
   // Track failed TTS generations
   const [failedTTSQuestions, setFailedTTSQuestions] = useState<Set<string>>(new Set());
   const [isRetryingFailedTTS, setIsRetryingFailedTTS] = useState(false);
+
+  // Voice Recording state
+  const [showRecordingModal, setShowRecordingModal] = useState(false);
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [recordedAudioUri, setRecordedAudioUri] = useState<string | null>(null);
+  const [isPlayingRecording, setIsPlayingRecording] = useState(false);
+  const [recordingQuestionId, setRecordingQuestionId] = useState<string | null>(null);
+  const [hasPreviousRecording, setHasPreviousRecording] = useState(false);
+  const recordingSound = useRef<Audio.Sound | null>(null);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // AI TTS Toggle state (for AI question generator)
+  const [generateAITTS, setGenerateAITTS] = useState<boolean>(true);
+  const [hasActiveTTSKeys, setHasActiveTTSKeys] = useState<boolean | null>(null);
 
   // Timer for TTS process (generation + upload)
   useEffect(() => {
@@ -1272,7 +1366,6 @@ export default function CreateExercise() {
       console.error('Error fetching teacher data:', error);
     }
   };
-
   const loadExerciseForEdit = async (exerciseId: string) => {
     try {
       setLoading(true);
@@ -1286,6 +1379,13 @@ export default function CreateExercise() {
         setExerciseCode(data.exerciseCode || '');
         setExerciseCategory(data.category || '');
         setTimeLimitPerItem(data.timeLimitPerItem || 120);
+        if (data.maxAttemptsPerItem === null) {
+          setMaxAttemptsPerItem(null);
+        } else if (typeof data.maxAttemptsPerItem === 'number') {
+          setMaxAttemptsPerItem(data.maxAttemptsPerItem);
+        } else {
+          setMaxAttemptsPerItem(1);
+        }
         // Migrate old order arrays to reorderItems structure
         const migratedQuestions = (data.questions || []).map((q: any) => {
           if (q.type === 're-order' && q.order && !q.reorderItems) {
@@ -1319,7 +1419,28 @@ export default function CreateExercise() {
 
   // Check if an image URI is local (from require())
   const isLocalImage = (uri: string): boolean => {
-    return uri.includes('assets/') || uri.includes('file://') || uri.includes('content://');
+    if (!uri) return false;
+    
+    // Check for various local URI patterns
+    const localPatterns = [
+      'assets/',           // Bundled assets
+      'file://',           // Local file system
+      'content://',        // Android content provider
+      'http://192.168.',   // Local dev server
+      'http://10.',        // Local dev server
+      'http://localhost:', // Local dev server
+      'http://127.0.0.1:', // Local dev server
+      '/static/media/',    // Webpack static assets
+    ];
+    
+    // Check if URI matches any local pattern
+    const isLocal = localPatterns.some(pattern => uri.includes(pattern));
+    
+    // Also check if URI is NOT a Firebase Storage URL
+    const isFirebaseUrl = uri.includes('firebasestorage.googleapis.com') || 
+                         uri.includes('storage.googleapis.com');
+    
+    return isLocal && !isFirebaseUrl;
   };
 
   // Upload local images to Firebase Storage and return remote URLs
@@ -1600,15 +1721,7 @@ export default function CreateExercise() {
       icon: 'sort',
       color: '#ef4444',
     },
-    {
-      id: 'reading-passage',
-      title: 'Reading Passage',
-      description: 'Provide a passage with related questions',
-      icon: 'book-open-variant',
-      color: '#8b5cf6',
-    },
   ];
-
   // Dynamic stock image categories - Updated with new Stock-Images categories
   const stockImageCategories = [
     {
@@ -1823,9 +1936,11 @@ export default function CreateExercise() {
     }
     
     if (type === 're-order') {
+      const initialItem = { id: Date.now().toString(), type: 'text', content: '' };
       newQuestion.order = [''];
-      newQuestion.reorderItems = [{ id: Date.now().toString(), type: 'text', content: '' }];
+      newQuestion.reorderItems = [initialItem];
       newQuestion.reorderDirection = 'asc';
+      newQuestion.answer = []; // Empty array to be filled when items are added
     }
     
     if (type === 'reading-passage') {
@@ -2058,13 +2173,17 @@ export default function CreateExercise() {
     setIsGeneratingQuestions(true);
 
     try {
-      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
+      // Get available stock images for reference (without category names)
+      const allAvailableImages = Object.keys(stockImages)
+        .flatMap(category => stockImages[category].map(img => img.name))
+        .join(', ');
       
-      
-      // Get available stock images for reference
-      const availableImages = Object.keys(stockImages).map(category => 
-        `${category}: ${stockImages[category].map(img => img.name).join(', ')}`
-      ).join('\n');
+      const availableImages = `Available images: ${allAvailableImages}`;
+
+      // Use existing questions as both context (to avoid duplicates) and samples (to match style)
+      const existingQuestionsContext = questions.length > 0 
+        ? `\n\nEXISTING QUESTIONS (Use these as examples for style, difficulty, and topic focus - DO NOT REPEAT THESE):\n${questions.map((q, idx) => `${idx + 1}. [${q.type}] ${q.question}`).join('\n')}\n\n**CRITICAL**: Generate NEW questions that:\n- Match the style and difficulty of the existing questions above\n- Cover different aspects of the same topic\n- DO NOT repeat or closely paraphrase any existing question\n- Maintain the same teaching approach and language mix (Filipino/English ratio)`
+        : '';
 
       const prompt = `You are an expert educational content creator for Grade 1 students in the Philippines. Generate ${numberOfQuestions} ${selectedQuestionType} questions based on the following exercise details:
 
@@ -2074,290 +2193,355 @@ EXERCISE DETAILS:
 - Category: ${exerciseCategory}
 - Additional Requirements: ${aiPrompt}
 
-QUESTION TYPE: ${selectedQuestionType}
+QUESTION TYPE: ${selectedQuestionType}${existingQuestionsContext}
 
-AVAILABLE STOCK IMAGES (use these in your questions when relevant but its not necessary):
+AVAILABLE STOCK IMAGES (use these in your questions when relevant):
 ${availableImages}
 
-REQUIREMENTS FOR FILIPINO GRADE 1 STUDENTS:
-1. Use simple Filipino language (Tagalog) mixed with ONLY WHEN English is necessary
-2. Questions should be age-appropriate for 6-7 year old Filipino children
-3. Use familiar Filipino words and concepts (e.g., "bahay", "pamilya", "pagkain", "kulay")
-4. Make questions engaging with Filipino cultural context
-5. Use simple sentence structures
-6. Include visual concepts that Filipino children can relate to
-7. MAXIMIZE USE OF STOCK IMAGES: Reference specific images from the available list in questions and options
-8. When using images, mention the exact image name from the stock images list
-9. CRITICAL: NEVER include the answer in the question text - questions should only ask, not provide answers even if its multiple answer.
+**CRITICAL IMAGE NAMING RULE:**
+When referencing images, use ONLY the image name itself. 
+❌ NEVER write: "Fruits and Vegetables: Banana"
+✅ ALWAYS write: "Banana"
+❌ NEVER write: "Animals: Cat"  
+✅ ALWAYS write: "Cat"
+❌ NEVER write: "Numbers: 5"
+✅ ALWAYS write: "5"
+=== PREMIUM VISUAL PRESENTATION STANDARDS ===
+VISUAL ACCURACY REQUIREMENTS:
+1. **questionImages should provide CONTEXT, NEVER reveal the answer**
+2. Images must be EXACTLY relevant - no approximations or "close enough" matches
+3. The visual should clarify what to look at, not give away the answer
+4. If asking about a specific object, show THAT object (answer is the name/color/count, not the object itself)
+5. Images should support understanding, not just decorate
+IMAGE MATCHING PRECISION & WHEN TO USE IMAGES:
+- Question: "Ano ang hugis nito?" → Use questionImages: ["Triangle"] (show shape, answer is the NAME)
+- Question: "Ilan ang mga ito?" → Use questionImages: ["Apple", "Apple", "Apple"] (show objects, answer is the COUNT)
+- Question: "Anong kulay ang bulaklak?" → Use questionImages: ["Pink Rose"] (show flower, answer is the COLOR)
+- Question: "Alin ang mas malaki?" → Use questionImages with size comparisons (show comparison context)
+- Question: "Ano ang sagot sa 2 + 3?" → NO questionImages (math problem, no visual needed)
+- Question: "Ano ang tawag sa...?" → Only use questionImages if the "ito" refers to something visual
+- WRONG: Asking about dogs but showing cat image
+- WRONG: Asking about numbers but showing letters
+- WRONG: Asking about shapes but showing animals
+- WRONG: Adding decorative images that don't help answer the question
 
-QUESTION TYPE SPECIFIC RULES:
+MULTIPLE CHOICE IMAGE RULES:
+- When using option images, each option MUST have a matching image from stock library
+- Images should be clearly distinguishable from each other
+- All option images should be the same category (all animals, all shapes, all numbers, etc.)
+- Option images should match the question's visual context
+- Example: Question about animals → All options should be animal images
+- Example: Question about shapes → All options should be shape images
+
+**MATCHING & RE-ORDER IMAGE RULES (VERY IMPORTANT):**
+- Each matching pair or reorder item can only show ONE image (not multiple)
+- Use COMPOSITE/MULTI-ITEM images from these categories:
+  ✅ "Comparing Quantities" (e.g., "2 Apples", "3 Candies", "5 Pencils")
+  ✅ "Money" (e.g., "16 Pesos", "23 Pesos", "Piso (1 peso coin)")
+  ✅ "Patterns" (e.g., "2 Boy 2 Girl", "Blue Pink", "Heart Star")
+  ✅ "Time and Position" (e.g., "1:00", "2:30", "Quarter Turn")
+  ✅ "Boxed Numbers" (numbers in boxes)
+  ✅ "Numbers" (for number sequences)
+- ❌ DON'T use single fruits like "Red Apple" alone - use "2 Apples" from Comparing Quantities
+- ❌ DON'T use single animals like "Cat" alone for counting - use quantity images
+- Each item should be a complete visual unit
+
+PATTERN & SEQUENCE VISUALIZATION:
+- For number sequences in questionImages: Use ["1", "2", "3"] to show the pattern
+- For shape patterns in questionImages: Use ["Circle", "Square", "Circle", "Square"]
+- For quantity visualization in questionImages: Repeat the same image N times
+- Pattern questions MUST use questionImages array (3-4 images minimum)
+- The pattern must be visually clear and obvious to Grade 1 students
+
+**FOR MATCHING/RE-ORDER ITEMS - USE COMPOSITE IMAGES:**
+- ✅ Counting/Quantities: Use "2 Apples", "3 Candies", "5 Boys" (one image shows multiple items)
+- ✅ Money: Use "16 Pesos", "23 Pesos", "40 pesos" (one image shows the amount)
+- ✅ Time: Use "1:00", "2:30", "6:00" (one clock image)
+- ✅ Patterns: Use "2 Boy 2 Girl", "Blue Pink", "Heart Star"
+- ❌ Don't use "Red Apple" alone when asking about quantities
+- ❌ Don't combine multiple single-item images - use pre-made composite images
+
+QUANTITY VISUALIZATION (CRITICAL):
+**IMPORTANT DISTINCTION:**
+- **questionImages** (for IDENTIFICATION questions) = Can repeat images to show quantity
+  ✅ questionImages: ["Red Apple", "Red Apple", "Red Apple"] (shows 3 apples to count)
+- **reorderItems/pairs** (for MATCHING/RE-ORDER) = Must use ONE composite image per item
+  ✅ reorderItems: [{"type": "image", "imageUrl": "3 Apples"}] (one image showing 3 apples)
+  ❌ reorderItems: Can't use multiple images like ["Red Apple", "Red Apple", "Red Apple"]
+
+- When question mentions a number (e.g., "5 apples", "lima na mansanas") in IDENTIFICATION:
+  → Use questionImages to repeat the image that many times
+  → Example: "May 5 apples" → questionImages: ["Red Apple", "Red Apple", "Red Apple", "Red Apple", "Red Apple"]
+- For MATCHING/RE-ORDER with quantities:
+  → Use composite images from "Comparing Quantities"
+  → Example: Use "3 Apples" as ONE image, not three separate apple images
+- Maximum 10 repetitions for questionImages clarity
+
+=== FILIPINO GRADE 1 STUDENT REQUIREMENTS ===
+
+LANGUAGE:
+1. Use simple Filipino (Tagalog) as primary language (90% Filipino, 10% English when needed)
+2. Age-appropriate for 6-7 year old Filipino children
+3. Use familiar Filipino words: "bahay", "pamilya", "pagkain", "kulay", "bilang", "hayop"
+4. Simple sentence structures only
+5. Engaging Filipino cultural context
+
+QUESTION QUALITY:
+1. Natural and conversational - like a friendly teacher
+2. NO category labels or prefixes
+3. Pure questions only (e.g., "Ano ito?", "Ilan ang mga ito?", "Anong kulay ito?")
+4. NEVER reveal answers in question text
+5. No parenthetical hints or instructions
+
+=== QUESTION TYPE SPECIFIC RULES ===
 
 FOR MULTIPLE CHOICE:
-- Provide 4 simple options with only 1 correct answer
-- The "answer" field should contain the EXACT text that appears in the options array
-- The correct answer must be placed in a RANDOM position in the options array (not always first)
-- All options should be plausible but only one should be correct
-- Use simple, clear language for all options
-- Include image references in options when relevant (e.g., "Apple", "Cat", "Circle")
+- Provide 4 clear, distinct options
+- Only 1 correct answer (unless multiAnswer specified)
+- "answer" field contains EXACT text from options array
+- Correct answer in RANDOM position (not always first)
+- All options should be plausible distractors
+- If using images, ALL options must have images
+- Option images should be from the same visual category
 
 FOR IDENTIFICATION:
 - Ask for specific Filipino words, objects, or concepts
-- The "answer" field should contain the correct answer text
-- Do NOT include options array
-- Do NOT include Emoji in the answer
-- Focus on single-word or short phrase answers
-- Use questionImage to show what students need to identify
-- ALWAYS include alternative answers for Filipino variations
-- Include common Filipino terms, English equivalents, and regional variations
-- Example: If asking for "bahay", include alternatives like "house", "tahanan", "bahay-kubo"
-- CRITICAL: NEVER mention the answer in the question text
-- Use phrases like "Ano ang hugis nito?" (What shape is this?) instead of "Ano ang hugis nito? Tingnan ang 'Triangle'"
-- Use "Ano ito?" (What is this?) instead of "Ano ito? Ito ay isang aso" (What is this? This is a dog)
-- The question should only ask, not provide hints or answers
+- "answer" field contains the correct answer text
+- NO options array
+- NO emojis in answer text
+- Single-word or short phrase answers
+- questionImage shows EXACTLY what student should identify
+- ALWAYS include 6-10 alternative answers (Filipino, English, regional variations)
+- Never reveal answer in question text
 
 FOR MATCHING:
-- Create pairs that Filipino children can easily understand
-- The "answer" field should be an array of correct pair indices
+- Create clear, logical pairs (3-5 pairs recommended)
+- "answer" field is array of correct pair indices [0, 1, 2, ...]
 - Include "pairs" array with left and right items
-- Each pair should have clear, simple concepts
-- Use images in pairs when relevant
+- **Use COMPOSITE images** from "Comparing Quantities", "Money", "Time and Position", "Patterns"
+- Each pair item = ONE image only (no multiple images per item)
+- Good examples: Match times ("7:00", "12:00"), money amounts ("16 Pesos", "23 Pesos"), quantities ("2 Apples", "3 Candies")
+- ❌ BAD: Don't use just "Red Apple" - use "2 Apples" or "3 Apples" from Comparing Quantities
+- Pairs should have obvious relationships for Grade 1 level
 
 FOR RE-ORDER:
-- Create simple sequences (numbers, letters, daily activities, patterns)
-- The "answer" field should be an array of items in correct order
-- Include "reorderItems" array with text and/or image items
-- Items should be logically connected and age-appropriate
-- For pattern questions, use multiple images to show the sequence
+- Create logical sequences (numbers, money amounts, time sequences, quantity comparisons)
+- "answer" field is array of items in correct order
+- "reorderItems" array with text and/or image items
+- **Use COMPOSITE images** that show complete units (money amounts, quantities, times, boxed numbers)
+- Each reorderItem = ONE image only (no multiple images per item)
+- Good examples: Order money amounts ("16 Pesos", "23 Pesos", "40 pesos"), times ("1:00", "2:00", "3:00"), numbers ("1", "2", "3")
+- ❌ BAD: Don't use just "Cat" - use "2 + 8", "3 Girls", "5 Boys" from Comparing Quantities
+- Items should be obvious and age-appropriate
+- Direction: ascending by default (can be descending for advanced)
 
-FOR RE-ORDER PATTERN QUESTIONS:
-- When creating pattern questions (number sequences, shape patterns, color progressions), use multiple images
-- Include "questionImages" array with multiple image references to show the pattern sequence
-- Create logical patterns that children can follow (e.g., 1-2-3-?, circle-square-circle-?, red-blue-red-?)
-- Use numbers, shapes, colors, or objects in sequence
-- The answer should be the next item in the pattern
-- ALWAYS use questionImages array for pattern questions, NOT questionImage
-- Include 3-4 images in the pattern sequence
-- Make sure the pattern is clear and logical for Grade 1 students
+=== CRITICAL IMAGE SELECTION GUIDELINES ===
 
-CRITICAL IMAGE RELEVANCE RULES:
-- questionImage MUST be factually relevant to the main subject of the question
-- If question asks about animals that give milk, questionImage should be a cow, goat, or milk-related image
-- If question asks about shapes, questionImage should show the specific shape being asked about
-- If question asks about colors, questionImage should show objects of that color
-- NEVER use irrelevant images (e.g., pig image for milk question, cat image for dog question)
-- questionImage should help students understand what the question is asking about
-- If no relevant image exists in stock images, do NOT include questionImage
-- For pattern questions, use questionImages array with multiple relevant images
+**STRICT IMAGE USAGE RULES:**
+1. **NEVER add answer images to questionImage or questionImages** - These should only show context, NOT the answer!
+2. **ALWAYS use questionImages array** (even for single images) - NEVER use questionImage field
+3. **Image names only** - Use just "Banana" NOT "Fruits and Vegetables: Banana"
+4. **Only add relevant images** - If question asks "Ano ang kulay ng langit?" (What color is sky?), don't add any image
+5. **Context only** - Images should provide context for the question, NOT reveal the answer
 
-YOU CAN ALSO USE EMOJIS INSTEAD OF USING ONLY PICTURES
+EXACT MATCHING:
+- Question asks about "Cat" → Use image named "Cat" ONLY
+- Question asks about "Triangle" → Use image named "Triangle" ONLY
+- Question asks about "5" → Use image named "5" ONLY
+- NO approximations, NO substitutions
+
+CONTEXTUAL RELEVANCE (NOT ANSWER REVEALING):
+- Question about counting animals → Show animals in questionImages, answer is the COUNT
+  Example: questionImages: ["Cat", "Cat", "Cat"] (shows context, answer is "3")
+- Question about shape names → Show the shape in questionImages, answer is the NAME
+  Example: questionImages: ["Triangle"] (shows shape, answer is "Triangle" or "Tatsulok")
+- Question about colors → Show colored objects in questionImages, answer is the COLOR
+  Example: questionImages: ["Red Apple"] (shows object, answer is "Red" or "Pula")
+- Animals that give milk → Use "Cow" or "Goat" (NOT pig, NOT cat)
+- Filipino fruits → Use "Mangga", "Saging", "Bayabas" (clean names, no folder prefix)
+
+IF NO PERFECT IMAGE EXISTS:
+- Do NOT force an image
+- Simply omit the questionImages or optionImages field
+- Focus on clear text instead
+- Better to have no image than wrong image
 
 IMPORTANT: Respond ONLY with valid JSON array. No additional text before or after.
 
-JSON Format for Multiple Choice:
+=== JSON RESPONSE FORMATS ===
+
+Multiple Choice Example (with option images - CLEAN NAMES ONLY):
 [
   {
-    "question": "Simple question in Filipino/English mix",
-    "answer": "Exact text that appears in options array",
-    "options": ["Option A", "Correct Answer", "Option C", "Option D"],
-    "imageReferences": ["Image Name 1", "Image Name 2"]
+    "question": "Ano ang hayop na ito?",
+    "answer": "Cat",
+    "options": ["Dog", "Cat", "Bird", "Fish"],
+    "optionImages": ["Dog", "Cat", "Bird", "Fish"]
   }
 ]
+❌ WRONG: "optionImages": ["Animals: Dog", "Animals: Cat", "Animals: Bird", "Animals: Fish"]
+✅ CORRECT: "optionImages": ["Dog", "Cat", "Bird", "Fish"]
 
-JSON Format for Identification:
+Identification Example (with quantity visualization - SHOWS CONTEXT, NOT ANSWER):
+[
+  {
+    "question": "Ilan ang mga mansanas?",
+    "answer": "5",
+    "questionImages": ["Red Apple", "Red Apple", "Red Apple", "Red Apple", "Red Apple"],
+    "alternativeAnswers": ["lima", "five", "5", "limang mansanas", "5 apples", "five apples"]
+  }
+]
+❌ WRONG: "questionImages": ["Fruits and Vegetables: Red Apple", ...]
+✅ CORRECT: "questionImages": ["Red Apple", "Red Apple", ...]
+
+Identification Example (with context image - SHOWS WHAT TO IDENTIFY, NOT THE ANSWER TEXT):
 [
   {
     "question": "Ano ang hugis nito?",
     "answer": "Triangle",
-    "imageReferences": ["Triangle"],
-    "alternativeAnswers": ["tatsulok", "triangle", "shape with three sides"]
+    "questionImages": ["Triangle"],
+    "alternativeAnswers": ["tatsulok", "triangle", "tatlong gilid", "three sides", "triangulo"]
   }
 ]
 
-JSON Format for Matching:
+Matching Example (using composite images - ONE IMAGE PER ITEM):
 [
   {
-    "question": "Match the items",
+    "question": "Itambal ang oras sa tamang panahon",
     "answer": [0, 1, 2],
     "pairs": [
-      {"left": "Item 1", "right": "Match 1"},
-      {"left": "Item 2", "right": "Match 2"},
-      {"left": "Item 3", "right": "Match 3"}
-    ],
-    "imageReferences": ["Image Name 1", "Image Name 2"]
+      {"left": "Umaga", "right": "7:00", "rightImage": "7:00"},
+      {"left": "Tanghali", "right": "12:00", "rightImage": "12:00"},
+      {"left": "Gabi", "right": "6:00", "rightImage": "6:00"}
+    ]
+  }
+]
+❌ WRONG: "leftImage": "Time and Position: 7:00"
+✅ CORRECT: "rightImage": "7:00"
+
+Matching Example (shapes - single items OK for shapes):
+[
+  {
+    "question": "Itambal ang hugis sa pangalan nito",
+    "answer": [0, 1, 2],
+    "pairs": [
+      {"left": "Bilog", "right": "Circle", "leftImage": "Circle"},
+      {"left": "Parisukat", "right": "Square", "leftImage": "Square"},
+      {"left": "Tatsulok", "right": "Triangle", "leftImage": "Triangle"}
+    ]
   }
 ]
 
-JSON Format for Re-order (regular sequence):
+Re-order Example (using composite images - EACH ITEM IS ONE IMAGE):
 [
   {
-    "question": "Put these in the correct order",
-    "answer": ["First", "Second", "Third"],
+    "question": "Ayusin ayon sa dami ng pera",
+    "answer": ["16 Pesos", "23 Pesos", "27 pesos", "40 pesos"],
     "reorderItems": [
-      {"type": "text", "content": "First item"},
-      {"type": "text", "content": "Second item"},
-      {"type": "text", "content": "Third item"}
-    ],
-    "imageReferences": ["Image Name 1", "Image Name 2"]
+      {"type": "image", "content": "40 pesos", "imageUrl": "40 pesos"},
+      {"type": "image", "content": "16 Pesos", "imageUrl": "16 Pesos"},
+      {"type": "image", "content": "27 pesos", "imageUrl": "27 pesos"},
+      {"type": "image", "content": "23 Pesos", "imageUrl": "23 Pesos"}
+    ]
   }
 ]
+❌ WRONG: Using "Isandaan (100 peso bill)" + "Singkwenta (50 peso bill)" separately
+✅ CORRECT: Using "40 pesos" (one composite image showing the amount)
 
-JSON Format for Re-order (pattern with multiple images):
+Re-order Example (number sequence - CLEAN NAMES):
 [
   {
-    "question": "What comes next in this pattern?",
-    "answer": "Next item in pattern",
-    "questionImages": ["Number 1", "Number 2", "Number 3"],
-    "imageReferences": ["Number 1", "Number 2", "Number 3", "Number 4"]
+    "question": "Ayusin ang mga numero mula sa pinakamaliit hanggang pinakamalaki",
+    "answer": ["1", "3", "5", "7"],
+    "reorderItems": [
+      {"type": "image", "content": "7", "imageUrl": "7"},
+      {"type": "image", "content": "3", "imageUrl": "3"},
+      {"type": "image", "content": "1", "imageUrl": "1"},
+      {"type": "image", "content": "5", "imageUrl": "5"}
+    ]
+  }
+]
+❌ WRONG: "imageUrl": "Numbers: 1"
+✅ CORRECT: "imageUrl": "1"
+
+Re-order Example (pattern completion):
+[
+  {
+    "question": "Ano ang susunod sa pattern?",
+    "questionImages": ["Circle", "Square", "Circle", "Square"],
+    "answer": "Circle"
   }
 ]
 
-IMPORTANT FOR PATTERN QUESTIONS:
-- Always use "questionImages" array (not "questionImage") for pattern questions
-- Include 3-4 images in the pattern sequence
-- Use specific image names from the available stock images
-- Make the pattern logical and easy to follow
-- The question should ask "What comes next?" or "What is the next item?"
+=== FINAL REMINDERS ===
 
-IMPORTANT FOR IDENTIFICATION ALTERNATIVE ANSWERS:
-- ALWAYS include alternative answers for identification questions
-- Include Filipino variations, English equivalents, and regional terms
-- Examples of good alternative answers:
-  * For "bahay": ["house", "tahanan", "bahay-kubo", "home"]
-  * For "aso": ["dog", "aso", "canine"]
-  * For "tubig": ["water", "tubig", "liquid"]
-  * For "araw": ["sun", "araw", "sunshine", "sikat ng araw"]
-  * For "bulaklak": ["flower", "bulaklak", "bloom"]
-- Include 6-10 alternative answers per question
-- Use simple, common terms that Grade 1 students would know
+**IMAGE NAMING (CRITICAL):**
+- Use ONLY image names: "Banana", "Cat", "Triangle", "1", "16 Pesos", "2 Apples"
+- NEVER include folder names: ❌ "Fruits and Vegetables: Banana" ✅ "Banana"
+- NEVER include categories: ❌ "Animals: Cat" ✅ "Cat"
+- Clean names for ALL image fields: questionImages, optionImages, leftImage, rightImage, imageUrl
 
-CRITICAL RULE FOR ALL QUESTIONS:
-- NEVER mention the answer in the question text even if its in the filename of the text.
-- WRONG: "Ano ang [Money:40 pesos] Magkano ang halaga nito?"
-- WRONG: "Ano ang hugis nito? Tingnan ang 'Triangle'"
-- WRONG: "Ano ito? Ito ay isang aso"
-- WRONG: "What is this? This is a house"
-- WRONG: "Ano ang shape na nasa picture? (ipakita ang image ng Square)"
-- WRONG: "What shape is this? (show the image of a Square)"
-- CORRECT: "Ano ang hugis nito?" (What shape is this?)
-- CORRECT: "Ano ito?" (What is this?)
-- CORRECT: "What is this?"
-- CORRECT: "Ano ang shape na nasa picture?" (What shape is in the picture?)
-- The question should ONLY ask, never provide  answers
-- Do NOT include parenthetical hints like "(show the image of X)" or "(ipakita ang image ng X)"
-- Do NOT include the answer in any form within the question text
+**IMAGE USAGE (CRITICAL):**
+- questionImages = CONTEXT only (what to look at), NOT the answer
+- optionImages = Answer choices (each option gets its own image)
+- ALWAYS use questionImages array (even for 1 image), NEVER use imageReferences field
+- Only add images when they truly help understand the question
 
-CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
-- NEVER mention the answer in the question text
-- WRONG: "Ano ang hugis nito? Tingnan ang 'Triangle'"
-- WRONG: "Ano ito? Ito ay isang aso"
-- WRONG: "What is this? This is a house"
-- WRONG: "Ano ang shape na nasa picture? (ipakita ang image ng Square)"
-- WRONG: "What shape is this? (show the image of a Square)"
-- CORRECT: "Ano ang hugis nito?" (What shape is this?)
-- CORRECT: "Ano ito?" (What is this?)
-- CORRECT: "What is this?"
-- CORRECT: "Ano ang shape na nasa picture?" (What shape is in the picture?)
-- The question should ONLY ask, never provide  answers
-- Do NOT include parenthetical hints like "(show the image of X)" or "(ipakita ang image ng X)"
-- Do NOT include the answer in any form within the question text`;
+**MATCHING & RE-ORDER IMAGES (CRITICAL):**
+- Each item = ONE single image (can't use multiple images per item)
+- Use COMPOSITE images that show complete concepts:
+  ✅ "2 Apples", "3 Candies", "16 Pesos", "7:00", "2 Boy 2 Girl"
+  ❌ Don't use single items like "Red Apple" alone for quantity questions
+- Prefer images from: Comparing Quantities, Money, Time and Position, Patterns, Boxed Numbers
+- For shapes/alphabet: Single items are OK ("Circle", "A", "Triangle")
 
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
-      
-      // Retry logic for 503 errors
-      let response;
-      let attempts = 0;
-      const maxAttempts = 10;
-      
-      while (attempts < maxAttempts) {
-        try {
-          response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+**EXAMPLES OF GOOD IMAGE CHOICES:**
+- Re-order by money amount: "16 Pesos", "23 Pesos", "27 pesos", "40 pesos"
+- Re-order by quantity: "1 Apple", "2 Apples", "3 Apples", "4 Apples" (from Comparing Quantities)
+- Re-order by time: "1:00", "2:00", "3:00", "4:00"
+- Match quantities with numbers: Left="2 Candies", Right="2"
+- ❌ BAD: Using "Cat", "Cat", "Cat" as separate reorder items
+- ✅ GOOD: Using "3 Girls" as ONE reorder item
+
+**QUALITY STANDARDS:**
+- All option images must be same category (all animals, all shapes, etc.)
+- Never reveal answers in question text or images
+- Keep language simple and Filipino-focused
+- Only use available stock images by exact name
+- Better no image than wrong image`;
+
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.8,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 2048,
         },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.8,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: 2048,
-          }
-        })
-      });
+      };
 
-          if (response.ok) {
-            break; // Success, exit retry loop
-          } else if (response.status === 503) {
-            attempts++;
-            console.warn(`API returned 503 (Service Unavailable). Attempt ${attempts}/${maxAttempts}. Retrying in 1 second...`);
-            if (attempts < maxAttempts) {
-              await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-              continue; // Retry
-            } else {
-              const errorText = await response.text();
-              console.error('API Error after max attempts:', response.status, errorText);
-              throw new Error(`API Error: ${response.status} - Service unavailable after ${maxAttempts} attempts`);
-            }
-          } else {
-            // Other error, don't retry
-        const errorText = await response.text();
-        console.error('API Error:', response.status, errorText);
-        throw new Error(`API Error: ${response.status}`);
-          }
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          if (errorMessage.includes('503') && attempts < maxAttempts) {
-            attempts++;
-            console.warn(`Network error during API call. Attempt ${attempts}/${maxAttempts}. Retrying in 1 second...`);
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            continue;
-          } else {
-            throw error; // Re-throw if not a 503 error or max attempts reached
-          }
-        }
-      }
+      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+      console.log('Gemini model used for question generation:', modelUsed);
 
-      if (!response) {
-        throw new Error('Failed to get response from API after all retry attempts');
-      }
-
-      const data = await response.json();
-      
-      const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      
+      const generatedText = extractGeminiText(data);
       if (!generatedText) {
         throw new Error('No content generated by AI');
       }
-      
-      
-      // Clean and extract JSON from the response
-      let cleanText = generatedText.trim();
-      
-      // Remove any markdown formatting
-      cleanText = cleanText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-      
-      // Find JSON array in the response
-      const jsonMatch = cleanText.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) {
-        console.error('No JSON array found in response:', cleanText);
-        throw new Error('No valid JSON array found in AI response');
-      }
 
-      let questionsData;
+      let questionsData: any[];
       try {
-        questionsData = JSON.parse(jsonMatch[0]);
+        questionsData = parseGeminiJson<any[]>(generatedText);
       } catch (parseError) {
         console.error('JSON Parse Error:', parseError);
-        console.error('Raw JSON string:', jsonMatch[0]);
+        console.error('Raw Gemini response:', generatedText);
         throw new Error('Invalid JSON format from AI response');
       }
       
@@ -2381,7 +2565,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
         }
         return null;
       };
-
       // Convert to Question objects with proper validation and image assignment
       const newQuestions: Question[] = questionsData.map((q: any, index: number) => {
         // Validate required fields
@@ -2421,38 +2604,70 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
           return null;
         };
           
-          // Helper function to check if image is relevant to question
-          const isImageRelevant = (imgName: string, questionText: string) => {
+          // Enhanced helper function to check if image is relevant to question
+          const isImageRelevant = (imgName: string, questionText: string, answerText?: string) => {
             const imgLower = imgName.toLowerCase();
             const questionLower = questionText.toLowerCase();
+            const answerLower = answerText ? answerText.toLowerCase() : '';
             
-            // Check for direct mentions
-            if (questionLower.includes(imgLower)) return true;
+            // Priority 1: Check if image name matches the answer exactly
+            if (answerLower && imgLower === answerLower) return true;
             
-          // Check for conceptual relevance
+            // Priority 2: Check for direct mentions in question
+            const imgWords = imgLower.split(/\s+/);
+            const questionWords = questionLower.split(/\s+/);
+            if (imgWords.some(word => questionWords.includes(word))) return true;
+            
+            // Priority 3: Check for conceptual relevance
+            
+            // Animals & their products
             if (questionLower.includes('gatas') || questionLower.includes('milk')) {
-              return imgLower.includes('cow') || imgLower.includes('goat') || imgLower.includes('milk');
+              return imgLower.includes('cow') || imgLower.includes('goat') || imgLower.includes('baka');
             }
+            
+            // Colors - match by color words
+            const colorWords = ['red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink', 'pula', 'asul', 'berde', 'dilaw', 'kahel', 'lila', 'rosas'];
             if (questionLower.includes('kulay') || questionLower.includes('color')) {
-              return imgLower.includes('red') || imgLower.includes('blue') || imgLower.includes('green') || 
-                     imgLower.includes('yellow') || imgLower.includes('orange') || imgLower.includes('purple');
+              return colorWords.some(color => imgLower.includes(color));
             }
+            
+            // Shapes - exact shape matching
+            const shapeWords = ['circle', 'square', 'triangle', 'rectangle', 'oval', 'bilog', 'parisukat', 'tatsulok', 'parihaba'];
             if (questionLower.includes('hugis') || questionLower.includes('shape')) {
-              return imgLower.includes('circle') || imgLower.includes('square') || imgLower.includes('triangle') || 
-                     imgLower.includes('rectangle') || imgLower.includes('oval');
+              return shapeWords.some(shape => imgLower.includes(shape));
             }
-            if (questionLower.includes('numero') || questionLower.includes('number')) {
-              return imgLower.match(/\d/) || imgLower.includes('number');
+            
+            // Numbers - digit matching
+            if (questionLower.includes('numero') || questionLower.includes('number') || questionLower.includes('bilang')) {
+              return /\d/.test(imgLower) || imgLower.includes('number');
             }
-          if (questionLower.includes('pattern') || questionLower.includes('sunod') || 
-              questionLower.includes('next') || questionLower.includes('susunod') ||
-              questionLower.includes('sequence') || questionLower.includes('order')) {
-            return imgLower.includes('number') || imgLower.includes('circle') || 
-                   imgLower.includes('square') || imgLower.includes('triangle') || 
-                   imgLower.includes('rectangle') || imgLower.includes('oval') ||
-                   imgLower.includes('red') || imgLower.includes('blue') || 
-                   imgLower.includes('green') || imgLower.includes('yellow');
-          }
+            
+            // Fruits & Vegetables
+            const fruitWords = ['apple', 'banana', 'orange', 'grape', 'mango', 'mansanas', 'saging', 'dalandan', 'ubas', 'mangga'];
+            if (questionLower.includes('prutas') || questionLower.includes('fruit')) {
+              return fruitWords.some(fruit => imgLower.includes(fruit));
+            }
+            
+            // Animals
+            const animalWords = ['cat', 'dog', 'bird', 'fish', 'cow', 'pig', 'pusa', 'aso', 'ibon', 'isda', 'baka', 'baboy'];
+            if (questionLower.includes('hayop') || questionLower.includes('animal')) {
+              return animalWords.some(animal => imgLower.includes(animal));
+            }
+            
+            // School supplies
+            if (questionLower.includes('school') || questionLower.includes('paaralan') || questionLower.includes('gamit')) {
+              return imgLower.includes('pencil') || imgLower.includes('book') || imgLower.includes('bag') || 
+                     imgLower.includes('lapis') || imgLower.includes('libro') || imgLower.includes('bag');
+            }
+            
+            // Patterns & sequences
+            if (questionLower.includes('pattern') || questionLower.includes('sunod') || 
+                questionLower.includes('next') || questionLower.includes('susunod') ||
+                questionLower.includes('sequence') || questionLower.includes('order') ||
+                questionLower.includes('ayusin')) {
+              // For patterns, numbers and shapes are most relevant
+              return /\d/.test(imgLower) || shapeWords.some(shape => imgLower.includes(shape));
+            }
             
             return false;
           };
@@ -2466,10 +2681,21 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             
             if (q.options && Array.isArray(q.options)) {
               processedOptions = q.options.map((opt: any) => String(opt).trim());
-              optionImages = q.options.map((opt: any) => {
-                const imageName = String(opt).trim();
-                return findStockImageByName(imageName);
-              });
+              
+              // Process optionImages if provided by AI
+              if (q.optionImages && Array.isArray(q.optionImages)) {
+                optionImages = q.optionImages.map((imgName: string) => {
+                  // Clean image name (remove any folder prefixes like "Fruits and Vegetables: Banana")
+                  const cleanName = imgName.split(':').pop()?.trim() || imgName;
+                  return findStockImageByName(cleanName);
+                });
+              } else {
+                // Fallback: try to find images from option text
+                optionImages = q.options.map((opt: any) => {
+                  const imageName = String(opt).trim();
+                  return findStockImageByName(imageName);
+                });
+              }
         }
 
         // Find the correct answer letter by matching the answer text with options
@@ -2524,15 +2750,21 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             break;
 
           case 'matching':
-            // Process pairs
+            // Process pairs with image support
             let processedPairs = undefined;
             if (q.pairs && Array.isArray(q.pairs)) {
-              processedPairs = q.pairs.map((pair: any) => ({
-                left: pair.left?.trim() || '',
-                right: pair.right?.trim() || '',
-                leftImage: pair.leftImage ? findStockImageByName(pair.leftImage) : null,
-                rightImage: pair.rightImage ? findStockImageByName(pair.rightImage) : null
-              }));
+              processedPairs = q.pairs.map((pair: any) => {
+                // Clean image names (remove any folder prefixes)
+                const cleanLeftImage = pair.leftImage ? pair.leftImage.split(':').pop()?.trim() : null;
+                const cleanRightImage = pair.rightImage ? pair.rightImage.split(':').pop()?.trim() : null;
+                
+                return {
+                  left: pair.left?.trim() || '',
+                  right: pair.right?.trim() || '',
+                  leftImage: cleanLeftImage ? findStockImageByName(cleanLeftImage) : null,
+                  rightImage: cleanRightImage ? findStockImageByName(cleanRightImage) : null
+                };
+              });
             }
 
             processedQuestion = {
@@ -2543,22 +2775,68 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
             break;
 
           case 're-order':
-            // Process reorder items
+            // Process reorder items with safety checks
             let processedReorderItems = undefined;
-            if (q.reorderItems && Array.isArray(q.reorderItems)) {
-              processedReorderItems = q.reorderItems.map((item: any) => ({
-                id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                type: item.type || 'text',
-                content: item.content?.trim() || '',
-                imageUrl: item.imageUrl || (item.type === 'image' ? findStockImageByName(item.content) : undefined)
+            
+            if (q.reorderItems && Array.isArray(q.reorderItems) && q.reorderItems.length > 0) {
+              processedReorderItems = q.reorderItems.map((item: any, idx: number) => {
+                // Clean image names (remove any folder prefixes)
+                let imageUrl = undefined;
+                if (item.imageUrl) {
+                  const cleanName = item.imageUrl.split(':').pop()?.trim() || item.imageUrl;
+                  imageUrl = findStockImageByName(cleanName);
+                } else if (item.type === 'image' && item.content) {
+                  const cleanName = item.content.split(':').pop()?.trim() || item.content;
+                  imageUrl = findStockImageByName(cleanName);
+                }
+                
+                return {
+                  id: `item_${Date.now()}_${idx}_${Math.random().toString(36).substr(2, 9)}`,
+                  type: item.type || 'text',
+                  content: item.content?.trim() || '',
+                  imageUrl: imageUrl
+                };
+              });
+            } else if (q.answer && Array.isArray(q.answer) && q.answer.length > 0) {
+              // Fallback: Create reorderItems from answer array if reorderItems not provided
+              processedReorderItems = q.answer.map((answerItem: string, idx: number) => ({
+                id: `item_${Date.now()}_${idx}_${Math.random().toString(36).substr(2, 9)}`,
+                type: 'text' as const,
+                content: String(answerItem).trim(),
               }));
+            }
+
+            // Ensure items are properly sorted according to answer array (which should be in correct order)
+            const reorderDirection = q.reorderDirection || 'asc';
+            const answerArray = Array.isArray(q.answer) ? q.answer : [];
+            
+            // If we have both reorderItems and answer array, order reorderItems to match answer array
+            let finalReorderItems = processedReorderItems || [];
+            if (answerArray.length > 0 && finalReorderItems.length > 0) {
+              // Create a map of items by content
+              const itemsMap = new Map<string, ReorderItem>(
+                finalReorderItems.map((item: ReorderItem) => [item.content, item])
+              );
+              
+              // Reorder items to match answer array order
+              finalReorderItems = answerArray
+                .map((answerItem: string) => itemsMap.get(String(answerItem)))
+                .filter((item: ReorderItem | undefined): item is ReorderItem => item !== undefined);
+              
+              // Add any items not in answer array at the end
+              const allMapValues = Array.from(itemsMap.values()) as ReorderItem[];
+              finalReorderItems.push(
+                ...allMapValues.filter(
+                  (item: ReorderItem) => !answerArray.includes(item.content)
+                )
+              );
             }
 
             processedQuestion = {
               ...processedQuestion,
-              answer: Array.isArray(q.answer) ? q.answer : [],
-              reorderItems: processedReorderItems,
-              reorderDirection: 'asc'
+              answer: answerArray,
+              reorderItems: finalReorderItems,
+              reorderDirection: reorderDirection
             };
             break;
 
@@ -2572,76 +2850,19 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
         }
 
         // Handle images based on question type
-        let questionImage = null;
         let questionImages = undefined;
 
-        // Check if this is a pattern question (has questionImages or multiple imageReferences)
-        const isPatternQuestion = (q.questionImages && Array.isArray(q.questionImages) && q.questionImages.length > 0) ||
-                                 (q.imageReferences && Array.isArray(q.imageReferences) && q.imageReferences.length > 1 && 
-                                  (q.question.toLowerCase().includes('pattern') || q.question.toLowerCase().includes('sunod') || 
-                                   q.question.toLowerCase().includes('next') || q.question.toLowerCase().includes('susunod')));
-
-        if (q.imageReferences && Array.isArray(q.imageReferences) && q.imageReferences.length > 0) {
-          if (selectedQuestionType === 're-order' && (q.imageReferences.length > 1 || isPatternQuestion)) {
-            // For re-order questions with multiple images or pattern questions, use questionImages array
-            questionImages = q.imageReferences.map((imgRef: string) => findStockImageByName(imgRef)).filter(Boolean);
-          } else {
-            // For other question types, use single questionImage
-            questionImage = findStockImageByName(q.imageReferences[0]);
-          }
-        }
-
-        // Handle special case for pattern questions with multiple images
+        // Process questionImages if provided (NEVER use questionImage field)
         if (q.questionImages && Array.isArray(q.questionImages) && q.questionImages.length > 0) {
-          questionImages = q.questionImages.map((imgRef: string) => findStockImageByName(imgRef)).filter(Boolean);
+          questionImages = q.questionImages.map((imgRef: string) => {
+            // Clean image name (remove any folder prefixes like "Fruits and Vegetables: Banana")
+            const cleanName = imgRef.split(':').pop()?.trim() || imgRef;
+            return findStockImageByName(cleanName);
+          }).filter(Boolean);
         }
 
-        // If no specific image references, try to find images from question text
-        if (!questionImage && !questionImages) {
-          const questionText = q.question.toLowerCase();
-          const usedOptionImages = new Set(
-            (processedQuestion.optionImages || [])
-              .filter((img: any) => img)
-              .map((img: any) => img.toLowerCase())
-          );
-          
-          // For pattern questions, collect up to 4 images
-          const maxImages = isPatternQuestion ? 4 : 1;
-          let imageCount = 0;
-          
-          for (const category of Object.keys(stockImages)) {
-            for (const img of stockImages[category]) {
-              const imgName = img.name.toLowerCase();
-              // Only use image if it's relevant to question AND not used in options
-              if (isImageRelevant(imgName, questionText) && !usedOptionImages.has(imgName)) {
-                if (selectedQuestionType === 're-order' || isPatternQuestion || (q.questionImages && q.questionImages.length > 1)) {
-                  // For pattern questions or re-order questions, collect multiple images
-                  if (!questionImages) {
-                    questionImages = [];
-                  }
-                  questionImages.push(Image.resolveAssetSource(img.uri).uri);
-                  imageCount++;
-                  console.log(`✅ Selected relevant question image: ${imgName} for pattern question: ${q.question.substring(0, 50)}...`);
-                  
-                  // Stop collecting images if we have enough or if it's not a pattern question
-                  if (imageCount >= maxImages || !isPatternQuestion) {
-                    break;
-                  }
-                } else {
-                  questionImage = Image.resolveAssetSource(img.uri).uri;
-                  console.log(`✅ Selected relevant question image: ${imgName} for question: ${q.question.substring(0, 50)}...`);
-                  break;
-                }
-              }
-            }
-            if (questionImage || (questionImages && imageCount >= maxImages)) break;
-          }
-          
-          // If no relevant image found, log it
-          if (!questionImage && !questionImages) {
-            console.log(`⚠️ No relevant image found for question: ${q.question.substring(0, 50)}...`);
-          }
-        }
+        // AI should provide questionImages - we don't auto-add anymore to prevent answer leakage
+        // This section is now intentionally minimal to respect the AI's image choices
 
         // Quantity-based multi-visualization (e.g., "There are 5 apples")
         // If the question implies multiple instances of the same object, create multiple images to visualize quantity
@@ -2746,16 +2967,8 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
 
         const finalQuestion = {
           ...processedQuestion,
-          questionImage: questionImage,
           questionImages: questionImages
         };
-
-        // Debug logging for pattern questions
-        if (isPatternQuestion) {
-          console.log(`🔍 Pattern question detected: ${q.question.substring(0, 50)}...`);
-          console.log(`📸 Question images:`, questionImages);
-          console.log(`🖼️ Single image:`, questionImage);
-        }
 
         // Debug logging for identification questions with alternative answers
         if (selectedQuestionType === 'identification' && finalQuestion.fillSettings?.altAnswers?.length) {
@@ -2770,11 +2983,18 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       // Add generated questions to existing questions
       setQuestions(prev => [...prev, ...newQuestions]);
       
+      // Check if AI TTS generation is enabled
+      if (!generateAITTS) {
+        console.log('AI TTS generation skipped - toggle is off');
+        showCustomAlert('Success', `${newQuestions.length} questions generated successfully! You can record voice or generate TTS individually for each question.`);
+        setShowAIGenerator(false);
+        setAiPrompt('');
+        setIsGeneratingQuestions(false);
+        return;
+      }
       // Generate TTS audio for all new questions sequentially to avoid rate limits
       setIsGeneratingTTS(true);
-      
       // TTS generation will run in background without blocking modal
-      
       // Process questions in batches of 2 using the same API key, then randomly select next key
       const processTTSSequentially = async () => {
         // Initialize progress tracking
@@ -2797,6 +3017,8 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
         const REQUEST_TIMEOUT = 30000; // 30 second timeout per request
         
         
+        let firstFailureIndex: number | null = null;
+
         for (let i = 0; i < newQuestions.length; i++) {
           const question = newQuestions[i];
           
@@ -2919,6 +3141,7 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
               
             } else {
               console.warn(`⚠️ No audio data returned for question: ${question.id}`);
+              if (firstFailureIndex === null) firstFailureIndex = i;
             }
             
             // Increment request counter for current key
@@ -3019,6 +3242,23 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
         }
         
         setTtsUploadStatus('TTS generation completed successfully!');
+
+        // If we failed at or before 25% progress, guide the user to record voice instead of waiting
+        if (firstFailureIndex !== null) {
+          const progressFraction = (firstFailureIndex + 1) / Math.max(newQuestions.length, 1);
+          if (progressFraction <= 0.25) {
+            setTimeout(() => {
+              showCustomAlert(
+                'TTS Currently Unavailable',
+                'TTS failed early in the batch. Please consider recording your voice for these questions using the mic button. You can retry TTS later when the service is stable.'
+              );
+              // Ensure save buttons are enabled by clearing TTS generation state
+              setIsGeneratingTTS(false);
+              setTtsProgress({ current: 0, total: 0 });
+              setTtsProcessStartTime(null);
+            }, 400);
+          }
+        }
         
         // Close progress modal after a short delay
         setTimeout(() => {
@@ -3057,7 +3297,10 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
   // TTS Preprocessing Function - Direct Gemini API call
   const preprocessTextForTTS = async (text: string): Promise<string> => {
     try {
-      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
+      // CRITICAL: Convert numbers to Tagalog BEFORE processing
+      // This ensures TTS will pronounce numbers correctly
+      const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(text);
+      
       const prompt = `Enhance this text for Text-to-Speech by improving punctuation and rhythm for natural speech delivery.
 
       Rules:
@@ -3066,50 +3309,47 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       3. Make it sound lively, like a cheerful Grade 1 teacher or storyteller.
       4. Keep the original language (about 90% Filipino, 10% English mix).
       5. Maintain natural expressions suited for young learners.
-      6. Do NOT include “Ok class” since this will play per student.
+      6. Do NOT include "Ok class" since this will play per student.
       7. Do NOT reveal answers — give hints only.
-      8. Avoid using too many English words. Prioritize simple Filipino that’s easy for Grade 1 pupils.
+      8. Avoid using too many English words. Prioritize simple Filipino that's easy for Grade 1 pupils.
+      9. IMPORTANT: All numbers are already converted to Tagalog words - DO NOT change them back to digits.
+      10. Keep all Tagalog number words as-is (e.g., "labindalawa", "dalawampu't isa").
       
-      Original text: "${text}"
+      Original text: "${textWithTagalogNumbers}"
       
       Enhanced text:`;
       
-
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: [
+      const requestBody = {
+        contents: [
+          {
+            parts: [
               {
-                parts: [
-                  {
-                    text: prompt
-                  }
-                ]
-              }
-            ]
-          })
-        }
-      );
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.5,
+          topP: 0.9,
+          maxOutputTokens: 256,
+        },
+      };
 
-      if (!response.ok) {
-        console.warn('⚠️ Gemini API failed, using original text');
-        return text;
-      }
+      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+      console.log('Gemini model used for TTS preprocessing:', modelUsed);
 
-      const data = await response.json();
-      let processedText = data.candidates?.[0]?.content?.parts?.[0]?.text || text;
-      console.log('Processed text:', processedText);
+      let processedText = extractGeminiText(data) || textWithTagalogNumbers;
+      
+      // CRITICAL: Ensure numbers remain as Tagalog words after Gemini processing
+      // Re-convert any numbers that might have been changed back to digits
+      processedText = convertNumbersToTagalogEnhanced(processedText);
       
       return processedText.trim();
-      
     } catch (error) {
-      console.warn('⚠️ Gemini preprocessing failed, using original text');
-      return text;
+      console.warn('⚠️ Gemini preprocessing failed, using original text with Tagalog numbers', error);
+      // Still convert numbers even if Gemini fails
+      return convertNumbersToTagalogEnhanced(text);
     }
   };
 
@@ -3126,7 +3366,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
     // Generate new TTS
     await generateTTS(text, true);
   };
-
   // TTS Functions
   const generateTTS = async (text: string, isRegenerate: boolean = false) => {
     if (!text.trim()) {
@@ -3353,10 +3592,12 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
     console.log('🎤 AI TTS Generation Started for question:', questionId);
 
     try {
+      // CRITICAL: Convert numbers to Tagalog before sending to TTS
+      const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(processedText);
 
       // Prepare request payload
       const requestPayload: any = {
-        text: processedText,
+        text: textWithTagalogNumbers,
         model_id: 'eleven_turbo_v2_5',
         voice_settings: {
           speed: 0.8,
@@ -3369,7 +3610,7 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       // ElevenLabs API call with multiple API key fallback
       try {
         const result = await callElevenLabsWithFallback(
-          processedText,
+          textWithTagalogNumbers,
           'jBpfuIE2acCO8z3wKNLl',
           true, // useV3
           'mp3_44100_128'
@@ -3424,10 +3665,12 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
     const startTime = Date.now();
 
     try {
+      // CRITICAL: Convert numbers to Tagalog before sending to TTS
+      const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(processedText);
 
       // Prepare request payload
       const requestPayload: any = {
-        text: processedText,
+        text: textWithTagalogNumbers,
         model_id: 'eleven_turbo_v2_5',
         voice_settings: {
           speed: 0.8,
@@ -3536,7 +3779,6 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
       return isMainQuestionFailed || hasFailedSubQuestions;
     });
   };
-
   // Function to retry all failed TTS generations
   const retryAllFailedTTS = async () => {
     const failedQuestions = getFailedTTSQuestions();
@@ -3655,72 +3897,67 @@ CRITICAL RULE FOR IDENTIFICATION QUESTIONS:
     setImproveError(null);
 
     try {
-      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
-      
-      const prompt = `You are an expert educational content writer. Rewrite the following exercise title and description to make them more professional and appealing for co-teachers who will see this exercise in a public library.
+      const prompt = `You are an expert educational content writer for Grade 1 students. Rewrite the following exercise title and description to make them engaging and appealing.
 
 Current Title: "${exerciseTitle}"
 Current Description: "${exerciseDescription}"
 
-Requirements:
-- Make the title clear, engaging, and professional
-- Write a compelling description that explains what students will learn and practice
-- Use educational terminology that teachers will understand
-- Highlight the key learning objectives and skills
-- Keep it concise but informative
-- Make it sound professional for sharing in a teacher community
+Requirements for TITLE:
+- MAXIMUM 3 WORDS ONLY! This is critical!
+- Make it fun, catchy, and witty for 6-7 year old children
+- Use simple Filipino or English words that Grade 1 students love
+- Think playful, exciting, and child-friendly (e.g., "Bilang Fun!", "Shape Hunt", "Number Magic")
+- NO complex words, NO long phrases
+- Make kids excited to play!
+
+Requirements for DESCRIPTION:
+- **MAXIMUM 2-3 SENTENCES ONLY!** Keep it short and concise!
+- Write a simple, clear description that explains what students will learn
+- Use simple language that both teachers AND parents can easily understand
+- Highlight the key learning objectives briefly
+- NO complex educational jargon, NO long paragraphs
+- Easy to digest and quick to read
+- Examples: "Students practice counting from 1-10 with fun animal images." OR "Mag-aaral ng mga hugis at kulay gamit ang larawan."
 
 Please respond with a JSON object in this exact format:
 {
-  "title": "Improved title here",
-  "description": "Improved description here"
+  "title": "Short 3-word title here",
+  "description": "Short 2-3 sentence description here"
 }`;
-
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
-      
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.7,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 1024,
         },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: 1024,
-          }
-        }),
-      });
+      };
 
-      if (!response.ok) {
-        throw new Error(`API request failed: ${response.status}`);
-      }
+      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
+      console.log('Gemini model used for exercise improvement:', modelUsed);
 
-      const data = await response.json();
-      
-      if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+      const responseText = extractGeminiText(data);
+      if (!responseText) {
         throw new Error('Invalid response from AI service');
       }
 
-      const responseText = data.candidates[0].content.parts[0].text;
-      
-      // Extract JSON from response
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
+      let improvedData: any;
+      try {
+        improvedData = parseGeminiJson<any>(responseText);
+      } catch (parseError) {
+        console.error('JSON Parse Error (improveExerciseDetails):', parseError);
+        console.error('Raw Gemini response:', responseText);
         throw new Error('Could not parse AI response');
       }
-
-      const improvedData = JSON.parse(jsonMatch[0]);
       
       if (improvedData.title) {
         setExerciseTitle(improvedData.title);
@@ -3731,7 +3968,15 @@ Please respond with a JSON object in this exact format:
 
     } catch (error) {
       console.error('Error improving exercise details:', error);
-      setImproveError('Failed to improve description. Please try again.');
+      const message = error instanceof Error ? error.message : 'Failed to improve description.';
+      const lowerMessage = message.toLowerCase();
+      setImproveError(
+        lowerMessage.includes('gemini') ||
+        lowerMessage.includes('api request') ||
+        lowerMessage.includes('invalid response')
+        ? 'Gemini is unavailable right now. Please check your API access or try again later.'
+        : 'Failed to improve description. Please try again.'
+      );
     } finally {
       setIsImprovingDescription(false);
     }
@@ -3828,6 +4073,268 @@ Please respond with a JSON object in this exact format:
       setCurrentAudioPlayer(null);
       setIsPlayingTTS(false);
     }
+  };
+
+  // Voice Recording Functions
+  const openRecordingModal = (questionId: string) => {
+    setRecordingQuestionId(questionId);
+    setRecordedAudioUri(null);
+    setRecordingDuration(0);
+    
+    // Check if this question already has a recorded voice
+    const question = questions.find(q => q.id === questionId);
+    setHasPreviousRecording(!!question?.recordedTtsUrl);
+    
+    setShowRecordingModal(true);
+  };
+
+  const closeRecordingModal = () => {
+    // Stop any ongoing recording or playback
+    stopRecording(false);
+    stopRecordingPlayback();
+    setShowRecordingModal(false);
+    setRecordingQuestionId(null);
+    setRecordedAudioUri(null);
+    setRecordingDuration(0);
+    setHasPreviousRecording(false);
+  };
+
+  const startRecording = async () => {
+    try {
+      console.log('Requesting permissions...');
+      const permission = await Audio.requestPermissionsAsync();
+      
+      if (permission.status !== 'granted') {
+        showCustomAlert('Permission Required', 'Please enable microphone access to record audio.');
+        return;
+      }
+
+      console.log('Setting up audio mode with noise cancellation...');
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      console.log('Starting recording with optimized compression...');
+      // ULTRA-OPTIMIZED recording options for smallest file size while maintaining voice clarity
+      // Optimized for voice recording: ~40-50 KB per minute (vs 960 KB/min at 128kbps)
+      const recordingOptions = {
+        android: {
+          extension: '.m4a',
+          outputFormat: Audio.AndroidOutputFormat.MPEG_4,
+          audioEncoder: Audio.AndroidAudioEncoder.AAC,
+          sampleRate: 22050, // Reduced from 44100 - sufficient for voice (saves ~50% size)
+          numberOfChannels: 1, // Mono - essential for voice recording
+          bitRate: 32000, // Reduced from 128000 - optimal for voice (saves 75% size)
+        },
+        ios: {
+          extension: '.m4a',
+          outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
+          audioQuality: Audio.IOSAudioQuality.MEDIUM, // Changed from HIGH for smaller size
+          sampleRate: 22050, // Reduced from 44100
+          numberOfChannels: 1, // Mono
+          bitRate: 32000, // Reduced from 128000
+          linearPCMBitDepth: 16,
+          linearPCMIsBigEndian: false,
+          linearPCMIsFloat: false,
+        },
+        web: {
+          mimeType: 'audio/webm',
+          bitsPerSecond: 32000, // Reduced from 128000
+        },
+      };
+
+      const { recording: newRecording } = await Audio.Recording.createAsync(
+        recordingOptions
+      );
+      
+      setRecording(newRecording);
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      // Start timer with 2-minute limit
+      const MAX_RECORDING_DURATION = 120; // 2 minutes in seconds
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration(prev => {
+          const newDuration = prev + 1;
+          
+          // Auto-stop at 2 minutes
+          if (newDuration >= MAX_RECORDING_DURATION) {
+            console.log('Maximum recording duration reached (2 minutes)');
+            stopRecording(true); // Pass true to indicate auto-stop
+            return MAX_RECORDING_DURATION;
+          }
+          
+          // Warning at 1:45
+          if (newDuration === 105) {
+            console.log('15 seconds remaining...');
+          }
+          
+          return newDuration;
+        });
+      }, 1000) as any;
+
+      console.log('Recording started successfully (max 2 minutes)');
+    } catch (error: any) {
+      console.error('Failed to start recording:', error);
+      showCustomAlert('Recording Error', `Failed to start recording: ${error.message}`);
+    }
+  };
+
+  const stopRecording = async (autoStopped: boolean = false) => {
+    if (!recording) return;
+
+    try {
+      console.log('Stopping recording...');
+      setIsRecording(false);
+      
+      // Clear timer
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      setRecordedAudioUri(uri);
+      setRecording(null);
+
+      // Reset audio mode
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+      });
+
+      console.log('Recording stopped, URI:', uri);
+      
+      // Show info message if auto-stopped at limit
+      if (autoStopped) {
+        setTimeout(() => {
+          showCustomAlert('Recording Complete', 'Recording stopped at 2-minute limit. You can now save or re-record.');
+        }, 500);
+      }
+    } catch (error: any) {
+      console.error('Failed to stop recording:', error);
+      showCustomAlert('Recording Error', `Failed to stop recording: ${error.message}`);
+    }
+  };
+
+  const playRecording = async () => {
+    if (!recordedAudioUri) return;
+
+    try {
+      console.log('Playing recording...');
+      
+      // Stop any existing playback
+      if (recordingSound.current) {
+        await recordingSound.current.unloadAsync();
+        recordingSound.current = null;
+      }
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: recordedAudioUri },
+        { shouldPlay: true },
+        (status: AVPlaybackStatus) => {
+          if (status.isLoaded && status.didJustFinish) {
+            setIsPlayingRecording(false);
+          }
+        }
+      );
+
+      recordingSound.current = sound;
+      setIsPlayingRecording(true);
+
+      console.log('Playing recording...');
+    } catch (error: any) {
+      console.error('Failed to play recording:', error);
+      showCustomAlert('Playback Error', `Failed to play recording: ${error.message}`);
+    }
+  };
+
+  const stopRecordingPlayback = async () => {
+    if (recordingSound.current) {
+      await recordingSound.current.stopAsync();
+      await recordingSound.current.unloadAsync();
+      recordingSound.current = null;
+      setIsPlayingRecording(false);
+    }
+  };
+
+  const reRecord = () => {
+    setRecordedAudioUri(null);
+    setRecordingDuration(0);
+    startRecording();
+  };
+  const saveRecordedVoice = async () => {
+    if (!recordedAudioUri || !recordingQuestionId) return;
+
+    try {
+      setUploading(true);
+
+      // Upload to Firebase Storage
+      const fileName = `recorded-tts/${exerciseCode || 'temp'}/question-${recordingQuestionId}.m4a`;
+      
+      // Use fetch to read the file and create a proper blob (RN compatible)
+      const response = await fetch(recordedAudioUri);
+      const blob = await response.blob();
+
+      // Upload file
+      const uploadResult = await uploadFile(fileName, blob, { contentType: 'audio/m4a' });
+      
+      if (uploadResult.error || !uploadResult.downloadURL) {
+        throw new Error(uploadResult.error || 'Upload failed');
+      }
+
+      // Update question with recorded TTS URL
+      updateQuestion(recordingQuestionId, {
+        recordedTtsUrl: uploadResult.downloadURL,
+        ttsStatus: 'ready'
+      });
+
+      console.log('Recorded voice saved successfully:', uploadResult.downloadURL);
+      showCustomAlert('Success', 'Voice recording saved successfully!');
+      closeRecordingModal();
+    } catch (error: any) {
+      console.error('Failed to save recorded voice:', error);
+      showCustomAlert('Upload Error', `Failed to save recording: ${error.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const deletePreviousRecording = () => {
+    if (!recordingQuestionId) return;
+
+    showCustomAlert(
+      'Delete Recording',
+      'Are you sure you want to delete the previous voice recording? This will restore the AI-generated TTS (if available).',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel'
+        },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            // Remove the recorded TTS URL from the question
+            updateQuestion(recordingQuestionId, {
+              recordedTtsUrl: undefined
+            });
+            
+            setHasPreviousRecording(false);
+            console.log('Previous recording deleted for question:', recordingQuestionId);
+            showCustomAlert('Success', 'Previous voice recording deleted successfully!');
+          }
+        }
+      ]
+    );
+  };
+
+  const formatRecordingTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   const deleteQuestion = (questionId: string) => {
@@ -4019,6 +4526,7 @@ Please respond with a JSON object in this exact format:
         teacherName: teacherData ? `${teacherData.firstName} ${teacherData.lastName}` : 'Unknown Teacher',
         questionCount: finalQuestions.length,
         timesUsed: 0,
+        exerciseCode: finalExerciseCode,
         questions: finalQuestions.map(q => {
           // Create a clean question object, removing all undefined values
           const cleanQuestion: any = {
@@ -4081,13 +4589,21 @@ Please respond with a JSON object in this exact format:
           if (q.ttsAudioUrl) {
             cleanQuestion.ttsAudioUrl = q.ttsAudioUrl;
           }
+          
+          if (q.recordedTtsUrl) {
+            cleanQuestion.recordedTtsUrl = q.recordedTtsUrl;
+          }
+          
+          if (q.ttsStatus) {
+            cleanQuestion.ttsStatus = q.ttsStatus;
+          }
 
           return cleanQuestion;
         }),
         isPublic: Boolean(isPublic),
-        exerciseCode: finalExerciseCode,
         category: exerciseCategory,
         timeLimitPerItem: timeLimitPerItem,
+        maxAttemptsPerItem: maxAttemptsPerItem,
         createdAt: new Date().toISOString(),
       };
       
@@ -4133,10 +4649,30 @@ Please respond with a JSON object in this exact format:
           error = updateError || 'Failed to update exercise';
         }
       } else {
-        // Create new exercise
-        const result = await pushData('/exercises', finalCleanPayload);
-        key = result.key;
-        error = result.error;
+        // Create new exercise with readable ID (EXERCISE-0001, EXERCISE-0002, etc.)
+        console.log('[CreateExercise] Creating new exercise with readable ID...');
+        
+        const result = await createExercise({
+          title: finalCleanPayload.title,
+          description: finalCleanPayload.description,
+          teacherId: finalCleanPayload.teacherId,
+          teacherName: finalCleanPayload.teacherName,
+          questions: finalCleanPayload.questions,
+          resourceUrl: finalCleanPayload.resourceUrl,
+          category: finalCleanPayload.category,
+          timesUsed: finalCleanPayload.timesUsed,
+          isPublic: finalCleanPayload.isPublic,
+          timeLimitPerItem: finalCleanPayload.timeLimitPerItem,
+          maxAttemptsPerItem: finalCleanPayload.maxAttemptsPerItem,
+          exerciseCode: finalExerciseCode
+        });
+        
+        key = result.exerciseId || null;
+        error = result.error || null;
+        
+        if (result.success && key) {
+          console.log(`[CreateExercise] Exercise created with ID: ${key}`);
+        }
       }
       
       if (error || !key) {
@@ -4211,7 +4747,6 @@ Please respond with a JSON object in this exact format:
       showCustomAlert('Error', 'Failed to pick a file');
     }
   };
-
   const uploadResourceFile = async (): Promise<string | null> => {
     if (!resourceFile) return null;
     try {
@@ -4231,7 +4766,6 @@ Please respond with a JSON object in this exact format:
       setUploading(false);
     }
   };
-
   const openStockImageModal = (context: {
     questionId: string;
     optionIndex?: number;
@@ -4504,6 +5038,73 @@ Please respond with a JSON object in this exact format:
     openModal('imageLibrary');
   };
 
+  const pickMultipleImagesFromDevice = async (questionId: string) => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        showCustomAlert('Permission Required', 'Please grant permission to access your photo library to add images.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: 'images',
+        allowsMultipleSelection: true,
+        quality: 0.8,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      // Upload all selected images to Firebase and add them to the question
+      setUploadingImage(true);
+      const uploadedUris: string[] = [];
+
+      for (let i = 0; i < result.assets.length; i++) {
+        const asset = result.assets[i];
+        try {
+          const fileName = `exercise_question_${Date.now()}_${i}.jpg`;
+          const storagePath = `exercise-images/${fileName}`;
+          
+          // Read the file and upload using the uploadFile helper
+          const response = await fetch(asset.uri);
+          const blob = await response.blob();
+          
+          const { downloadURL, error } = await uploadFile(storagePath, blob, {
+            contentType: 'image/jpeg',
+          });
+          
+          if (error) {
+            throw new Error(`Upload failed: ${error}`);
+          }
+          
+          if (downloadURL) {
+            uploadedUris.push(downloadURL);
+          }
+        } catch (error) {
+          console.error(`Error uploading image ${i + 1}:`, error);
+          showCustomAlert('Upload Error', `Failed to upload image ${i + 1} of ${result.assets.length}`);
+        }
+      }
+
+      // Add all successfully uploaded images to the question
+      const question = questions.find(q => q.id === questionId);
+      if (question && uploadedUris.length > 0) {
+        const currentImages = question.questionImages || [];
+        updateQuestion(questionId, { 
+          questionImages: [...currentImages, ...uploadedUris] 
+        });
+        showCustomAlert('Success', `Successfully added ${uploadedUris.length} image(s) to the question`);
+      }
+
+      setUploadingImage(false);
+    } catch (error) {
+      console.error('Error picking images:', error);
+      showCustomAlert('Error', 'Failed to pick images. Please try again.');
+      setUploadingImage(false);
+    }
+  };
+
   const addQuestionImage = (questionId: string, imageUri: string) => {
     const question = questions.find(q => q.id === questionId);
     if (!question) return;
@@ -4618,6 +5219,55 @@ Please respond with a JSON object in this exact format:
       }
     }
   };
+  // Helper function to sort reorder items based on direction
+  const sortReorderItems = (items: ReorderItem[], direction: 'asc' | 'desc' = 'asc'): ReorderItem[] => {
+    if (!items || items.length === 0) return items;
+    
+    const sorted = [...items].sort((a, b) => {
+      const aContent = a.content || '';
+      const bContent = b.content || '';
+      
+      // Try to extract numeric values from currency strings (e.g., "20 PISO" -> 20)
+      const extractNumericValue = (text: string): number => {
+        // Match patterns like "20 PISO", "5 peso", "1 PISO", etc.
+        const currencyMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:PISO|peso|PESO)/i);
+        if (currencyMatch) {
+          return parseFloat(currencyMatch[1]);
+        }
+        
+        // Try to parse as regular number
+        const num = parseFloat(text);
+        if (!isNaN(num)) {
+          return num;
+        }
+        
+        // Return a large number for non-numeric values to sort them last
+        return Infinity;
+      };
+      
+      const aNum = extractNumericValue(aContent);
+      const bNum = extractNumericValue(bContent);
+      
+      // If both are valid numbers (including currency values)
+      if (aNum !== Infinity && bNum !== Infinity) {
+        return direction === 'asc' ? aNum - bNum : bNum - aNum;
+      }
+      
+      // If one is a number and one isn't, numbers come first
+      if (aNum !== Infinity && bNum === Infinity) {
+        return -1;
+      }
+      if (aNum === Infinity && bNum !== Infinity) {
+        return 1;
+      }
+      
+      // Both are non-numeric, fall back to string comparison
+      const comparison = aContent.localeCompare(bContent, 'en', { numeric: true, sensitivity: 'base' });
+      return direction === 'asc' ? comparison : -comparison;
+    });
+    
+    return sorted;
+  };
 
   // Reorder item functions
   const addReorderItem = (questionId: string, type: 'text' | 'image' = 'text') => {
@@ -4631,11 +5281,23 @@ Please respond with a JSON object in this exact format:
     const question = questions.find(q => q.id === questionId);
     if (question) {
       const currentItems = question.reorderItems || [];
-      updateQuestion(questionId, { reorderItems: [...currentItems, newItem] });
+      const updatedItems = [...currentItems, newItem];
+      
+      // Sort items based on current direction
+      const sortedItems = sortReorderItems(updatedItems, question.reorderDirection || 'asc');
+      
+      // Update answer to match sorted order
+      const answer = sortedItems.map(item => item.content).filter(Boolean);
+      
+      updateQuestion(questionId, { 
+        reorderItems: sortedItems,
+        answer: answer
+      });
       
       // If it's an image item, automatically open the image picker
       if (type === 'image') {
-        const newItemIndex = currentItems.length; // Index of the newly added item
+        // Find the index of the new item after sorting
+        const newItemIndex = sortedItems.findIndex(item => item.id === newItem.id);
         pickReorderItemImage(questionId, newItemIndex);
       }
     }
@@ -4646,7 +5308,17 @@ Please respond with a JSON object in this exact format:
     if (question && question.reorderItems) {
       const newItems = [...question.reorderItems];
       newItems[itemIndex] = { ...newItems[itemIndex], ...updates };
-      updateQuestion(questionId, { reorderItems: newItems });
+      
+      // Sort items based on current direction
+      const sortedItems = sortReorderItems(newItems, question.reorderDirection || 'asc');
+      
+      // Update answer to match sorted order
+      const answer = sortedItems.map(item => item.content).filter(Boolean);
+      
+      updateQuestion(questionId, { 
+        reorderItems: sortedItems,
+        answer: answer
+      });
     }
   };
 
@@ -4654,7 +5326,17 @@ Please respond with a JSON object in this exact format:
     const question = questions.find(q => q.id === questionId);
     if (question && question.reorderItems && question.reorderItems.length > 1) {
       const newItems = question.reorderItems.filter((_, index) => index !== itemIndex);
-      updateQuestion(questionId, { reorderItems: newItems });
+      
+      // Sort items based on current direction
+      const sortedItems = sortReorderItems(newItems, question.reorderDirection || 'asc');
+      
+      // Update answer to match sorted order
+      const answer = sortedItems.map(item => item.content).filter(Boolean);
+      
+      updateQuestion(questionId, { 
+        reorderItems: sortedItems,
+        answer: answer
+      });
     }
   };
 
@@ -4665,90 +5347,16 @@ Please respond with a JSON object in this exact format:
   };
 
   const reorderItems = (questionId: string, newItems: ReorderItem[]) => {
-    updateQuestion(questionId, { reorderItems: newItems });
-  };
-
-  // Render function for draggable reorder items
-  const renderReorderItem = ({ item, drag, isActive, getIndex }: RenderItemParams<ReorderItem>) => {
-    const index = getIndex?.() ?? 0;
-    const question = questions.find(q => q.id === editingQuestion?.id);
-    if (!question || !question.reorderItems) return null;
-
-    return (
-      <TouchableOpacity
-        style={[
-          styles.reorderItemContainer,
-          isActive && styles.reorderItemActive
-        ]}
-        onLongPress={drag}
-        disabled={isActive}
-      >
-        <View style={styles.reorderItemContent}>
-          <View style={styles.reorderItemNumber}>
-            <Text style={styles.reorderItemNumberText}>{index + 1}</Text>
-          </View>
-          
-          {item.type === 'text' ? (
-            <TextInput
-              style={styles.reorderTextInput}
-              value={item.content}
-              onChangeText={(text) => updateReorderItem(editingQuestion!.id, index, { content: text })}
-              placeholder={`Item ${index + 1}`}
-              placeholderTextColor="#9ca3af"
-            />
-          ) : (
-            <View style={styles.reorderImageContainer}>
-              {item.imageUrl && item.imageUrl.trim() !== '' ? (
-                <Image source={{ uri: item.imageUrl }} style={styles.reorderImageThumbnail} />
-              ) : (
-                <View style={styles.reorderImagePlaceholder}>
-                  <MaterialCommunityIcons name="image" size={24} color="#9ca3af" />
-                </View>
-              )}
-            </View>
-          )}
-          
-          <View style={styles.reorderItemActions}>
-            {item.type === 'text' ? (
-              <TouchableOpacity
-                style={styles.reorderActionButton}
-                onPress={() => pickReorderItemImage(editingQuestion!.id, index)}
-              >
-                <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.reorderItemActionGroup}>
-                <TouchableOpacity
-                  style={styles.reorderActionButton}
-                  onPress={() => pickReorderItemImage(editingQuestion!.id, index)}
-                >
-                  <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.reorderActionButton}
-                  onPress={() => updateReorderItem(editingQuestion!.id, index, { type: 'text', content: '', imageUrl: undefined })}
-                >
-                  <MaterialCommunityIcons name="text" size={20} color="#3b82f6" />
-                </TouchableOpacity>
-              </View>
-            )}
-            
-            {question.reorderItems.length > 1 && (
-              <TouchableOpacity
-                style={styles.reorderActionButton}
-                onPress={() => removeReorderItem(editingQuestion!.id, index)}
-              >
-                <AntDesign name="close" size={16} color="#ef4444" />
-              </TouchableOpacity>
-            )}
-          </View>
-        </View>
-        
-        <View style={styles.reorderDragHandle}>
-          <MaterialCommunityIcons name="drag" size={20} color="#9ca3af" />
-        </View>
-      </TouchableOpacity>
-    );
+    const question = questions.find(q => q.id === questionId);
+    if (!question) return;
+    
+    // Update answer to match new order
+    const answer = newItems.map(item => item.content).filter(Boolean);
+    
+    updateQuestion(questionId, { 
+      reorderItems: newItems,
+      answer: answer
+    });
   };
 
   const renderQuestionTypeModal = () => (
@@ -4824,7 +5432,15 @@ Please respond with a JSON object in this exact format:
             <View style={styles.placeholder} />
           </View>
             
-          <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
+          <ScrollView 
+            ref={questionEditorScrollRef}
+            style={styles.fullScreenContent} 
+            showsVerticalScrollIndicator={true}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            bounces={true}
+            contentContainerStyle={styles.fullScreenScrollContainer}
+          >
             <View style={styles.inputGroup}>
               <Text style={styles.inputLabel}>Question</Text>
               <View style={styles.questionInputContainer}>
@@ -4897,25 +5513,52 @@ Please respond with a JSON object in this exact format:
                       </Text>
                     </TouchableOpacity>
                   )}
+                  
+                  {/* Record Voice Button */}
+                  <TouchableOpacity
+                    style={[styles.ttsButton, styles.recordVoiceButton]}
+                    onPress={() => openRecordingModal(editingQuestion.id)}
+                    disabled={isGeneratingTTS}
+                  >
+                    <MaterialCommunityIcons 
+                      name={editingQuestion.recordedTtsUrl ? "microphone-settings" : "microphone"} 
+                      size={16} 
+                      color={editingQuestion.recordedTtsUrl ? "#10b981" : "#7c3aed"} 
+                    />
+                    <Text style={[styles.ttsButtonText, { color: editingQuestion.recordedTtsUrl ? '#10b981' : '#7c3aed' }]}>
+                      {editingQuestion.recordedTtsUrl ? 'Voice Recorded' : 'Record Voice'}
+                    </Text>
+                  </TouchableOpacity>
+                  
+                  {/* Play Recorded Voice Button */}
+                  {editingQuestion.recordedTtsUrl && (
+                    <TouchableOpacity
+                      style={styles.ttsButton}
+                      onPress={isPlayingTTS ? stopTTS : () => playTTS(editingQuestion.recordedTtsUrl)}
+                    >
+                      <MaterialCommunityIcons 
+                        name={isPlayingTTS ? "stop" : "play"} 
+                        size={16} 
+                        color="#7c3aed" 
+                      />
+                      <Text style={[styles.ttsButtonText, { color: '#7c3aed' }]}>
+                        {isPlayingTTS ? 'Stop Voice' : 'Play Voice'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
               </View>
               
               <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
-                <TouchableOpacity onPress={() => pickQuestionImage(editingQuestion.id)} style={styles.pickFileButton}>
-                  <MaterialCommunityIcons name="image-plus" size={16} color="#ffffff" />
-                  <Text style={styles.pickFileButtonText}>{editingQuestion.questionImage ? 'Change image' : 'Add image'}</Text>
+                <TouchableOpacity 
+                  onPress={() => pickMultipleQuestionImages(editingQuestion.id)} 
+                  style={styles.imageOptionsButton}
+                >
+                  <MaterialCommunityIcons name="image-plus" size={18} color="#ffffff" />
+                  <Text style={styles.imageOptionsButtonText}>
+                    Add Images
+                  </Text>
                 </TouchableOpacity>
-                
-                {/* Multiple images button for pattern questions and multiple choice */}
-                {(editingQuestion.type === 're-order' || editingQuestion.type === 'identification' || editingQuestion.type === 'multiple-choice') && (
-                  <TouchableOpacity 
-                    onPress={() => pickMultipleQuestionImages(editingQuestion.id)} 
-                    style={[styles.pickFileButton, { marginLeft: 8, backgroundColor: '#f97316' }]}
-                  >
-                    <MaterialCommunityIcons name="image-multiple" size={16} color="#ffffff" />
-                    <Text style={styles.pickFileButtonText}>Add Multiple Images</Text>
-                  </TouchableOpacity>
-                )}
               </View>
               
               {/* Single question image */}
@@ -4925,6 +5568,7 @@ Please respond with a JSON object in this exact format:
                       source={{ uri: editingQuestion.questionImage }} 
                       style={{ width: 140, height: 140, borderRadius: 12, marginRight: 8 }} 
                       resizeMode="cover"
+                      fadeDuration={0}
                       loadingIndicatorSource={require('../assets/images/icon.png')}
                     />
                     <TouchableOpacity onPress={() => updateQuestion(editingQuestion.id, { questionImage: null })}>
@@ -4946,8 +5590,9 @@ Please respond with a JSON object in this exact format:
                       keyExtractor={(item, index) => `${editingQuestion.id}-img-${index}`}
                       onDragEnd={({ data }) => reorderQuestionImages(editingQuestion.id, data)}
                       horizontal
-                      showsHorizontalScrollIndicator={false}
+                      showsHorizontalScrollIndicator={true}
                       scrollEnabled={true}
+                      bounces={true}
                     />
                   </View>
                 </View>
@@ -5035,7 +5680,6 @@ Please respond with a JSON object in this exact format:
                   </View>
                 </View>
               )}
-
               {editingQuestion.type === 'multiple-choice' && (
                 <View style={styles.inputGroup}>
                   <Text style={styles.inputLabel}>Answer Options</Text>
@@ -5124,6 +5768,7 @@ Please respond with a JSON object in this exact format:
                             source={{ uri: editingQuestion.optionImages[index] as string }} 
                             style={{ width: 72, height: 72, borderRadius: 8, marginRight: 8 }} 
                             resizeMode="cover"
+                            fadeDuration={0}
                             loadingIndicatorSource={require('../assets/images/icon.png')}
                           />
                           <TouchableOpacity onPress={() => {
@@ -5155,6 +5800,7 @@ Please respond with a JSON object in this exact format:
                                   source={{ uri: imageUrl }} 
                                   style={{ width: 72, height: 72, borderRadius: 8 }} 
                                   resizeMode="cover"
+                                  fadeDuration={0}
                                   loadingIndicatorSource={require('../assets/images/icon.png')}
                                 />
                                 <TouchableOpacity 
@@ -5218,13 +5864,19 @@ Please respond with a JSON object in this exact format:
                         style={styles.pairsPreviewVScroll}
                         showsVerticalScrollIndicator={true}
                         contentContainerStyle={styles.pairsPreviewVContainer}
-                          nestedScrollEnabled={true}
+                        nestedScrollEnabled={true}
+                        bounces={true}
                       >
                         {(editingQuestion.pairs || []).map((pair, idx) => (
                           <View key={`pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                             <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
                               {pair.leftImage && pair.leftImage.trim() !== '' ? (
-                                <Image source={{ uri: pair.leftImage }} style={styles.pairImage} />
+                                <Image 
+                                  source={{ uri: pair.leftImage }} 
+                                  style={styles.pairImage}
+                                  resizeMode="cover"
+                                  loadingIndicatorSource={require('../assets/images/icon.png')}
+                                />
                               ) : (
                                 <Text style={styles.pairText}>{pair.left || 'Left item'}</Text>
                               )}
@@ -5234,7 +5886,12 @@ Please respond with a JSON object in this exact format:
                             </View>
                             <View style={[styles.pairSide, styles.pairRight, { backgroundColor: ['#1e40af','#059669','#d97706','#dc2626','#7c3aed'][idx % 5] }]}>
                               {pair.rightImage && pair.rightImage.trim() !== '' ? (
-                                <Image source={{ uri: pair.rightImage }} style={styles.pairImage} />
+                                <Image 
+                                  source={{ uri: pair.rightImage }} 
+                                  style={styles.pairImage}
+                                  resizeMode="cover"
+                                  loadingIndicatorSource={require('../assets/images/icon.png')}
+                                />
                               ) : (
                                 <Text style={styles.pairText}>{pair.right || 'Right item'}</Text>
                               )}
@@ -5290,7 +5947,12 @@ Please respond with a JSON object in this exact format:
                           </View>
                           {pair.leftImage && pair.leftImage.trim() !== '' && (
                             <View style={styles.pairImagePreview}>
-                              <Image source={{ uri: pair.leftImage }} style={styles.pairImageThumbnail} />
+                              <Image 
+                                source={{ uri: pair.leftImage }} 
+                                style={styles.pairImageThumbnail}
+                                resizeMode="cover"
+                                loadingIndicatorSource={require('../assets/images/icon.png')}
+                              />
                               <TouchableOpacity 
                                 style={styles.pairImageRemove} 
                                 onPress={() => clearPairImage(editingQuestion.id, index, 'left')}
@@ -5330,7 +5992,12 @@ Please respond with a JSON object in this exact format:
                           </View>
                           {pair.rightImage && pair.rightImage.trim() !== '' && (
                             <View style={styles.pairImagePreview}>
-                              <Image source={{ uri: pair.rightImage }} style={styles.pairImageThumbnail} />
+                              <Image 
+                                source={{ uri: pair.rightImage }} 
+                                style={styles.pairImageThumbnail}
+                                resizeMode="cover"
+                                loadingIndicatorSource={require('../assets/images/icon.png')}
+                              />
                               <TouchableOpacity 
                                 style={styles.pairImageRemove} 
                                 onPress={() => clearPairImage(editingQuestion.id, index, 'right')}
@@ -5356,34 +6023,195 @@ Please respond with a JSON object in this exact format:
                   </TouchableOpacity>
                 </View>
               )}
-
               {editingQuestion.type === 're-order' && (
                 <View style={styles.inputGroup}>
                   <Text style={styles.inputLabel}>Items to Reorder</Text>
-                  <View style={{ flexDirection: 'row', marginBottom: 12 }}>
+                  <View style={{ flexDirection: 'row', marginBottom: 4 }}>
                     <TouchableOpacity
                       style={[styles.choiceModeButton, (editingQuestion.reorderDirection || 'asc') === 'asc' && styles.choiceModeActive]}
-                      onPress={() => updateQuestion(editingQuestion.id, { reorderDirection: 'asc' })}
+                      onPress={() => {
+                        const newDirection = 'asc';
+                        const sortedItems = sortReorderItems(editingQuestion.reorderItems || [], newDirection);
+                        const answer = sortedItems.map(item => item.content).filter(Boolean);
+                        updateQuestion(editingQuestion.id, { 
+                          reorderDirection: newDirection,
+                          reorderItems: sortedItems,
+                          answer: answer
+                        });
+                      }}
                     >
                       <Text style={[styles.choiceModeText, (editingQuestion.reorderDirection || 'asc') === 'asc' && styles.choiceModeTextActive]}>Ascending order</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.choiceModeButton, editingQuestion.reorderDirection === 'desc' && styles.choiceModeActive]}
-                      onPress={() => updateQuestion(editingQuestion.id, { reorderDirection: 'desc' })}
+                      onPress={() => {
+                        const newDirection = 'desc';
+                        const sortedItems = sortReorderItems(editingQuestion.reorderItems || [], newDirection);
+                        const answer = sortedItems.map(item => item.content).filter(Boolean);
+                        updateQuestion(editingQuestion.id, { 
+                          reorderDirection: newDirection,
+                          reorderItems: sortedItems,
+                          answer: answer
+                        });
+                      }}
                     >
                       <Text style={[styles.choiceModeText, editingQuestion.reorderDirection === 'desc' && styles.choiceModeTextActive]}>Descending order</Text>
                     </TouchableOpacity>
                   </View>
+                  <Text style={{ fontSize: 12, color: '#64748b', marginBottom: 8, fontStyle: 'italic' }}>
+                    Items are automatically sorted in {(editingQuestion.reorderDirection || 'asc') === 'asc' ? 'ascending' : 'descending'} order. Students will see them shuffled.
+                  </Text>
+                  <TouchableOpacity
+                    style={{
+                      backgroundColor: '#f3f4f6',
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 6,
+                      marginBottom: 12,
+                      alignSelf: 'flex-start',
+                      flexDirection: 'row',
+                      alignItems: 'center'
+                    }}
+                    onPress={() => {
+                      const sortedItems = sortReorderItems(editingQuestion.reorderItems || [], editingQuestion.reorderDirection || 'asc');
+                      const answer = sortedItems.map(item => item.content).filter(Boolean);
+                      updateQuestion(editingQuestion.id, { 
+                        reorderItems: sortedItems,
+                        answer: answer
+                      });
+                    }}
+                  >
+                    <MaterialCommunityIcons name="sort" size={16} color="#64748b" />
+                    <Text style={{ marginLeft: 6, fontSize: 12, color: '#64748b' }}>
+                      Sort Items Now
+                    </Text>
+                  </TouchableOpacity>
                   
-                  {/* Draggable Reorder Items */}
+                  {/* Reorder Items with Arrow Controls */}
                   <View style={styles.reorderContainer}>
-                    <DraggableFlatList
-                      data={editingQuestion.reorderItems || []}
-                      renderItem={renderReorderItem}
-                      keyExtractor={(item) => item.id}
-                      onDragEnd={({ data }) => reorderItems(editingQuestion.id, data)}
-                      scrollEnabled={false}
-                    />
+                    {(editingQuestion.reorderItems || []).map((item, index) => (
+                      <View
+                        key={item.id}
+                        style={[
+                          styles.reorderItemContainer,
+                        ]}
+                      >
+                        <View style={styles.reorderItemContent}>
+                          <View style={styles.reorderItemNumber}>
+                            <Text style={styles.reorderItemNumberText}>{index + 1}</Text>
+                          </View>
+                          
+                          {item.type === 'text' ? (
+                            <TextInput
+                              style={styles.reorderTextInput}
+                              value={item.content}
+                              onChangeText={(text) => updateReorderItem(editingQuestion.id, index, { content: text })}
+                              placeholder={`Item ${index + 1}`}
+                              placeholderTextColor="#9ca3af"
+                            />
+                          ) : (
+                            <View style={styles.reorderImageContainer}>
+                              {item.imageUrl && item.imageUrl.trim() !== '' ? (
+                                <Image 
+                                  source={{ uri: item.imageUrl }} 
+                                  style={styles.reorderImageThumbnail}
+                                  resizeMode="cover"
+                                  loadingIndicatorSource={require('../assets/images/icon.png')}
+                                />
+                              ) : (
+                                <View style={styles.reorderImagePlaceholder}>
+                                  <MaterialCommunityIcons name="image" size={24} color="#9ca3af" />
+                                </View>
+                              )}
+                            </View>
+                          )}
+                          
+                          <View style={styles.reorderItemActions}>
+                            {item.type === 'text' ? (
+                              <TouchableOpacity
+                                style={styles.reorderActionButton}
+                                onPress={() => pickReorderItemImage(editingQuestion.id, index)}
+                              >
+                                <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
+                              </TouchableOpacity>
+                            ) : (
+                              <View style={styles.reorderItemActionGroup}>
+                                <TouchableOpacity
+                                  style={styles.reorderActionButton}
+                                  onPress={() => pickReorderItemImage(editingQuestion.id, index)}
+                                >
+                                  <MaterialCommunityIcons name="image-plus" size={20} color="#3b82f6" />
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  style={styles.reorderActionButton}
+                                  onPress={() => updateReorderItem(editingQuestion.id, index, { type: 'text', content: '', imageUrl: undefined })}
+                                >
+                                  <MaterialCommunityIcons name="text" size={20} color="#3b82f6" />
+                                </TouchableOpacity>
+                              </View>
+                            )}
+                            
+                            {(editingQuestion.reorderItems || []).length > 1 && (
+                              <TouchableOpacity
+                                style={styles.reorderActionButton}
+                                onPress={() => removeReorderItem(editingQuestion.id, index)}
+                              >
+                                <AntDesign name="close" size={16} color="#ef4444" />
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+                        
+                        <View style={styles.reorderArrowControls}>
+                          <TouchableOpacity 
+                            style={[styles.reorderArrowButton, index === 0 && styles.reorderArrowButtonDisabled]}
+                            onPress={() => {
+                              if (index > 0) {
+                                const newItems = [...(editingQuestion.reorderItems || [])];
+                                [newItems[index - 1], newItems[index]] = [newItems[index], newItems[index - 1]];
+                                
+                                // Update answer to match new manual order
+                                const answer = newItems.map(item => item.content).filter(Boolean);
+                                updateQuestion(editingQuestion.id, { 
+                                  reorderItems: newItems,
+                                  answer: answer
+                                });
+                              }
+                            }}
+                            disabled={index === 0}
+                          >
+                            <MaterialCommunityIcons 
+                              name="arrow-up" 
+                              size={20} 
+                              color={index === 0 ? "#d1d5db" : "#64748b"} 
+                            />
+                          </TouchableOpacity>
+                          <TouchableOpacity 
+                            style={[styles.reorderArrowButton, index === (editingQuestion.reorderItems || []).length - 1 && styles.reorderArrowButtonDisabled]}
+                            onPress={() => {
+                              if (index < (editingQuestion.reorderItems || []).length - 1) {
+                                const newItems = [...(editingQuestion.reorderItems || [])];
+                                [newItems[index], newItems[index + 1]] = [newItems[index + 1], newItems[index]];
+                                
+                                // Update answer to match new manual order
+                                const answer = newItems.map(item => item.content).filter(Boolean);
+                                updateQuestion(editingQuestion.id, { 
+                                  reorderItems: newItems,
+                                  answer: answer
+                                });
+                              }
+                            }}
+                            disabled={index === (editingQuestion.reorderItems || []).length - 1}
+                          >
+                            <MaterialCommunityIcons 
+                              name="arrow-down" 
+                              size={20} 
+                              color={index === (editingQuestion.reorderItems || []).length - 1 ? "#d1d5db" : "#64748b"} 
+                            />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
                   </View>
                   
                   {/* Add Item Buttons */}
@@ -5414,7 +6242,12 @@ Please respond with a JSON object in this exact format:
                             {item.type === 'text' ? (
                               <Text style={styles.reorderPreviewText}>{item.content || `Item ${i+1}`}</Text>
                             ) : item.imageUrl && item.imageUrl.trim() !== '' ? (
-                              <Image source={{ uri: item.imageUrl }} style={styles.reorderPreviewImage} />
+                              <Image 
+                                source={{ uri: item.imageUrl }} 
+                                style={styles.reorderPreviewImage}
+                                resizeMode="cover"
+                                loadingIndicatorSource={require('../assets/images/icon.png')}
+                              />
                             ) : (
                               <View style={styles.reorderPreviewPlaceholder}>
                                 <MaterialCommunityIcons name="image" size={20} color="#ffffff" />
@@ -5619,7 +6452,6 @@ Please respond with a JSON object in this exact format:
                             </View>
                           </View>
                         )}
-
                         {sub.type === 'matching' && (
                           <View style={styles.inputGroup}>
                             <Text style={styles.inputLabel}>Matching Pairs</Text>
@@ -5638,13 +6470,18 @@ Please respond with a JSON object in this exact format:
                                   style={styles.pairsPreviewVScroll}
                                   showsVerticalScrollIndicator={true}
                                   contentContainerStyle={styles.pairsPreviewVContainer}
-                                    nestedScrollEnabled={true}
+                                  nestedScrollEnabled={true}
+                                  bounces={true}
                                 >
                                   {(sub.pairs || []).map((pair, idx) => (
                                     <View key={`sub-pr-${idx}`} style={[styles.pairPreviewCard, { alignSelf: 'center' }]}>
                                       <View style={[styles.pairSide, styles.pairLeft, { backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6'][idx % 5] }]}>
                                         {(pair as any).leftImage && (pair as any).leftImage.trim() !== '' ? (
-                                          <Image source={{ uri: (pair as any).leftImage }} style={styles.pairImage} />
+                                          <Image 
+                                            source={{ uri: (pair as any).leftImage }} 
+                                            style={styles.pairImage}
+                                            loadingIndicatorSource={require('../assets/images/icon.png')}
+                                          />
                                         ) : (
                                           <Text style={styles.pairText}>{pair.left || 'Left item'}</Text>
                                         )}
@@ -5654,7 +6491,11 @@ Please respond with a JSON object in this exact format:
                                       </View>
                                       <View style={[styles.pairSide, styles.pairRight, { backgroundColor: ['#1e40af','#059669','#d97706','#dc2626','#7c3aed'][idx % 5] }]}>
                                         {(pair as any).rightImage && (pair as any).rightImage.trim() !== '' ? (
-                                          <Image source={{ uri: (pair as any).rightImage }} style={styles.pairImage} />
+                                          <Image 
+                                            source={{ uri: (pair as any).rightImage }} 
+                                            style={styles.pairImage}
+                                            loadingIndicatorSource={require('../assets/images/icon.png')}
+                                          />
                                         ) : (
                                           <Text style={styles.pairText}>{pair.right || 'Right item'}</Text>
                                         )}
@@ -5731,7 +6572,12 @@ Please respond with a JSON object in this exact format:
                                     </View>
                                     {(pair as any).leftImage && (pair as any).leftImage.trim() !== '' && (
                                       <View style={styles.pairImagePreview}>
-                                        <Image source={{ uri: (pair as any).leftImage }} style={styles.pairImageThumbnail} />
+                                        <Image 
+                                          source={{ uri: (pair as any).leftImage }} 
+                                          style={styles.pairImageThumbnail}
+                                          resizeMode="cover"
+                                          loadingIndicatorSource={require('../assets/images/icon.png')}
+                                        />
                                         <TouchableOpacity 
                                           style={styles.pairImageRemove} 
                                           onPress={() => {
@@ -5803,7 +6649,12 @@ Please respond with a JSON object in this exact format:
                                     </View>
                                     {(pair as any).rightImage && (pair as any).rightImage.trim() !== '' && (
                                       <View style={styles.pairImagePreview}>
-                                        <Image source={{ uri: (pair as any).rightImage }} style={styles.pairImageThumbnail} />
+                                        <Image 
+                                          source={{ uri: (pair as any).rightImage }} 
+                                          style={styles.pairImageThumbnail}
+                                          resizeMode="cover"
+                                          loadingIndicatorSource={require('../assets/images/icon.png')}
+                                        />
                                         <TouchableOpacity 
                                           style={styles.pairImageRemove} 
                                           onPress={() => {
@@ -5981,7 +6832,13 @@ Please respond with a JSON object in this exact format:
                 <View style={styles.textReviewHeaderSpacer} />
               </View>
               
-              <ScrollView style={styles.textReviewContent} showsVerticalScrollIndicator={false}>
+              <ScrollView 
+                style={styles.textReviewContent} 
+                showsVerticalScrollIndicator={true}
+                keyboardShouldPersistTaps="handled"
+                keyboardDismissMode="on-drag"
+                bounces={true}
+              >
                 <View style={styles.textReviewSection}>
                   <Text style={styles.textReviewLabel}>Processed Text:</Text>
                   <TextInput
@@ -6080,15 +6937,18 @@ Please respond with a JSON object in this exact format:
       </View>
     );
   }
-
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
       <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
         <ScrollView 
+          ref={mainScrollRef}
           style={styles.scrollView} 
-          contentContainerStyle={{ paddingBottom: 20 }}
-          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContentContainer}
+          showsVerticalScrollIndicator={true}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          bounces={true}
         >
         {/* Header */}
         <View style={styles.header}>
@@ -6218,6 +7078,65 @@ Please respond with a JSON object in this exact format:
             )}
           </View>
           
+          {/* Attempt Limit Per Item */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Attempt Limit Per Item</Text>
+            <View style={styles.timeLimitContainer}>
+              <TouchableOpacity
+                style={[styles.timeLimitOption, maxAttemptsPerItem === null && styles.timeLimitOptionActive]}
+                onPress={() => setMaxAttemptsPerItem(null)}
+              >
+                <MaterialCommunityIcons name="infinity" size={20} color={maxAttemptsPerItem === null ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.timeLimitText, maxAttemptsPerItem === null && styles.timeLimitTextActive]}>Unlimited</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.timeLimitOption, maxAttemptsPerItem !== null && styles.timeLimitOptionActive]}
+                onPress={() => setMaxAttemptsPerItem(1)}
+              >
+                <MaterialCommunityIcons name="repeat" size={20} color={maxAttemptsPerItem !== null ? "#ffffff" : "#64748b"} />
+                <Text style={[styles.timeLimitText, maxAttemptsPerItem !== null && styles.timeLimitTextActive]}>Set Limit</Text>
+              </TouchableOpacity>
+            </View>
+            
+            {maxAttemptsPerItem !== null && (
+              <View style={styles.timeLimitInputContainer}>
+                <Text style={styles.timeLimitInputLabel}>Maximum attempts per item</Text>
+                <View style={styles.timeLimitInputRow}>
+                  <TouchableOpacity
+                    style={styles.timeLimitButton}
+                    onPress={() => setMaxAttemptsPerItem(Math.max(1, maxAttemptsPerItem - 1))}
+                  >
+                    <AntDesign name="minus" size={16} color="#3b82f6" />
+                  </TouchableOpacity>
+                  <TextInput
+                    style={styles.timeLimitInput}
+                    value={maxAttemptsPerItem.toString()}
+                    onChangeText={(text) => {
+                      const value = parseInt(text);
+                      if (!isNaN(value) && value >= 1) {
+                        setMaxAttemptsPerItem(value);
+                      }
+                    }}
+                    keyboardType="numeric"
+                    placeholder="1"
+                  />
+                  <TouchableOpacity
+                    style={styles.timeLimitButton}
+                    onPress={() => setMaxAttemptsPerItem(Math.min(10, maxAttemptsPerItem + 1))}
+                  >
+                    <AntDesign name="plus" size={16} color="#3b82f6" />
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.timeLimitHelperText}>
+                  {maxAttemptsPerItem === 1 
+                    ? 'Students get only 1 attempt per question' 
+                    : `Students can try up to ${maxAttemptsPerItem} times per question`
+                  }
+                </Text>
+              </View>
+            )}
+          </View>
+          
           {/* Public/Private Toggle */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Visibility</Text>
@@ -6265,12 +7184,11 @@ Please respond with a JSON object in this exact format:
             <Text style={styles.sectionTitle}>Questions ({questions.length})</Text>
             <View style={styles.buttonContainer}>
               <TouchableOpacity
-                style={styles.aiGeneratorButton}
+                style={styles.aiGeneratorButtonIcon}
                 onPress={() => setShowAIGenerator(true)}
                 disabled={!exerciseTitle.trim() || !exerciseDescription.trim() || !exerciseCategory.trim()}
               >
-                <MaterialCommunityIcons name="robot" size={16} color="#ffffff" />
-                <Text style={styles.aiGeneratorButtonText}>AI</Text>
+                <MaterialCommunityIcons name="robot" size={22} color="#ffffff" />
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.addQuestionButton}
@@ -6279,7 +7197,7 @@ Please respond with a JSON object in this exact format:
                   openModal('questionType');
                 }}
               >
-                <AntDesign name="plus" size={16} color="#ffffff" />
+                <AntDesign name="plus" size={18} color="#ffffff" />
                 <Text style={styles.addQuestionButtonText}>Add Question</Text>
               </TouchableOpacity>
             </View>
@@ -6426,8 +7344,10 @@ Please respond with a JSON object in this exact format:
         <View style={styles.aiModalOverlay}>
           <ScrollView 
             contentContainerStyle={styles.aiModalScrollContainer}
-            showsVerticalScrollIndicator={false}
+            showsVerticalScrollIndicator={true}
             keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            bounces={true}
           >
             <View style={styles.aiModal}>
               <View style={styles.aiModalHeader}>
@@ -6440,6 +7360,7 @@ Please respond with a JSON object in this exact format:
                 </TouchableOpacity>
               </View>
               
+              
               <View style={styles.aiModalContent}>
                 
                 <Text style={styles.aiModalLabel}>Additional Requirements (Optional)</Text>
@@ -6447,12 +7368,46 @@ Please respond with a JSON object in this exact format:
                   style={styles.aiModalTextArea}
                   value={aiPrompt}
                   onChangeText={setAiPrompt}
-                  placeholder="Halimbawa: 'Tungkol sa mga hayop sa bahay', 'Mga kulay at hugis', 'Bilang 1-10', 'Mga letra A-Z' (Optional)"
+                  placeholder="Halimbawa: 'Tungkol sa mga hayop sa bahay', 'Mga kulay at hugis', 'Bilang 1-10', 'Mga letra A-Z'"
                   placeholderTextColor="#9ca3af"
                   multiline
                   textAlignVertical="top"
                 />
                 
+                {/* AI TTS Toggle */}
+                <View style={styles.aiTTSToggleContainer}>
+                  <View style={styles.aiTTSToggleTextContainer}>
+                    <MaterialCommunityIcons name="volume-high" size={20} color="#7c3aed" />
+                    <View>
+                      <Text style={styles.aiTTSToggleTitle}>Generate AI TTS</Text>
+                      <Text style={styles.aiTTSToggleSubtitle}>
+                        Auto-generate speech for each question
+                      </Text>
+                    </View>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.aiTTSToggle, generateAITTS && styles.aiTTSToggleActive, hasActiveTTSKeys === false && styles.aiTTSToggleDisabled]}
+                    onPress={() => {
+                      if (hasActiveTTSKeys === false) {
+                        showCustomAlert(
+                          'ElevenLabs Unavailable',
+                          'No active ElevenLabs API key is available. Add or reactivate a key in Firebase to enable AI-generated TTS.'
+                        );
+                        return;
+                      }
+                      setGenerateAITTS(!generateAITTS);
+                    }}
+                    disabled={hasActiveTTSKeys === false}
+                   >
+                     <View style={[styles.aiTTSToggleThumb, generateAITTS && styles.aiTTSToggleThumbActive]} />
+                   </TouchableOpacity>
+                 </View>
+                {hasActiveTTSKeys === false && (
+                  <Text style={styles.aiTTSToggleWarning}>
+                    ElevenLabs API keys are not available, so TTS generation is turned off.
+                  </Text>
+                )}
+
                 <View style={styles.aiModalRow}>
                   <View style={styles.aiModalInputGroup}>
                     <Text style={styles.aiModalLabel}>Number of Questions</Text>
@@ -6472,6 +7427,8 @@ Please respond with a JSON object in this exact format:
                       </TouchableOpacity>
                     </View>
                   </View>
+
+                  
                   
                   <View style={styles.aiModalInputGroup}>
                     <Text style={styles.aiModalLabel}>Question Type</Text>
@@ -6498,6 +7455,8 @@ Please respond with a JSON object in this exact format:
                     </View>
                   </View>
                 </View>
+
+        
                 
                 <TouchableOpacity
                   style={[styles.aiGenerateButton, (isGeneratingQuestions || isGeneratingTTS) && styles.aiGenerateButtonDisabled]}
@@ -6535,6 +7494,154 @@ Please respond with a JSON object in this exact format:
               </View>
             </View>
           </ScrollView>
+        </View>
+      </Modal>
+      
+      {/* Voice Recording Modal */}
+      <Modal
+        visible={showRecordingModal}
+        transparent
+        animationType="fade"
+        onRequestClose={closeRecordingModal}
+      >
+        <View style={styles.recordingModalOverlay}>
+          <View style={styles.recordingModalContainer}>
+            <View style={styles.recordingModalHeader}>
+              <Text style={styles.recordingModalTitle}>Record Voice</Text>
+              <TouchableOpacity onPress={closeRecordingModal} style={styles.recordingModalClose}>
+                <AntDesign name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.recordingModalContent}>
+              {/* Recording Status */}
+              <View style={styles.recordingStatusContainer}>
+                {isRecording && (
+                  <View style={styles.recordingPulse}>
+                    <View style={styles.recordingPulseInner} />
+                  </View>
+                )}
+                <MaterialCommunityIcons 
+                  name={isRecording ? "microphone" : recordedAudioUri ? "check-circle" : "microphone-outline"} 
+                  size={80} 
+                  color={isRecording ? "#ef4444" : recordedAudioUri ? "#10b981" : "#94a3b8"} 
+                />
+              </View>
+
+              {/* Timer with Limit */}
+              <View style={styles.recordingTimerContainer}>
+                <Text style={[
+                  styles.recordingTimer,
+                  recordingDuration >= 105 && isRecording && { color: '#ef4444' }, // Red when < 15s left
+                  recordingDuration >= 90 && recordingDuration < 105 && isRecording && { color: '#f59e0b' }, // Orange when < 30s left
+                ]}>
+                  {formatRecordingTime(recordingDuration)}
+                </Text>
+                <Text style={styles.recordingTimerLimit}> / 2:00</Text>
+              </View>
+
+              {/* Status Text */}
+              <Text style={styles.recordingStatusText}>
+                {isRecording 
+                  ? recordingDuration >= 105 
+                    ? "Finishing soon..." 
+                    : "Recording in progress..." 
+                  : recordedAudioUri 
+                    ? "Recording ready!" 
+                    : "Tap to start (max 2 minutes)"}
+              </Text>
+
+              {/* Control Buttons */}
+              <View style={styles.recordingControls}>
+                {!recordedAudioUri ? (
+                  <>
+                    {!isRecording ? (
+                      <>
+                        <TouchableOpacity 
+                          style={styles.recordingButtonPrimary}
+                          onPress={startRecording}
+                        >
+                          <MaterialCommunityIcons name="microphone" size={24} color="#fff" />
+                          <Text style={styles.recordingButtonText}>Start Recording</Text>
+                        </TouchableOpacity>
+                        
+                        {/* Delete Previous Recording Button */}
+                        {hasPreviousRecording && (
+                          <TouchableOpacity 
+                            style={styles.recordingButtonDelete}
+                            onPress={deletePreviousRecording}
+                          >
+                            <MaterialCommunityIcons name="delete-outline" size={20} color="#ef4444" />
+                            <Text style={styles.recordingButtonDeleteText}>Delete Previous Recording</Text>
+                          </TouchableOpacity>
+                        )}
+                      </>
+                    ) : (
+                      <TouchableOpacity 
+                        style={[styles.recordingButtonPrimary, styles.recordingButtonStop]}
+                        onPress={() => stopRecording(false)}
+                      >
+                        <MaterialCommunityIcons name="stop" size={24} color="#fff" />
+                        <Text style={styles.recordingButtonText}>Stop Recording</Text>
+                      </TouchableOpacity>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <View style={styles.recordingActionsRow}>
+                      <TouchableOpacity 
+                        style={styles.recordingButtonSecondary}
+                        onPress={isPlayingRecording ? stopRecordingPlayback : playRecording}
+                      >
+                        <MaterialCommunityIcons 
+                          name={isPlayingRecording ? "stop" : "play"} 
+                          size={20} 
+                          color="#7c3aed" 
+                        />
+                        <Text style={styles.recordingButtonSecondaryText}>
+                          {isPlayingRecording ? "Stop" : "Play"}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity 
+                        style={styles.recordingButtonSecondary}
+                        onPress={reRecord}
+                      >
+                        <MaterialCommunityIcons name="refresh" size={20} color="#7c3aed" />
+                        <Text style={styles.recordingButtonSecondaryText}>Re-record</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <TouchableOpacity 
+                      style={[styles.recordingButtonPrimary, styles.recordingButtonSave]}
+                      onPress={saveRecordedVoice}
+                      disabled={uploading}
+                    >
+                      {uploading ? (
+                        <>
+                          <ActivityIndicator size="small" color="#fff" />
+                          <Text style={styles.recordingButtonText}>Saving...</Text>
+                        </>
+                      ) : (
+                        <>
+                          <MaterialCommunityIcons name="content-save" size={24} color="#fff" />
+                          <Text style={styles.recordingButtonText}>Save Voice</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+
+              {/* Tips */}
+              <View style={styles.recordingTips}>
+                <MaterialCommunityIcons name="lightbulb-outline" size={16} color="#64748b" />
+                <Text style={styles.recordingTipsText}>
+                  Tip: Max 2 minutes. Recording is optimized for voice with minimal file size (~100 KB/min). Speak clearly near the microphone
+                </Text>
+              </View>
+            </View>
+          </View>
         </View>
       </Modal>
       
@@ -6672,7 +7779,14 @@ Please respond with a JSON object in this exact format:
           </View>
 
           {/* Content */}
-          <ScrollView style={{ flex: 1, paddingHorizontal: 20 }}>
+          <ScrollView 
+            style={{ flex: 1, paddingHorizontal: 20 }}
+            showsVerticalScrollIndicator={true}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            bounces={true}
+            contentContainerStyle={{ paddingBottom: 20 }}
+          >
             {!selectedCategory ? (
               // Category Selection
               <View style={{ paddingVertical: 20 }}>
@@ -6790,26 +7904,40 @@ Please respond with a JSON object in this exact format:
                   {stockImageCategories.find(c => c.id === selectedCategory)?.name} Images
                 </Text>
                 
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }}>
-                  {stockImageCategories
-                    .find(c => c.id === selectedCategory)
-                    ?.images.map((image) => (
-                      <TouchableOpacity
-                        key={image.name}
-                        style={{ width: '30%', marginBottom: 16, alignItems: 'center' }}
-                        onPress={() => selectStockImage(image.source)}
-                      >
-                        <Image
-                          source={image.source}
-                          style={{ width: 80, height: 80, borderRadius: 12, backgroundColor: '#f1f5f9' }}
-                          resizeMode="cover"
-                        />
-                        <Text style={{ fontSize: 12, color: '#64748b', marginTop: 8, textAlign: 'center', fontWeight: '500' }} numberOfLines={1}>
-                          {image.name}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                </View>
+                <FlatList
+                  data={stockImageCategories.find(c => c.id === selectedCategory)?.images || []}
+                  numColumns={3}
+                  keyExtractor={(item) => item.name}
+                  showsVerticalScrollIndicator={true}
+                  contentContainerStyle={{ paddingBottom: 20 }}
+                  bounces={true}
+                  columnWrapperStyle={{ justifyContent: 'space-between' }}
+                  initialNumToRender={12}
+                  maxToRenderPerBatch={6}
+                  windowSize={10}
+                  getItemLayout={(data, index) => ({
+                    length: 116, // 80 (image) + 16 (margin) + 20 (text)
+                    offset: 116 * Math.floor(index / 3),
+                    index,
+                  })}
+                  renderItem={({ item: image }) => (
+                    <TouchableOpacity
+                      style={{ width: '30%', marginBottom: 16, alignItems: 'center' }}
+                      onPress={() => selectStockImage(image.source)}
+                    >
+                      <Image
+                        source={image.source}
+                        style={{ width: 80, height: 80, borderRadius: 12, backgroundColor: '#f1f5f9' }}
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                      <Text style={{ fontSize: 12, color: '#64748b', marginTop: 8, textAlign: 'center', fontWeight: '500' }} numberOfLines={1}>
+                        {image.name}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                />
               </View>
             )}
           </ScrollView>
@@ -6841,766 +7969,986 @@ Please respond with a JSON object in this exact format:
                 <AntDesign name="arrow-left" size={24} color="#1e293b" />
               </TouchableOpacity>
               <Text style={styles.fullScreenTitle}>Choose Image</Text>
-              <View style={styles.placeholder} />
-            </View>
+              <TouchableOpacity 
+                onPress={() => scrollToTop(stockImagesScrollRef)} 
+                style={styles.scrollToTopButton}
+              >
+                <AntDesign name="arrow-up" size={20} color="#64748b" />
+              </TouchableOpacity>
+          </View>
             
-            <ScrollView style={styles.fullScreenContent} showsVerticalScrollIndicator={false}>
+            <ScrollView 
+              ref={stockImagesScrollRef}
+              style={styles.fullScreenContent} 
+              showsVerticalScrollIndicator={true}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              bounces={true}
+              contentContainerStyle={styles.fullScreenScrollContainer}
+            >
             {/* Animals Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Animals</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `animal-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Animals')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Animals')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Animals'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`animal-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Alphabet Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Alphabet</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Alphabet'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `alphabet-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Alphabet')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Alphabet')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Alphabet'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`alphabet-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Fruits Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Fruits</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Fruits and Vegetables'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `fruit-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Fruits')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Fruits')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Fruits and Vegetables'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`fruit-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* 3D Alphabet Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>3D Alphabet</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['3D Alphabet'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `3d-alphabet-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('3D Alphabet')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('3D Alphabet')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['3D Alphabet'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`3d-alphabet-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Boxed Alphabet Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Boxed Alphabet</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Boxed Alphabet'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `boxed-alphabet-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Boxed Alphabet')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Boxed Alphabet')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Boxed Alphabet'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`boxed-alphabet-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Boxed Numbers Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Boxed Numbers 1-9</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Boxed Numbers 1-9'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `boxed-number-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Boxed Numbers 1-9')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Boxed Numbers 1-9')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Boxed Numbers 1-9'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`boxed-number-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
-
             {/* Comparing Quantities Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Comparing Quantities</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Comparing Quantities'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `comparing-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Comparing Quantities')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Comparing Quantities')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Comparing Quantities'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`comparing-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Dates Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Dates</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Dates'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `date-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Dates')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Dates')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Dates'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`date-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Extra Objects Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Extra Objects</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Extra Objects'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `extra-object-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Extra Objects')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Extra Objects')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Extra Objects'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`extra-object-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Fractions Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Fractions</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Fractions'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `fraction-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Fractions')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Fractions')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Fractions'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`fraction-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Length and Distance Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Length and Distance</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Length and Distance'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `length-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Length and Distance')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Length and Distance')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Length and Distance'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`length-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Money Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Money</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Money'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `money-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Money')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Money')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Money'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`money-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Patterns Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Patterns</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Patterns'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `pattern-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Patterns')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Patterns')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Patterns'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`pattern-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Time and Position Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Time and Position</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Time and Position'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `time-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Time and Position')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Time and Position')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Time and Position'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`time-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Land Animals Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Land Animals</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).filter((_, index) => index < 32).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `land-animal-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Land Animals')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Land Animals')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Animals'] || []).filter((_, index) => index < 32).map((image, index) => (
-                  <TouchableOpacity
-                    key={`land-animal-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Sea Animals Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Sea Animals</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Animals'] || []).filter((_, index) => index >= 32).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `sea-animal-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Sea Animals')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Sea Animals')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Animals'] || []).filter((_, index) => index >= 32).map((image, index) => (
-                  <TouchableOpacity
-                    key={`sea-animal-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Math Symbols Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Math Symbols</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Math Symbols'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `math-symbol-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Math Symbols')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Math Symbols')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Math Symbols'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`math-symbol-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
-
             {/* Numbers Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Numbers</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...stockImages['Numbers'].map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `number-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Numbers')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={8}
+                maxToRenderPerBatch={5}
+                windowSize={5}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Numbers')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {stockImages['Numbers'].map((image, index) => (
-                  <TouchableOpacity
-                    key={`number-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* School Supplies Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>School Supplies</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['School Supplies'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `school-supply-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('School Supplies')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('School Supplies')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['School Supplies'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`school-supply-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Shapes Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Shapes</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Shapes'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `shape-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Shapes')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Shapes')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Shapes'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`shape-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Toys Section */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Toys</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(stockImages['Toys'] || []).map(img => ({ image: img }))]}
+                keyExtractor={(item, index) => `toy-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Toys')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(Image.resolveAssetSource(item.image.uri).uri)}
+                    >
+                      <Image 
+                        source={item.image.uri} 
+                        style={styles.horizontalImageThumbnail} 
+                        resizeMode="cover"
+                        fadeDuration={0}
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Toys')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(stockImages['Toys'] || []).map((image, index) => (
-                  <TouchableOpacity
-                    key={`toy-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(Image.resolveAssetSource(image.uri).uri)}
-                  >
-                    <Image 
-                      source={image.uri} 
-                      style={styles.horizontalImageThumbnail} 
-                      resizeMode="cover"
-                      loadingIndicatorSource={require('../assets/images/icon.png')}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Custom Categories */}
             {Object.keys(customCategories).map((categoryName) => (
               <View key={categoryName} style={styles.imageCategory}>
                 <Text style={styles.categoryTitle}>{categoryName}</Text>
-                <ScrollView 
-                  horizontal 
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.horizontalImageScroll}
+                <FlatList
+                  horizontal
+                  showsHorizontalScrollIndicator={true}
+                bounces={true}
+                  data={[{ isAddButton: true }, ...customCategories[categoryName].map(url => ({ imageUrl: url }))]}
+                  keyExtractor={(item, index) => `custom-${categoryName}-${index}`}
+                  renderItem={({ item }: any) => {
+                    if (item.isAddButton) {
+                      return (
+                        <TouchableOpacity
+                          style={styles.addImageButton}
+                          onPress={() => handleImageUpload(categoryName)}
+                        >
+                          <AntDesign name="plus" size={24} color="#3b82f6" />
+                        </TouchableOpacity>
+                      );
+                    }
+                    return (
+                      <TouchableOpacity
+                        style={styles.horizontalImageItem}
+                        onPress={() => handleImageSelect(item.imageUrl)}
+                      >
+                        <Image 
+                          source={{ uri: item.imageUrl }} 
+                          style={styles.horizontalImageThumbnail} 
+                          resizeMode="cover"
+                          fadeDuration={0}
+                          loadingIndicatorSource={require('../assets/images/icon.png')}
+                        />
+                      </TouchableOpacity>
+                    );
+                  }}
+                  initialNumToRender={5}
+                  maxToRenderPerBatch={3}
+                  windowSize={3}
                   contentContainerStyle={styles.horizontalImageContainer}
-                >
-                  {/* Add button as first item */}
-                  <TouchableOpacity
-                    style={styles.addImageButton}
-                    onPress={() => handleImageUpload(categoryName)}
-                  >
-                    <AntDesign name="plus" size={24} color="#3b82f6" />
-                  </TouchableOpacity>
-                  
-                  {customCategories[categoryName].map((imageUrl, index) => (
-                    <TouchableOpacity
-                      key={`custom-${categoryName}-${index}`}
-                      style={styles.horizontalImageItem}
-                      onPress={() => handleImageSelect(imageUrl)}
-                    >
-                      <Image 
-                        source={{ uri: imageUrl }} 
-                        style={styles.horizontalImageThumbnail} 
-                        resizeMode="cover"
-                        loadingIndicatorSource={require('../assets/images/icon.png')}
-                      />
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
+                />
               </View>
             ))}
 
             {/* Custom Uploads Category - Always show this */}
             <View style={styles.imageCategory}>
               <Text style={styles.categoryTitle}>Custom Uploads</Text>
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false}
-                style={styles.horizontalImageScroll}
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                bounces={true}
+                data={[{ isAddButton: true }, ...(customCategories['Custom Uploads'] || []).map(url => ({ imageUrl: url }))]}
+                keyExtractor={(item, index) => `custom-uploads-${index}`}
+                renderItem={({ item }: any) => {
+                  if (item.isAddButton) {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addImageButton}
+                        onPress={() => handleImageUpload('Custom Uploads')}
+                      >
+                        <AntDesign name="plus" size={24} color="#3b82f6" />
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={styles.horizontalImageItem}
+                      onPress={() => handleImageSelect(item.imageUrl)}
+                    >
+                      <Image 
+                        source={{ uri: item.imageUrl }} 
+                        style={styles.horizontalImageThumbnail}
+                        resizeMode="cover"
+                        loadingIndicatorSource={require('../assets/images/icon.png')}
+                      />
+                    </TouchableOpacity>
+                  );
+                }}
+                initialNumToRender={5}
+                maxToRenderPerBatch={3}
+                windowSize={3}
                 contentContainerStyle={styles.horizontalImageContainer}
-              >
-                {/* Add button as first item */}
-                <TouchableOpacity
-                  style={styles.addImageButton}
-                  onPress={() => handleImageUpload('Custom Uploads')}
-                >
-                  <AntDesign name="plus" size={24} color="#3b82f6" />
-                </TouchableOpacity>
-                
-                {(customCategories['Custom Uploads'] || []).map((imageUrl, index) => (
-                  <TouchableOpacity
-                    key={`custom-uploads-${index}`}
-                    style={styles.horizontalImageItem}
-                    onPress={() => handleImageSelect(imageUrl)}
-                  >
-                    <Image source={{ uri: imageUrl }} style={styles.horizontalImageThumbnail} />
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              />
             </View>
 
             {/* Create Another Category Button */}
@@ -7818,7 +9166,6 @@ Please respond with a JSON object in this exact format:
     </View>
   );
 }
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -7827,13 +9174,18 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
   },
+  scrollContentContainer: {
+    paddingBottom: 20,
+    flexGrow: 1,
+  },
   
   // Header Styles
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 12,
+    paddingTop: 50,
+    paddingBottom: 12,
     marginBottom: 16,
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
@@ -7842,6 +9194,12 @@ const styles = StyleSheet.create({
   },
   backButton: {
     padding: 8,
+  },
+  scrollToTopButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#f8fafc',
+    opacity: 0.8,
   },
   headerTitle: {
     fontSize: 24,
@@ -8229,21 +9587,51 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#7c3aed',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 18,
     shadowColor: '#7c3aed',
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.25,
-    shadowRadius: 8,
+    shadowRadius: 4,
     elevation: 3,
   },
   addQuestionButtonText: {
     color: '#ffffff',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
-    marginLeft: 6,
+    marginLeft: 4,
   },
+  
+  // Icon-only buttons for AI and Add Question
+  aiGeneratorButtonIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#10b981',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  addQuestionButtonIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#7c3aed',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+    marginLeft: 8,
+  },
+  
   retryFailedTTSButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -8375,9 +9763,18 @@ const styles = StyleSheet.create({
   },
   saveExerciseButton: {
     backgroundColor: '#10b981',
-    paddingVertical: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
     borderRadius: 12,
     alignItems: 'center',
+    alignSelf: 'center',
+    minWidth: 200,
+    maxWidth: 400,
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
   saveExerciseButtonDisabled: {
     backgroundColor: '#9ca3af',
@@ -8385,7 +9782,7 @@ const styles = StyleSheet.create({
   },
   saveExerciseButtonText: {
     color: '#ffffff',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
   },
   ttsUploadProgressContainer: {
@@ -8469,6 +9866,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 16,
   },
+  fullScreenScrollContainer: {
+    paddingBottom: 20,
+    flexGrow: 1,
+  },
   fullScreenActions: {
     paddingHorizontal: 20,
     paddingVertical: 20,
@@ -8525,7 +9926,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    maxHeight: '80%',
+    maxHeight: '85%',
+    minHeight: '60%',
   },
   modalHeader: {
     flexDirection: 'row',
@@ -8546,6 +9948,7 @@ const styles = StyleSheet.create({
   questionTypesList: {
     paddingHorizontal: 20,
     paddingVertical: 16,
+    paddingBottom: 30,
   },
   questionTypeCard: {
     flexDirection: 'row',
@@ -8672,6 +10075,8 @@ const styles = StyleSheet.create({
   },
   scrollContainer: {
     position: 'relative',
+    borderRadius: 8,
+    overflow: 'hidden',
   },
   optionLabel: {
     fontSize: 16,
@@ -8799,6 +10204,114 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginLeft: 6,
   },
+  
+  // Image Options Button
+  imageOptionsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  imageOptionsButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 8,
+    marginRight: 6,
+  },
+  
+  // Image Options Modal
+  imageOptionsModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  imageOptionsModalContent: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    width: '100%',
+    maxWidth: 400,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  imageOptionsModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  imageOptionsModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  imageOptionsModalClose: {
+    padding: 4,
+  },
+  imageOptionsModalBody: {
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+  },
+  imageOptionsModalDescription: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  imageOptionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  imageOptionIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  imageOptionContent: {
+    flex: 1,
+  },
+  imageOptionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  imageOptionDescription: {
+    fontSize: 13,
+    color: '#64748b',
+  },
+  
   selectedFileName: {
     flex: 1,
     color: '#1e293b',
@@ -8817,6 +10330,8 @@ const styles = StyleSheet.create({
   pairsPreviewVScroll: {
     maxHeight: 300,
     marginVertical: 8,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
   },
   pairsPreviewVContainer: {
     paddingBottom: 12,
@@ -9718,9 +11233,25 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
     marginLeft: 4,
   },
-  reorderDragHandle: {
-    padding: 8,
+  reorderArrowControls: {
+    flexDirection: 'column',
+    gap: 4,
     marginLeft: 8,
+  },
+  reorderArrowButton: {
+    padding: 8,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    minWidth: 36,
+    minHeight: 36,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  reorderArrowButtonDisabled: {
+    backgroundColor: '#f8fafc',
+    opacity: 0.5,
   },
   reorderAddButtons: {
     flexDirection: 'row',
@@ -9859,6 +11390,30 @@ const styles = StyleSheet.create({
     color: '#374151',
     marginBottom: 8,
     marginTop: 16,
+  },
+  aiModalHint: {
+    fontSize: 12,
+    color: '#64748b',
+    marginBottom: 8,
+    fontStyle: 'italic',
+    lineHeight: 16,
+  },
+  existingQuestionsInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+  },
+  existingQuestionsInfoText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#1e40af',
+    marginLeft: 8,
+    lineHeight: 18,
   },
   aiExerciseInfo: {
     backgroundColor: '#f8fafc',
@@ -10252,5 +11807,254 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#3b82f6',
+  },
+
+  // Recording Modal Styles
+  recordingModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  recordingModalContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    width: '100%',
+    maxWidth: 480,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 12,
+    overflow: 'hidden',
+  },
+  recordingModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+  },
+  recordingModalTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  recordingModalClose: {
+    padding: 8,
+    borderRadius: 20,
+    backgroundColor: '#f1f5f9',
+  },
+  recordingModalContent: {
+    padding: 32,
+    alignItems: 'center',
+  },
+  recordingStatusContainer: {
+    position: 'relative',
+    marginBottom: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recordingPulse: {
+    position: 'absolute',
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    opacity: 0.6,
+  },
+  recordingPulseInner: {
+    position: 'absolute',
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: 'rgba(239, 68, 68, 0.3)',
+    opacity: 0.4,
+  },
+  recordingTimerContainer: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  recordingTimer: {
+    fontSize: 48,
+    fontWeight: '700',
+    color: '#1e293b',
+    fontVariant: ['tabular-nums'],
+  },
+  recordingTimerLimit: {
+    fontSize: 24,
+    fontWeight: '500',
+    color: '#94a3b8',
+    fontVariant: ['tabular-nums'],
+  },
+  recordingStatusText: {
+    fontSize: 16,
+    color: '#64748b',
+    marginBottom: 32,
+    textAlign: 'center',
+  },
+  recordingControls: {
+    width: '100%',
+    gap: 12,
+  },
+  recordingActionsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 12,
+  },
+  recordingButtonPrimary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#7c3aed',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    gap: 8,
+    shadowColor: '#7c3aed',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  recordingButtonStop: {
+    backgroundColor: '#ef4444',
+    shadowColor: '#ef4444',
+  },
+  recordingButtonSave: {
+    backgroundColor: '#10b981',
+    shadowColor: '#10b981',
+  },
+  recordingButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  recordingButtonSecondary: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f1f5f9',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  recordingButtonSecondaryText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#7c3aed',
+  },
+  recordingButtonDelete: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fef2f2',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    marginTop: 12,
+  },
+  recordingButtonDeleteText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ef4444',
+  },
+  recordingTips: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+  },
+  recordingTipsText: {
+    fontSize: 13,
+    color: '#64748b',
+    flex: 1,
+    lineHeight: 18,
+  },
+  recordVoiceButton: {
+    borderWidth: 1,
+    borderColor: '#7c3aed',
+    backgroundColor: '#faf5ff',
+  },
+
+  // AI TTS Toggle Styles
+  aiTTSToggleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: '#faf5ff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e9d5ff',
+    marginTop: 8,
+  },
+  aiTTSToggleTextContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  aiTTSToggleTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 2,
+  },
+  aiTTSToggleSubtitle: {
+    fontSize: 9,
+    color: '#64748b',
+  },
+  aiTTSToggle: {
+    width: 52,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#cbd5e1',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  aiTTSToggleActive: {
+    backgroundColor: '#7c3aed',
+  },
+  aiTTSToggleThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+    transform: [{ translateX: 0 }],
+  },
+  aiTTSToggleThumbActive: {
+    transform: [{ translateX: 24 }],
+  },
+  aiTTSToggleDisabled: {
+    backgroundColor: '#e2e8f0',
+  },
+  aiTTSToggleWarning: {
+    fontSize: 12,
+    color: '#ef4444',
+    marginTop: 4,
+    textAlign: 'center',
   },
 });

@@ -3,5 +3,8 @@
     "source.fixAll": "explicit",
     "source.organizeImports": "explicit",
     "source.sortMembers": "explicit"
-  }
+  },
+  "java.configuration.updateBuildConfiguration": "automatic",
+  "java.jdt.ls.java.home": null,
+  "gradle.nestedProjects": true
 }

@@ -1,29 +1,30 @@
 {
   "expo": {
-    "name": "MATHTATAG-reimagined",
-    "slug": "MATHTATAG-reimagined",
-    "version": "1.0.0",
+    "name": "MATHTATAG",
+    "slug": "MATHTATAG",
+    "version": "1.0.4",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/logo-zoomedout.png",
     "scheme": "mathtatagreimagined",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "icon": "./assets/images/icon.png"
+      "icon": "./assets/images/logo-zoomedout.png"
     },
     "android": {
       "package": "com.mathtatag.reimagined",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/icon.png"
+        "foregroundImage": "./assets/images/and.png"
       },
-      "edgeToEdgeEnabled": true,
+      "edgeToEdgeEnabled": false,
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/logo-transparent.png",
+      "bundler": "metro"
     },
     "plugins": [
       "expo-router",
@@ -46,7 +47,19 @@
       "reactCompiler": true
     },
     "extra": {
-      "router": {}
+      "router": {},
+      "eas": {
+        "projectId": "f64c3081-3b9d-476a-b777-401604c59e6b"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/f64c3081-3b9d-476a-b777-401604c59e6b",
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
     }
   }
 }
