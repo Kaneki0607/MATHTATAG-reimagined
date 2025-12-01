@@ -44,8 +44,9 @@ A comprehensive cross-platform educational application for mathematical learning
 ## 🛠 Tech Stack
 
 ### Frontend Framework
+- **React 19.1.0** - Modern React runtime
 - **React Native 0.81.4** - Cross-platform mobile framework
-- **Expo 54** - Development platform and tooling
+- **Expo 54.0.13** - Development platform and tooling
 - **Expo Router 6** - File-based navigation
 - **TypeScript 5.9** - Type safety and better DX
 
@@ -67,7 +68,7 @@ A comprehensive cross-platform educational application for mathematical learning
 - **xlsx** - Excel file generation and parsing
 - **expo-document-picker** - File selection for resources
 - **expo-image-picker** - Camera and gallery access
-- **@react-native-firebase** - Firebase SDK integration
+- **firebase** - Firebase Web SDK v11 integration
 
 ## 🚀 Quick Setup
 
@@ -536,6 +537,7 @@ MATHTATAG-reimagined/
 ├── app/                          # Main application screens (Expo Router)
 │   ├── index.tsx                 # Landing page / Role selection
 │   ├── _layout.tsx               # Root layout with navigation
+│   ├── RoleSelection.tsx         # Role selection screen
 │   ├── TeacherLogin.tsx          # Teacher authentication
 │   ├── TeacherDashboard.tsx      # Teacher main interface
 │   ├── ParentLogin.tsx           # Parent login (code-based)
@@ -550,24 +552,45 @@ MATHTATAG-reimagined/
 │   ├── AssignExerciseForm.tsx    # Exercise assignment modal
 │   ├── IdManagementPanel.tsx     # ID system management
 │   ├── ResponsiveComponents.tsx  # Responsive wrappers
+│   ├── ResponsiveDashboard.tsx   # Responsive dashboard layout
+│   ├── ResponsiveGrid.tsx        # Grid utilities
 │   ├── TermsAndConditions.tsx    # Legal text component
+│   ├── external-link.tsx
+│   ├── haptic-tab.tsx
+│   ├── hello-wave.tsx
+│   ├── parallax-scroll-view.tsx
+│   ├── themed-text.tsx
+│   ├── themed-view.tsx
 │   └── ui/                       # UI primitives
+│       ├── collapsible.tsx
+│       ├── icon-symbol.ios.tsx
+│       └── icon-symbol.tsx
 │
 ├── lib/                          # Core business logic and utilities
+│   ├── app-metadata.ts           # App meta helpers
 │   ├── firebase.ts               # Firebase app initialization
 │   ├── firebase-auth.ts          # Authentication functions
 │   ├── firebase-database.ts      # Database CRUD operations
 │   ├── firebase-storage.ts       # File upload/download
+│   ├── firebase-utils.ts         # Shared Firebase helpers
 │   ├── id-generator.ts           # Readable ID generation system
+│   ├── id-migration-utility.ts   # Utilities for migrating IDs
 │   ├── entity-helpers.ts         # Entity creation helpers
 │   ├── elevenlabs-keys.ts        # TTS API configuration
 │   ├── error-logger.ts           # Error tracking
-│   └── README-ID-SYSTEM.ts       # ID system documentation
+│   ├── gemini-utils.ts           # AI helpers
+│   ├── README-ID-SYSTEM.ts       # ID system documentation
+│   ├── result-validation-utils.ts# Result validation helpers
+│   ├── stock-images-catalog.ts   # Stock image index
+│   ├── tagalog-number-utils.ts   # Tagalog numbers helper
+│   └── terms-utils.ts            # Terms utilities
 │
 ├── hooks/                        # Custom React hooks
 │   ├── useExercises.ts           # Exercise data management
 │   ├── useResponsive.ts          # Responsive layout hook
-│   └── use-color-scheme.ts       # Theme management
+│   ├── useResponsiveLayout.ts    # Responsive layout utilities
+│   ├── use-color-scheme.ts       # Theme management
+│   └── use-color-scheme.web.ts   # Theme management (web)
 │
 ├── constants/                    # App-wide constants
 │   └── theme.ts                  # Color scheme and styling
@@ -576,6 +599,12 @@ MATHTATAG-reimagined/
 │   ├── setup.js                  # Project setup automation
 │   ├── initialize-id-counters.ts # Initialize ID system
 │   ├── migrate-ids.ts            # Migrate legacy IDs
+│   ├── migrate-result-ids.ts     # Migrate legacy result IDs
+│   ├── migrate-all-ids.ts        # Migrate all IDs
+│   ├── repair-exercise-results.ts# Repair result consistency
+│   ├── test-id-system.ts         # Test ID generation
+│   ├── test-result-validation.ts # Test result validation helpers
+│   ├── test-user-example.ts      # Example script (dev)
 │   ├── verify-ids.ts             # Verify ID integrity
 │   └── reset-project.js          # Reset to blank slate
 │
@@ -587,12 +616,22 @@ MATHTATAG-reimagined/
 │   │   │   ├── Animals/          # Animal images
 │   │   │   ├── Fruits and Vegetables/
 │   │   │   └── ... (15+ categories)
-│   │   └── Maps/                 # Map images for navigation
+│   │   ├── Maps/                 # Map images for navigation
+│   │   ├── icon.png
+│   │   └── splash-icon.png
 │   └── fonts/                    # Custom fonts
+│       ├── LeagueSpartan-Bold.ttf
+│       ├── LuckiestGuy-Regular.ttf
+│       └── SpaceMono-Regular.ttf
 │
 ├── dist/                         # Web build output (generated)
+├── public/
+│   └── robots.txt
 ├── node_modules/                 # Dependencies (generated)
 │
+├── eas.json                      # EAS build profiles
+├── eslint.config.js              # ESLint configuration
+├── expo-env.d.ts                 # Type definitions for Expo Router
 ├── package.json                  # Dependencies and scripts
 ├── tsconfig.json                 # TypeScript configuration
 ├── app.json                      # Expo configuration
@@ -655,6 +694,12 @@ npm run id:test
 
 # Migrate legacy IDs (if needed)
 npm run id:migrate
+
+# Migrate legacy result IDs (if needed)
+npm run migrate:results
+
+# Migrate all IDs (teachers, students, classes, results, etc.)
+npm run migrate:all
 ```
 
 See `lib/README-ID-SYSTEM.ts` for complete documentation.
@@ -681,6 +726,7 @@ npm run web        # Web browser
 - **Hot Reload**: Changes appear instantly
 - **TypeScript**: Full type checking
 - **File-based Routing**: Add files to `/app` directory
+- **React Compiler**: Enabled for performance and DX improvements
 - **Error Overlay**: Helpful error messages in development
 
 ### Git Workflow
@@ -923,6 +969,16 @@ This project is proprietary software developed for MATHTATAG.
 
 ## 🆕 Recent Updates
 
+### Version 1.0.4 (December 2025)
+- ✅ **React 19.1 + React Compiler**: Upgraded to React 19.1.0 with React Compiler enabled for improved performance
+- ✅ **Role Selection Screen**: Added `app/RoleSelection.tsx` for clearer onboarding
+- ✅ **EAS Profiles & Channels**: Preview channel configured; APK build profile verified
+- ✅ **Web Export**: Static web export and Vercel rewrites confirmed (`vercel.json` + `dist/`)
+- ✅ **Responsive UI**: New `ResponsiveDashboard.tsx` and `ResponsiveGrid.tsx` components
+- ✅ **ID Utilities**: Added scripts to migrate all IDs and result IDs
+- ✅ **Utilities & Hooks**: New helpers (`firebase-utils`, `result-validation-utils`, `tagalog-number-utils`) and `useResponsiveLayout`
+- ✅ **Dependency Refresh**: Expo SDK 54.0.13, React Native 0.81.4, Firebase JS SDK v11
+
 ### Version 1.0.3 (October 2025)
 - ✅ **Voice Recording System**: Ultra-optimized teacher voice recording with 2-minute limit
 - ✅ **Audio Compression**: 75% smaller file sizes (~40-100 KB/min vs 960 KB/min)
@@ -937,7 +993,7 @@ This project is proprietary software developed for MATHTATAG.
 
 ---
 
-**Current Version:** 1.0.3  
-**Last Updated:** October 19, 2025  
+**Current Version:** 1.0.4  
+**Last Updated:** December 1, 2025  
 **Status:** Production Ready ✅  
 **Repository:** [github.com/Kaneki0607/MATHTATAG-reimagined](https://github.com/Kaneki0607/MATHTATAG-reimagined)
