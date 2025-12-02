@@ -9225,12 +9225,12 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                       });
 
                       
-                      // Sort assignments within each quarter from earliest to latest assigned
+                      // Sort assignments within each quarter from latest to earliest assigned
                       Object.keys(groupedByQuarter).forEach((q) => {
                         groupedByQuarter[q].sort((a: any, b: any) => {
                           const ta = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
                           const tb = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
-                          return ta - tb;
+                          return tb - ta;
                         });
                       });
                       
