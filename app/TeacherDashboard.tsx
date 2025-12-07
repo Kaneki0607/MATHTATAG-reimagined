@@ -31,6 +31,8 @@ import {
 
   ScrollView,
 
+  Pressable,
+
   StyleSheet,
 
   Text,
@@ -45,6 +47,7 @@ import {
   useWindowDimensions
 } from 'react-native';
 
+import XLSX from 'xlsx';
 import { ResponsiveCards } from '../components/ResponsiveGrid';
 import { useResponsive } from '../hooks/useResponsive';
 import { useResponsiveLayout, useResponsiveValue } from '../hooks/useResponsiveLayout';
@@ -5732,10 +5735,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   };
   const handleExportToExcel = async (exerciseTitle: string, results: any[], students: any[]) => {
 
-    let XLSX: any;
     try {
-      const XLSXLib: any = await import('xlsx');
-      XLSX = XLSXLib.default || XLSXLib;
 
       // Create a workbook
 
@@ -6334,10 +6334,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   const handleExportClassStatsToExcel = async () => {
     if (!selectedExerciseForStats) return;
     
-    let XLSX: any;
     try {
-      const XLSXLib: any = await import('xlsx');
-      XLSX = XLSXLib.default || XLSXLib;
       const { exerciseTitle, exerciseId, exerciseResults, classId } = selectedExerciseForStats;
       
       // Create a workbook
@@ -6346,6 +6343,11 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       // Calculate all statistics
       const scores = exerciseResults.map((r: any) => r.scorePercentage || 0);
       const sortedScores = [...scores].sort((a: number, b: number) => a - b);
+
+      // Resolve class info and students for richer export
+      const classInfo = activeClasses.find(c => c.id === classId);
+      const className = classInfo?.name || 'Class';
+      const classStudents = studentsByClass[classId] || [];
       
       if (scores.length === 0) {
         showAlert('Error', 'No data available to export.', undefined, 'error');
@@ -6400,12 +6402,14 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       
       // SHEET 1: OVERVIEW
       const overviewData = [
+        { 'Metric': 'Class Name', 'Value': className },
         { 'Metric': 'Exercise Title', 'Value': exerciseTitle },
         { 'Metric': 'Exercise ID', 'Value': exerciseId },
         { 'Metric': 'Total Students', 'Value': scores.length },
         { 'Metric': 'Mean Percentage Score (MPS)', 'Value': `${mps.toFixed(1)}%` },
-        { 'Metric': 'Pass Rate (≥60%)', 'Value': `${passRate.toFixed(1)}%` },
-        { 'Metric': 'Students Passed', 'Value': `${passCount}/${scores.length}` }
+        { 'Metric': 'Pass Rate (≥75%)', 'Value': `${passRate.toFixed(1)}%` },
+        { 'Metric': 'Students Passed', 'Value': `${passCount}/${scores.length}` },
+        { 'Metric': 'Exported At', 'Value': new Date().toLocaleString() }
       ];
       
       const overviewWs = XLSX.utils.json_to_sheet(overviewData);
@@ -6462,62 +6466,201 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       performanceDistWs['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 15 }];
       XLSX.utils.book_append_sheet(wb, performanceDistWs, 'Performance Distribution');
       
-      // SHEET 6: ITEM ANALYSIS
-      const firstResult = exerciseResults[0];
-      if (firstResult?.questionResults?.length) {
-        const itemAnalysisData: any[] = [];
-        
-        firstResult.questionResults.forEach((question: any, questionIndex: number) => {
-          const questionNumber = question.questionNumber || questionIndex + 1;
-          const questionText = question.questionText || `Question ${questionNumber}`;
-          
-          let questionType = question.questionType || 'Unknown';
-          if (questionType.includes('multiple-choice')) {
-            questionType = 'Multiple Choice';
-          } else if (questionType.includes('identification')) {
-            questionType = 'Identification';
-          } else if (questionType.includes('re-order')) {
-            questionType = 'Re-order';
-          } else if (questionType.includes('matching')) {
-            questionType = 'Matching';
+      // SHEET 6: STUDENT RESULTS (per-student summary)
+      try {
+        const studentResultsData = exerciseResults.map((result: any, idx: number) => {
+          // Try to find student by multiple strategies
+          let student = classStudents.find((s: any) => s.studentId === result.studentId);
+          if (!student && result.studentInfo?.name) {
+            student = classStudents.find((s: any) => 
+              s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+            );
           }
-          
-          const questionResults = exerciseResults.map((result: any) => {
-            return result.questionResults?.find((q: any) => q.questionId === question.questionId);
-          }).filter(Boolean);
-          
-          const correctCount = questionResults.filter((q: any) => q.isCorrect).length;
-          const difficultyIndex = questionResults.length > 0 ? (correctCount / questionResults.length) * 100 : 0;
-          
-          const avgTime = questionResults.reduce((sum: any, q: any) => sum + (q.timeSpent || 0), 0) / questionResults.length;
-          const avgTimeSeconds = Math.round(avgTime / 1000);
-          
-          const avgAttempts = questionResults.reduce((sum: any, q: any) => sum + (q.attempts || 1), 0) / questionResults.length;
-          
-          itemAnalysisData.push({
-            'Question #': questionNumber,
-            'Question Text': questionText,
-            'Type': questionType,
-            'Difficulty Index (%)': difficultyIndex.toFixed(1),
-            'Correct Count': correctCount,
-            'Total Responses': questionResults.length,
-            'Avg Time (s)': avgTimeSeconds,
-            'Avg Attempts': avgAttempts.toFixed(1)
-          });
+          if (!student && result.parentId) {
+            student = classStudents.find((s: any) => s.parentId === result.parentId);
+          }
+  
+          const studentNickname = student ? formatStudentName(student) : (result.studentInfo?.name || 'Unknown Student');
+  
+          const questionResults = Array.isArray(result.questionResults) ? result.questionResults : [];
+          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q?.attempts || 1), 0);
+          const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
+  
+          const totalTimeMs = typeof result.totalTimeSpent === 'number' ? result.totalTimeSpent : 0;
+          const totalTimeSeconds = Math.max(0, Math.round(totalTimeMs / 1000));
+          const totalTimeMinutes = Math.max(0, Math.floor(totalTimeMs / 60000));
+          const remainingSeconds = Math.max(0, Math.round((totalTimeMs % 60000) / 1000));
+          const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${remainingSeconds}s` : `${totalTimeSeconds}s`;
+  
+          const totalCorrect = result.resultsSummary?.totalCorrect ?? questionResults.filter((q: any) => !!q?.isCorrect).length;
+          const totalQuestions = questionResults.length;
+  
+          return {
+            '#': idx + 1,
+            'Student': studentNickname,
+            'Correct Answers': `${totalCorrect}/${totalQuestions}`,
+            'Score %': `${Math.round(result.scorePercentage || 0)}%`,
+            'Avg Attempts': avgAttempts,
+            'Time (seconds)': totalTimeSeconds,
+            'Time (formatted)': timeDisplay,
+            'Completed At': result.completedAt ? new Date(result.completedAt).toLocaleString() : 'N/A'
+          };
         });
-        
-        const itemAnalysisWs = XLSX.utils.json_to_sheet(itemAnalysisData);
-        itemAnalysisWs['!cols'] = [
-          { wch: 12 }, // Question #
-          { wch: 40 }, // Question Text
-          { wch: 18 }, // Type
-          { wch: 18 }, // Difficulty Index
-          { wch: 15 }, // Correct Count
-          { wch: 15 }, // Total Responses
-          { wch: 12 }, // Avg Time
-          { wch: 15 }  // Avg Attempts
+        const studentResultsWs = XLSX.utils.json_to_sheet(studentResultsData);
+        studentResultsWs['!cols'] = [
+          { wch: 5 },   // #
+          { wch: 25 },  // Student
+          { wch: 18 },  // Correct Answers
+          { wch: 12 },  // Score %
+          { wch: 15 },  // Avg Attempts
+          { wch: 15 },  // Time (seconds)
+          { wch: 18 },  // Time (formatted)
+          { wch: 25 }   // Completed At
         ];
-        XLSX.utils.book_append_sheet(wb, itemAnalysisWs, 'Item Analysis');
+        XLSX.utils.book_append_sheet(wb, studentResultsWs, 'Student Results');
+      } catch (sectionErr) {
+        console.warn('Student Results sheet failed:', sectionErr);
+      }
+      
+      // SHEET 7: ITEM ANALYSIS
+      const firstResult = exerciseResults[0];
+      try {
+        if (firstResult?.questionResults?.length) {
+          const itemAnalysisData: any[] = [];
+          
+          firstResult.questionResults.forEach((question: any, questionIndex: number) => {
+            const questionNumber = question?.questionNumber || questionIndex + 1;
+            const questionText = question?.questionText || `Question ${questionNumber}`;
+            
+            let questionType = question?.questionType || 'Unknown';
+            if (typeof questionType === 'string' && questionType.includes('multiple-choice')) {
+              questionType = 'Multiple Choice';
+            } else if (typeof questionType === 'string' && questionType.includes('identification')) {
+              questionType = 'Identification';
+            } else if (typeof questionType === 'string' && questionType.includes('re-order')) {
+              questionType = 'Re-order';
+            } else if (typeof questionType === 'string' && questionType.includes('matching')) {
+              questionType = 'Matching';
+            }
+            
+            const perQuestionResults = exerciseResults.map((result: any) => {
+              const list = Array.isArray(result.questionResults) ? result.questionResults : [];
+              return list.find((q: any) => q?.questionId === question?.questionId);
+            }).filter(Boolean);
+            
+            const correctCount = perQuestionResults.filter((q: any) => !!q?.isCorrect).length;
+            const difficultyIndex = perQuestionResults.length > 0 ? (correctCount / perQuestionResults.length) * 100 : 0;
+            
+            const sumTime = perQuestionResults.reduce((sum: number, q: any) => sum + (q?.timeSpent || q?.timeSpentSeconds || 0), 0);
+            const avgTimeSeconds = perQuestionResults.length > 0 ? Math.round((sumTime / perQuestionResults.length) / 1000) : 0;
+            
+            const sumAttempts = perQuestionResults.reduce((sum: number, q: any) => sum + (q?.attempts || 1), 0);
+            const avgAttempts = perQuestionResults.length > 0 ? (sumAttempts / perQuestionResults.length) : 1;
+            
+            itemAnalysisData.push({
+              'Question #': questionNumber,
+              'Question Text': questionText,
+              'Type': questionType,
+              'Difficulty Index (%)': difficultyIndex.toFixed(1),
+              'Correct Count': correctCount,
+              'Total Responses': perQuestionResults.length,
+              'Avg Time (s)': avgTimeSeconds,
+              'Avg Attempts': avgAttempts.toFixed(1)
+            });
+          });
+          
+          const itemAnalysisWs = XLSX.utils.json_to_sheet(itemAnalysisData);
+          itemAnalysisWs['!cols'] = [
+            { wch: 12 }, // Question #
+            { wch: 40 }, // Question Text
+            { wch: 18 }, // Type
+            { wch: 18 }, // Difficulty Index
+            { wch: 15 }, // Correct Count
+            { wch: 15 }, // Total Responses
+            { wch: 12 }, // Avg Time
+            { wch: 15 }  // Avg Attempts
+          ];
+          XLSX.utils.book_append_sheet(wb, itemAnalysisWs, 'Item Analysis');
+        }
+      } catch (sectionErr) {
+        console.warn('Item Analysis sheet failed:', sectionErr);
+      }
+
+      // SHEET 8: ANSWER DISTRIBUTION (per question answer frequencies)
+      try {
+        if (firstResult?.questionResults?.length) {
+          const answerRows: any[] = [];
+  
+          firstResult.questionResults.forEach((question: any, questionIndex: number) => {
+            const questionNumber = question?.questionNumber || questionIndex + 1;
+            const questionType = question?.questionType || '';
+  
+            // Build distribution for this question
+            const distribution: Record<string, { count: number; isCorrect: boolean }> = {};
+            let totalConsidered = 0;
+  
+            exerciseResults.forEach((result: any) => {
+              const list = Array.isArray(result.questionResults) ? result.questionResults : [];
+              const qResult = list.find((q: any) => q?.questionId === question?.questionId);
+              if (qResult) {
+                const rawAnswer = qResult.studentAnswer ?? qResult.answer ?? 'No Answer';
+                const formatted = formatAnswerForDisplay(String(rawAnswer), String(questionType));
+                const isCorrect = !!qResult.isCorrect;
+                totalConsidered++;
+                if (!distribution[formatted]) {
+                  distribution[formatted] = { count: 0, isCorrect };
+                }
+                distribution[formatted].count += 1;
+              } else {
+                // Count as No Answer
+                totalConsidered++;
+                const key = 'No Answer';
+                if (!distribution[key]) {
+                  distribution[key] = { count: 0, isCorrect: false };
+                }
+                distribution[key].count += 1;
+              }
+            });
+  
+            const entries = Object.entries(distribution)
+              .sort(([, a], [, b]) => ((b?.count || 0) - (a?.count || 0)));
+  
+            // Header row per question
+            answerRows.push({
+              'Question #': `Q${questionNumber}`,
+              'Answer': '(summary)',
+              'Count': totalConsidered,
+              'Percentage': '100%',
+              'Correct?': ''
+            });
+  
+            entries.forEach(([answerText, data]) => {
+              const pct = totalConsidered > 0 ? Math.round(((data?.count || 0) / totalConsidered) * 100) : 0;
+              answerRows.push({
+                'Question #': `Q${questionNumber}`,
+                'Answer': answerText,
+                'Count': data?.count || 0,
+                'Percentage': `${pct}%`,
+                'Correct?': data?.isCorrect ? 'Yes' : 'No'
+              });
+            });
+  
+            // Blank separator
+            answerRows.push({ 'Question #': '', 'Answer': '', 'Count': '', 'Percentage': '', 'Correct?': '' });
+          });
+  
+          const answerDistWs = XLSX.utils.json_to_sheet(answerRows);
+          answerDistWs['!cols'] = [
+            { wch: 10 }, // Question #
+            { wch: 50 }, // Answer
+            { wch: 10 }, // Count
+            { wch: 12 }, // Percentage
+            { wch: 10 }  // Correct?
+          ];
+          XLSX.utils.book_append_sheet(wb, answerDistWs, 'Answer Distribution');
+        }
+      } catch (sectionErr) {
+        console.warn('Answer Distribution sheet failed:', sectionErr);
       }
       
       // Generate Excel file
@@ -6560,10 +6703,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   
   
   const handleExportQuarterToExcel = async (quarter: string, classId: string, resultsByExercise: any, students: any[]) => {
-    let XLSX: any;
     try {
-      const XLSXLib: any = await import('xlsx');
-      XLSX = XLSXLib.default || XLSXLib;
       // Get class info for filename
       const classInfo = activeClasses.find(c => c.id === classId);
       const className = classInfo?.name || 'Class';
@@ -14711,10 +14851,9 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
       {/* Detailed Statistics Modal */}
       <Modal visible={showDetailedStatsModal} animationType="fade" transparent={true}>
-        <TouchableWithoutFeedback onPress={handleCloseDetailedStats}>
-          <View style={styles.detailedStatsModalBackdrop}>
-            <TouchableWithoutFeedback onPress={() => {}}>
-              <ModalErrorBoundary
+        <View style={styles.detailedStatsModalBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={handleCloseDetailedStats} />
+          <ModalErrorBoundary
                 fallback={(
                   <View style={styles.detailedStatsErrorContainer}>
                     <MaterialCommunityIcons name="alert-circle" size={48} color="#ef4444" />
@@ -14732,7 +14871,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                   </View>
                 )}
               >
-                <View style={[styles.detailedStatsModalPanelContainer]} onStartShouldSetResponder={() => true}>
+                <View style={[styles.detailedStatsModalPanelContainer]}>
                   <View style={[styles.detailedStatsModalPanel]}>
                   {/* Header */}
                   <View style={styles.detailedStatsModalHeader}>
@@ -14779,7 +14918,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           {!detailedStatsLoading && (
           <ScrollView
             style={styles.detailedStatsModalContent}
-            showsVerticalScrollIndicator={false}
+            showsVerticalScrollIndicator={true}
             bounces={true}
             overScrollMode="always"
             decelerationRate="fast"
@@ -15318,9 +15457,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 </View>
               </View>
             </ModalErrorBoundary>
-            </TouchableWithoutFeedback>
-          </View>
-        </TouchableWithoutFeedback>
+        </View>
       </Modal>
 
       {/* Custom Alert */}
@@ -24910,6 +25047,7 @@ const styles = StyleSheet.create({
   },
 
   detailedStatsModalContent: {
+    flex: 1,
     flexGrow: 1,
     paddingHorizontal: 16,
     paddingTop: 8,

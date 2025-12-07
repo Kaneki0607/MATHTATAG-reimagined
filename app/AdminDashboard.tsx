@@ -449,17 +449,19 @@ export default function AdminDashboard() {
   const updateReportStatus = async (reportId: string, newStatus: string, newPriority?: string) => {
     try {
       const user = getCurrentUser();
-      const updateData: any = {
+      const updatePayload: any = {
         status: newStatus,
         ...(newPriority && { priority: newPriority }),
       };
 
       if (newStatus === 'resolved') {
-        updateData.resolvedAt = new Date().toISOString();
-        updateData.resolvedBy = user?.uid || 'admin';
+        updatePayload.resolvedAt = new Date().toISOString();
+        updatePayload.resolvedBy = user?.uid || 'admin';
+        // Track when the report was forwarded to Super Admin for sorting on their side
+        updatePayload.forwardedAt = new Date().toISOString();
       }
 
-      const { success, error } = await updateData(`/technicalReports/${reportId}`, updateData);
+      const { success, error } = await updateData(`/technicalReports/${reportId}`, updatePayload);
 
       if (success) {
         // Update local state immediately
@@ -467,14 +469,14 @@ export default function AdminDashboard() {
           prev.map(report => 
             report.id === reportId ? { 
               ...report, 
-              ...updateData
+              ...updatePayload
             } : report
           )
         );
         
         // Update selected report if it's the same one
         if (selectedReport?.id === reportId) {
-          setSelectedReport(prev => prev ? { ...prev, ...updateData } : null);
+          setSelectedReport(prev => prev ? { ...prev, ...updatePayload } : null);
         }
 
         Alert.alert('Success', `Report status updated to ${newStatus}.`);

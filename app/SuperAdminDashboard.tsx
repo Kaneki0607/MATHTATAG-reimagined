@@ -79,6 +79,8 @@ interface TechnicalReport {
   buildProfile?: string;
   expoVersion?: string;
   submittedAt?: string;
+  // When admin forwarded/sent the ticket to Super Admin
+  forwardedAt?: string;
 }
 
 export default function SuperAdminDashboard() {
@@ -312,6 +314,7 @@ export default function SuperAdminDashboard() {
           category: data.category,
           resolvedAt: data.resolvedAt,
           resolvedBy: data.resolvedBy,
+          forwardedAt: data.forwardedAt,
           // Technical metadata fields
           appVersion: data.appVersion,
           updateId: data.updateId,
@@ -324,8 +327,11 @@ export default function SuperAdminDashboard() {
           expoVersion: data.expoVersion,
           submittedAt: data.submittedAt,
         })).sort((a, b) => {
-          const aTime = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-          const bTime = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+          // Sort by forwardedAt if available, otherwise fallback to original timestamp
+          const aKey = a.forwardedAt || a.timestamp || 0;
+          const bKey = b.forwardedAt || b.timestamp || 0;
+          const aTime = aKey ? new Date(aKey).getTime() : 0;
+          const bTime = bKey ? new Date(bKey).getTime() : 0;
           return bTime - aTime;
         });
         setTechnicalReports(reportsList);
@@ -711,8 +717,9 @@ export default function SuperAdminDashboard() {
       
       switch (reportSortBy) {
         case 'timestamp':
-          aValue = new Date(a.timestamp || 0).getTime();
-          bValue = new Date(b.timestamp || 0).getTime();
+          // Use forwardedAt when present to sort by latest "sent" first
+          aValue = new Date((a.forwardedAt || a.timestamp || 0) as any).getTime();
+          bValue = new Date((b.forwardedAt || b.timestamp || 0) as any).getTime();
           break;
         case 'priority':
           const priorityOrder = { critical: 4, high: 3, medium: 2, low: 1 };
