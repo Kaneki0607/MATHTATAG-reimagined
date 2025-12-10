@@ -1,5 +1,5 @@
-export const GEMINI_API_KEY = 'AIzaSyCkLH0BgJm6i9C-lYTqKzFYVRgKeACLmCM';
-export const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash-latest'];
+export const GEMINI_API_KEY = 'AIzaSyCcI2-ZiL1cKdu_XuUYAQYtn-ug0rp6H5E';
+export const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-exp'];
 export const GEMINI_MAX_ATTEMPTS_PER_MODEL = 3;
 
 const parseGeminiErrorMessage = (raw: string): string => {
