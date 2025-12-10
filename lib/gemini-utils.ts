@@ -1,4 +1,4 @@
-export const GEMINI_API_KEY = 'AIzaSyDZpUdOvbu3SA0yoNyPhSaDvUzTKEnfVOY';
+export const GEMINI_API_KEY = 'AIzaSyCkLH0BgJm6i9C-lYTqKzFYVRgKeACLmCM';
 export const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash-latest'];
 export const GEMINI_MAX_ATTEMPTS_PER_MODEL = 3;
 

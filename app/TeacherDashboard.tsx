@@ -1,19 +1,11 @@
 import { AntDesign, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
-import React from 'react';
-
 import * as FileSystem from 'expo-file-system/legacy';
-
 import * as ImagePicker from 'expo-image-picker';
-
 import * as Print from 'expo-print';
-
 import { useRouter } from 'expo-router';
-
 import { Accelerometer } from 'expo-sensors';
-
 import * as Sharing from 'expo-sharing';
-
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   ActivityIndicator,
@@ -27,12 +19,10 @@ import {
 
   PanResponder,
   Platform,
+  Pressable,
   RefreshControl,
 
   ScrollView,
-
-  Pressable,
-
   StyleSheet,
 
   Text,
@@ -5737,7 +5727,6 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
     try {
 
-      // Create a workbook
 
       const wb = XLSX.utils.book_new();
 
