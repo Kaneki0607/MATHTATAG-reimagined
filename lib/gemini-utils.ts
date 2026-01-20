@@ -1,4 +1,20 @@
-export const GEMINI_API_KEY = 'AIzaSyCcI2-ZiL1cKdu_XuUYAQYtn-ug0rp6H5E';
+import Constants from 'expo-constants';
+
+// Load Gemini API key from environment variables via Expo Constants
+// The key is set in .env file and loaded through app.config.js
+const getGeminiApiKey = (): string => {
+  const apiKey = Constants.expoConfig?.extra?.geminiApiKey as string;
+  
+  if (!apiKey || apiKey.trim() === '') {
+    throw new Error(
+      'GEMINI_API_KEY is not configured. Please add it to your .env file:\n' +
+      'GEMINI_API_KEY=your_api_key_here'
+    );
+  }
+  
+  return apiKey;
+};
+
 export const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash-lite'];
 export const GEMINI_MAX_ATTEMPTS_PER_MODEL = 3;
 
@@ -18,6 +34,9 @@ const parseGeminiErrorMessage = (raw: string): string => {
 };
 
 export const callGeminiWithFallback = async (requestBody: any): Promise<{ data: any; modelUsed: string }> => {
+  // Validate API key is configured (throws if missing)
+  const GEMINI_API_KEY = getGeminiApiKey();
+  
   let lastErrorDetails = 'Gemini request failed.';
 
   for (const modelName of GEMINI_MODELS) {

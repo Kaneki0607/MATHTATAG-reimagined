@@ -686,6 +686,7 @@ export default function ParentDashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [tasksLoading, setTasksLoading] = useState(true); // Start as true to show loading skeleton
   const [initialTasksLoaded, setInitialTasksLoaded] = useState(false); // Track if tasks have been loaded at least once
+  const [classInactive, setClassInactive] = useState(false); // Track if student's class is inactive
   
   // Refresh state
   const [refreshing, setRefreshing] = useState(false);
@@ -2745,6 +2746,19 @@ LANGUAGE RULES:
         return;
       }
       
+      // Check if the student's class is active
+      const { data: classData } = await readData(`/classes/${studentClassId}`);
+      if (classData && classData.status === 'inactive') {
+        console.log('loadTasks: Student class is inactive, blocking access to data');
+        setClassInactive(true);
+        setTasksLoading(false);
+        setInitialTasksLoaded(true);
+        setTasks([]); // Clear any existing tasks
+        return;
+      } else {
+        setClassInactive(false); // Ensure it's reset if class becomes active again
+      }
+      
       console.log('loadTasks: Successfully identified student. ClassId:', studentClassId, 'StudentId:', studentId, 'ActualParentId:', actualParentId);
       
       // Load tasks, assigned exercises, and exercise results
@@ -3648,19 +3662,38 @@ LANGUAGE RULES:
             }
           >
 
-            {/* Announcements Section - Top Priority */}
-            <View style={styles.modernAnnouncementSection}>
-              <View style={styles.sectionHeaderRow}>
-                <View style={styles.modernSectionLabelContainer}>
-                  <MaterialCommunityIcons name="bullhorn" size={24} color="#3b82f6" />
-                  <Text style={styles.modernSectionLabel}>Mga Paalala</Text>
-                  {unreadCount > 0 && (
-                    <View style={styles.modernUnreadBadge}>
-                      <Text style={styles.modernUnreadCount}>{unreadCount}</Text>
-                    </View>
-                  )}
+            {/* Class Inactive Warning - Show if class is inactive */}
+            {classInactive && (
+              <View style={styles.inactiveClassWarning}>
+                <View style={styles.inactiveClassIconContainer}>
+                  <MaterialCommunityIcons name="archive" size={48} color="#f59e0b" />
                 </View>
+                <Text style={styles.inactiveClassTitle}>Klase ay Hindi Aktibo</Text>
+                <Text style={styles.inactiveClassMessage}>
+                  Ang klase ng inyong anak ay kasalukuyang hindi aktibo. Hindi muna makikita ang mga gawain at talaan ng marka.
+                </Text>
+                <Text style={styles.inactiveClassMessage}>
+                  Mangyaring makipag-ugnayan sa guro para sa karagdagang impormasyon.
+                </Text>
               </View>
+            )}
+
+            {/* Only show content if class is active */}
+            {!classInactive && (
+              <>
+                {/* Announcements Section - Top Priority */}
+                <View style={styles.modernAnnouncementSection}>
+                  <View style={styles.sectionHeaderRow}>
+                    <View style={styles.modernSectionLabelContainer}>
+                      <MaterialCommunityIcons name="bullhorn" size={24} color="#3b82f6" />
+                      <Text style={styles.modernSectionLabel}>Mga Paalala</Text>
+                      {unreadCount > 0 && (
+                        <View style={styles.modernUnreadBadge}>
+                          <Text style={styles.modernUnreadCount}>{unreadCount}</Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
 
               {announcements.length > 0 ? (
                 <ScrollView 
@@ -4031,6 +4064,8 @@ LANGUAGE RULES:
                 </Text>
               </View>
             </View>
+              </>
+            )}
           </ScrollView>
         )}
 
@@ -10812,6 +10847,35 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 16,
+  },
+  inactiveClassWarning: {
+    backgroundColor: '#fef3c7',
+    borderRadius: 12,
+    padding: 20,
+    marginHorizontal: 16,
+    marginTop: 16,
+    marginBottom: 24,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#f59e0b',
+  },
+  inactiveClassIconContainer: {
+    marginBottom: 12,
+  },
+  inactiveClassTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#92400e',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  inactiveClassMessage: {
+    fontSize: 14,
+    color: '#78350f',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 8,
+    paddingHorizontal: 8,
   },
 
 });

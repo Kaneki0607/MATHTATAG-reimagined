@@ -9,7 +9,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   ActivityIndicator,
-
+  Alert,
   Animated,
   Dimensions,
 
@@ -55,8 +55,6 @@ import { createAnnouncement, createClass, createParent, createStudent } from '..
 import { logError, logErrorWithStack } from '../lib/error-logger';
 import { uploadFile } from '../lib/firebase-storage';
 import { callGeminiWithFallback, extractGeminiText, parseGeminiJson } from '../lib/gemini-utils';
-
-
 
 // Note: Using static dimensions for StyleSheet creation
 // Dynamic dimensions are handled via useWindowDimensions hook in component
@@ -5221,11 +5219,6 @@ export default function TeacherDashboard() {
     
 
     try {
-
-      const geminiApiKey = "AIzaSyDsUXZXUDTMRQI0axt_A9ulaSe_m-HQvZk";
-
-      
-
       // Prepare performance data for analysis
 
       const performanceData = {
@@ -5396,78 +5389,23 @@ LANGUAGE RULES:
 
 Remember: Return ONLY the JSON object, no markdown, no code blocks, no additional text.`;
 
-
-
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, {
-
-        method: 'POST',
-
-        headers: {
-
-          'Content-Type': 'application/json',
-
-        },
-
-        body: JSON.stringify({
-
-          contents: [{
-
-            parts: [{
-
-              text: prompt
-
-            }]
-
-          }],
-
-          generationConfig: {
-
-            temperature: 0.7,
-
-            topK: 40,
-
-            topP: 0.95,
-
-            maxOutputTokens: 2048,
-
-          }
-
-        })
+      // Use callGeminiWithFallback for proper error handling and retry logic
+      const { data } = await callGeminiWithFallback({
+        contents: [{
+          parts: [{
+            text: prompt
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.7,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 2048,
+        }
 
       });
 
-
-
-      if (!response.ok) {
-
-        const errorText = await response.text();
-
-        console.warn(`Gemini API error (attempt ${retryCount + 1}): ${response.status} - ${errorText}`);
-
-        
-
-        // Retry on certain error codes
-
-        if ((response.status === 404 || response.status === 500 || response.status === 503) && retryCount < maxRetries) {
-
-          console.log(`Retrying Gemini analysis in ${retryDelay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
-
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
-
-          return legacyGenerateGeminiAnalysis(resultData, classAverages, retryCount + 1);
-
-        }
-
-        
-
-        throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
-
-      }
-
-
-
-      const data = await response.json();
-
+      // Extract analysis text from Gemini response
       const analysisText = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
       
@@ -5558,8 +5496,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
         }
 
-        
-
+    
         // If all retries failed, try to extract partial data or return fallback
 
         console.log('All retries failed, attempting to extract partial data...');
@@ -6737,39 +6674,18 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               exercises: {}
             };
           }
-
-          // Calculate metrics for this exercise
-          const questionResults = result.questionResults || [];
-          const totalAttempts = questionResults.reduce((sum: number, q: any) => sum + (q.attempts || 1), 0);
-          const avgAttempts = questionResults.length > 0 ? (totalAttempts / questionResults.length).toFixed(1) : '1.0';
           
-          const totalTimeMinutes = Math.round((result.totalTimeSpent || 0) / 60000);
-          const totalTimeSeconds = Math.round(((result.totalTimeSpent || 0) % 60000) / 1000);
-          const timeDisplay = totalTimeMinutes > 0 ? `${totalTimeMinutes}m ${totalTimeSeconds}s` : `${Math.round((result.totalTimeSpent || 0) / 1000)}s`;
-          
-          // Store exercise results for this student
+          // Store exercise results for this student (numeric score for calculations)
           studentResultsMap[studentName].exercises[exerciseTitle] = {
-            scorePercentage: `${Math.round(result.scorePercentage || 0)}%`,
-            avgAttempts,
-            timeFormatted: timeDisplay,
-            completedAt: result.completedAt ? new Date(result.completedAt).toLocaleString() : 'N/A'
+            score: Math.round(result.scorePercentage || 0)
           };
         });
       });
       
-      // Create headers for the wide format
-      const exerciseTitles = Object.keys(resultsByExercise);
-      const headers = ['#', 'Student'];
+      // Get sorted exercise titles for consistent column order
+      const exerciseTitles = Object.keys(resultsByExercise).sort();
       
-      // Add columns for each exercise
-      exerciseTitles.forEach(exerciseTitle => {
-        headers.push(`${exerciseTitle} - Score %`);
-        headers.push(`${exerciseTitle} - Avg Attempts`);
-        headers.push(`${exerciseTitle} - Time (formatted)`);
-        headers.push(`${exerciseTitle} - Completed At`);
-      });
-      
-      // Create Excel data in wide format
+      // Create Excel data in class record format
       const excelData: any[] = [];
       let rowNumber = 1;
       
@@ -6778,31 +6694,46 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         a.studentName.localeCompare(b.studentName)
       );
       
-      sortedStudents.forEach((studentData: any) => {
-        const row: any = {
-          '#': rowNumber++,
-          'Student': studentData.studentName
-        };
-        
-        // Add data for each exercise
-        exerciseTitles.forEach(exerciseTitle => {
-          const exerciseData = studentData.exercises[exerciseTitle];
-          if (exerciseData) {
-            row[`${exerciseTitle} - Score %`] = exerciseData.scorePercentage;
-            row[`${exerciseTitle} - Avg Attempts`] = exerciseData.avgAttempts;
-            row[`${exerciseTitle} - Time (formatted)`] = exerciseData.timeFormatted;
-            row[`${exerciseTitle} - Completed At`] = exerciseData.completedAt;
-          } else {
-            // No data for this exercise
-            row[`${exerciseTitle} - Score %`] = 'N/A';
-            row[`${exerciseTitle} - Avg Attempts`] = 'N/A';
-            row[`${exerciseTitle} - Time (formatted)`] = 'N/A';
-            row[`${exerciseTitle} - Completed At`] = 'N/A';
-          }
+      // If no exercises, show roster with status
+      if (exerciseTitles.length === 0) {
+        sortedStudents.forEach((studentData: any) => {
+          excelData.push({
+            '#': rowNumber++,
+            'Student Name': studentData.studentName,
+            'Status': 'No exercises assigned for this quarter'
+          });
         });
-        
-        excelData.push(row);
-      });
+      } else {
+        // Show class record with exercise scores
+        sortedStudents.forEach((studentData: any) => {
+          const row: any = {
+            '#': rowNumber++,
+            'Student Name': studentData.studentName
+          };
+          
+          let totalScore = 0;
+          let exerciseCount = 0;
+          
+          // Add score for each exercise
+          exerciseTitles.forEach(exerciseTitle => {
+            const exerciseData = studentData.exercises[exerciseTitle];
+            if (exerciseData) {
+              row[exerciseTitle] = exerciseData.score;
+              totalScore += exerciseData.score;
+              exerciseCount++;
+            } else {
+              // No data for this exercise
+              row[exerciseTitle] = '-';
+            }
+          });
+          
+          // Calculate total and average
+          row['Total'] = exerciseCount > 0 ? totalScore : '-';
+          row['Average'] = exerciseCount > 0 ? Math.round(totalScore / exerciseCount) : '-';
+          
+          excelData.push(row);
+        });
+      }
 
       // Create a workbook
       const wb = XLSX.utils.book_new();
@@ -6810,19 +6741,25 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       // Convert data to worksheet
       const ws = XLSX.utils.json_to_sheet(excelData);
       
-      // Set column widths for wide format
+      // Set column widths for class record format
       const colWidths = [
         { wch: 5 },   // #
-        { wch: 20 },  // Student
+        { wch: 30 },  // Student Name
       ];
       
-      // Add widths for each exercise's columns
-      exerciseTitles.forEach(() => {
-        colWidths.push({ wch: 12 }); // Score %
-        colWidths.push({ wch: 15 }); // Avg Attempts
-        colWidths.push({ wch: 18 }); // Time (formatted)
-        colWidths.push({ wch: 25 }); // Completed At
-      });
+      if (exerciseTitles.length === 0) {
+        // No exercises - just show status column
+        colWidths.push({ wch: 40 }); // Status
+      } else {
+        // Add widths for each exercise column (score only)
+        exerciseTitles.forEach(() => {
+          colWidths.push({ wch: 12 }); // Exercise Score
+        });
+        
+        // Add widths for Total and Average columns
+        colWidths.push({ wch: 12 }); // Total
+        colWidths.push({ wch: 12 }); // Average
+      }
       
       ws['!cols'] = colWidths;
       
@@ -6872,6 +6809,706 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
   };
 
 
+
+  // Export complete class record for archived classes (all quarters)
+  const handleExportArchivedClassRecord = async (cls: { id: string; name: string }) => {
+    try {
+      console.log('🔍 Starting export for class:', cls.name, 'ID:', cls.id);
+      
+      // Load all exercise results for this class
+      const { data: allResultsData } = await readData('/ExerciseResults');
+      console.log('📊 Total results in database:', Object.keys(allResultsData || {}).length);
+      
+      const allResults = Object.entries(allResultsData || {})
+        .map(([id, result]: [string, any]) => ({ id, ...result }))
+        .filter((result: any) => result.classId === cls.id);
+      
+      console.log('✅ Results for this class:', allResults.length);
+      if (allResults.length > 0) {
+        console.log('Sample result:', allResults[0]);
+      }
+
+      // Load assigned exercises to get quarter information
+      const { data: assignedExercisesData } = await readData('/assignedExercises');
+      console.log('📚 Total assignments in database:', Object.keys(assignedExercisesData || {}).length);
+      
+      const assignedExercises = Object.entries(assignedExercisesData || {})
+        .map(([id, assignment]: [string, any]) => ({ id, ...assignment }))
+        .filter((assignment: any) => assignment.classId === cls.id);
+      
+      console.log('✅ Assignments for this class:', assignedExercises.length);
+      if (assignedExercises.length > 0) {
+        console.log('Sample assignment:', assignedExercises[0]);
+      }
+
+      // Get class students - try memory first, then database
+      let classStudents = studentsByClass[cls.id] || [];
+      
+      if (classStudents.length === 0) {
+        console.log('⚠️ No students in memory, fetching from database...');
+        const { data: studentsData } = await readData('/students');
+        const allStudents = Object.entries(studentsData || {})
+          .map(([id, student]: [string, any]) => ({ studentId: id, ...student }));
+        classStudents = allStudents.filter((s: any) => s.classId === cls.id);
+        console.log('✅ Students fetched from database:', classStudents.length);
+      } else {
+        console.log('✅ Students from memory:', classStudents.length);
+      }
+      
+      if (classStudents.length > 0) {
+        console.log('Sample student:', classStudents[0]);
+      }
+
+      // Organize results by quarter and exercise
+      const resultsByQuarterAndExercise: Record<string, Record<string, any[]>> = {};
+      
+      allResults.forEach((result: any) => {
+        // Find the assignment to get quarter
+        const assignment = assignedExercises.find((a: any) => 
+          a.id === result.assignedExerciseId || a.exerciseId === result.exerciseId
+        );
+        
+        const quarter = assignment?.quarter || 'No Quarter';
+        const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
+
+        if (!resultsByQuarterAndExercise[quarter]) {
+          resultsByQuarterAndExercise[quarter] = {};
+        }
+        if (!resultsByQuarterAndExercise[quarter][exerciseTitle]) {
+          resultsByQuarterAndExercise[quarter][exerciseTitle] = [];
+        }
+        resultsByQuarterAndExercise[quarter][exerciseTitle].push(result);
+      });
+      
+      console.log('📋 Quarters organized:', Object.keys(resultsByQuarterAndExercise));
+      Object.keys(resultsByQuarterAndExercise).forEach(q => {
+        console.log(`   ${q}: ${Object.keys(resultsByQuarterAndExercise[q]).length} exercises`);
+      });
+
+      // Create a workbook with summary sheet first, then one sheet per quarter
+      const wb = XLSX.utils.book_new();
+
+      // Always create class record format, even if no results yet
+      if (Object.keys(resultsByQuarterAndExercise).length === 0) {
+        console.warn('⚠️ No exercise results yet. Creating class roster template...');
+        
+        // Create a student roster sheet even without results
+        const rosterData: any[] = [];
+        
+        // Title section
+        rosterData.push(['CLASS ROSTER']);
+        rosterData.push([`Class: ${cls.name}`]);
+        rosterData.push([`Total Students: ${classStudents.length}`]);
+        rosterData.push([`Generated: ${new Date().toLocaleString()}`]);
+        rosterData.push([]);
+        
+        // Headers
+        rosterData.push(['#', 'STUDENT NAME', 'STATUS']);
+        
+        // Sort students alphabetically
+        const sortedStudents = [...classStudents].sort((a: any, b: any) => 
+          formatStudentName(a).localeCompare(formatStudentName(b))
+        );
+        
+        // Add each student
+        sortedStudents.forEach((student: any, idx: number) => {
+          rosterData.push([
+            idx + 1,
+            formatStudentName(student),
+            'No exercises completed yet'
+          ]);
+        });
+        
+        // Add note
+        rosterData.push([]);
+        rosterData.push(['Note: Students have not completed any exercises yet.']);
+        rosterData.push(['Assign exercises and have students complete them to see detailed records.']);
+        
+        const ws = XLSX.utils.aoa_to_sheet(rosterData);
+        ws['!cols'] = [{ wch: 5 }, { wch: 35 }, { wch: 35 }];
+        XLSX.utils.book_append_sheet(wb, ws, 'Class Roster');
+      } else {
+        // Create summary sheet with Quarter 1-4 scores and Final Score
+        const summaryData: any[] = [];
+        
+        // Add title and class information
+        summaryData.push(['STUDENT ACADEMIC RECORDS SUMMARY']);
+        summaryData.push([`Class: ${cls.name}`]);
+        summaryData.push([`Total Students: ${classStudents.length}`]);
+        summaryData.push([`Generated: ${new Date().toLocaleString()}`]);
+        summaryData.push([]); // Empty row for spacing
+        
+        const summaryHeaders = ['#', 'Student Name', 'Quarter 1 Score', 'Quarter 1 Remarks', 'Quarter 2 Score', 'Quarter 2 Remarks', 'Quarter 3 Score', 'Quarter 3 Remarks', 'Quarter 4 Score', 'Quarter 4 Remarks', 'Final Score'];
+        summaryData.push(summaryHeaders);
+        
+        // Calculate average scores per quarter per student
+        const studentQuarterScores: Record<string, Record<string, { score: number; count: number }>> = {};
+        const summaryQuarterOrder = ['Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4'];
+        
+        // Initialize student structure
+        classStudents.forEach((student: any) => {
+          const studentName = formatStudentName(student);
+          studentQuarterScores[studentName] = {};
+          summaryQuarterOrder.forEach(q => {
+            studentQuarterScores[studentName][q] = { score: 0, count: 0 };
+          });
+        });
+        
+        // Aggregate scores by student and quarter
+        allResults.forEach((result: any) => {
+          const assignment = assignedExercises.find((a: any) => 
+            a.id === result.assignedExerciseId || a.exerciseId === result.exerciseId
+          );
+          const quarter = assignment?.quarter || null;
+          if (!quarter || !summaryQuarterOrder.includes(quarter)) return;
+          
+          let student = classStudents.find((s: any) => s.studentId === result.studentId);
+          if (!student && result.studentInfo?.name) {
+            student = classStudents.find((s: any) => 
+              s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+            );
+          }
+          if (!student && result.parentId) {
+            student = classStudents.find((s: any) => s.parentId === result.parentId);
+          }
+          
+          const studentName = student ? formatStudentName(student) : 
+            (result.studentInfo?.name || 'Unknown Student');
+          
+          if (studentQuarterScores[studentName] && studentQuarterScores[studentName][quarter]) {
+            studentQuarterScores[studentName][quarter].score += result.scorePercentage || 0;
+            studentQuarterScores[studentName][quarter].count += 1;
+          }
+        });
+        
+        // Helper function to get remarks based on score
+        const getRemarks = (score: number): string => {
+          if (score >= 90) return 'Outstanding';
+          if (score >= 85) return 'Very Satisfactory';
+          if (score >= 80) return 'Satisfactory';
+          if (score >= 75) return 'Fairly Satisfactory';
+          return 'Did Not Meet Expectations';
+        };
+
+        // Build summary rows
+        const sortedStudentNames = Object.keys(studentQuarterScores).sort();
+        sortedStudentNames.forEach((studentName, idx) => {
+          const row: any[] = [
+            idx + 1,
+            studentName
+          ];
+          
+          let totalScore = 0;
+          let totalCount = 0;
+          
+          summaryQuarterOrder.forEach(quarter => {
+            const quarterData = studentQuarterScores[studentName][quarter];
+            const avgScore = quarterData.count > 0 
+              ? Math.round((quarterData.score / quarterData.count) * 100) / 100 
+              : null;
+            
+            row.push(avgScore !== null ? avgScore.toFixed(2) : 'N/A');
+            row.push(avgScore !== null ? getRemarks(avgScore) : 'No Data');
+            
+            if (avgScore !== null) {
+              totalScore += avgScore;
+              totalCount += 1;
+            }
+          });
+          
+          // Calculate Final Score
+          const finalScore = totalCount > 0 ? Math.round((totalScore / totalCount) * 100) / 100 : null;
+          row.push(finalScore !== null ? finalScore.toFixed(2) : 'N/A');
+          
+          summaryData.push(row);
+        });
+        
+        // Create summary worksheet
+        const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
+        
+        // Set column widths for summary
+        summaryWs['!cols'] = [
+          { wch: 6 },   // #
+          { wch: 28 },   // Student Name
+          { wch: 12 },   // Q1 Score
+          { wch: 22 },   // Q1 Remarks
+          { wch: 12 },   // Q2 Score
+          { wch: 22 },   // Q2 Remarks
+          { wch: 12 },   // Q3 Score
+          { wch: 22 },   // Q3 Remarks
+          { wch: 12 },   // Q4 Score
+          { wch: 22 },   // Q4 Remarks
+          { wch: 14 }    // Final Score
+        ];
+        
+        // Apply formatting to summary sheet
+        const summaryRange = XLSX.utils.decode_range(summaryWs['!ref'] || 'A1');
+        
+        // Style title rows (rows 0-3)
+        for (let row = 0; row < 4; row++) {
+          const cellAddress = XLSX.utils.encode_cell({ r: row, c: 0 });
+          if (!summaryWs[cellAddress]) continue;
+          
+          summaryWs[cellAddress].s = {
+            font: { 
+              bold: row === 0 ? true : false, 
+              sz: row === 0 ? 14 : 11,
+              color: { rgb: row === 0 ? "1F4E78" : "333333" }
+            },
+            alignment: { 
+              horizontal: 'left',
+              vertical: 'center'
+            }
+          };
+          
+          // Merge cells for title rows
+          if (!summaryWs['!merges']) summaryWs['!merges'] = [];
+          summaryWs['!merges'].push({
+            s: { r: row, c: 0 },
+            e: { r: row, c: summaryRange.e.c }
+          });
+        }
+        
+        // Style header row (row 5, which is index 5 after title rows)
+        const headerRowIndex = 5;
+        for (let col = summaryRange.s.c; col <= summaryRange.e.c; col++) {
+          const cellAddress = XLSX.utils.encode_cell({ r: headerRowIndex, c: col });
+          if (!summaryWs[cellAddress]) continue;
+          
+          summaryWs[cellAddress].s = {
+            font: { bold: true, sz: 11, color: { rgb: "FFFFFF" } },
+            fill: { fgColor: { rgb: "4472C4" } },
+            alignment: { 
+              horizontal: col === 0 ? 'center' : col === 1 ? 'left' : 'center',
+              vertical: 'center',
+              wrapText: true
+            },
+            border: {
+              top: { style: 'thin', color: { rgb: "000000" } },
+              bottom: { style: 'thin', color: { rgb: "000000" } },
+              left: { style: 'thin', color: { rgb: "000000" } },
+              right: { style: 'thin', color: { rgb: "000000" } }
+            }
+          };
+        }
+        
+        // Style data rows (starting from row 6, which is after title + header rows)
+        const dataStartRow = 6;
+        for (let row = dataStartRow; row <= summaryRange.e.r; row++) {
+          for (let col = summaryRange.s.c; col <= summaryRange.e.c; col++) {
+            const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+            if (!summaryWs[cellAddress]) continue;
+            
+            let horizontalAlign: 'left' | 'center' | 'right' = 'left';
+            let fillColor = (row - dataStartRow) % 2 === 0 ? 'FFFFFF' : 'F8F9FA';
+            
+            if (col === 0) {
+              horizontalAlign = 'center'; // # column
+            } else if (col === 1) {
+              horizontalAlign = 'left'; // Student name
+            } else if (col === summaryRange.e.c) {
+              horizontalAlign = 'center'; // Final Score
+              // Highlight final score column with golden tint
+              fillColor = (row - dataStartRow) % 2 === 0 ? 'FFFEF0' : 'FFF9E6';
+            } else if (col % 2 === 0) {
+              horizontalAlign = 'center'; // Score columns (even cols after name)
+            } else {
+              horizontalAlign = 'left'; // Remarks columns
+              
+              // Color-code remarks based on value
+              const cellValue = summaryWs[cellAddress].v;
+              if (typeof cellValue === 'string') {
+                if (cellValue === 'Outstanding') {
+                  fillColor = 'E8F5E9'; // Light green
+                } else if (cellValue === 'Very Satisfactory') {
+                  fillColor = 'E3F2FD'; // Light blue
+                } else if (cellValue === 'Satisfactory') {
+                  fillColor = 'F3E5F5'; // Light purple
+                } else if (cellValue === 'Fairly Satisfactory') {
+                  fillColor = 'FFF3E0'; // Light orange
+                } else if (cellValue === 'Did Not Meet Expectations') {
+                  fillColor = 'FFEBEE'; // Light red
+                }
+              }
+            }
+            
+            summaryWs[cellAddress].s = {
+              font: { 
+                sz: 10,
+                bold: col === summaryRange.e.c ? true : false // Bold final score
+              },
+              alignment: { 
+                horizontal: horizontalAlign,
+                vertical: 'center',
+                wrapText: true
+              },
+              fill: { fgColor: { rgb: fillColor } },
+              border: {
+                top: { style: 'thin', color: { rgb: "D0D0D0" } },
+                bottom: { style: 'thin', color: { rgb: "D0D0D0" } },
+                left: { style: 'thin', color: { rgb: "D0D0D0" } },
+                right: { style: 'thin', color: { rgb: "D0D0D0" } }
+              }
+            };
+          }
+        }
+        
+        // Freeze panes at header row (row 6)
+        summaryWs['!freeze'] = { xSplit: 0, ySplit: 6, topLeftCell: 'A7', activePane: 'bottomLeft', state: 'frozen' };
+        
+        // Add summary sheet as first sheet
+        XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
+        
+        // Continue with detailed quarter sheets...
+        // Process each quarter (detailed sheets)
+        const detailedQuarterOrder = ['Quarter 1', 'Quarter 2', 'Quarter 3', 'Quarter 4', 'No Quarter'];
+        
+        for (const quarter of detailedQuarterOrder) {
+          if (!resultsByQuarterAndExercise[quarter]) continue;
+
+          const resultsByExercise = resultsByQuarterAndExercise[quarter];
+          
+          // Create a map of all students with their results for each exercise
+          const studentResultsMap: Record<string, any> = {};
+          
+          // Initialize all students
+          classStudents.forEach((student: any) => {
+            const studentName = formatStudentName(student);
+            studentResultsMap[studentName] = {
+              studentName,
+              student,
+              exercises: {}
+            };
+          });
+
+          // Process each exercise's results
+          Object.entries(resultsByExercise).forEach(([exerciseTitle, exerciseResults]: [string, any]) => {
+            (exerciseResults as any[]).forEach((result: any) => {
+              let student = classStudents.find((s: any) => s.studentId === result.studentId);
+              
+              if (!student && result.studentInfo?.name) {
+                student = classStudents.find((s: any) => 
+                  s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
+                );
+              }
+              
+              if (!student && result.parentId) {
+                student = classStudents.find((s: any) => s.parentId === result.parentId);
+              }
+
+              const studentName = student ? formatStudentName(student) : 
+                (result.studentInfo?.name || 'Unknown Student');
+
+              if (!studentResultsMap[studentName]) {
+                studentResultsMap[studentName] = {
+                  studentName,
+                  student,
+                  exercises: {}
+                };
+              }
+
+              // Store exercise results for this student (numeric score for calculations)
+              studentResultsMap[studentName].exercises[exerciseTitle] = {
+                score: Math.round(result.scorePercentage || 0)
+              };
+            });
+          });
+
+          // Create CLASS RECORD format: students in rows, exercises in columns
+          const exerciseTitles = Object.keys(resultsByExercise).sort();
+          const quarterData: any[] = [];
+          
+          // Title section
+          quarterData.push([`CLASS RECORD - ${quarter.toUpperCase()}`]);
+          quarterData.push([`Class: ${cls.name}`]);
+          quarterData.push([`Total Exercises: ${exerciseTitles.length} | Total Students: ${classStudents.length}`]);
+          quarterData.push([`Generated: ${new Date().toLocaleString()}`]);
+          quarterData.push([]); // Empty row for spacing
+          
+          // Build headers: # | Student Name | Exercise 1 | Exercise 2 | ... | Total | Average | Remarks
+          const headers = ['#', 'STUDENT NAME'];
+          exerciseTitles.forEach(title => headers.push(title));
+          headers.push('TOTAL');
+          headers.push('AVERAGE');
+          headers.push('REMARKS');
+          quarterData.push(headers);
+          
+          // Sort students alphabetically
+          const sortedStudents = Object.values(studentResultsMap).sort((a: any, b: any) => 
+            a.studentName.localeCompare(b.studentName)
+          );
+          
+          // Build data rows
+          sortedStudents.forEach((studentData: any, idx: number) => {
+            const row: any[] = [
+              idx + 1,
+              studentData.studentName
+            ];
+            
+            let totalScore = 0;
+            let completedCount = 0;
+            
+            // Add score for each exercise (just the number)
+            exerciseTitles.forEach(exerciseTitle => {
+              const exerciseData = studentData.exercises[exerciseTitle];
+              if (exerciseData) {
+                row.push(exerciseData.score);
+                totalScore += exerciseData.score;
+                completedCount++;
+              } else {
+                row.push('—');
+              }
+            });
+            
+            // Add summary columns
+            const average = completedCount > 0 ? Math.round(totalScore / completedCount) : 0;
+            row.push(completedCount > 0 ? totalScore : '—');
+            row.push(completedCount > 0 ? average : '—');
+            
+            // Add remarks based on average
+            let remarks = '';
+            if (completedCount === 0) {
+              remarks = 'No Data';
+            } else if (average >= 90) {
+              remarks = 'Outstanding';
+            } else if (average >= 85) {
+              remarks = 'Very Satisfactory';
+            } else if (average >= 80) {
+              remarks = 'Satisfactory';
+            } else if (average >= 75) {
+              remarks = 'Fairly Satisfactory';
+            } else {
+              remarks = 'Did Not Meet Expectations';
+            }
+            row.push(remarks);
+            
+            quarterData.push(row);
+          });
+          
+          // Add spacing and class statistics
+          quarterData.push([]);
+          
+          // Class average row
+          const classAvgRow: any[] = ['', 'CLASS AVERAGE'];
+          exerciseTitles.forEach(exerciseTitle => {
+            const results = resultsByExercise[exerciseTitle] || [];
+            const scores = results.map((r: any) => r.scorePercentage || 0);
+            const avg = scores.length > 0 
+              ? Math.round(scores.reduce((sum: number, s: number) => sum + s, 0) / scores.length)
+              : 0;
+            classAvgRow.push(scores.length > 0 ? avg : '—');
+          });
+          classAvgRow.push('—');
+          classAvgRow.push('—');
+          classAvgRow.push('—');
+          quarterData.push(classAvgRow);
+          
+          // Completion rate row
+          const completionRow = ['', 'COMPLETION RATE'];
+          exerciseTitles.forEach(exerciseTitle => {
+            const results = resultsByExercise[exerciseTitle] || [];
+            const rate = classStudents.length > 0 
+              ? Math.round((results.length / classStudents.length) * 100)
+              : 0;
+            completionRow.push(`${rate}%`);
+          });
+          completionRow.push('—');
+          completionRow.push('—');
+          completionRow.push('—');
+          quarterData.push(completionRow);
+
+          // Convert data to worksheet
+          const ws = XLSX.utils.aoa_to_sheet(quarterData);
+          
+          // Set column widths
+          const colWidths = [
+            { wch: 5 },   // #
+            { wch: 28 }   // Student Name
+          ];
+          exerciseTitles.forEach(title => {
+            const width = Math.max(12, Math.min(title.length + 2, 25));
+            colWidths.push({ wch: width });
+          });
+          colWidths.push({ wch: 10 });   // Total
+          colWidths.push({ wch: 12 });  // Average
+          colWidths.push({ wch: 28 });  // Remarks
+          ws['!cols'] = colWidths;
+          
+          // Apply formatting: bold headers, borders, alignment
+          const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+          
+          // Style title rows (rows 0-3)
+          for (let row = 0; row < 4; row++) {
+            const cellAddress = XLSX.utils.encode_cell({ r: row, c: 0 });
+            if (!ws[cellAddress]) continue;
+            
+            ws[cellAddress].s = {
+              font: { 
+                bold: row === 0 ? true : false, 
+                sz: row === 0 ? 14 : 11,
+                color: { rgb: row === 0 ? "1F4E78" : "333333" }
+              },
+              alignment: { 
+                horizontal: 'left',
+                vertical: 'center'
+              }
+            };
+            
+            // Merge cells for title rows
+            if (!ws['!merges']) ws['!merges'] = [];
+            ws['!merges'].push({
+              s: { r: row, c: 0 },
+              e: { r: row, c: range.e.c }
+            });
+          }
+          
+          // Style header row (row 5 after title section)
+          const headerRowIndex = 5;
+          for (let col = range.s.c; col <= range.e.c; col++) {
+            const cellAddress = XLSX.utils.encode_cell({ r: headerRowIndex, c: col });
+            if (!ws[cellAddress]) continue;
+            
+            // Apply header styling with bold text
+            ws[cellAddress].s = {
+              font: { bold: true, sz: 11, color: { rgb: "FFFFFF" } },
+              fill: { fgColor: { rgb: "4472C4" } }, // Blue background
+              alignment: { 
+                horizontal: col === 0 ? 'center' : col === 1 ? 'left' : 'center',
+                vertical: 'center',
+                wrapText: true
+              },
+              border: {
+                top: { style: 'thin', color: { rgb: "000000" } },
+                bottom: { style: 'thin', color: { rgb: "000000" } },
+                left: { style: 'thin', color: { rgb: "000000" } },
+                right: { style: 'thin', color: { rgb: "000000" } }
+              }
+            };
+          }
+          
+          // Style data rows (starting after title and header rows)
+          const dataStartRow = 6;
+          for (let row = dataStartRow; row <= range.e.r; row++) {
+            for (let col = range.s.c; col <= range.e.c; col++) {
+              const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+              if (!ws[cellAddress]) continue;
+              
+              // Determine alignment based on column
+              let horizontalAlign: 'left' | 'center' | 'right' = 'left';
+              let fillColor = (row - dataStartRow) % 2 === 0 ? 'FFFFFF' : 'F8F9FA';
+              let isBold = false;
+              
+              if (col === 0) {
+                horizontalAlign = 'center'; // # column
+              } else if (col === 1) {
+                horizontalAlign = 'left'; // Student name
+                
+                // Check if it's a summary row (CLASS AVERAGE, COMPLETION RATE)
+                const cellValue = ws[cellAddress].v;
+                if (cellValue === 'CLASS AVERAGE' || cellValue === 'COMPLETION RATE') {
+                  isBold = true;
+                  fillColor = 'E7F3FF'; // Light blue for summary rows
+                }
+              } else {
+                // Check if it's a number or percentage
+                const cellValue = ws[cellAddress].v;
+                if (typeof cellValue === 'number' || (typeof cellValue === 'string' && (cellValue.includes('%') || cellValue.match(/^\d+\.?\d*$/)))) {
+                  horizontalAlign = 'center';
+                } else if (typeof cellValue === 'string') {
+                  // Remarks column - color-code based on value
+                  if (col === range.e.c) { // Last column (Remarks)
+                    horizontalAlign = 'left';
+                    if (cellValue === 'Outstanding') {
+                      fillColor = 'E8F5E9'; // Light green
+                    } else if (cellValue === 'Very Satisfactory') {
+                      fillColor = 'E3F2FD'; // Light blue
+                    } else if (cellValue === 'Satisfactory') {
+                      fillColor = 'F3E5F5'; // Light purple
+                    } else if (cellValue === 'Fairly Satisfactory') {
+                      fillColor = 'FFF3E0'; // Light orange
+                    } else if (cellValue === 'Did Not Meet Expectations') {
+                      fillColor = 'FFEBEE'; // Light red
+                    }
+                  } else {
+                    horizontalAlign = 'left';
+                  }
+                }
+              }
+              
+              ws[cellAddress].s = {
+                font: { 
+                  sz: 10,
+                  bold: isBold
+                },
+                alignment: { 
+                  horizontal: horizontalAlign,
+                  vertical: 'center',
+                  wrapText: true
+                },
+                fill: { fgColor: { rgb: fillColor } },
+                border: {
+                  top: { style: 'thin', color: { rgb: "D0D0D0" } },
+                  bottom: { style: 'thin', color: { rgb: "D0D0D0" } },
+                  left: { style: 'thin', color: { rgb: "D0D0D0" } },
+                  right: { style: 'thin', color: { rgb: "D0D0D0" } }
+                }
+              };
+            }
+          }
+          
+          // Freeze panes at header row (row 6)
+          ws['!freeze'] = { xSplit: 0, ySplit: 6, topLeftCell: 'A7', activePane: 'bottomLeft', state: 'frozen' };
+          
+          // Add worksheet to workbook with quarter name as sheet name
+          XLSX.utils.book_append_sheet(wb, ws, quarter.replace(' ', '_'));
+        }
+      }
+
+      // Generate Excel file as base64 with cell styles enabled
+      const wbout = XLSX.write(wb, { 
+        type: 'base64', 
+        bookType: 'xlsx',
+        cellStyles: true // Enable cell styling support
+      });
+      
+      // Create filename
+      const filename = `${cls.name.replace(/[^a-zA-Z0-9]/g, '_')}_ClassRecord_Archived.xlsx`;
+      const fileUri = `${FileSystem.cacheDirectory}${filename}`;
+      
+      // Write file to device
+      await FileSystem.writeAsStringAsync(fileUri, wbout, {
+        encoding: 'base64',
+      });
+      
+      // Share the file
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          dialogTitle: `Export ${cls.name} Class Record`,
+          UTI: 'com.microsoft.excel.xlsx'
+        });
+        showAlert('Success', `Class record for "${cls.name}" exported successfully!`, undefined, 'success');
+      } else {
+        showAlert('Success', `Results exported to ${filename}`, undefined, 'success');
+      }
+      
+      // Clean up the file after a delay
+      setTimeout(async () => {
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(fileUri);
+          if (fileInfo.exists) {
+            await FileSystem.deleteAsync(fileUri);
+          }
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temporary Excel file:', cleanupError);
+        }
+      }, 5000);
+      
+    } catch (error) {
+      console.error('Export archived class record error:', error);
+      showAlert('Error', 'Failed to export archived class record. Please try again.', undefined, 'error');
+    }
+  };
 
   const exportClassListToExcel = async (cls: { id: string; name: string }) => {
     try {
@@ -9859,7 +10496,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                             </View>
 
                             {sorted.map((row: any, idx: number) => (
-                              <View key={row.s.studentId} style={[styles.studentRow, { alignItems: 'center' }]}>
+                              <TouchableOpacity 
+                                key={row.s.studentId} 
+                                style={[styles.studentRow, { alignItems: 'center' }]}
+                                onPress={() => router.push({
+                                  pathname: '/StudentRecords',
+                                  params: { studentId: row.s.studentId, studentName: row.name }
+                                } as any)}
+                                activeOpacity={0.7}
+                              >
                                 <Text style={[styles.studentIndex, { width: 28 }]}>{idx + 1}.</Text>
                                 <Text style={[styles.studentName, { flex: 1, minWidth: 120 }]} numberOfLines={1} ellipsizeMode="tail">{row.name}</Text>
                                 <Text style={{ width: 80, color: '#111827', textAlign: 'left' }} numberOfLines={1}>{row.gender}</Text>
@@ -9867,7 +10512,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                 <View style={styles.studentActionsWrap}>
                                   <TouchableOpacity
                                     accessibilityLabel="Student options"
-                                    onPress={() => setStudentMenuVisible(studentMenuVisible === row.s.studentId ? null : row.s.studentId)}
+                                    onPress={(e) => {
+                                      e.stopPropagation();
+                                      setStudentMenuVisible(studentMenuVisible === row.s.studentId ? null : row.s.studentId);
+                                    }}
                                     style={styles.iconBtn}
                                   >
                                     <MaterialIcons name="more-vert" size={20} color="#64748b" />
@@ -9876,21 +10524,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                     <View style={styles.studentMenuDropdown}>
                                       <TouchableOpacity
                                         style={styles.studentMenuItem}
-                                        onPress={() => handleEditStudent(row.s, { id: cls.id, name: cls.name })}
+                                        onPress={() => {
+                                          setStudentMenuVisible(null);
+                                          handleEditStudent(row.s, { id: cls.id, name: cls.name });
+                                        }}
                                       >
                                         <MaterialIcons name="edit" size={16} color="#64748b" />
                                         <Text style={styles.studentMenuText}>Edit Student</Text>
                                       </TouchableOpacity>
                                       <TouchableOpacity
                                         style={styles.studentMenuItem}
-                                        onPress={() => handleViewParentInfo(row.s)}
+                                        onPress={() => {
+                                          setStudentMenuVisible(null);
+                                          handleViewParentInfo(row.s);
+                                        }}
                                       >
                                         <MaterialIcons name="person" size={16} color="#3b82f6" />
                                         <Text style={styles.studentMenuText}>View Parent Info</Text>
                                       </TouchableOpacity>
                                       <TouchableOpacity
                                         style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
-                                        onPress={() => handleDeleteStudent(row.s, cls.id)}
+                                        onPress={() => {
+                                          setStudentMenuVisible(null);
+                                          handleDeleteStudent(row.s, cls.id);
+                                        }}
                                       >
                                         <MaterialIcons name="delete" size={16} color="#ef4444" />
                                         <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
@@ -9898,7 +10555,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                     </View>
                                   )}
                                 </View>
-                              </View>
+                              </TouchableOpacity>
                             ))}
                           </>
                         );
@@ -11254,7 +11911,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                       .map((cls) => (
 
-                      <View key={cls.id} style={styles.classTabCard}>
+                      <TouchableOpacity 
+                        key={cls.id} 
+                        style={styles.classTabCard}
+                        onPress={() => {
+                          Alert.alert(
+                            'Archived Class',
+                            'This class has been archived. Do you want to download the class record for this archived class? The file will be downloaded in Excel format (.xlsx).',
+                            [
+                              {
+                                text: 'Cancel',
+                                style: 'cancel',
+                                onPress: () => {
+                                  // Do nothing - just close the prompt
+                                }
+                              },
+                              {
+                                text: 'Download',
+                                onPress: () => handleExportArchivedClassRecord(cls)
+                              }
+                            ]
+                          );
+                        }}
+                        activeOpacity={0.7}
+                      >
 
                         <View style={styles.classCardHeader}>
 
@@ -11304,7 +11984,7 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
 
                         </View>
 
-                      </View>
+                      </TouchableOpacity>
 
                     ))}
 

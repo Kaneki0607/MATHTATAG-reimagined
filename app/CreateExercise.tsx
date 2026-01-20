@@ -4,10 +4,12 @@ import { Audio, AVPlaybackStatus } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
+  BackHandler,
   FlatList,
   Image,
   Modal,
@@ -872,6 +874,7 @@ interface Question {
 }
 export default function CreateExercise() {
   const router = useRouter();
+  const navigation = useNavigation();
   
   // Scroll references for scroll-to-top functionality
   const mainScrollRef = useRef<ScrollView>(null);
@@ -1084,6 +1087,98 @@ export default function CreateExercise() {
     const s = sec % 60;
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
+  
+  // Helper function to check if there's unsaved content
+  const hasUnsavedContent = useCallback(() => {
+    return (
+      exerciseTitle.trim() !== '' ||
+      exerciseDescription.trim() !== '' ||
+      exerciseCode.trim() !== '' ||
+      exerciseCategory.trim() !== '' ||
+      questions.length > 0
+    );
+  }, [exerciseTitle, exerciseDescription, exerciseCode, exerciseCategory, questions]);
+
+  // Handle back navigation with confirmation
+  const handleBackNavigation = useCallback(() => {
+    if (!hasUnsavedContent()) {
+      // No unsaved content, navigate away immediately
+      router.push('/TeacherDashboard');
+      return;
+    }
+
+    // Show confirmation alert
+    Alert.alert(
+      'Discard Changes?',
+      'You have unsaved progress. Are you sure you want to exit? All unsaved changes will be lost.',
+      [
+        { text: "Stay", style: 'cancel', onPress: () => {} },
+        {
+          text: 'Exit',
+          style: 'destructive',
+          onPress: () => router.push('/TeacherDashboard'),
+        },
+      ]
+    );
+  }, [hasUnsavedContent, router]);
+
+  // Intercept back navigation to confirm exit with unsaved changes
+  useEffect(() => {
+    // Handle Android hardware back button
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!hasUnsavedContent()) {
+        // No unsaved content, allow default behavior
+        return false;
+      }
+
+      // Show confirmation alert
+      Alert.alert(
+        'Discard Changes?',
+        'You have unsaved progress. Are you sure you want to exit? All unsaved changes will be lost.',
+        [
+          { text: "Stay", style: 'cancel', onPress: () => {} },
+          {
+            text: 'Exit',
+            style: 'destructive',
+            onPress: () => router.push('/TeacherDashboard'),
+          },
+        ]
+      );
+      
+      // Prevent default back behavior
+      return true;
+    });
+
+    // Handle navigation events (for gestures and other navigation triggers)
+    const beforeRemoveListener = navigation.addListener('beforeRemove', (e) => {
+      if (!hasUnsavedContent()) {
+        // No unsaved content, allow navigation
+        return;
+      }
+
+      // Prevent default behavior
+      e.preventDefault();
+
+      // Show confirmation alert
+      Alert.alert(
+        'Discard Changes?',
+        'You have unsaved progress. Are you sure you want to exit? All unsaved changes will be lost.',
+        [
+          { text: "Stay", style: 'cancel', onPress: () => {} },
+          {
+            text: 'Exit',
+            style: 'destructive',
+            onPress: () => navigation.dispatch(e.data.action),
+          },
+        ]
+      );
+    });
+
+    return () => {
+      backHandler.remove();
+      beforeRemoveListener();
+    };
+  }, [hasUnsavedContent, router, navigation]);
   
   // User state
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -6952,7 +7047,7 @@ Please respond with a JSON object in this exact format:
         >
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.push('/TeacherDashboard')} style={styles.backButton}>
+          <TouchableOpacity onPress={handleBackNavigation} style={styles.backButton}>
             <AntDesign name="arrow-left" size={24} color="#1e293b" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{isEditing ? 'Edit Exercise' : 'Create Exercise'}</Text>

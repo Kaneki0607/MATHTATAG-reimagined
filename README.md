@@ -851,6 +851,22 @@ Submit to App Store
 
 ## 🔐 Environment Configuration
 
+### Required: Google Gemini API Key
+
+**⚠️ CRITICAL SECURITY NOTE:** The Google Gemini API key must NEVER be uploaded to GitHub or any public repository. Google automatically disables API keys that are detected in public repositories.
+
+#### Setup Instructions:
+1. Create a `.env` file in the project root directory
+2. Add your Gemini API key:
+   ```
+   GEMINI_API_KEY=your_actual_api_key_here
+   ```
+3. The `.env` file is automatically ignored by Git (see `.gitignore`)
+
+**Get your API key:** Visit https://aistudio.google.com/apikey
+
+The API key is automatically loaded via `app.config.js` and accessed through `expo-constants` in the application code.
+
 ### Firebase Configuration
 Located in `lib/firebase.ts`:
 ```typescript

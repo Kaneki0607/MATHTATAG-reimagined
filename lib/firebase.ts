@@ -2,17 +2,27 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import { getDatabase } from 'firebase/database';
 import { getStorage } from 'firebase/storage';
+import Constants from 'expo-constants';
 
+// Load Firebase config from environment variables via Expo Constants
+// These values are set in .env file and loaded through app.config.js
 const firebaseConfig = {
-  apiKey: 'AIzaSyCa8VPUo61L6MIGptW3fRoSUN13xPFzqdI',
-  authDomain: 'mathtatag-capstone-app.firebaseapp.com',
-  databaseURL: 'https://mathtatag-capstone-app-default-rtdb.firebaseio.com',
-  projectId: 'mathtatag-capstone-app',
-  storageBucket: 'mathtatag-capstone-app.firebasestorage.app',
-  messagingSenderId: '974540125959',
-  appId: '1:974540125959:web:5abf2650be3502993cb7a2',
-  measurementId: 'G-RKEVRP1200',
+  apiKey: Constants.expoConfig?.extra?.firebaseApiKey as string,
+  authDomain: Constants.expoConfig?.extra?.firebaseAuthDomain as string,
+  databaseURL: Constants.expoConfig?.extra?.firebaseDatabaseURL as string,
+  projectId: Constants.expoConfig?.extra?.firebaseProjectId as string,
+  storageBucket: Constants.expoConfig?.extra?.firebaseStorageBucket as string,
+  messagingSenderId: Constants.expoConfig?.extra?.firebaseMessagingSenderId as string,
+  appId: Constants.expoConfig?.extra?.firebaseAppId as string,
+  measurementId: Constants.expoConfig?.extra?.firebaseMeasurementId as string,
 };
+
+// Validate that all required Firebase config values are present
+if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
+  throw new Error(
+    'Firebase configuration is incomplete. Please check your .env file and ensure all FIREBASE_* variables are set.'
+  );
+}
 
 // Initialize Firebase app
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();

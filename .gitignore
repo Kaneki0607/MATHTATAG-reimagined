@@ -30,8 +30,15 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
-.env*.local
+# Environment variables - NEVER commit API keys or secrets
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+# BUT allow .env.example (template file without actual secrets)
+!.env.example
 
 # typescript
 *.tsbuildinfo

@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useIsFocused } from '@react-navigation/native';
+import { useIsFocused, useNavigation } from '@react-navigation/native';
 import { AudioSource, AudioStatus, createAudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import { Image as ExpoImage } from 'expo-image';
@@ -11,7 +11,9 @@ import * as Speech from 'expo-speech';
 // import * as Network from 'expo-network';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Animated,
+  BackHandler,
   Dimensions,
   Easing,
   Image,
@@ -1515,6 +1517,102 @@ export default function StudentExerciseAnswering() {
   const [resourcesReady, setResourcesReady] = useState(false);
   const [exerciseStarted, setExerciseStarted] = useState(false);
   const [officialStartTime, setOfficialStartTime] = useState<number | null>(null);
+
+  // Navigation prevention
+  const navigation = useNavigation();
+
+  // Helper function to safely navigate back or to a fallback route
+  const safeNavigateBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      // Fallback to RoleSelection if no back history
+      router.replace('/RoleSelection');
+    }
+  }, [router]);
+
+  // Intercept all back navigation (header back button, Android back button, gestures)
+  useEffect(() => {
+    const shouldPreventNavigation = exerciseStarted && !showResults && !submitting;
+
+    // Handle React Navigation's beforeRemove event (header back button, gestures)
+    const unsubscribe = navigation.addListener('beforeRemove', (e) => {
+      if (!shouldPreventNavigation) {
+        // If exercise hasn't started or results are shown, allow navigation
+        return;
+      }
+
+      // Prevent default navigation
+      e.preventDefault();
+
+      // Show confirmation alert
+      Alert.alert(
+        'Exit Exercise?',
+        'Are you sure you want to leave? All unsaved progress will be lost and cannot be recovered.',
+        [
+          {
+            text: 'Cancel',
+            style: 'cancel',
+            onPress: () => {
+              // User cancelled - stay on screen
+            }
+          },
+          {
+            text: 'Exit',
+            style: 'destructive',
+            onPress: () => {
+              // User confirmed - allow navigation
+              navigation.dispatch(e.data.action);
+            }
+          }
+        ],
+        { cancelable: false }
+      );
+    });
+
+    return unsubscribe;
+  }, [navigation, exerciseStarted, showResults, submitting]);
+
+  // Handle Android hardware back button
+  useEffect(() => {
+    const shouldPreventNavigation = exerciseStarted && !showResults && !submitting;
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!shouldPreventNavigation) {
+        // Allow default back behavior
+        return false;
+      }
+
+      // Show confirmation alert
+      Alert.alert(
+        'Exit Exercise?',
+        'Are you sure you want to leave? All unsaved progress will be lost and cannot be recovered.',
+        [
+          {
+            text: 'Cancel',
+            style: 'cancel',
+            onPress: () => {
+              // User cancelled - stay on screen
+            }
+          },
+          {
+            text: 'Exit',
+            style: 'destructive',
+            onPress: () => {
+              // User confirmed - navigate back
+              safeNavigateBack();
+            }
+          }
+        ],
+        { cancelable: false }
+      );
+
+      // Return true to prevent default back behavior
+      return true;
+    });
+
+    return () => backHandler.remove();
+  }, [exerciseStarted, showResults, submitting, router]);
 
   // Smooth progress animation effect
   useEffect(() => {
@@ -3085,7 +3183,7 @@ export default function StudentExerciseAnswering() {
         const assignedExerciseResult = await readData(`/assignedExercises/${assignedExerciseId}`);
         
         if (!assignedExerciseResult.data) {
-          showCustomAlert('Error', 'Assigned exercise not found', () => router.back(), 'error');
+          showCustomAlert('Error', 'Assigned exercise not found', () => safeNavigateBack(), 'error');
           return;
         }
         
@@ -3094,13 +3192,13 @@ export default function StudentExerciseAnswering() {
         
         // Validate assigned exercise data structure
         if (!assignedData.exerciseId) {
-          showCustomAlert('Error', 'Invalid assigned exercise data - missing exercise reference', () => router.back(), 'error');
+          showCustomAlert('Error', 'Invalid assigned exercise data - missing exercise reference', () => safeNavigateBack(), 'error');
           return;
         }
         
         // Check if assignment is still accepting submissions
         if (assignedData.acceptingStatus !== 'open') {
-          showCustomAlert('Assignment Closed', 'This assignment is no longer accepting submissions.', () => router.back(), 'warning');
+          showCustomAlert('Assignment Closed', 'This assignment is no longer accepting submissions.', () => safeNavigateBack(), 'warning');
           return;
         }
         
@@ -3114,14 +3212,14 @@ export default function StudentExerciseAnswering() {
           }
         } catch (error) {
           console.error('Invalid deadline date:', assignedData.deadline);
-          showCustomAlert('Error', 'Invalid assignment deadline date', () => router.back(), 'error');
+          showCustomAlert('Error', 'Invalid assignment deadline date', () => safeNavigateBack(), 'error');
           return;
         }
         
         if (now > deadline) {
           // Check if late submissions are allowed
           if (!assignedData.acceptLateSubmissions) {
-            showCustomAlert('Deadline Passed', 'The deadline for this assignment has passed and late submissions are not allowed.', () => router.back(), 'warning');
+            showCustomAlert('Deadline Passed', 'The deadline for this assignment has passed and late submissions are not allowed.', () => safeNavigateBack(), 'warning');
             return;
           } else {
             // Show warning but allow submission
@@ -3137,7 +3235,7 @@ export default function StudentExerciseAnswering() {
         if (result.data) {
           // Validate exercise data structure
           if (!result.data.questions || !Array.isArray(result.data.questions) || result.data.questions.length === 0) {
-            showCustomAlert('Error', 'Invalid exercise data - no questions found', () => router.back(), 'error');
+            showCustomAlert('Error', 'Invalid exercise data - no questions found', () => safeNavigateBack(), 'error');
             return;
           }
           
@@ -3185,7 +3283,7 @@ export default function StudentExerciseAnswering() {
             showCustomAlert(
               'Invalid Exercise Data', 
               `This exercise has questions with missing or invalid answer options:\n\n${invalidQuestions.join('\n')}\n\nPlease contact your teacher to fix this exercise.`,
-              () => router.back(),
+              () => safeNavigateBack(),
               'error'
             );
             return;
@@ -3314,12 +3412,12 @@ export default function StudentExerciseAnswering() {
           setAttemptCounts(initAttempts);
           setCorrectQuestions(initCorrect);
         } else {
-          showCustomAlert('Error', 'Exercise not found', () => router.back(), 'error');
+          showCustomAlert('Error', 'Exercise not found', () => safeNavigateBack(), 'error');
         }
       } else {
         // Fallback to direct exercise loading (existing behavior)
         if (!exerciseId) {
-          showCustomAlert('Error', 'No exercise ID provided', () => router.back(), 'error');
+          showCustomAlert('Error', 'No exercise ID provided', () => safeNavigateBack(), 'error');
           return;
         }
         
@@ -3327,7 +3425,7 @@ export default function StudentExerciseAnswering() {
         if (result.data) {
           // Validate exercise data structure
           if (!result.data.questions || !Array.isArray(result.data.questions) || result.data.questions.length === 0) {
-            showCustomAlert('Error', 'Invalid exercise data - no questions found', () => router.back(), 'error');
+            showCustomAlert('Error', 'Invalid exercise data - no questions found', () => safeNavigateBack(), 'error');
             return;
           }
           
@@ -3375,7 +3473,7 @@ export default function StudentExerciseAnswering() {
             showCustomAlert(
               'Invalid Exercise Data', 
               `This exercise has questions with missing or invalid answer options:\n\n${invalidQuestions.join('\n')}\n\nPlease contact your teacher to fix this exercise.`,
-              () => router.back(),
+              () => safeNavigateBack(),
               'error'
             );
             return;
@@ -3431,15 +3529,50 @@ export default function StudentExerciseAnswering() {
           setAttemptCounts(initAttempts);
           setCorrectQuestions(initCorrect);
         } else {
-          showCustomAlert('Error', 'Exercise not found', () => router.back(), 'error');
+          showCustomAlert('Error', 'Exercise not found', () => safeNavigateBack(), 'error');
         }
       }
     } catch (error) {
       console.error('Failed to load exercise:', error);
-      showCustomAlert('Error', 'Failed to load exercise', () => router.back(), 'error');
+      showCustomAlert('Error', 'Failed to load exercise', () => safeNavigateBack(), 'error');
     } finally {
       setLoading(false);
     }
+  };
+  
+  // Handle back navigation with confirmation
+  const handleBack = () => {
+    const shouldPreventNavigation = exerciseStarted && !showResults && !submitting;
+
+    if (!shouldPreventNavigation) {
+      // If exercise hasn't started or results are shown, navigate back directly
+      safeNavigateBack();
+      return;
+    }
+
+    // Show confirmation alert
+    Alert.alert(
+      'Exit Exercise?',
+      'Are you sure you want to leave? All unsaved progress will be lost and cannot be recovered.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => {
+            // User cancelled - stay on screen
+          }
+        },
+        {
+          text: 'Exit',
+          style: 'destructive',
+          onPress: () => {
+            // User confirmed - navigate back
+            safeNavigateBack();
+          }
+        }
+      ],
+      { cancelable: false }
+    );
   };
   
   const handleAnswerChange = (answer: string | string[] | {[key: string]: any}) => {
@@ -7221,7 +7354,7 @@ export default function StudentExerciseAnswering() {
           <View style={styles.header}>
             <TouchableOpacity
               style={styles.headerButton}
-              onPress={() => router.back()}
+              onPress={handleBack}
               activeOpacity={0.7}
             >
               <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
@@ -7665,7 +7798,7 @@ export default function StudentExerciseAnswering() {
                 {/* Close Button */}
                 <View style={styles.buttonContainer}>
                   <TouchableOpacity 
-                    onPress={() => router.back()} 
+                    onPress={() => safeNavigateBack()} 
                     style={styles.closeResultsButton}
                     activeOpacity={0.8}
                   >
