@@ -694,6 +694,9 @@ export default function ParentDashboard() {
   // Navigation state
   const [activeSection, setActiveSection] = useState('home');
   
+  // Teacher data cache to avoid N+1 queries
+  const teacherCacheRef = useRef<Map<string, any>>(new Map());
+  
   // Question Result view state
   const [showQuestionResult, setShowQuestionResult] = useState(false);
   const [selectedResult, setSelectedResult] = useState<any>(null);
@@ -853,6 +856,38 @@ export default function ParentDashboard() {
     if (!selectedResult) return '';
     return selectedResult.resultsSummary?.remarks || getPerformanceRemarks(selectedResultScore);
   }, [selectedResult, selectedResultScore]);
+
+  // Memoized grouped and sorted pending tasks for performance
+  const groupedPendingTasks = useMemo(() => {
+    const pendingTasks = tasks.filter(t => t.isAssignedExercise && t.status !== 'completed');
+    
+    // Sort by deadline (nearest first)
+    const sortedTasks = pendingTasks.sort((a, b) => {
+      const dateA = new Date(a.dueDate);
+      const dateB = new Date(b.dueDate);
+      return dateA.getTime() - dateB.getTime();
+    });
+    
+    const groupedByQuarter: Record<string, Task[]> = {
+      'Quarter 1': [],
+      'Quarter 2': [],
+      'Quarter 3': [],
+      'Quarter 4': [],
+      'No Quarter': [],
+    };
+    
+    sortedTasks.forEach((task) => {
+      const quarter = task.quarter || 'No Quarter';
+      groupedByQuarter[quarter].push(task);
+    });
+    
+    return {
+      groupedByQuarter,
+      quarters: ['Quarter 4', 'Quarter 3', 'Quarter 2', 'Quarter 1', 'No Quarter'].filter(
+        (quarter) => groupedByQuarter[quarter].length > 0
+      )
+    };
+  }, [tasks]);
   
   // Profile modal state
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -1081,6 +1116,32 @@ export default function ParentDashboard() {
     };
   }, [fadeAnim, translateAnim]);
 
+  // Helper function to fetch teacher data with caching
+  const fetchTeacherData = async (teacherId: string) => {
+    // Check cache first
+    if (teacherCacheRef.current.has(teacherId)) {
+      return teacherCacheRef.current.get(teacherId);
+    }
+    
+    // Fetch from database if not in cache
+    try {
+      const teacherResult = await readData(`/teachers/${teacherId}`);
+      if (teacherResult.data) {
+        const teacherData = {
+          teacherName: teacherResult.data.firstName + ' ' + teacherResult.data.lastName,
+          teacherProfilePictureUrl: teacherResult.data.profilePictureUrl,
+          teacherGender: teacherResult.data.gender
+        };
+        // Store in cache
+        teacherCacheRef.current.set(teacherId, teacherData);
+        return teacherData;
+      }
+    } catch (error) {
+      console.error('Failed to load teacher data:', error);
+    }
+    return null;
+  };
+
   const loadAnnouncements = async () => {
     try {
       const result = await readData('/announcements');
@@ -1090,26 +1151,15 @@ export default function ParentDashboard() {
           id: key
         })) as Announcement[];
         
-        // Load teacher data for each announcement
+        // Load teacher data for each announcement using cache
         const announcementsWithTeacherData = await Promise.all(
           announcementsList.map(async (announcement) => {
-            try {
-              const teacherResult = await readData(`/teachers/${announcement.teacherId}`);
-              if (teacherResult.data) {
-                return {
-                  ...announcement,
-                  teacherName: teacherResult.data.firstName + ' ' + teacherResult.data.lastName,
-                  teacherProfilePictureUrl: teacherResult.data.profilePictureUrl,
-                  teacherGender: teacherResult.data.gender
-                };
-              }
-            } catch (error) {
-              console.error('Failed to load teacher data:', error);
-              if (error instanceof Error) {
-                logErrorWithStack(error, 'warning', 'ParentDashboard', 'Failed to load teacher data for announcement');
-              } else {
-                logError('Failed to load teacher data: ' + String(error), 'warning', 'ParentDashboard');
-              }
+            const teacherData = await fetchTeacherData(announcement.teacherId);
+            if (teacherData) {
+              return {
+                ...announcement,
+                ...teacherData
+              };
             }
             return announcement;
           })
@@ -2310,21 +2360,33 @@ LANGUAGE RULES:
         },
       };
 
-      const { data, modelUsed } = await callGeminiWithFallback(requestBody);
-      console.log('Gemini model used for parent analysis:', modelUsed);
-
-      const responseText = extractGeminiText(data);
-      if (!responseText) {
-        throw new Error('Invalid response from AI service');
-      }
-
+      // Add timeout to prevent hanging (30 seconds)
+      const timeoutPromise = new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new Error('Gemini API call timed out after 30 seconds')), 30000)
+      );
+      
       try {
-        const analysis = parseGeminiJson<any>(responseText);
-        setGeminiAnalysis(analysis);
-        return;
-      } catch (parseError) {
-        console.error('Failed to parse Gemini response:', parseError);
-        console.error('Raw Gemini response:', responseText);
+        const { data, modelUsed } = await Promise.race([
+          callGeminiWithFallback(requestBody),
+          timeoutPromise
+        ]);
+        console.log('Gemini model used for parent analysis:', modelUsed);
+
+        const responseText = extractGeminiText(data);
+        if (!responseText) {
+          throw new Error('Invalid response from AI service');
+        }
+
+        try {
+          const analysis = parseGeminiJson<any>(responseText);
+          setGeminiAnalysis(analysis);
+          return;
+        } catch (parseError) {
+          console.warn('Failed to parse Gemini response, using fallback:', parseError);
+        }
+      } catch (geminiError) {
+        // Gemini API failed or timed out, proceed to fallback
+        console.warn('Gemini API call failed or timed out, using fallback analysis');
       }
 
       try {
@@ -2332,10 +2394,12 @@ LANGUAGE RULES:
           overallPerformance: {
             level: performanceData.score >= 80 ? 'excellent' : performanceData.score >= 60 ? 'good' : 'needs_improvement',
             description: `Nakakuha ang bata ng ${performanceData.score}% sa pagsusulit na ito.`,
-            score: performanceData.score
+            score: performanceData.score,
+            grade: performanceData.score >= 97 ? 'A+' : performanceData.score >= 93 ? 'A' : performanceData.score >= 90 ? 'B+' : performanceData.score >= 85 ? 'B' : performanceData.score >= 80 ? 'C+' : performanceData.score >= 75 ? 'C' : performanceData.score >= 70 ? 'D' : 'F',
+            interpretation: 'Ang marka na ito ay nagpapakita ng antas ng pag-unawa ng bata sa mga aralin.'
           },
           strengths: ['Nakumpleto ang lahat ng tanong', 'Nagpakita ng pagsisikap'],
-          weaknesses: ['Kailangan pa ng karagdagang pagsasanay sa ilang tanong'],
+          areasForImprovement: ['Kailangan pa ng karagdagang pagsasanay sa ilang tanong'],
           questionAnalysis: ['Ang bata ay nakasagot nang tama sa lahat ng tanong'],
           timeAnalysis: {
             studentTime: Math.round(performanceData.timeSpent / 1000),
@@ -2343,8 +2407,33 @@ LANGUAGE RULES:
             comparison: 'similar',
             description: 'Ang bilis ng pagsagot ay nasa normal na saklaw'
           },
-          recommendations: ['Mag-practice pa ng mga katulad na pagsasanay', 'Magbasa nang mabuti ang mga tanong'],
-          encouragement: 'Magaling! Nakumpleto mo ang pagsasanay na ito! Patuloy na mag-practice para mas lalong gumaling!'
+          learningRecommendations: {
+            immediate: ['Mag-practice pa ng mga katulad na pagsasanay', 'Magbasa nang mabuti ang mga tanong', 'Gumamit ng mga visual aids para mas maintindihan'],
+            shortTerm: ['Maglaan ng regular na oras para sa pag-aaral', 'Magsanay ng iba\'t ibang uri ng problema'],
+            longTerm: ['Palakasin ang pundasyon sa matematika', 'Magpatuloy sa pag-unlad sa lahat ng paksa']
+          },
+          parentGuidance: {
+            howToHelp: [
+              'Maglaan ng tahimik na lugar para sa pag-aaral ng inyong anak',
+              'Magbigay ng positibong suporta at pag-encourage sa bawat pagtatangka',
+              'Makipag-usap sa guro para sa karagdagang tulong kung kinakailangan'
+            ],
+            whatToWatch: [
+              'Bantayan kung umaangkop ba ang bata sa mga bagong konsepto',
+              'Tingnan kung may mga partikular na paksa na nahihirapan siya'
+            ],
+            whenToSeekHelp: [
+              'Kung patuloy na nahihirapan ang bata sa parehong paksa',
+              'Kung bumababa ang interes o kumpiyansa sa matematika'
+            ]
+          },
+          nextSteps: [
+            'Ipagpatuloy ang regular na pagsasanay',
+            'Subukan ang mas challenging na mga problema',
+            'Maghanap ng mga interactive na learning materials'
+          ],
+          encouragement: 'Magaling! Nakumpleto mo ang pagsasanay na ito! Patuloy na mag-practice para mas lalong gumaling!',
+          callToAction: 'Magpatuloy sa pag-aaral at huwag matakot na magtanong kung may hindi maintindihan!'
         };
         setGeminiAnalysis(fallbackAnalysis);
       } catch (fallbackError) {
@@ -2354,10 +2443,12 @@ LANGUAGE RULES:
           overallPerformance: {
             level: 'good',
             description: 'Nakumpleto ang pagsusulit',
-            score: performanceData.score
+            score: performanceData.score,
+            grade: 'B',
+            interpretation: 'Ang marka na ito ay nagpapakita ng pag-unawa ng bata sa mga aralin.'
           },
           strengths: ['Nakumpleto ang lahat ng tanong'],
-          weaknesses: ['Kailangan pa ng practice'],
+          areasForImprovement: ['Kailangan pa ng practice'],
           questionAnalysis: ['Nakasagot nang tama sa lahat ng tanong'],
           timeAnalysis: {
             studentTime: Math.round(performanceData.timeSpent / 1000),
@@ -2365,21 +2456,38 @@ LANGUAGE RULES:
             comparison: 'similar',
             description: 'Normal na bilis'
           },
-          recommendations: ['Mag-practice pa'],
-          encouragement: 'Magaling!'
+          learningRecommendations: {
+            immediate: ['Mag-practice pa', 'Magbasa nang mabuti', 'Magtanong kung may hindi maintindihan'],
+            shortTerm: ['Gumawa ng regular na practice schedule'],
+            longTerm: ['Palakasin ang mathematical skills']
+          },
+          parentGuidance: {
+            howToHelp: [
+              'Magbigay ng suporta at encouragement sa inyong anak',
+              'Maglaan ng oras para sa pag-aaral'
+            ],
+            whatToWatch: ['Tingnan ang progreso ng bata sa pag-aaral'],
+            whenToSeekHelp: ['Kung patuloy na nahihirapan ang bata']
+          },
+          nextSteps: ['Magpatuloy sa pag-aaral', 'Subukan ang iba pang exercises'],
+          encouragement: 'Magaling!',
+          callToAction: 'Ipagpatuloy ang masayang pag-aaral!'
         });
       }
     } catch (error) {
       console.error('Failed to generate Gemini analysis:', error);
       // Fallback analysis
+      const scorePercentage = resultData.scorePercentage || 0;
       setGeminiAnalysis({
         overallPerformance: {
-          level: resultData.scorePercentage >= 80 ? 'excellent' : resultData.scorePercentage >= 60 ? 'good' : 'needs_improvement',
-          description: `Nakakuha ang bata ng ${resultData.scorePercentage}% sa pagsusulit na ito.`,
-          score: resultData.scorePercentage
+          level: scorePercentage >= 80 ? 'excellent' : scorePercentage >= 60 ? 'good' : 'needs_improvement',
+          description: `Nakakuha ang bata ng ${scorePercentage}% sa pagsusulit na ito.`,
+          score: scorePercentage,
+          grade: scorePercentage >= 97 ? 'A+' : scorePercentage >= 93 ? 'A' : scorePercentage >= 90 ? 'B+' : scorePercentage >= 85 ? 'B' : scorePercentage >= 80 ? 'C+' : scorePercentage >= 75 ? 'C' : scorePercentage >= 70 ? 'D' : 'F',
+          interpretation: 'Ang marka na ito ay nagpapakita ng antas ng pag-unawa ng bata sa mga aralin.'
         },
         strengths: ['Nakumpleto ang lahat ng tanong', 'Nagpakita ng pagsisikap'],
-        weaknesses: ['Kailangan pa ng karagdagang pagsasanay sa ilang tanong'],
+        areasForImprovement: ['Kailangan pa ng karagdagang pagsasanay sa ilang tanong'],
         questionAnalysis: ['Ang bata ay nakasagot nang tama sa lahat ng tanong'],
         timeAnalysis: {
           studentTime: Math.round(resultData.totalTimeSpent / 1000),
@@ -2387,8 +2495,33 @@ LANGUAGE RULES:
           comparison: 'similar',
           description: 'Ang bilis ng pagsagot ay nasa normal na saklaw'
         },
-        recommendations: ['Mag-practice pa ng mga katulad na pagsasanay', 'Magbasa nang mabuti ang mga tanong'],
-        encouragement: 'Magaling! Nakumpleto mo ang pagsasanay na ito! Patuloy na mag-practice para mas lalong gumaling!'
+        learningRecommendations: {
+          immediate: ['Mag-practice pa ng mga katulad na pagsasanay', 'Magbasa nang mabuti ang mga tanong', 'Humingi ng tulong kung kinakailangan'],
+          shortTerm: ['Maglaan ng regular na oras para sa pag-aaral', 'Magsanay ng iba\'t ibang uri ng problema'],
+          longTerm: ['Palakasin ang pundasyon sa matematika', 'Magpatuloy sa pag-unlad']
+        },
+        parentGuidance: {
+          howToHelp: [
+            'Maglaan ng tahimik na lugar para sa pag-aaral ng inyong anak',
+            'Magbigay ng positibong suporta at pag-encourage',
+            'Makipag-usap sa guro para sa karagdagang tulong kung kinakailangan'
+          ],
+          whatToWatch: [
+            'Bantayan kung umaangkop ba ang bata sa mga bagong konsepto',
+            'Tingnan kung may mga partikular na paksa na nahihirapan siya'
+          ],
+          whenToSeekHelp: [
+            'Kung patuloy na nahihirapan ang bata sa parehong paksa',
+            'Kung bumababa ang interes sa pag-aaral'
+          ]
+        },
+        nextSteps: [
+          'Ipagpatuloy ang regular na pagsasanay',
+          'Subukan ang mas challenging na mga problema',
+          'Maghanap ng mga interactive na learning materials'
+        ],
+        encouragement: 'Magaling! Nakumpleto mo ang pagsasanay na ito! Patuloy na mag-practice para mas lalong gumaling!',
+        callToAction: 'Magpatuloy sa pag-aaral at huwag matakot na magtanong!'
       });
     }
   };
@@ -2693,21 +2826,13 @@ LANGUAGE RULES:
                 };
               }
               
-              // Load teacher data
-              const teacherResult = await readData(`/teachers/${assignedExercise.assignedBy}`);
-              let teacherData = null;
-              if (teacherResult.data) {
-                teacherData = {
-                  teacherName: teacherResult.data.firstName + ' ' + teacherResult.data.lastName,
-                  teacherProfilePictureUrl: teacherResult.data.profilePictureUrl,
-                  teacherGender: teacherResult.data.gender
-                };
-              }
+              // Load teacher data using cache
+              const teacherData = await fetchTeacherData(assignedExercise.assignedBy);
               
               return {
                 ...assignedExercise,
                 exercise: exerciseData,
-                ...teacherData
+                ...(teacherData || {})
               };
             } catch (error) {
               console.error('Failed to load data for assigned exercise:', error);
@@ -2784,21 +2909,15 @@ LANGUAGE RULES:
         
         console.log(`Filtered ${filteredTasks.length} regular tasks for class ${studentClassId}`);
         
-        // Load teacher data for each filtered task
+        // Load teacher data for each filtered task using cache
         const tasksWithTeacherData = await Promise.all(
           filteredTasks.map(async (task) => {
-            try {
-              const teacherResult = await readData(`/teachers/${task.teacherId}`);
-              if (teacherResult.data) {
-                return {
-                  ...task,
-                  teacherName: teacherResult.data.firstName + ' ' + teacherResult.data.lastName,
-                  teacherProfilePictureUrl: teacherResult.data.profilePictureUrl,
-                  teacherGender: teacherResult.data.gender
-                };
-              }
-            } catch (error) {
-              console.error('Failed to load teacher data for task:', error);
+            const teacherData = await fetchTeacherData(task.teacherId);
+            if (teacherData) {
+              return {
+                ...task,
+                ...teacherData
+              };
             }
             return task;
           })
@@ -4118,36 +4237,8 @@ LANGUAGE RULES:
                 showsVerticalScrollIndicator={false}
               >
                 {(() => {
-                  // Separate pending and completed tasks
-                  const pendingTasks = tasks.filter(t => t.isAssignedExercise && t.status !== 'completed');
-                  const completedTasks = tasks.filter(t => t.isAssignedExercise && t.status === 'completed');
-                  
-                  const filteredTasks = pendingTasks;
-                  
-                  // Sort tasks by deadline (nearest first)
-                  const sortedTasks = filteredTasks.sort((a, b) => {
-                    const dateA = new Date(a.dueDate);
-                    const dateB = new Date(b.dueDate);
-                    return dateA.getTime() - dateB.getTime();
-                  });
-                  
-                  const groupedByQuarter: Record<string, Task[]> = {
-                    'Quarter 1': [],
-                    'Quarter 2': [],
-                    'Quarter 3': [],
-                    'Quarter 4': [],
-                    'No Quarter': [],
-                  };
-                  
-                  sortedTasks.forEach((task) => {
-                    const quarter = task.quarter || 'No Quarter';
-                    groupedByQuarter[quarter].push(task);
-                  });
-                  
-                  // Reverse quarter order: Q4, Q3, Q2, Q1 - only show quarters with tasks
-                  const quarters = ['Quarter 4', 'Quarter 3', 'Quarter 2', 'Quarter 1', 'No Quarter'].filter(
-                    (quarter) => groupedByQuarter[quarter].length > 0
-                  );
+                  // Use memoized grouped and sorted tasks for performance
+                  const { groupedByQuarter, quarters } = groupedPendingTasks;
                   
                   return quarters.map((quarter, quarterIdx) => (
                     <View key={quarter}>

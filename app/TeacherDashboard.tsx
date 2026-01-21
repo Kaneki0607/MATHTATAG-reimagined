@@ -2254,6 +2254,16 @@ export default function TeacherDashboard() {
 
   const [studentMenuVisible, setStudentMenuVisible] = useState<string | null>(null);
 
+  const [studentMenuAnchor, setStudentMenuAnchor] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+
+  const [studentMenuContext, setStudentMenuContext] = useState<{
+    student: any;
+    classInfo: { id: string; name: string };
+    classId: string;
+  } | null>(null);
+
+  const studentMenuButtonRefs = useRef<Record<string, any>>({});
+
   const [showParentInfoModal, setShowParentInfoModal] = useState(false);
 
   // Export menu state
@@ -6819,13 +6829,22 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       const { data: allResultsData } = await readData('/ExerciseResults');
       console.log('📊 Total results in database:', Object.keys(allResultsData || {}).length);
       
+      // Filter by classId (check both root level and nested in assignmentMetadata)
       const allResults = Object.entries(allResultsData || {})
         .map(([id, result]: [string, any]) => ({ id, ...result }))
-        .filter((result: any) => result.classId === cls.id);
+        .filter((result: any) => {
+          const resultClassId = result?.assignmentMetadata?.classId || result?.classId;
+          return resultClassId === cls.id;
+        });
       
       console.log('✅ Results for this class:', allResults.length);
       if (allResults.length > 0) {
         console.log('Sample result:', allResults[0]);
+        console.log('  - classId check:', {
+          rootClassId: allResults[0].classId,
+          metadataClassId: allResults[0].assignmentMetadata?.classId,
+          targetClassId: cls.id
+        });
       }
 
       // Load assigned exercises to get quarter information
@@ -6863,13 +6882,18 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
       const resultsByQuarterAndExercise: Record<string, Record<string, any[]>> = {};
       
       allResults.forEach((result: any) => {
+        // Extract IDs from nested structures (like TeacherDashboard line 3888-3890)
+        const exerciseId = result?.exerciseInfo?.exerciseId || result?.exerciseId;
+        const assignedExerciseId = result?.assignedExerciseId || result?.assignmentId || result?.assignmentMetadata?.assignmentId;
+        
         // Find the assignment to get quarter
         const assignment = assignedExercises.find((a: any) => 
-          a.id === result.assignedExerciseId || a.exerciseId === result.exerciseId
+          a.id === assignedExerciseId || a.exerciseId === exerciseId
         );
         
         const quarter = assignment?.quarter || 'No Quarter';
-        const exerciseTitle = result.exerciseTitle || 'Unknown Exercise';
+        // Extract title from nested structures (like TeacherDashboard line 3910)
+        const exerciseTitle = result?.exerciseTitle || result?.exerciseInfo?.title || result?.exerciseInfo?.exerciseTitle || 'Unknown Exercise';
 
         if (!resultsByQuarterAndExercise[quarter]) {
           resultsByQuarterAndExercise[quarter] = {};
@@ -6956,27 +6980,48 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
         
         // Aggregate scores by student and quarter
         allResults.forEach((result: any) => {
+          // Extract IDs from nested structures
+          const exerciseId = result?.exerciseInfo?.exerciseId || result?.exerciseId;
+          const assignedExerciseId = result?.assignedExerciseId || result?.assignmentId || result?.assignmentMetadata?.assignmentId;
+          
           const assignment = assignedExercises.find((a: any) => 
-            a.id === result.assignedExerciseId || a.exerciseId === result.exerciseId
+            a.id === assignedExerciseId || a.exerciseId === exerciseId
           );
           const quarter = assignment?.quarter || null;
           if (!quarter || !summaryQuarterOrder.includes(quarter)) return;
           
-          let student = classStudents.find((s: any) => s.studentId === result.studentId);
-          if (!student && result.studentInfo?.name) {
+          // Extract studentId from nested structures (check multiple locations)
+          const resultStudentId = result?.studentInfo?.studentId || result?.studentId;
+          
+          // Try multiple matching strategies
+          let student = classStudents.find((s: any) => s.studentId === resultStudentId);
+          if (!student && result?.studentInfo?.name) {
             student = classStudents.find((s: any) => 
               s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
             );
           }
-          if (!student && result.parentId) {
-            student = classStudents.find((s: any) => s.parentId === result.parentId);
+          if (!student && result?.assignmentMetadata?.parentId) {
+            student = classStudents.find((s: any) => s.parentId === result.assignmentMetadata.parentId);
           }
           
           const studentName = student ? formatStudentName(student) : 
-            (result.studentInfo?.name || 'Unknown Student');
+            (result?.studentInfo?.name || 'Unknown Student');
+          
+          // Extract score from nested structures (check multiple locations)
+          const score = result?.resultsSummary?.meanPercentageScore ?? 
+                       result?.scorePercentage ?? 
+                       0;
+          
+          console.log('  Processing result for student:', {
+            studentName,
+            quarter,
+            score,
+            resultStudentId,
+            matched: !!student
+          });
           
           if (studentQuarterScores[studentName] && studentQuarterScores[studentName][quarter]) {
-            studentQuarterScores[studentName][quarter].score += result.scorePercentage || 0;
+            studentQuarterScores[studentName][quarter].score += score;
             studentQuarterScores[studentName][quarter].count += 1;
           }
         });
@@ -7184,20 +7229,23 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           // Process each exercise's results
           Object.entries(resultsByExercise).forEach(([exerciseTitle, exerciseResults]: [string, any]) => {
             (exerciseResults as any[]).forEach((result: any) => {
-              let student = classStudents.find((s: any) => s.studentId === result.studentId);
+              // Extract studentId from nested structures
+              const resultStudentId = result?.studentInfo?.studentId || result?.studentId;
               
-              if (!student && result.studentInfo?.name) {
+              let student = classStudents.find((s: any) => s.studentId === resultStudentId);
+              
+              if (!student && result?.studentInfo?.name) {
                 student = classStudents.find((s: any) => 
                   s.fullName && s.fullName.toLowerCase().trim() === result.studentInfo.name.toLowerCase().trim()
                 );
               }
               
-              if (!student && result.parentId) {
-                student = classStudents.find((s: any) => s.parentId === result.parentId);
+              if (!student && result?.assignmentMetadata?.parentId) {
+                student = classStudents.find((s: any) => s.parentId === result.assignmentMetadata.parentId);
               }
 
               const studentName = student ? formatStudentName(student) : 
-                (result.studentInfo?.name || 'Unknown Student');
+                (result?.studentInfo?.name || 'Unknown Student');
 
               if (!studentResultsMap[studentName]) {
                 studentResultsMap[studentName] = {
@@ -7207,9 +7255,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                 };
               }
 
-              // Store exercise results for this student (numeric score for calculations)
+              // Extract ALL metrics from resultsSummary
+              const resultsSummary = result?.resultsSummary || {};
+              const score = resultsSummary?.meanPercentageScore ?? result?.scorePercentage ?? 0;
+              
+              // Store ALL exercise metrics for this student
               studentResultsMap[studentName].exercises[exerciseTitle] = {
-                score: Math.round(result.scorePercentage || 0)
+                // Raw score (e.g., "7/10")
+                rawScore: `${resultsSummary.totalCorrect || 0}/${resultsSummary.totalItems || 0}`,
+                // Percentage score
+                score: Math.round(score * 100) / 100,
+                // Average attempts per item
+                avgAttempts: resultsSummary.meanAttemptsPerItem || 0,
+                // Average time per item (in seconds)
+                avgTimePerItem: Math.round(resultsSummary.meanTimePerItemSeconds || 0),
+                // Total time spent
+                totalTime: resultsSummary.totalTimeSpentSeconds || 0,
+                // Total attempts across all items
+                totalAttempts: resultsSummary.totalAttempts || 0,
+                // Correct/Incorrect breakdown
+                totalCorrect: resultsSummary.totalCorrect || 0,
+                totalIncorrect: resultsSummary.totalIncorrect || 0,
+                totalItems: resultsSummary.totalItems || 0,
+                // Remarks from the result
+                remarks: resultsSummary.remarks || 'N/A'
               };
             });
           });
@@ -7225,11 +7294,15 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           quarterData.push([`Generated: ${new Date().toLocaleString()}`]);
           quarterData.push([]); // Empty row for spacing
           
-          // Build headers: # | Student Name | Exercise 1 | Exercise 2 | ... | Total | Average | Remarks
+          // Build headers with detailed metrics for each exercise
           const headers = ['#', 'STUDENT NAME'];
-          exerciseTitles.forEach(title => headers.push(title));
-          headers.push('TOTAL');
-          headers.push('AVERAGE');
+          exerciseTitles.forEach(title => {
+            headers.push(`${title}\nRaw Score`);
+            headers.push(`${title}\nScore`);
+            headers.push(`${title}\nAve Time\nSecs/Item`);
+            headers.push(`${title}\nAve\nAttempt/Item`);
+          });
+          headers.push('QUARTER\nAVERAGE');
           headers.push('REMARKS');
           quarterData.push(headers);
           
@@ -7248,34 +7321,45 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
             let totalScore = 0;
             let completedCount = 0;
             
-            // Add score for each exercise (just the number)
+            // Add detailed metrics for each exercise
             exerciseTitles.forEach(exerciseTitle => {
               const exerciseData = studentData.exercises[exerciseTitle];
               if (exerciseData) {
-                row.push(exerciseData.score);
+                // Raw Score (e.g., "7/10")
+                row.push(exerciseData.rawScore);
+                // Percentage Score
+                row.push(`${exerciseData.score.toFixed(2)}%`);
+                // Average Time per Item
+                row.push(exerciseData.avgTimePerItem);
+                // Average Attempts per Item
+                row.push(exerciseData.avgAttempts.toFixed(1));
+                
                 totalScore += exerciseData.score;
                 completedCount++;
               } else {
+                // No data for this exercise
+                row.push('—');
+                row.push('—');
+                row.push('—');
                 row.push('—');
               }
             });
             
-            // Add summary columns
-            const average = completedCount > 0 ? Math.round(totalScore / completedCount) : 0;
-            row.push(completedCount > 0 ? totalScore : '—');
-            row.push(completedCount > 0 ? average : '—');
+            // Add quarter average
+            const averageNum = completedCount > 0 ? (totalScore / completedCount) : 0;
+            row.push(completedCount > 0 ? `${averageNum.toFixed(2)}%` : '—');
             
             // Add remarks based on average
             let remarks = '';
             if (completedCount === 0) {
               remarks = 'No Data';
-            } else if (average >= 90) {
+            } else if (averageNum >= 90) {
               remarks = 'Outstanding';
-            } else if (average >= 85) {
+            } else if (averageNum >= 85) {
               remarks = 'Very Satisfactory';
-            } else if (average >= 80) {
+            } else if (averageNum >= 80) {
               remarks = 'Satisfactory';
-            } else if (average >= 75) {
+            } else if (averageNum >= 75) {
               remarks = 'Fairly Satisfactory';
             } else {
               remarks = 'Did Not Meet Expectations';
@@ -7292,13 +7376,30 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           const classAvgRow: any[] = ['', 'CLASS AVERAGE'];
           exerciseTitles.forEach(exerciseTitle => {
             const results = resultsByExercise[exerciseTitle] || [];
-            const scores = results.map((r: any) => r.scorePercentage || 0);
-            const avg = scores.length > 0 
-              ? Math.round(scores.reduce((sum: number, s: number) => sum + s, 0) / scores.length)
-              : 0;
-            classAvgRow.push(scores.length > 0 ? avg : '—');
+            if (results.length > 0) {
+              // Calculate averages from all students who completed this exercise
+              const totalCorrect = results.reduce((sum: number, r: any) => 
+                sum + (r?.resultsSummary?.totalCorrect || 0), 0);
+              const totalItems = results.reduce((sum: number, r: any) => 
+                sum + (r?.resultsSummary?.totalItems || 0), 0);
+              const avgScore = results.reduce((sum: number, r: any) => 
+                sum + (r?.resultsSummary?.meanPercentageScore || 0), 0) / results.length;
+              const avgTime = results.reduce((sum: number, r: any) => 
+                sum + (r?.resultsSummary?.meanTimePerItemSeconds || 0), 0) / results.length;
+              const avgAttempts = results.reduce((sum: number, r: any) => 
+                sum + (r?.resultsSummary?.meanAttemptsPerItem || 0), 0) / results.length;
+              
+              classAvgRow.push(`${totalCorrect}/${totalItems}`);
+              classAvgRow.push(`${avgScore.toFixed(2)}%`);
+              classAvgRow.push(Math.round(avgTime));
+              classAvgRow.push(avgAttempts.toFixed(1));
+            } else {
+              classAvgRow.push('—');
+              classAvgRow.push('—');
+              classAvgRow.push('—');
+              classAvgRow.push('—');
+            }
           });
-          classAvgRow.push('—');
           classAvgRow.push('—');
           classAvgRow.push('—');
           quarterData.push(classAvgRow);
@@ -7311,8 +7412,10 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
               ? Math.round((results.length / classStudents.length) * 100)
               : 0;
             completionRow.push(`${rate}%`);
+            completionRow.push('—');
+            completionRow.push('—');
+            completionRow.push('—');
           });
-          completionRow.push('—');
           completionRow.push('—');
           completionRow.push('—');
           quarterData.push(completionRow);
@@ -7320,17 +7423,18 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
           // Convert data to worksheet
           const ws = XLSX.utils.aoa_to_sheet(quarterData);
           
-          // Set column widths
+          // Set column widths for detailed metrics
           const colWidths = [
             { wch: 5 },   // #
             { wch: 28 }   // Student Name
           ];
           exerciseTitles.forEach(title => {
-            const width = Math.max(12, Math.min(title.length + 2, 25));
-            colWidths.push({ wch: width });
+            colWidths.push({ wch: 12 });  // Raw Score
+            colWidths.push({ wch: 10 });  // Score %
+            colWidths.push({ wch: 12 });  // Ave Time Secs/Item
+            colWidths.push({ wch: 12 });  // Ave Attempt/Item
           });
-          colWidths.push({ wch: 10 });   // Total
-          colWidths.push({ wch: 12 });  // Average
+          colWidths.push({ wch: 14 });  // Quarter Average
           colWidths.push({ wch: 28 });  // Remarks
           ws['!cols'] = colWidths;
           
@@ -8130,6 +8234,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     setShowAddStudentModal(true);
 
     setStudentMenuVisible(null);
+    setStudentMenuAnchor(null);
+    setStudentMenuContext(null);
 
   };
 
@@ -8180,6 +8286,8 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
     );
 
     setStudentMenuVisible(null);
+    setStudentMenuAnchor(null);
+    setStudentMenuContext(null);
 
   };
 
@@ -10514,46 +10622,38 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
                                     accessibilityLabel="Student options"
                                     onPress={(e) => {
                                       e.stopPropagation();
-                                      setStudentMenuVisible(studentMenuVisible === row.s.studentId ? null : row.s.studentId);
+                                      const nextId = studentMenuVisible === row.s.studentId ? null : row.s.studentId;
+                                      if (!nextId) {
+                                        setStudentMenuVisible(null);
+                                        setStudentMenuAnchor(null);
+                                        setStudentMenuContext(null);
+                                        return;
+                                      }
+
+                                      setStudentMenuContext({
+                                        student: row.s,
+                                        classInfo: { id: cls.id, name: cls.name },
+                                        classId: cls.id,
+                                      });
+
+                                      const node = studentMenuButtonRefs.current[row.s.studentId];
+                                      if (node?.measureInWindow) {
+                                        node.measureInWindow((x: number, y: number, w: number, h: number) => {
+                                          setStudentMenuAnchor({ x, y, w, h });
+                                          setStudentMenuVisible(nextId);
+                                        });
+                                      } else {
+                                        setStudentMenuAnchor(null);
+                                        setStudentMenuVisible(nextId);
+                                      }
                                     }}
                                     style={styles.iconBtn}
+                                    ref={(r: any) => {
+                                      if (r) studentMenuButtonRefs.current[row.s.studentId] = r;
+                                    }}
                                   >
                                     <MaterialIcons name="more-vert" size={20} color="#64748b" />
                                   </TouchableOpacity>
-                                  {studentMenuVisible === row.s.studentId && (
-                                    <View style={styles.studentMenuDropdown}>
-                                      <TouchableOpacity
-                                        style={styles.studentMenuItem}
-                                        onPress={() => {
-                                          setStudentMenuVisible(null);
-                                          handleEditStudent(row.s, { id: cls.id, name: cls.name });
-                                        }}
-                                      >
-                                        <MaterialIcons name="edit" size={16} color="#64748b" />
-                                        <Text style={styles.studentMenuText}>Edit Student</Text>
-                                      </TouchableOpacity>
-                                      <TouchableOpacity
-                                        style={styles.studentMenuItem}
-                                        onPress={() => {
-                                          setStudentMenuVisible(null);
-                                          handleViewParentInfo(row.s);
-                                        }}
-                                      >
-                                        <MaterialIcons name="person" size={16} color="#3b82f6" />
-                                        <Text style={styles.studentMenuText}>View Parent Info</Text>
-                                      </TouchableOpacity>
-                                      <TouchableOpacity
-                                        style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
-                                        onPress={() => {
-                                          setStudentMenuVisible(null);
-                                          handleDeleteStudent(row.s, cls.id);
-                                        }}
-                                      >
-                                        <MaterialIcons name="delete" size={16} color="#ef4444" />
-                                        <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
-                                      </TouchableOpacity>
-                                    </View>
-                                  )}
                                 </View>
                               </TouchableOpacity>
                             ))}
@@ -10581,6 +10681,90 @@ Remember: Return ONLY the JSON object, no markdown, no code blocks, no additiona
            </View>
 
          )}
+
+        {/* Student 3-dot menu rendered in a Modal to avoid ScrollView clipping */}
+        <Modal
+          transparent
+          visible={!!studentMenuVisible}
+          animationType="none"
+          onRequestClose={() => {
+            setStudentMenuVisible(null);
+            setStudentMenuAnchor(null);
+            setStudentMenuContext(null);
+          }}
+        >
+          <Pressable
+            style={styles.studentMenuOverlay}
+            onPress={() => {
+              setStudentMenuVisible(null);
+              setStudentMenuAnchor(null);
+              setStudentMenuContext(null);
+            }}
+          >
+            {!!studentMenuVisible && !!studentMenuContext && (
+              <View
+                style={[
+                  styles.studentMenuDropdownModal,
+                  (() => {
+                    const estimatedMenuH = 148;
+                    const estimatedMenuW = 180;
+                    const margin = 8;
+                    const anchor = studentMenuAnchor ?? { x: width - estimatedMenuW - margin, y: 80, w: 0, h: 0 };
+
+                    const openUp = anchor.y + anchor.h + estimatedMenuH > height - 24;
+                    const top = Math.max(
+                      margin,
+                      openUp ? anchor.y - estimatedMenuH - margin : anchor.y + anchor.h + margin
+                    );
+
+                    const leftRaw = anchor.x + anchor.w - estimatedMenuW;
+                    const left = Math.max(margin, Math.min(leftRaw, width - estimatedMenuW - margin));
+
+                    return { top, left };
+                  })(),
+                ]}
+              >
+                <TouchableOpacity
+                  style={styles.studentMenuItem}
+                  onPress={() => {
+                    setStudentMenuVisible(null);
+                    setStudentMenuAnchor(null);
+                    handleEditStudent(studentMenuContext.student, studentMenuContext.classInfo);
+                  }}
+                >
+                  <MaterialIcons name="edit" size={16} color="#64748b" />
+                  <Text style={styles.studentMenuText}>Edit Student</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.studentMenuItem}
+                  onPress={() => {
+                    setStudentMenuVisible(null);
+                    setStudentMenuAnchor(null);
+                    setStudentMenuContext(null);
+                    handleViewParentInfo(studentMenuContext.student);
+                  }}
+                >
+                  <MaterialIcons name="person" size={16} color="#3b82f6" />
+                  <Text style={styles.studentMenuText}>View Parent Info</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.studentMenuItem, styles.studentMenuItemDanger]}
+                  onPress={() => {
+                    setStudentMenuVisible(null);
+                    setStudentMenuAnchor(null);
+                    handleDeleteStudent(studentMenuContext.student, studentMenuContext.classId);
+                  }}
+                >
+                  <MaterialIcons name="delete" size={16} color="#ef4444" />
+                  <Text style={[styles.studentMenuText, styles.studentMenuTextDanger]}>Delete Student</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </Pressable>
+        </Modal>
+
          {activeTab === 'results' && (
 
            <View style={{ paddingBottom: 140 }}>
@@ -18661,6 +18845,8 @@ const styles = StyleSheet.create({
 
     borderBottomColor: '#f1f5f9',
 
+    overflow: 'visible',
+
   },
 
   studentHeaderRow: {
@@ -18722,6 +18908,12 @@ const styles = StyleSheet.create({
     width: 40,
 
     minWidth: 40,
+
+    position: 'relative',
+
+    overflow: 'visible',
+
+    zIndex: 1001,
 
   },
 
@@ -22796,14 +22988,36 @@ const styles = StyleSheet.create({
 
     shadowRadius: 8,
 
-    elevation: 5,
+    elevation: 10,
 
     borderWidth: 1,
 
     borderColor: 'rgba(0,0,0,0.1)',
 
-    zIndex: 1000,
+    zIndex: 10000,
 
+  },
+
+  studentMenuOverlay: {
+    flex: 1,
+    backgroundColor: 'transparent',
+  },
+
+  // Modal-positioned menu (escapes ScrollView clipping)
+  studentMenuDropdownModal: {
+    position: 'absolute',
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    paddingVertical: 4,
+    minWidth: 180,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    elevation: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.1)',
+    zIndex: 99999,
   },
 
   studentMenuItem: {

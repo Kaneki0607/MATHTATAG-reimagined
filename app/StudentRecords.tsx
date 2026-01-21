@@ -44,7 +44,18 @@ const StudentRecords: React.FC = () => {
       // First, verify the student's class is active
       const { data: studentData } = await readData(`/students/${studentId}`);
       
-      if (studentData && studentData.classId) {
+      console.log('📚 StudentRecords - Loading data for:', studentId);
+      console.log('Student data:', studentData);
+
+      if (!studentData) {
+        console.log('⚠️ Student not found');
+        setLoading(false);
+        return;
+      }
+
+      const studentClassId = studentData.classId;
+      
+      if (studentData.classId) {
         const { data: classData } = await readData(`/classes/${studentData.classId}`);
         
         if (classData && classData.status === 'inactive') {
@@ -54,13 +65,31 @@ const StudentRecords: React.FC = () => {
         }
       }
 
-      // Fetch all exercise results
-      const { data: exerciseResults } = await readData('/ExerciseResults');
-
-      if (!exerciseResults) {
+      if (!studentClassId) {
+        console.log('⚠️ Student has no classId');
         setLoading(false);
         return;
       }
+
+      // Fetch exercise results and assigned exercises (using same paths as TeacherDashboard)
+      const { data: exerciseResultsData } = await readData('/ExerciseResults');
+      const { data: assignedExercisesData } = await readData('/assignedExercises');
+
+      console.log('📊 Raw ExerciseResults keys:', exerciseResultsData ? Object.keys(exerciseResultsData).length : 0);
+      console.log('Student classId:', studentClassId);
+
+      if (!exerciseResultsData) {
+        console.log('⚠️ No exercise results found');
+        setLoading(false);
+        return;
+      }
+
+      // Convert assignedExercises to array (exactly like TeacherDashboard line 6835-6837)
+      const assignedExercises = Object.entries(assignedExercisesData || {})
+        .map(([id, assignment]: [string, any]) => ({ id, ...assignment }))
+        .filter((assignment: any) => assignment.classId === studentClassId);
+      
+      console.log('Assigned exercises for class:', assignedExercises.length);
 
       // Filter results for this student and organize by quarter
       const quarterData: Record<string, number[]> = {
@@ -70,26 +99,91 @@ const StudentRecords: React.FC = () => {
         'Quarter 4': [],
       };
 
-      Object.values(exerciseResults).forEach((result: any) => {
-        // Match by studentId or studentInfo.studentId
-        const resultStudentId = result.studentId || result.studentInfo?.studentId;
-        
-        if (resultStudentId === studentId) {
-          // Get quarter from assignmentMetadata
-          const quarter = result.assignmentMetadata?.quarter;
-          
-          // Get score - try multiple fields for compatibility
-          const score = 
-            result.scorePercentage ?? 
-            result.resultsSummary?.meanPercentageScore ?? 
-            0;
+      let matchedCount = 0;
+      let processedCount = 0;
 
-          // Only add if quarter is valid and score exists
+      // Process ALL results (they're stored as flat object, NOT organized by classId)
+      // This is exactly like TeacherDashboard line 3870-3943
+      Object.entries(exerciseResultsData).forEach(([resultId, result]: any) => {
+        processedCount++;
+        
+        // Extract classId from result (like TeacherDashboard line 3889)
+        const resultClassId = result?.assignmentMetadata?.classId || result?.classId;
+        
+        // Only process results for this student's class
+        if (resultClassId !== studentClassId) {
+          return;
+        }
+
+        console.log(`Checking result ${processedCount}:`, {
+          resultId,
+          exerciseTitle: result?.exerciseTitle,
+          classId: resultClassId,
+          studentId: result?.studentId,
+          studentInfoId: result?.studentInfo?.studentId
+        });
+        // Match by studentId (exactly like TeacherDashboard line 3977-3980)
+        const resultStudentId = result?.studentId || result?.studentInfo?.studentId;
+        const isMatch = (resultStudentId && resultStudentId === studentId) ||
+                       (result?.parentId && studentData.parentId && result.parentId === studentData.parentId) ||
+                       (result?.studentInfo?.name && studentData.fullName && 
+                        result.studentInfo.name.toLowerCase().trim() === studentData.fullName.toLowerCase().trim());
+        
+        if (isMatch) {
+          matchedCount++;
+          console.log(`✓ Match #${matchedCount}:`, result?.exerciseTitle, result?.scorePercentage);
+
+          // Get quarter from assignedExercises (exactly like TeacherDashboard line 10788-10812)
+          let quarter = null;
+          let assignment = null;
+          
+          // Extract IDs like TeacherDashboard does (line 3888-3890)
+          const exerciseId = result?.exerciseInfo?.exerciseId || result?.exerciseId;
+          const assignedExerciseId = result?.assignedExerciseId || result?.assignmentId || result?.assignmentMetadata?.assignmentId;
+          
+          // Try to find by assignedExerciseId first
+          if (assignedExerciseId) {
+            assignment = assignedExercises.find((a: any) => a.id === assignedExerciseId);
+          }
+          
+          // If not found, try by exerciseId + classId
+          if (!assignment && exerciseId) {
+            assignment = assignedExercises.find((a: any) => 
+              a.exerciseId === exerciseId && a.classId === resultClassId
+            );
+          }
+          
+          if (assignment?.quarter) {
+            quarter = assignment.quarter;
+            console.log('    ✓ Quarter from assignment:', quarter);
+          } else if (result?.assignmentMetadata?.quarter) {
+            quarter = result.assignmentMetadata.quarter;
+            console.log('    ✓ Quarter from metadata:', quarter);
+          } else {
+            console.log('    ✗ No quarter found for:', result?.exerciseTitle);
+          }
+          
+          // Get score (like TeacherDashboard line 3911)
+          const score = result?.scorePercentage ?? result?.resultsSummary?.meanPercentageScore ?? 0;
+
+          // Only add if quarter is valid
           if (quarter && quarterData[quarter] !== undefined && score !== null) {
             quarterData[quarter].push(score);
+            console.log(`    ✓ Added to ${quarter}: ${score}%`);
           }
         }
       });
+
+      console.log('📊 Summary:');
+      console.log('  Total results processed:', processedCount);
+      console.log('  Results for this class:', Object.entries(exerciseResultsData).filter(([, r]: any) => 
+        (r?.assignmentMetadata?.classId || r?.classId) === studentClassId
+      ).length);
+      console.log('  Matched to student:', matchedCount);
+      console.log('  Quarter 1:', quarterData['Quarter 1'].length);
+      console.log('  Quarter 2:', quarterData['Quarter 2'].length);
+      console.log('  Quarter 3:', quarterData['Quarter 3'].length);
+      console.log('  Quarter 4:', quarterData['Quarter 4'].length);
 
       // Calculate average score and remarks for each quarter
       const records: QuarterRecord[] = [];

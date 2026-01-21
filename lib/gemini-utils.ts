@@ -60,6 +60,26 @@ export const callGeminiWithFallback = async (requestBody: any): Promise<{ data: 
           const friendlyError = parseGeminiErrorMessage(errorText);
           lastErrorDetails = `(${response.status}) ${friendlyError}`;
 
+          // Handle 429 (Rate Limit/Quota Exceeded)
+          if (response.status === 429) {
+            console.warn(`Gemini model "${modelName}" quota exceeded. Trying next fallback model...`);
+            // Extract retry-after time if present in error message
+            const retryMatch = errorText.match(/retry in ([\d.]+)s/i);
+            if (retryMatch && parseFloat(retryMatch[1]) < 5) {
+              // If retry time is less than 5 seconds, wait and retry same model
+              const retrySeconds = parseFloat(retryMatch[1]);
+              attempt++;
+              if (attempt < GEMINI_MAX_ATTEMPTS_PER_MODEL) {
+                console.warn(`Waiting ${retrySeconds}s before retrying...`);
+                await new Promise(resolve => setTimeout(resolve, retrySeconds * 1000));
+                continue;
+              }
+            }
+            // Otherwise, skip to next model
+            break;
+          }
+
+          // Handle 503 (Service Overloaded)
           if (response.status === 503) {
             attempt++;
             console.warn(`Gemini model "${modelName}" overloaded (attempt ${attempt}/${GEMINI_MAX_ATTEMPTS_PER_MODEL}). Retrying...`);
@@ -71,6 +91,7 @@ export const callGeminiWithFallback = async (requestBody: any): Promise<{ data: 
             }
           }
 
+          // Handle 403/404 (Permission/Not Found)
           if (response.status === 403 || response.status === 404) {
             console.warn(`Gemini model "${modelName}" unavailable: ${friendlyError}. Trying next fallback model...`);
             break;
@@ -97,7 +118,15 @@ export const callGeminiWithFallback = async (requestBody: any): Promise<{ data: 
         console.warn(`Gemini request failed for model "${modelName}" (attempt ${attempt + 1}/${GEMINI_MAX_ATTEMPTS_PER_MODEL}):`, error);
 
         const lowerMessage = message.toLowerCase();
-        if (lowerMessage.includes('permission') || lowerMessage.includes('403') || lowerMessage.includes('404')) {
+        
+        // Skip to next model for permission errors or quota issues
+        if (lowerMessage.includes('permission') || 
+            lowerMessage.includes('403') || 
+            lowerMessage.includes('404') ||
+            lowerMessage.includes('429') ||
+            lowerMessage.includes('quota') ||
+            lowerMessage.includes('rate limit')) {
+          console.warn(`Skipping to next model due to: ${message}`);
           break;
         }
 
@@ -109,6 +138,16 @@ export const callGeminiWithFallback = async (requestBody: any): Promise<{ data: 
     }
   }
 
+  // Provide user-friendly error message for quota issues
+  if (lastErrorDetails.toLowerCase().includes('quota') || 
+      lastErrorDetails.toLowerCase().includes('429') ||
+      lastErrorDetails.toLowerCase().includes('rate limit')) {
+    throw new Error(
+      'AI service quota temporarily exceeded. This usually resolves within a few minutes. ' +
+      'Please try again shortly or contact support if the issue persists.'
+    );
+  }
+  
   throw new Error(lastErrorDetails);
 };
 

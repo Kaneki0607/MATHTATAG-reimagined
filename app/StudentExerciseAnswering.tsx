@@ -2534,8 +2534,7 @@ export default function StudentExerciseAnswering() {
         currentTTSRef.current = cachedPlayer;
         setCurrentAudioPlayer(cachedPlayer);
         setCurrentAudioUri(audioUrl);
-        setIsPlayingTTS(true);
-        setIsLoadingTTS(false); // Already loaded!
+        setIsLoadingTTS(true); // Set loading state first
         
         // CRITICAL: Remove all existing listeners to prevent accumulation
         try {
@@ -2570,8 +2569,22 @@ export default function StudentExerciseAnswering() {
           }
         });
         
-        // Start playback immediately
-        cachedPlayer.play();
+        // Start playback immediately with error handling
+        try {
+          await cachedPlayer.play();
+          console.log('[TTS-Play] ✓ Cached player started successfully');
+          setIsPlayingTTS(true);
+          setIsLoadingTTS(false);
+        } catch (playError) {
+          console.error('[TTS-Play] Failed to play cached audio:', playError);
+          setIsPlayingTTS(false);
+          setIsLoadingTTS(false);
+          // Remove from cache and try creating a new player
+          audioPlayerCacheRef.current.delete(audioUrl);
+          currentTTSRef.current = null;
+          setCurrentAudioPlayer(null);
+          setCurrentAudioUri(null);
+        }
         return;
       }
       
@@ -2617,7 +2630,22 @@ export default function StudentExerciseAnswering() {
         }
       });
       
-      player.play();
+      // Start playback with error handling
+      try {
+        await player.play();
+        console.log('[TTS-Play] ✓ New player started successfully');
+        setIsPlayingTTS(true);
+        setIsLoadingTTS(false);
+      } catch (playError) {
+        console.error('[TTS-Play] Failed to play new audio:', playError);
+        setIsPlayingTTS(false);
+        setIsLoadingTTS(false);
+        // Remove from cache if errored
+        audioPlayerCacheRef.current.delete(audioUrl);
+        currentTTSRef.current = null;
+        setCurrentAudioPlayer(null);
+        setCurrentAudioUri(null);
+      }
     } catch (error) {
       console.error('[TTS-Play] Error:', error);
       setIsPlayingTTS(false);
