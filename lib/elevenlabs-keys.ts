@@ -18,14 +18,27 @@ export interface ApiKeyInfo {
 
 const FIREBASE_PATH = '/elevenlabskeys';
 
-/** Default voice for app TTS (Create Exercise, AI questions). */
+/** Default voice for app TTS (Create Exercise, AI questions). Maria - fil-PH */
 export const ELEVENLABS_TTS_VOICE_ID = '4RLeKvASM0Zt73Htf5GF';
+export const ELEVENLABS_TTS_MODEL_ID = 'eleven_turbo_v2_5';
+export const ELEVENLABS_TTS_DEBUG = __DEV__;
 
-// Used only when validating new keys in Super Admin (not for app TTS output)
-const VALIDATION_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
-const VALIDATION_MODEL_ID = 'eleven_flash_v2_5';
+/** Maria voice defaults from ElevenLabs voice metadata */
+export const ELEVENLABS_TTS_VOICE_SETTINGS = {
+  stability: 0.5,
+  similarity_boost: 0.75,
+  style: 0,
+  speed: 1.08,
+  use_speaker_boost: true,
+};
 
-const parseElevenLabsErrorMessage = (errorText: string): string => {
+// Used only when validating new keys in Super Admin
+const VALIDATION_VOICE_ID = ELEVENLABS_TTS_VOICE_ID;
+const VALIDATION_MODEL_ID = ELEVENLABS_TTS_MODEL_ID;
+
+export const maskElevenLabsApiKey = (key: string) => `${key.substring(0, 10)}...`;
+
+export const parseElevenLabsErrorMessage = (errorText: string): string => {
   try {
     const data = JSON.parse(errorText);
     const detail = data?.detail;
@@ -36,6 +49,84 @@ const parseElevenLabsErrorMessage = (errorText: string): string => {
     // not JSON
   }
   return errorText.trim().slice(0, 240);
+};
+
+export const buildElevenLabsTtsUrl = (
+  voiceId: string = ELEVENLABS_TTS_VOICE_ID,
+  outputFormat?: string
+) =>
+  outputFormat
+    ? `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${outputFormat}`
+    : `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
+
+export const buildElevenLabsTtsPayload = (text: string) => ({
+  text,
+  model_id: ELEVENLABS_TTS_MODEL_ID,
+  voice_settings: ELEVENLABS_TTS_VOICE_SETTINGS,
+  language_code: 'fil',
+});
+
+export const logElevenLabsTtsRequest = (
+  context: string,
+  details: {
+    url: string;
+    apiKey: string;
+    voiceId: string;
+    modelId: string;
+    textPreview: string;
+    textLength: number;
+  }
+) => {
+  if (!ELEVENLABS_TTS_DEBUG) return;
+  console.log('📤 [ElevenLabs TTS REQUEST]', context, {
+    method: 'POST',
+    url: details.url,
+    apiKey: maskElevenLabsApiKey(details.apiKey),
+    voiceId: details.voiceId,
+    modelId: details.modelId,
+    languageCode: 'fil',
+    textLength: details.textLength,
+    textPreview: details.textPreview.slice(0, 120),
+    voiceSettings: ELEVENLABS_TTS_VOICE_SETTINGS,
+    headers: {
+      Accept: 'audio/mpeg',
+      'Content-Type': 'application/json',
+      'xi-api-key': '[masked]',
+    },
+  });
+};
+
+export const logElevenLabsTtsResponse = (
+  context: string,
+  response: Response,
+  durationMs: number,
+  errorText?: string | null
+) => {
+  const logPayload: Record<string, unknown> = {
+    context,
+    status: response.status,
+    ok: response.ok,
+    durationMs,
+    contentType: response.headers?.get?.('content-type') ?? 'unknown',
+  };
+
+  if (errorText) {
+    logPayload.errorRaw = errorText.slice(0, 800);
+    logPayload.errorMessage = parseElevenLabsErrorMessage(errorText);
+    try {
+      logPayload.errorJson = JSON.parse(errorText);
+    } catch {
+      // not JSON
+    }
+  }
+
+  if (response.ok) {
+    if (ELEVENLABS_TTS_DEBUG) {
+      console.log('📥 [ElevenLabs TTS RESPONSE OK]', logPayload);
+    }
+  } else {
+    console.error('📥 [ElevenLabs TTS RESPONSE ERROR]', logPayload);
+  }
 };
 
 /** Pull sk_* keys from pasted text (one per line or embedded in a blob). */
@@ -118,27 +209,34 @@ export const validateElevenLabsTtsKey = async (
   key: string
 ): Promise<{ valid: boolean; error?: string; warning?: string }> => {
   try {
-    const response = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${VALIDATION_VOICE_ID}?output_format=mp3_44100_128`,
-      {
-        method: 'POST',
-        headers: {
-          Accept: 'audio/mpeg',
-          'Content-Type': 'application/json',
-          'xi-api-key': key,
-        },
-        body: JSON.stringify({
-          text: 'test',
-          model_id: VALIDATION_MODEL_ID,
-        }),
-      }
-    );
+    const url = buildElevenLabsTtsUrl(VALIDATION_VOICE_ID, 'mp3_44100_128');
+    const payload = buildElevenLabsTtsPayload('test');
+    logElevenLabsTtsRequest('validateElevenLabsTtsKey', {
+      url,
+      apiKey: key,
+      voiceId: VALIDATION_VOICE_ID,
+      modelId: VALIDATION_MODEL_ID,
+      textPreview: payload.text,
+      textLength: payload.text.length,
+    });
+    const started = Date.now();
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Accept: 'audio/mpeg',
+        'Content-Type': 'application/json',
+        'xi-api-key': key,
+      },
+      body: JSON.stringify(payload),
+    });
 
     if (response.ok) {
+      logElevenLabsTtsResponse('validateElevenLabsTtsKey', response, Date.now() - started);
       return { valid: true };
     }
 
     const errorText = await response.text();
+    logElevenLabsTtsResponse('validateElevenLabsTtsKey', response, Date.now() - started, errorText);
     const message = parseElevenLabsErrorMessage(errorText);
     console.warn(
       `⚠️ ElevenLabs key validation (${key.substring(0, 10)}...): ${response.status} — ${message}`
@@ -182,20 +280,27 @@ export const validateElevenLabsTtsKey = async (
       };
     }
 
-    // TTS permission is present, but the validation voice/model is not allowed on this plan.
-    // The app uses a different voice — still save the key.
     if (
       response.status === 402 ||
       errorText.includes('payment_required') ||
       errorText.includes('paid_plan_required') ||
-      errorText.includes('free_users_not_allowed') ||
+      errorText.includes('free_users_not_allowed')
+    ) {
+      return {
+        valid: false,
+        error:
+          message ||
+          'This voice requires a paid ElevenLabs plan for API use (library/professional voices are blocked on free tier).',
+      };
+    }
+
+    if (
       errorText.includes('voice_not_found') ||
       errorText.includes('creator tier')
     ) {
       return {
-        valid: true,
-        warning:
-          'Key has TTS access. Validation used a sample voice your plan may not include; app TTS may still work.',
+        valid: false,
+        error: message || 'Voice not available for this API key or plan.',
       };
     }
 

@@ -22,7 +22,22 @@ import {
   View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
-import { ELEVENLABS_TTS_VOICE_ID, getActiveApiKeys, getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
+import {
+  buildElevenLabsTtsPayload,
+  buildElevenLabsTtsUrl,
+  ELEVENLABS_TTS_MODEL_ID,
+  ELEVENLABS_TTS_VOICE_ID,
+  ELEVENLABS_TTS_VOICE_SETTINGS,
+  getActiveApiKeys,
+  getRandomApiKey,
+  logElevenLabsTtsRequest,
+  logElevenLabsTtsResponse,
+  markApiKeyAsFailed,
+  markApiKeyAsUsed,
+  maskElevenLabsApiKey,
+  parseElevenLabsErrorMessage,
+  updateApiKeyCredits,
+} from '../lib/elevenlabs-keys';
 import { createExercise } from '../lib/entity-helpers';
 import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
@@ -47,10 +62,11 @@ const performApiKeyMaintenance = async () => {
 const ELEVENLABS_KEY_UNUSABLE = 'ELEVENLABS_KEY_UNUSABLE';
 const ELEVENLABS_UNUSUAL_ACTIVITY = 'UNUSUAL_ACTIVITY_DETECTED';
 const ELEVENLABS_QUOTA_EXCEEDED = 'QUOTA_EXCEEDED';
+const ELEVENLABS_PAYMENT_REQUIRED = 'ELEVENLABS_PAYMENT_REQUIRED';
 
-const maskApiKey = (key: string) => `${key.substring(0, 10)}...`;
+const maskApiKey = maskElevenLabsApiKey;
 
-type ElevenLabsFailureKind = 'unusual_activity' | 'quota_exceeded' | 'key_unusable' | 'retryable';
+type ElevenLabsFailureKind = 'unusual_activity' | 'quota_exceeded' | 'key_unusable' | 'payment_required' | 'retryable';
 
 const classifyElevenLabsError = (status: number, errorText: string): ElevenLabsFailureKind => {
   if (
@@ -75,6 +91,15 @@ const classifyElevenLabsError = (status: number, errorText: string): ElevenLabsF
     errorText.includes('invalid_api_key')
   ) {
     return 'key_unusable';
+  }
+
+  if (
+    status === 402 ||
+    errorText.includes('payment_required') ||
+    errorText.includes('paid_plan_required') ||
+    errorText.includes('free_users_not_allowed')
+  ) {
+    return 'payment_required';
   }
 
   return 'retryable';
@@ -151,6 +176,12 @@ const throwForElevenLabsFailure = async (
     throw new Error(`${ELEVENLABS_KEY_UNUSABLE}: ${detail}`);
   }
 
+  if (kind === 'payment_required') {
+    const detail = parseElevenLabsErrorMessage(errorText) ||
+      'This voice requires a paid ElevenLabs plan for API use.';
+    throw new Error(`${ELEVENLABS_PAYMENT_REQUIRED}: ${detail}`);
+  }
+
   if (status >= 400 && status < 500) {
     await markApiKeyAsFailed(apiKey);
   }
@@ -180,27 +211,29 @@ const callElevenLabsWithFallback = async (
     try {
       console.log(`🔄 Trying ElevenLabs API key (${maskApiKey(apiKey)})`);
 
-      const requestPayload = useV3 ? {
-        text: text,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: {
-          speed: 0.8,
-          stability: 0.5,
-          similarity_boost: 0.75,
-        },
-        language_code: 'fil'
-      } : {
-        text: text,
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.8
-        }
-      };
+      const requestPayload = useV3
+        ? buildElevenLabsTtsPayload(text)
+        : {
+            text,
+            voice_settings: {
+              stability: ELEVENLABS_TTS_VOICE_SETTINGS.stability,
+              similarity_boost: ELEVENLABS_TTS_VOICE_SETTINGS.similarity_boost,
+            },
+          };
 
-      const url = useV3 
-        ? `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${outputFormat}`
-        : `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
-        
+      const url = useV3
+        ? buildElevenLabsTtsUrl(voiceId, outputFormat)
+        : buildElevenLabsTtsUrl(voiceId);
+
+      logElevenLabsTtsRequest('callElevenLabsWithFallback', {
+        url,
+        apiKey,
+        voiceId,
+        modelId: ELEVENLABS_TTS_MODEL_ID,
+        textPreview: text,
+        textLength: text.length,
+      });
+
       const response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -212,6 +245,7 @@ const callElevenLabsWithFallback = async (
       });
 
       if (response.ok) {
+        logElevenLabsTtsResponse('callElevenLabsWithFallback', response, Date.now() - attemptStart);
         const audioBlob = await response.blob();
         performanceLog.apiKey = Date.now() - attemptStart;
         await markApiKeyAsUsed(apiKey, performanceLog.apiKey);
@@ -224,8 +258,14 @@ const callElevenLabsWithFallback = async (
       }
 
       const errorText = await response.text();
+      logElevenLabsTtsResponse('callElevenLabsWithFallback', response, Date.now() - attemptStart, errorText);
+
       if (classifyElevenLabsError(response.status, errorText) === 'unusual_activity') {
         return null;
+      }
+
+      if (classifyElevenLabsError(response.status, errorText) === 'payment_required') {
+        await throwForElevenLabsFailure(apiKey, response.status, errorText);
       }
 
       try {
@@ -3618,18 +3658,6 @@ Re-order Example (pattern completion):
       const finalTextForTTS = selectedText;
 
 
-      // Step 2: Prepare request payload with final text and validated parameters
-      const requestPayload: any = {
-        text: finalTextForTTS,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: {
-          speed: 0.8,
-          stability: 0.5,
-          similarity_boost: 0.75,
-        },
-        language_code: 'fil'
-      };
-
       // Step 3: ElevenLabs API call with multiple API key fallback
       const elevenLabsStart = Date.now();
       
@@ -3766,7 +3794,14 @@ Re-order Example (pattern completion):
       }
 
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes(ELEVENLABS_KEY_UNUSABLE) || msg.includes('missing_permissions')) {
+      if (msg.includes(ELEVENLABS_PAYMENT_REQUIRED) || msg.includes('paid_plan_required') || msg.includes('payment_required')) {
+        showCustomAlert(
+          'ElevenLabs Plan Required',
+          msg.includes(ELEVENLABS_PAYMENT_REQUIRED)
+            ? msg.replace(`${ELEVENLABS_PAYMENT_REQUIRED}: `, '')
+            : 'Maria is a professional library voice. Free ElevenLabs accounts cannot use library voices via the API — upgrade your plan or use a Voice Design voice.'
+        );
+      } else if (msg.includes(ELEVENLABS_KEY_UNUSABLE) || msg.includes('missing_permissions')) {
         showCustomAlert(
           'ElevenLabs Permission Required',
           'The ElevenLabs API key does not have Text-to-Speech permission. Ask a Super Admin to create a new key at elevenlabs.io → API Keys and enable the "Text to Speech" permission.'
@@ -3796,18 +3831,6 @@ Re-order Example (pattern completion):
     try {
       // CRITICAL: Convert numbers to Tagalog before sending to TTS
       const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(processedText);
-
-      // Prepare request payload
-      const requestPayload: any = {
-        text: textWithTagalogNumbers,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: {
-          speed: 0.8,
-          stability: 0.5,
-          similarity_boost: 0.75,
-        },
-        language_code: 'fil'
-      };
 
       // ElevenLabs API call with multiple API key fallback
       try {
@@ -3866,19 +3889,18 @@ Re-order Example (pattern completion):
 
     const startTime = Date.now();
     const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(processedText);
+    const requestPayload = buildElevenLabsTtsPayload(textWithTagalogNumbers);
+    const url = buildElevenLabsTtsUrl(ELEVENLABS_TTS_VOICE_ID, 'mp3_44100_128');
 
-    const requestPayload: any = {
-      text: textWithTagalogNumbers,
-      model_id: 'eleven_turbo_v2_5',
-      voice_settings: {
-        speed: 0.8,
-        stability: 0.5,
-        similarity_boost: 0.75,
-      },
-      language_code: 'fil'
-    };
+    logElevenLabsTtsRequest('generateTTSForAIWithKey', {
+      url,
+      apiKey,
+      voiceId: ELEVENLABS_TTS_VOICE_ID,
+      modelId: ELEVENLABS_TTS_MODEL_ID,
+      textPreview: textWithTagalogNumbers,
+      textLength: textWithTagalogNumbers.length,
+    });
 
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_TTS_VOICE_ID}?output_format=mp3_44100_128`;
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -3890,6 +3912,7 @@ Re-order Example (pattern completion):
     });
 
     if (response.ok) {
+      logElevenLabsTtsResponse('generateTTSForAIWithKey', response, Date.now() - startTime);
       const ttsTimeMs = Date.now() - startTime;
       console.log('✅ TTS Generation Successful for Question:', questionId, `(${ttsTimeMs}ms)`);
       const audioBlob = await response.blob();
@@ -3908,7 +3931,8 @@ Re-order Example (pattern completion):
     }
 
     const errorText = await response.text();
-    console.error(`❌ ElevenLabs API failed with key ${maskApiKey(apiKey)}:`, response.status);
+    logElevenLabsTtsResponse('generateTTSForAIWithKey', response, Date.now() - startTime, errorText);
+    console.error(`❌ ElevenLabs API failed with key ${maskApiKey(apiKey)}:`, response.status, parseElevenLabsErrorMessage(errorText));
     await throwForElevenLabsFailure(apiKey, response.status, errorText);
     return null;
   };
