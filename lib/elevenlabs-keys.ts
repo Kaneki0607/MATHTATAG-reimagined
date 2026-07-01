@@ -18,6 +18,9 @@ export interface ApiKeyInfo {
 
 const FIREBASE_PATH = '/elevenlabskeys';
 
+/** Default voice for app TTS (Create Exercise, AI questions). */
+export const ELEVENLABS_TTS_VOICE_ID = '4RLeKvASM0Zt73Htf5GF';
+
 // Used only when validating new keys in Super Admin (not for app TTS output)
 const VALIDATION_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
 const VALIDATION_MODEL_ID = 'eleven_flash_v2_5';

@@ -7,30 +7,30 @@ import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    BackHandler,
-    FlatList,
-    Image,
-    Modal,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  Alert,
+  BackHandler,
+  FlatList,
+  Image,
+  Modal,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
-import { getActiveApiKeys, getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
+import { ELEVENLABS_TTS_VOICE_ID, getActiveApiKeys, getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
 import { createExercise } from '../lib/entity-helpers';
 import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 import {
-    callGeminiWithFallback,
-    extractGeminiText,
-    parseGeminiJson
+  callGeminiWithFallback,
+  extractGeminiText,
+  parseGeminiJson
 } from '../lib/gemini-utils';
 import { convertNumbersToTagalogEnhanced } from '../lib/tagalog-number-utils';
 
@@ -161,7 +161,7 @@ const throwForElevenLabsFailure = async (
 // Helper function to try multiple ElevenLabs API keys with fallback
 const callElevenLabsWithFallback = async (
   text: string, 
-  voiceId: string = 'jBpfuIE2acCO8z3wKNLl',
+  voiceId: string = ELEVENLABS_TTS_VOICE_ID,
   useV3: boolean = true,
   outputFormat: string = 'mp3_44100_128'
 ): Promise<{ audioBlob: Blob; usedApiKey: string; performanceLog: any } | null> => {
@@ -3636,7 +3636,7 @@ Re-order Example (pattern completion):
       try {
         const result = await callElevenLabsWithFallback(
           finalTextForTTS,
-          'jBpfuIE2acCO8z3wKNLl',
+          ELEVENLABS_TTS_VOICE_ID,
           true, // useV3
           'mp3_44100_128'
         );
@@ -3813,7 +3813,7 @@ Re-order Example (pattern completion):
       try {
         const result = await callElevenLabsWithFallback(
           textWithTagalogNumbers,
-          'jBpfuIE2acCO8z3wKNLl',
+          ELEVENLABS_TTS_VOICE_ID,
           true, // useV3
           'mp3_44100_128'
         );
@@ -3878,7 +3878,7 @@ Re-order Example (pattern completion):
       language_code: 'fil'
     };
 
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/jBpfuIE2acCO8z3wKNLl?output_format=mp3_44100_128`;
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_TTS_VOICE_ID}?output_format=mp3_44100_128`;
     const response = await fetch(url, {
       method: 'POST',
       headers: {
