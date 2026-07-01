@@ -1,7 +1,7 @@
 // Expo app configuration with environment variable support
 // This file reads from .env file and passes values to the app via expo.extra
 
-require('dotenv').config();
+require('dotenv').config({ override: true });
 
 module.exports = {
   expo: {
@@ -58,6 +58,7 @@ module.exports = {
       },
       // Environment variables accessible via Constants.expoConfig.extra
       geminiApiKey: process.env.GEMINI_API_KEY || '',
+      elevenLabsApiKey: process.env.ELEVENLABS_API_KEY || '',
       // Firebase configuration from environment variables
       firebaseApiKey: process.env.FIREBASE_API_KEY || '',
       firebaseAuthDomain: process.env.FIREBASE_AUTH_DOMAIN || '',

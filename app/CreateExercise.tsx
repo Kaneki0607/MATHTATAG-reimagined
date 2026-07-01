@@ -7,19 +7,19 @@ import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  BackHandler,
-  FlatList,
-  Image,
-  Modal,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    ActivityIndicator,
+    Alert,
+    BackHandler,
+    FlatList,
+    Image,
+    Modal,
+    ScrollView,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import DraggableFlatList, { RenderItemParams } from 'react-native-draggable-flatlist';
 import { getActiveApiKeys, getRandomApiKey, markApiKeyAsFailed, markApiKeyAsUsed, updateApiKeyCredits } from '../lib/elevenlabs-keys';
@@ -28,9 +28,9 @@ import { onAuthChange } from '../lib/firebase-auth';
 import { pushData, readData, updateData } from '../lib/firebase-database';
 import { uploadFile } from '../lib/firebase-storage';
 import {
-  callGeminiWithFallback,
-  extractGeminiText,
-  parseGeminiJson
+    callGeminiWithFallback,
+    extractGeminiText,
+    parseGeminiJson
 } from '../lib/gemini-utils';
 import { convertNumbersToTagalogEnhanced } from '../lib/tagalog-number-utils';
 
@@ -42,6 +42,42 @@ import { convertNumbersToTagalogEnhanced } from '../lib/tagalog-number-utils';
 const performApiKeyMaintenance = async () => {
   // Optionally: remove or mark failed/expired keys; for now no-op using Firebase list
   return;
+};
+
+const ELEVENLABS_KEY_UNUSABLE = 'ELEVENLABS_KEY_UNUSABLE';
+const ELEVENLABS_UNUSUAL_ACTIVITY = 'UNUSUAL_ACTIVITY_DETECTED';
+const ELEVENLABS_QUOTA_EXCEEDED = 'QUOTA_EXCEEDED';
+
+const maskApiKey = (key: string) => `${key.substring(0, 10)}...`;
+
+type ElevenLabsFailureKind = 'unusual_activity' | 'quota_exceeded' | 'key_unusable' | 'retryable';
+
+const classifyElevenLabsError = (status: number, errorText: string): ElevenLabsFailureKind => {
+  if (
+    errorText.includes('detected_unusual_activity') ||
+    errorText.includes('Unusual activity detected') ||
+    errorText.includes('Free Tier usage disabled')
+  ) {
+    return 'unusual_activity';
+  }
+
+  if (
+    errorText.includes('quota_exceeded') ||
+    errorText.includes('exceeds your quota') ||
+    errorText.includes('credits remaining')
+  ) {
+    return 'quota_exceeded';
+  }
+
+  if (
+    status === 401 ||
+    errorText.includes('missing_permissions') ||
+    errorText.includes('invalid_api_key')
+  ) {
+    return 'key_unusable';
+  }
+
+  return 'retryable';
 };
 
 // Helper function to check if API key has low credits and update status
@@ -84,6 +120,44 @@ const checkAndUpdateApiKeyCredits = async (apiKey: string, response: Response, e
   return false; // Key was not marked as low credits
 };
 
+const throwForElevenLabsFailure = async (
+  apiKey: string,
+  status: number,
+  errorText: string
+): Promise<never> => {
+  const kind = classifyElevenLabsError(status, errorText);
+
+  if (kind === 'unusual_activity') {
+    await markApiKeyAsFailed(apiKey);
+    throw new Error(ELEVENLABS_UNUSUAL_ACTIVITY);
+  }
+
+  if (kind === 'quota_exceeded') {
+    const creditsMatch = errorText.match(/(\d+)\s+credits\s+remaining/);
+    if (creditsMatch) {
+      await updateApiKeyCredits(apiKey, parseInt(creditsMatch[1], 10));
+    } else {
+      await checkAndUpdateApiKeyCredits(apiKey, { status } as Response, errorText);
+    }
+    await markApiKeyAsFailed(apiKey);
+    throw new Error(ELEVENLABS_QUOTA_EXCEEDED);
+  }
+
+  if (kind === 'key_unusable') {
+    await markApiKeyAsFailed(apiKey);
+    const detail = errorText.includes('missing_permissions')
+      ? 'ElevenLabs API key is missing the text_to_speech permission.'
+      : 'ElevenLabs API key is invalid or unauthorized.';
+    throw new Error(`${ELEVENLABS_KEY_UNUSABLE}: ${detail}`);
+  }
+
+  if (status >= 400 && status < 500) {
+    await markApiKeyAsFailed(apiKey);
+  }
+
+  throw new Error(`API call failed: ${status} - ${errorText}`);
+};
+
 // Helper function to try multiple ElevenLabs API keys with fallback
 const callElevenLabsWithFallback = async (
   text: string, 
@@ -91,20 +165,21 @@ const callElevenLabsWithFallback = async (
   useV3: boolean = true,
   outputFormat: string = 'mp3_44100_128'
 ): Promise<{ audioBlob: Blob; usedApiKey: string; performanceLog: any } | null> => {
-  const performanceLog: any = {};
-  
-  // Get a random API key
-  const apiKey = await getRandomApiKey();
-  if (!apiKey) {
+  const apiKeys = await getActiveApiKeys();
+  if (apiKeys.length === 0) {
     throw new Error('No active ElevenLabs API keys available');
   }
-  
-  const attemptStart = Date.now();
-    
+
+  const shuffledKeys = [...apiKeys].sort(() => Math.random() - 0.5);
+  let lastError: Error | null = null;
+
+  for (const apiKey of shuffledKeys) {
+    const performanceLog: any = {};
+    const attemptStart = Date.now();
+
     try {
-      console.log(`🔄 Trying ElevenLabs API key (${apiKey.substring(0, 10)}...)`);
-      
-      // Prepare request payload based on version
+      console.log(`🔄 Trying ElevenLabs API key (${maskApiKey(apiKey)})`);
+
       const requestPayload = useV3 ? {
         text: text,
         model_id: 'eleven_turbo_v2_5',
@@ -122,7 +197,6 @@ const callElevenLabsWithFallback = async (
         }
       };
 
-      // Make API call
       const url = useV3 
         ? `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${outputFormat}`
         : `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
@@ -140,56 +214,52 @@ const callElevenLabsWithFallback = async (
       if (response.ok) {
         const audioBlob = await response.blob();
         performanceLog.apiKey = Date.now() - attemptStart;
-        
-        // Mark this key as used in DB with TTS generation time
         await markApiKeyAsUsed(apiKey, performanceLog.apiKey);
-        
+
         return {
           audioBlob,
           usedApiKey: apiKey,
           performanceLog
         };
-      } else {
-        const errorText = await response.text();
-        
-        // Check for IP address unusual activity first - this should stop all retries
-        if (errorText.includes('detected_unusual_activity') || 
-            errorText.includes('Unusual activity detected') ||
-            errorText.includes('Free Tier usage disabled')) {
-          
-          // Stop retrying and return null instead of throwing error to prevent crash
-          return null;
+      }
+
+      const errorText = await response.text();
+      if (classifyElevenLabsError(response.status, errorText) === 'unusual_activity') {
+        return null;
+      }
+
+      try {
+        await throwForElevenLabsFailure(apiKey, response.status, errorText);
+      } catch (error) {
+        lastError = error as Error;
+        if (
+          lastError.message.startsWith(ELEVENLABS_KEY_UNUSABLE) ||
+          lastError.message === ELEVENLABS_QUOTA_EXCEEDED
+        ) {
+          continue;
         }
-        
-        // Handle different error types
-        if (response.status === 401) {
-          // Unauthorized - invalid API key
-          await markApiKeyAsFailed(apiKey);
-        } else if (response.status === 429) {
-          // Rate limit or quota exceeded
-          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
-        } else {
-          // Check if this key has low credits and update status
-          const hasLowCredits = await checkAndUpdateApiKeyCredits(apiKey, response, errorText);
-          
-          // Mark key as failed if it's not a credit issue and not a temporary error
-          if (!hasLowCredits && response.status >= 400 && response.status < 500) {
-            await markApiKeyAsFailed(apiKey);
-          }
-        }
-        
-        // Throw error to indicate this key failed
-        throw new Error(`API call failed with status ${response.status}: ${errorText}`);
+        throw lastError;
       }
     } catch (error) {
-      console.warn(`⚠️ ElevenLabs API key error:`, error);
-      
-      // Mark key as failed
-      await markApiKeyAsFailed(apiKey);
-      
-      // Re-throw the error
+      if ((error as Error).message === ELEVENLABS_UNUSUAL_ACTIVITY) {
+        return null;
+      }
+
+      if (
+        (error as Error).message.startsWith(ELEVENLABS_KEY_UNUSABLE) ||
+        (error as Error).message === ELEVENLABS_QUOTA_EXCEEDED
+      ) {
+        lastError = error as Error;
+        continue;
+      }
+
       throw error;
     }
+  }
+
+  throw lastError ?? new Error(
+    'No ElevenLabs API keys with Text-to-Speech permission are available. Ask a Super Admin to add a valid key.'
+  );
 };
 
 // Utility placeholders removed (DB-driven now)
@@ -3163,10 +3233,10 @@ Re-order Example (pattern completion):
                 }
               } catch (error: any) {
                 retryCount++;
-                console.warn(`⚠️ TTS attempt ${retryCount} failed for question ${i + 1}:`, error);
+                console.warn(`⚠️ TTS attempt ${retryCount} failed for question ${i + 1}:`, error?.message || error);
                 
                 // Check if it's an unusual activity error - skip to next question immediately
-                if (error?.message?.includes('UNUSUAL_ACTIVITY_DETECTED')) {
+                if (error?.message?.includes(ELEVENLABS_UNUSUAL_ACTIVITY)) {
                   // Mark this question as failed TTS
                   setFailedTTSQuestions(prev => new Set([...prev, question.id]));
                   // Mark the problematic API key as failed (keep in database)
@@ -3184,7 +3254,7 @@ Re-order Example (pattern completion):
                 }
                 
                 // Check if it's a quota exceeded error - skip to next question immediately
-                if (error?.message?.includes('QUOTA_EXCEEDED')) {
+                if (error?.message?.includes(ELEVENLABS_QUOTA_EXCEEDED)) {
                   // Mark this question as failed TTS
                   setFailedTTSQuestions(prev => new Set([...prev, question.id]));
                   // Try to get a different API key for the next question
@@ -3197,6 +3267,21 @@ Re-order Example (pattern completion):
                   await new Promise(resolve => setTimeout(resolve, 5000));
                   skipQuestion = true; // Set flag to skip this question entirely
                   break; // Exit the retry loop
+                }
+
+                // Invalid or permissionless API key - rotate to another key instead of retrying forever
+                if (error?.message?.includes(ELEVENLABS_KEY_UNUSABLE)) {
+                  setFailedTTSQuestions(prev => new Set([...prev, question.id]));
+                  const newApiKey = await getRandomApiKey();
+                  if (newApiKey && newApiKey !== currentApiKey) {
+                    currentApiKey = newApiKey;
+                    requestsWithCurrentKey = 0;
+                    retryCount = 0;
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                  }
+                  skipQuestion = true;
+                  break;
                 }
                 
                 if (retryCount < MAX_RETRIES_PER_QUESTION) {
@@ -3262,7 +3347,7 @@ Re-order Example (pattern completion):
             
             // Check if it's an unusual activity error - skip to next question
             const errorMessage = error?.message || error?.toString() || '';
-            if (errorMessage.includes('UNUSUAL_ACTIVITY_DETECTED')) {
+            if (errorMessage.includes(ELEVENLABS_UNUSUAL_ACTIVITY)) {
               console.log(`🚫 Unusual activity detected for question ${question.id} - skipping to next question`);
               // Mark this question as failed TTS
               setFailedTTSQuestions(prev => new Set([...prev, question.id]));
@@ -3282,7 +3367,7 @@ Re-order Example (pattern completion):
             }
             
             // Check if it's a quota exceeded error - skip to next question
-            if (errorMessage.includes('QUOTA_EXCEEDED')) {
+            if (errorMessage.includes(ELEVENLABS_QUOTA_EXCEEDED)) {
               console.log(`💰 Quota exceeded for question ${question.id} - skipping to next question`);
               // Mark this question as failed TTS
               setFailedTTSQuestions(prev => new Set([...prev, question.id]));
@@ -3484,6 +3569,15 @@ Re-order Example (pattern completion):
     setIsGeneratingTTS(true);
     
     try {
+      const activeKeys = await getActiveApiKeys();
+      if (activeKeys.length === 0) {
+        showCustomAlert(
+          'ElevenLabs Unavailable',
+          'No working ElevenLabs API keys are available. A Super Admin must add a key with Text-to-Speech permission enabled at elevenlabs.io → API Keys.'
+        );
+        return;
+      }
+
       // Stop current audio if playing
       if (currentAudioPlayer) {
         currentAudioPlayer.remove();
@@ -3670,8 +3764,21 @@ Re-order Example (pattern completion):
       if (editingQuestion) {
         setFailedTTSQuestions(prev => new Set([...prev, editingQuestion.id]));
       }
-      
-      showCustomAlert('Error', 'Failed to generate speech. Please try again.');
+
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes(ELEVENLABS_KEY_UNUSABLE) || msg.includes('missing_permissions')) {
+        showCustomAlert(
+          'ElevenLabs Permission Required',
+          'The ElevenLabs API key does not have Text-to-Speech permission. Ask a Super Admin to create a new key at elevenlabs.io → API Keys and enable the "Text to Speech" permission.'
+        );
+      } else if (msg.toLowerCase().includes('no active elevenlabs') || msg.toLowerCase().includes('no working elevenlabs')) {
+        showCustomAlert(
+          'ElevenLabs Unavailable',
+          'No working ElevenLabs API keys are available. A Super Admin must add a valid key with Text-to-Speech permission.'
+        );
+      } else {
+        showCustomAlert('Error', 'Failed to generate speech. Please try again.');
+      }
     } finally {
       setIsGeneratingTTS(false);
     }
@@ -3755,109 +3862,55 @@ Re-order Example (pattern completion):
       return null;
     }
 
-    console.log('🎤 AI TTS Generation Started for question:', questionId, 'with API key:', apiKey);
+    console.log('🎤 AI TTS Generation Started for question:', questionId, 'with API key:', maskApiKey(apiKey));
 
     const startTime = Date.now();
+    const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(processedText);
 
-    try {
-      // CRITICAL: Convert numbers to Tagalog before sending to TTS
-      const textWithTagalogNumbers = convertNumbersToTagalogEnhanced(processedText);
+    const requestPayload: any = {
+      text: textWithTagalogNumbers,
+      model_id: 'eleven_turbo_v2_5',
+      voice_settings: {
+        speed: 0.8,
+        stability: 0.5,
+        similarity_boost: 0.75,
+      },
+      language_code: 'fil'
+    };
 
-      // Prepare request payload
-      const requestPayload: any = {
-        text: textWithTagalogNumbers,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: {
-          speed: 0.8,
-          stability: 0.5,
-          similarity_boost: 0.75,
-        },
-        language_code: 'fil'
-      };
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/jBpfuIE2acCO8z3wKNLl?output_format=mp3_44100_128`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Accept': 'audio/mpeg',
+        'Content-Type': 'application/json',
+        'xi-api-key': apiKey
+      },
+      body: JSON.stringify(requestPayload)
+    });
 
-      // ElevenLabs API call with specific API key
-      try {
-        const url = `https://api.elevenlabs.io/v1/text-to-speech/jBpfuIE2acCO8z3wKNLl?output_format=mp3_44100_128`;
-        
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Accept': 'audio/mpeg',
-            'Content-Type': 'application/json',
-            'xi-api-key': apiKey
-          },
-          body: JSON.stringify(requestPayload)
-        });
+    if (response.ok) {
+      const ttsTimeMs = Date.now() - startTime;
+      console.log('✅ TTS Generation Successful for Question:', questionId, `(${ttsTimeMs}ms)`);
+      const audioBlob = await response.blob();
+      await markApiKeyAsUsed(apiKey, ttsTimeMs);
 
-        if (response.ok) {
-          const ttsTimeMs = Date.now() - startTime;
-          console.log('✅ TTS Generation Successful for Question:', questionId, `(${ttsTimeMs}ms)`);
-          const audioBlob = await response.blob();
-
-          // Mark API key as used for this individual TTS generation
-          await markApiKeyAsUsed(apiKey, ttsTimeMs);
-
-          // Process successful response
-          const reader = new FileReader();
-          
-          return new Promise((resolve, reject) => {
-            reader.onloadend = () => {
-              const base64data = reader.result as string;
-              const base64Audio = base64data.split(',')[1];
-              resolve(base64Audio);
-            };
-            reader.onerror = () => reject(new Error('Failed to read audio blob'));
-            reader.readAsDataURL(audioBlob);
-          });
-        } else {
-          const errorText = await response.text();
-          console.error(`❌ ElevenLabs API failed with key ${apiKey.substring(0, 10)}...:`, response.status, errorText);
-          
-          // Check for unusual activity error - this should stop all retries
-          if (errorText.includes('detected_unusual_activity') || 
-              errorText.includes('Unusual activity detected') ||
-              errorText.includes('Free Tier usage disabled')) {
-            console.log(`🚫 Unusual activity detected - stopping TTS generation for this question`);
-            // Mark this API key as failed to prevent further use
-            await markApiKeyAsFailed(apiKey);
-            // Return a special error that indicates we should skip to next question
-            throw new Error('UNUSUAL_ACTIVITY_DETECTED');
-          }
-          
-          // Check for quota exceeded error - this should also stop retries
-          if (errorText.includes('quota_exceeded') || 
-              errorText.includes('exceeds your quota') ||
-              errorText.includes('credits remaining')) {
-            console.log(`💰 Quota exceeded detected - stopping TTS generation for this question`);
-            
-            // Extract credits remaining from error message
-            const creditsMatch = errorText.match(/(\d+)\s+credits\s+remaining/);
-            if (creditsMatch) {
-              const creditsRemaining = parseInt(creditsMatch[1]);
-              console.log(`📊 Recording credits remaining: ${creditsRemaining} for key ${apiKey.substring(0, 10)}...`);
-              await updateApiKeyCredits(apiKey, creditsRemaining);
-            }
-            
-            // Mark this API key as failed to prevent further use
-            await markApiKeyAsFailed(apiKey);
-            // Return a special error that indicates we should skip to next question
-            throw new Error('QUOTA_EXCEEDED');
-          }
-          
-          throw new Error(`API call failed: ${response.status} - ${errorText}`);
-        }
-        
-      } catch (apiError: any) {
-        console.error('❌ ElevenLabs API call failed for AI TTS:', apiError);
-        throw new Error(`AI TTS Generation failed: ${apiError.message}`);
-      }
-
-    } catch (error) {
-      console.error('❌ AI TTS Generation Error:', error);
-      // Track this question as having failed TTS
-      setFailedTTSQuestions(prev => new Set([...prev, questionId]));
-      return null;
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64data = reader.result as string;
+          const base64Audio = base64data.split(',')[1];
+          resolve(base64Audio);
+        };
+        reader.onerror = () => reject(new Error('Failed to read audio blob'));
+        reader.readAsDataURL(audioBlob);
+      });
     }
+
+    const errorText = await response.text();
+    console.error(`❌ ElevenLabs API failed with key ${maskApiKey(apiKey)}:`, response.status);
+    await throwForElevenLabsFailure(apiKey, response.status, errorText);
+    return null;
   };
 
   // Function to identify questions with failed TTS
@@ -4033,7 +4086,16 @@ Please respond with a JSON object in this exact format:
           temperature: 0.7,
           topK: 40,
           topP: 0.95,
-          maxOutputTokens: 1024,
+          maxOutputTokens: 512,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              description: { type: 'string' },
+            },
+            required: ['title', 'description'],
+          },
         },
       };
 
@@ -4051,7 +4113,22 @@ Please respond with a JSON object in this exact format:
       } catch (parseError) {
         console.error('JSON Parse Error (improveExerciseDetails):', parseError);
         console.error('Raw Gemini response:', responseText);
-        throw new Error('Could not parse AI response');
+
+        // Retry once with stricter JSON-only output if the first response was truncated
+        const retryBody = {
+          ...requestBody,
+          generationConfig: {
+            ...requestBody.generationConfig,
+            temperature: 0.3,
+            maxOutputTokens: 512,
+          },
+        };
+        const { data: retryData } = await callGeminiWithFallback(retryBody);
+        const retryText = extractGeminiText(retryData);
+        if (!retryText) {
+          throw new Error('Could not parse AI response');
+        }
+        improvedData = parseGeminiJson<any>(retryText);
       }
       
       if (improvedData.title) {

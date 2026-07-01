@@ -3,7 +3,7 @@ import { Stack } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View, useWindowDimensions } from 'react-native';
 import { useResponsive } from '../hooks/useResponsive';
-import { addApiKey, deleteApiKey, getApiKeyStatus } from '../lib/elevenlabs-keys';
+import { addApiKey, deleteApiKey, extractElevenLabsKeysFromText, getApiKeyStatus, validateElevenLabsTtsKey } from '../lib/elevenlabs-keys';
 import { getCurrentUser, onAuthChange } from '../lib/firebase-auth';
 import { deleteData, readData, updateData, writeData } from '../lib/firebase-database';
 
@@ -2741,7 +2741,19 @@ export default function SuperAdminDashboard() {
             </View>
             <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
               <View style={{ paddingHorizontal: 28, paddingTop: 20, gap: 12 }}>
-                <Text style={{ color: '#475569' }}>Paste one or many keys below. The system will auto-detect keys starting with "sk_".</Text>
+                <Text style={{ color: '#475569' }}>
+                  Paste one or many keys below. Each key must start with "sk_" and have Text-to-Speech enabled in ElevenLabs.
+                </Text>
+                <View style={{ backgroundColor: '#f0f9ff', borderRadius: 10, padding: 12, gap: 6 }}>
+                  <Text style={{ color: '#0369a1', fontWeight: '700' }}>How to create a working key</Text>
+                  <Text style={{ color: '#0c4a6e', lineHeight: 20 }}>
+                    1. elevenlabs.io → Developers → API Keys → Create{'\n'}
+                    2. Enable Text to Speech and Voices Read (or turn off Restrict Key){'\n'}
+                    3. Copy the full key immediately — shown only once{'\n'}
+                    4. Paste on its own line here, then Add Keys
+                  </Text>
+                </View>
+
                 <TextInput
                   value={bulkKeysText}
                   onChangeText={setBulkKeysText}
@@ -2771,30 +2783,62 @@ export default function SuperAdminDashboard() {
                   if (!bulkKeysText.trim()) return;
                   setAddingKeys(true);
                   try {
-                    // Extract keys with regex, allow variable length hex after sk_
-                    const matches = (bulkKeysText.match(/sk_[a-f0-9]{20,}/gi) || []).map(k => k.trim());
-                    const unique = Array.from(new Set(matches));
+                    // Extract keys (line-by-line or from pasted blob)
+                    const unique = extractElevenLabsKeysFromText(bulkKeysText);
                     if (unique.length === 0) {
-                      setAddResultsMsg('No valid keys detected. Make sure each begins with "sk_".');
+                      setAddResultsMsg('No valid keys detected. Paste the full key on its own line (starts with sk_).');
                     } else {
                       // Filter out keys already present
                       const existingSet = new Set(apiKeys.map(k => (k.key || '').toLowerCase()));
                       const toAdd = unique.filter(k => !existingSet.has(k.toLowerCase()));
                       let success = 0;
                       let failed = 0;
+                      const failureReasons: string[] = [];
+                      const warnings: string[] = [];
                       for (const key of toAdd) {
                         try {
+                          const validation = await validateElevenLabsTtsKey(key);
+                          if (!validation.valid) {
+                            failed++;
+                            if (validation.error && !failureReasons.includes(validation.error)) {
+                              failureReasons.push(validation.error);
+                            }
+                            continue;
+                          }
+                          if (validation.warning && !warnings.includes(validation.warning)) {
+                            warnings.push(validation.warning);
+                          }
                           const result = await addApiKey(key);
-                          if (result) {
+                          if (result.ok) {
                             success++;
                           } else {
                             failed++;
+                            if (result.error && !failureReasons.includes(result.error)) {
+                              failureReasons.push(result.error);
+                            }
                           }
-                        } catch {
+                        } catch (error) {
                           failed++;
+                          const msg = error instanceof Error ? error.message : 'Unknown error';
+                          if (!failureReasons.includes(msg)) {
+                            failureReasons.push(msg);
+                          }
                         }
                       }
-                      setAddResultsMsg(`Detected ${unique.length} key(s). Added ${success}${failed ? `, Failed ${failed}` : ''}${toAdd.length !== unique.length ? `, Skipped ${unique.length - toAdd.length} duplicate(s)` : ''}.`);
+                      const reasonText = failureReasons.length
+                        ? ` ${failureReasons[0]}`
+                        : '';
+                      const summary = `Detected ${unique.length} key(s). Added ${success}${failed ? `, Failed ${failed}` : ''}${toAdd.length !== unique.length ? `, Skipped ${unique.length - toAdd.length} duplicate(s)` : ''}.${reasonText}`;
+                      setAddResultsMsg(summary);
+                      if (failed > 0 && success === 0) {
+                        Alert.alert(
+                          'Could not add API key',
+                          failureReasons.join('\n\n') || summary
+                        );
+                      } else if (success > 0) {
+                        const warningText = warnings.length ? `\n\n${warnings[0]}` : '';
+                        Alert.alert('Success', `Added ${success} API key(s).${warningText}`);
+                      }
                       await onRefresh();
                     }
                   } finally {

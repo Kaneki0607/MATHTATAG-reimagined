@@ -3,6 +3,7 @@
 // Keys with credits below 300 will be automatically removed
 // All keys are now stored in Firebase at /elevenlabsKeys
 
+import Constants from 'expo-constants';
 import { deleteData, pushData, readData, updateData } from './firebase-database';
 
 export interface ApiKeyInfo {
@@ -16,6 +17,38 @@ export interface ApiKeyInfo {
 }
 
 const FIREBASE_PATH = '/elevenlabskeys';
+
+// Used only when validating new keys in Super Admin (not for app TTS output)
+const VALIDATION_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
+const VALIDATION_MODEL_ID = 'eleven_flash_v2_5';
+
+const parseElevenLabsErrorMessage = (errorText: string): string => {
+  try {
+    const data = JSON.parse(errorText);
+    const detail = data?.detail;
+    if (typeof detail === 'string') return detail;
+    if (detail?.message) return String(detail.message);
+    if (detail?.status) return String(detail.status);
+  } catch {
+    // not JSON
+  }
+  return errorText.trim().slice(0, 240);
+};
+
+/** Pull sk_* keys from pasted text (one per line or embedded in a blob). */
+export const extractElevenLabsKeysFromText = (text: string): string[] => {
+  const fromLines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^["']|["']$/g, ''))
+    .filter((line) => line.startsWith('sk_'));
+  const fromRegex = text.match(/sk_[a-zA-Z0-9_-]{20,}/g) || [];
+  return Array.from(new Set([...fromLines, ...fromRegex].map((k) => k.trim())));
+};
+
+const getEnvElevenLabsKey = (): string | null => {
+  const key = (Constants.expoConfig?.extra?.elevenLabsApiKey as string | undefined)?.trim();
+  return key && key.startsWith('sk_') ? key : null;
+};
 
 // Helper: Get all keys from Firebase
 const getAllKeysFromFirebase = async (): Promise<ApiKeyInfo[]> => {
@@ -32,11 +65,16 @@ const getAllKeysFromFirebase = async (): Promise<ApiKeyInfo[]> => {
 // Get all active API keys
 export const getActiveApiKeys = async (): Promise<string[]> => {
   const allKeys = await getAllKeysFromFirebase();
-  const activeKeys = allKeys
+  const firebaseActiveKeys = allKeys
     .filter(keyInfo => keyInfo.status === 'active')
     .map(keyInfo => keyInfo.key);
+
+  const envKey = getEnvElevenLabsKey();
+  const activeKeys = envKey
+    ? [envKey, ...firebaseActiveKeys.filter(key => key !== envKey)]
+    : firebaseActiveKeys;
     
-  console.log(`🔑 Active API keys available: ${activeKeys.length}/${allKeys.length}`);
+  console.log(`🔑 Active API keys available: ${activeKeys.length}/${allKeys.length}${envKey ? ' (includes .env key)' : ''}`);
   
   // Log status of all keys for debugging
   if (activeKeys.length === 0) {
@@ -72,18 +110,115 @@ export const getApiKeyStatus = async () => {
   };
 };
 
-// Add a new API key
-export const addApiKey = async (newKey: string): Promise<boolean> => {
+// Add a new API key (validates Text-to-Speech permission first)
+export const validateElevenLabsTtsKey = async (
+  key: string
+): Promise<{ valid: boolean; error?: string; warning?: string }> => {
+  try {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${VALIDATION_VOICE_ID}?output_format=mp3_44100_128`,
+      {
+        method: 'POST',
+        headers: {
+          Accept: 'audio/mpeg',
+          'Content-Type': 'application/json',
+          'xi-api-key': key,
+        },
+        body: JSON.stringify({
+          text: 'test',
+          model_id: VALIDATION_MODEL_ID,
+        }),
+      }
+    );
+
+    if (response.ok) {
+      return { valid: true };
+    }
+
+    const errorText = await response.text();
+    const message = parseElevenLabsErrorMessage(errorText);
+    console.warn(
+      `⚠️ ElevenLabs key validation (${key.substring(0, 10)}...): ${response.status} — ${message}`
+    );
+
+    if (
+      errorText.includes('missing_permissions') ||
+      errorText.includes('text_to_speech')
+    ) {
+      return {
+        valid: false,
+        error:
+          'This key is missing the Text-to-Speech permission. In ElevenLabs → API Keys → Edit key, enable "Text to Speech" (and "Voices Read" if listed).',
+      };
+    }
+
+    if (response.status === 401 || errorText.includes('invalid_api_key')) {
+      return { valid: false, error: 'Invalid or unauthorized API key. Copy the full key right after creating it.' };
+    }
+
+    if (
+      errorText.includes('detected_unusual_activity') ||
+      errorText.includes('Unusual activity detected') ||
+      errorText.includes('Free Tier usage disabled')
+    ) {
+      return {
+        valid: false,
+        error:
+          'ElevenLabs blocked this account (unusual activity). Try another network, disable VPN, or contact ElevenLabs support.',
+      };
+    }
+
+    if (
+      errorText.includes('quota_exceeded') ||
+      errorText.includes('exceeds your quota') ||
+      response.status === 429
+    ) {
+      return {
+        valid: false,
+        error: 'No ElevenLabs credits left on this account. Add credits or wait for your quota to reset.',
+      };
+    }
+
+    // TTS permission is present, but the validation voice/model is not allowed on this plan.
+    // The app uses a different voice — still save the key.
+    if (
+      response.status === 402 ||
+      errorText.includes('payment_required') ||
+      errorText.includes('paid_plan_required') ||
+      errorText.includes('free_users_not_allowed') ||
+      errorText.includes('voice_not_found') ||
+      errorText.includes('creator tier')
+    ) {
+      return {
+        valid: true,
+        warning:
+          'Key has TTS access. Validation used a sample voice your plan may not include; app TTS may still work.',
+      };
+    }
+
+    return {
+      valid: false,
+      error: message
+        ? `ElevenLabs rejected the test: ${message}`
+        : `Key validation failed (${response.status}).`,
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      error: error instanceof Error ? error.message : 'Network error during key validation.',
+    };
+  }
+};
+
+export const addApiKey = async (newKey: string): Promise<{ ok: boolean; error?: string }> => {
   if (!newKey.startsWith('sk_')) {
-    console.warn('⚠️ API key should start with "sk_" for ElevenLabs');
-    return false;
+    return { ok: false, error: 'Key must start with "sk_".' };
   }
   
   // Check if key already exists
   const allKeys = await getAllKeysFromFirebase();
   if (allKeys.some(keyInfo => keyInfo.key === newKey)) {
-    console.warn('⚠️ API key already exists in the list');
-    return false;
+    return { ok: false, error: 'This key is already in the list.' };
   }
   
   const newKeyData: ApiKeyInfo = {
@@ -96,11 +231,11 @@ export const addApiKey = async (newKey: string): Promise<boolean> => {
   
   if (result.error) {
     console.error('❌ Failed to add API key:', result.error);
-    return false;
+    return { ok: false, error: `Could not save to database: ${result.error}` };
   }
   
   console.log(`✅ Added new API key. ID: ${result.key}`);
-  return true;
+  return { ok: true };
 };
 
 // Mark API key as used and increment usage count
@@ -388,7 +523,10 @@ export const checkAllApiKeyCredits = async (): Promise<void> => {
           console.warn(`⚠️ Failed to check credits for key ${keyInfo.key.substring(0, 10)}...: ${response.status}${messageSnippet}`);
           
           // Check for unusual activity error
-          if (errorText.includes('detected_unusual_activity') || 
+          if (errorText.includes('missing_permissions')) {
+            console.log(`🔑 Missing TTS permission for key ${keyInfo.key.substring(0, 10)}... - marking as failed`);
+            await markApiKeyAsFailed(keyInfo.key);
+          } else if (errorText.includes('detected_unusual_activity') ||
               errorText.includes('Unusual activity detected') ||
               errorText.includes('Free Tier usage disabled')) {
             console.log(`🚫 Unusual activity detected for key ${keyInfo.key.substring(0, 10)}... - marking as failed`);

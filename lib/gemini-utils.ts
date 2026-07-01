@@ -12,10 +12,15 @@ const getGeminiApiKey = (): string => {
     );
   }
   
-  return apiKey;
+  return apiKey.trim();
 };
 
-export const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash-lite'];
+export const GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+];
 export const GEMINI_MAX_ATTEMPTS_PER_MODEL = 3;
 
 const parseGeminiErrorMessage = (raw: string): string => {
@@ -45,11 +50,12 @@ export const callGeminiWithFallback = async (requestBody: any): Promise<{ data: 
     while (attempt < GEMINI_MAX_ATTEMPTS_PER_MODEL) {
       try {
         const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`,
           {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
+              'x-goog-api-key': GEMINI_API_KEY,
             },
             body: JSON.stringify(requestBody),
           }
@@ -108,6 +114,12 @@ export const callGeminiWithFallback = async (requestBody: any): Promise<{ data: 
 
         if (!candidate) {
           lastErrorDetails = 'Invalid response from AI service';
+          break;
+        }
+
+        const finishReason = candidate.finishReason;
+        if (finishReason === 'MAX_TOKENS') {
+          console.warn(`Gemini model "${modelName}" returned truncated output (MAX_TOKENS). Trying next fallback model...`);
           break;
         }
 
@@ -190,6 +202,31 @@ const ensureClosingDelimiter = (text: string): string => {
   return text;
 };
 
+const extractJsonStringFields = (text: string, fields: string[]): Record<string, string> => {
+  const result: Record<string, string> = {};
+
+  for (const field of fields) {
+    const completeMatch = text.match(
+      new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, 's')
+    );
+    if (completeMatch) {
+      result[field] = completeMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n');
+      continue;
+    }
+
+    const partialMatch = text.match(new RegExp(`"${field}"\\s*:\\s*"([\\s\\S]*)`, 's'));
+    if (partialMatch) {
+      result[field] = partialMatch[1]
+        .replace(/"\s*,?\s*[\s\S]*$/, '')
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, '\n')
+        .trim();
+    }
+  }
+
+  return result;
+};
+
 export const parseGeminiJson = <T>(responseText: string): T => {
   if (!responseText) {
     throw new Error('Empty Gemini response');
@@ -225,6 +262,15 @@ export const parseGeminiJson = <T>(responseText: string): T => {
   } catch (error) {
     console.warn('Failed to parse Gemini JSON on first attempt. Retrying with sanitized payload.', error);
     cleanedText = ensureClosingDelimiter(removeTrailingCommas(cleanedText));
-    return JSON.parse(cleanedText) as T;
+    try {
+      return JSON.parse(cleanedText) as T;
+    } catch (retryError) {
+      const looseFields = extractJsonStringFields(cleanedText, ['title', 'description', 'text', 'content']);
+      if (Object.keys(looseFields).length > 0) {
+        console.warn('Recovered partial Gemini JSON via field extraction.');
+        return looseFields as T;
+      }
+      throw retryError;
+    }
   }
 };
